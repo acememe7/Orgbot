@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/gptbots-proto",
     "crates/gptbots-engine",
+    "crates/gptbots-providers",
 ]
 
 [workspace.package]
