@@ -640,48 +640,44 @@ struct McpClientProvider {
     task_id: Arc<std::sync::Mutex<Option<String>>>,
 }
 
-impl McpClientProvider {
-    /// Ask the room one question and read its answer.
-    async fn ask(
-        wr: &mut tokio::net::unix::OwnedWriteHalf,
-        reader: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
-        request: &str,
-    ) -> gptbots_providers::Result<Value> {
-        use tokio::io::AsyncWriteExt;
-        wr.write_all(format!("{request}\n").as_bytes())
-            .await
-            .map_err(|error| {
-                gptbots_providers::ProviderError::Unsupported(format!("mcp write: {error}"))
-            })?;
-        let reply = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                let read = reader
-                    .next_line()
-                    .await
-                    .map_err(|error| {
-                        gptbots_providers::ProviderError::Unsupported(format!("mcp read: {error}"))
-                    })?
-                    .ok_or_else(|| {
-                        gptbots_providers::ProviderError::Unsupported(
-                            "mcp socket closed early".into(),
-                        )
-                    })?;
-                if read.is_empty() {
-                    continue;
-                }
-                if let Ok(value) = serde_json::from_str::<Value>(&read) {
-                    return Ok(value);
-                }
-            }
-        })
+/// Ask the room's MCP bridge one question and read its answer.
+async fn mcp_ask(
+    wr: &mut tokio::net::unix::OwnedWriteHalf,
+    reader: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
+    request: &str,
+) -> gptbots_providers::Result<Value> {
+    use tokio::io::AsyncWriteExt;
+    wr.write_all(format!("{request}\n").as_bytes())
         .await
-        .map_err(|_| {
-            gptbots_providers::ProviderError::Unsupported("mcp round trip timed out".into())
-        })??;
-        Ok(reply)
-    }
+        .map_err(|error| {
+            gptbots_providers::ProviderError::Unsupported(format!("mcp write: {error}"))
+        })?;
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read = reader
+                .next_line()
+                .await
+                .map_err(|error| {
+                    gptbots_providers::ProviderError::Unsupported(format!("mcp read: {error}"))
+                })?
+                .ok_or_else(|| {
+                    gptbots_providers::ProviderError::Unsupported("mcp socket closed early".into())
+                })?;
+            if read.is_empty() {
+                continue;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(&read) {
+                return Ok(value);
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        gptbots_providers::ProviderError::Unsupported("mcp round trip timed out".into())
+    })??;
+    Ok(reply)
 }
 
 #[async_trait]
@@ -710,7 +706,7 @@ impl Provider for McpClientProvider {
         let mut reader = BufReader::new(read_half).lines();
 
         // Standard handshake.
-        let _init = Self::ask(
+        let _init = mcp_ask(
             &mut write_half,
             &mut reader,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"room-test","version":"1"}}}"#,
@@ -730,7 +726,7 @@ impl Provider for McpClientProvider {
         let call = format!(
             "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"claim_task\",\"arguments\":{{\"task\":\"{task}\"}}}}}}"
         );
-        let reply = Self::ask(&mut write_half, &mut reader, &call).await?;
+        let reply = mcp_ask(&mut write_half, &mut reader, &call).await?;
         if reply
             .pointer("/result/isError")
             .is_some_and(|flag| flag.as_bool() == Some(true))
@@ -918,5 +914,208 @@ async fn a_real_codex_bot_claims_a_task_through_the_room_bridge() {
         task.state,
         TaskState::Claimed,
         "codex claimed the task in-band through the MCP bridge; report={report:?}"
+    );
+}
+
+// ---------------------------------------------------- full lifecycle via bridge
+
+/// A bridge client that replays a planned sequence of board actions, one
+/// episode per step — the deterministic stand-in for a real agent episode.
+#[derive(Debug)]
+struct ScriptedMcpClient {
+    task_id: Arc<std::sync::Mutex<Option<String>>>,
+    steps: Vec<Vec<(&'static str, Value)>>,
+    cursor: std::sync::atomic::AtomicUsize,
+}
+
+impl ScriptedMcpClient {
+    async fn run_step(
+        &self,
+        request: &CompletionRequest,
+    ) -> gptbots_providers::Result<CompletionResponse> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixStream;
+
+        let step = self
+            .cursor
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let Some(actions) = self.steps.get(step) else {
+            return Ok(nothing()); // plan exhausted; say nothing further
+        };
+        let socket = request.mcp_socket.as_deref().ok_or_else(|| {
+            gptbots_providers::ProviderError::Unsupported("no mcp socket on request".into())
+        })?;
+        let stream = UnixStream::connect(socket).await.map_err(|error| {
+            gptbots_providers::ProviderError::Unsupported(format!(
+                "connect room mcp {socket}: {error}"
+            ))
+        })?;
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half).lines();
+
+        let _init = mcp_ask(
+            &mut write_half,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"scripted-bridge","version":"1"}}}"#,
+        )
+        .await?;
+        write_half
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .await
+            .map_err(|error| {
+                gptbots_providers::ProviderError::Unsupported(format!("mcp notify: {error}"))
+            })?;
+
+        let task = self.task_id.lock().unwrap().clone().unwrap_or_default();
+        for (idx, (name, args)) in actions.iter().enumerate() {
+            let mut args = args.clone();
+            args["task"] = json!(task);
+            let call = json!({
+                "jsonrpc": "2.0",
+                "id": 10 + idx,
+                "method": "tools/call",
+                "params": { "name": name, "arguments": args },
+            });
+            let reply = mcp_ask(&mut write_half, &mut reader, &call.to_string()).await?;
+            if reply
+                .pointer("/result/isError")
+                .is_some_and(|flag| flag.as_bool() == Some(true))
+            {
+                let text = reply
+                    .pointer("/result/content/0/text")
+                    .cloned()
+                    .unwrap_or_default();
+                return Err(gptbots_providers::ProviderError::Unsupported(format!(
+                    "{name} rejected by the room: {text}"
+                )));
+            }
+        }
+        Ok(say(&format!(
+            "acted: {}",
+            actions
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
+    }
+}
+
+#[async_trait]
+impl Provider for ScriptedMcpClient {
+    fn name(&self) -> &str {
+        "scripted-mcp"
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+        _sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> gptbots_providers::Result<CompletionResponse> {
+        self.run_step(&request).await
+    }
+}
+
+#[tokio::test]
+async fn a_room_cycle_claim_work_review_submit_runs_through_the_bridge() {
+    use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
+
+    let task_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let cli_ref = |handle: &str, roles: &[&str], autonomy: Autonomy| {
+        AgentSpec::new(
+            handle,
+            handle,
+            ProviderRef::CliAgent {
+                cli: gptbots_proto::agent::CliKind::Claude,
+                model: String::new(),
+                workdir: String::new(),
+                policy: gptbots_proto::agent::AgentPolicy::ReadOnly,
+                mcp: true,
+            },
+        )
+        .with_roles(roles.iter().copied())
+        .with_autonomy(autonomy)
+    };
+
+    // Worker: claim, do the work, ask for review; then submit once approved.
+    let worker_spec = cli_ref(
+        "worker",
+        &["writer"],
+        Autonomy {
+            may_submit: true,
+            ..Default::default()
+        },
+    );
+    let reviewer_spec = cli_ref("reviewer", &["reviewer"], Autonomy::inspector());
+
+    let worker = Arc::new(ScriptedMcpClient {
+        task_id: task_id.clone(),
+        steps: vec![
+            vec![
+                ("claim_task", json!({})),
+                ("start_task", json!({})),
+                ("submit_for_review", json!({ "artifacts": [] })),
+            ],
+            vec![("submit_task", json!({}))],
+        ],
+        cursor: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let reviewer = Arc::new(ScriptedMcpClient {
+        task_id: task_id.clone(),
+        steps: vec![vec![(
+            "record_review",
+            json!({ "summary": "looks good", "findings": [] }),
+        )]],
+        cursor: std::sync::atomic::AtomicUsize::new(0),
+    });
+
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "cycle-room".into(),
+        goal: "run a full task cycle through the room bridge".into(),
+        roster: vec![],
+        completion: CompletionRule::AllTasksTerminal,
+        limits: RoomLimits::default(),
+    });
+    room.seat(worker_spec.clone(), worker).unwrap();
+    room.seat(reviewer_spec.clone(), reviewer).unwrap();
+    room.start().unwrap();
+
+    let events = room
+        .engine_mut()
+        .apply(gptbots_engine::Command::CreateTask {
+            title: "cycle target".into(),
+            brief: "claim, work, review, submit".into(),
+            by: None,
+            required_role: Some("writer".into()),
+            priority: gptbots_proto::task::Priority::High,
+            acceptance_criteria: vec![],
+            depends_on: vec![],
+            parent: None,
+        })
+        .unwrap();
+    let task = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            gptbots_proto::Event::TaskCreated { task } => Some(*task.clone()),
+            _ => None,
+        })
+        .expect("a task was created");
+    room.engine_mut()
+        .apply(gptbots_engine::Command::OpenTask { task: task.id })
+        .unwrap();
+    *task_id.lock().unwrap() = Some(task.id.to_string());
+
+    let outcome = room.run(None).await;
+    let final_task = room.engine().tasks().find(|t| t.id == task.id).unwrap();
+    assert_eq!(
+        outcome,
+        RunOutcome::Completed,
+        "final state: {final_task:?}"
+    );
+    assert!(
+        final_task.state.is_terminal(),
+        "the task reached a terminal state through the bridge: {:?}",
+        final_task.state
     );
 }
