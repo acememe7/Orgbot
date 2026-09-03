@@ -827,3 +827,96 @@ async fn an_mcp_agent_bot_claims_a_seeded_task_in_band() {
     );
     assert_eq!(task.assignee, Some(bot_spec.id));
 }
+
+#[tokio::test]
+async fn a_real_codex_bot_claims_a_task_through_the_room_bridge() {
+    // Live-gated: needs GPTBOTS_TEST_LIVE_CLIS=1, codex installed and signed
+    // in, and GPTBOTS_MCP_RELAY_BIN pointing at a built `gptbots` binary
+    // (which carries the room-mcp subcommand the agent CLI spawns).
+    use gptbots_providers::agent_cli::AgentCliProvider;
+
+    if std::env::var_os("GPTBOTS_TEST_LIVE_CLIS").is_none()
+        || !AgentCliProvider::available(gptbots_proto::agent::CliKind::Codex)
+        || std::env::var_os("GPTBOTS_MCP_RELAY_BIN").is_none()
+    {
+        eprintln!("skipped (live codex bridge test needs GPTBOTS_TEST_LIVE_CLIS=1, codex, GPTBOTS_MCP_RELAY_BIN)");
+        return;
+    }
+
+    let provider = Arc::new(
+        AgentCliProvider::new(
+            gptbots_proto::agent::CliKind::Codex,
+            "",
+            "/tmp/gptbots-e2e-ws",
+            gptbots_proto::agent::AgentPolicy::ReadOnly,
+            true,
+        )
+        .unwrap(),
+    );
+    let bot_spec = AgentSpec::new(
+        "coder",
+        "Coder",
+        ProviderRef::CliAgent {
+            cli: gptbots_proto::agent::CliKind::Codex,
+            model: String::new(),
+            workdir: "/tmp/gptbots-e2e-ws".into(),
+            policy: gptbots_proto::agent::AgentPolicy::ReadOnly,
+            mcp: true,
+        },
+    )
+    .with_roles(["writer"])
+    .with_persona(
+        "You are verifying a bridge. Claim the open task with claim_task, then post_message exactly: claimed-ok",
+    );
+
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "codex-bridge-live".into(),
+        goal: "Claim the seeded task through the room MCP bridge and report it.".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    room.seat(bot_spec.clone(), provider).unwrap();
+    room.start().unwrap();
+
+    let events = room
+        .engine_mut()
+        .apply(gptbots_engine::Command::CreateTask {
+            title: "bridge target".into(),
+            brief: "Claim this task to prove the bridge.".into(),
+            by: None,
+            required_role: Some("writer".into()),
+            priority: gptbots_proto::task::Priority::High,
+            acceptance_criteria: vec![],
+            depends_on: vec![],
+            parent: None,
+        })
+        .unwrap();
+    let task_id = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            gptbots_proto::Event::TaskCreated { task } => Some(task.id),
+            _ => None,
+        })
+        .expect("a task was created");
+    room.engine_mut()
+        .apply(gptbots_engine::Command::OpenTask { task: task_id })
+        .unwrap();
+
+    // One working episode; the real codex agent claims through the bridge.
+    let report = tokio::time::timeout(std::time::Duration::from_secs(240), room.step(None))
+        .await
+        .expect("the codex episode finished in time")
+        .expect("the bot was actionable");
+
+    let task = room
+        .engine()
+        .tasks()
+        .find(|task| task.id == task_id)
+        .expect("the task still exists");
+    assert_eq!(
+        task.state,
+        TaskState::Claimed,
+        "codex claimed the task in-band through the MCP bridge; report={report:?}"
+    );
+}

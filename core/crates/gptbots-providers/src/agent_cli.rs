@@ -215,14 +215,28 @@ impl Provider for AgentCliProvider {
         };
 
         let mut episode = Episode::default();
-        let mcp_config = if self.mcp && self.cli == CliKind::Claude {
-            request
-                .mcp_socket
-                .as_deref()
-                .map(write_claude_mcp_config)
-                .transpose()?
+        let (claude_config, codex_home) = if self.mcp {
+            match self.cli {
+                CliKind::Claude => {
+                    let path = request
+                        .mcp_socket
+                        .as_deref()
+                        .map(write_claude_mcp_config)
+                        .transpose()?;
+                    (path, None)
+                }
+                CliKind::Codex => {
+                    let path = request
+                        .mcp_socket
+                        .as_deref()
+                        .map(write_codex_home)
+                        .transpose()?;
+                    (None, path)
+                }
+                CliKind::Grok => (None, None),
+            }
         } else {
-            None
+            (None, None)
         };
         let result = self
             .run_episode(
@@ -230,11 +244,15 @@ impl Provider for AgentCliProvider {
                 resumed.as_deref(),
                 &sink,
                 &mut episode,
-                mcp_config.as_deref(),
+                claude_config.as_deref(),
+                codex_home.as_deref(),
             )
             .await;
-        if let Some(path) = &mcp_config {
+        if let Some(path) = &claude_config {
             let _ = std::fs::remove_file(path);
+        }
+        if let Some(dir) = &codex_home {
+            let _ = std::fs::remove_dir_all(dir);
         }
         result?;
 
@@ -279,6 +297,7 @@ impl AgentCliProvider {
         sink: &Option<mpsc::Sender<StreamEvent>>,
         episode: &mut Episode,
         mcp_config: Option<&Path>,
+        codex_home: Option<&Path>,
     ) -> Result<()> {
         let mut cmd = Command::new(&self.bin);
         build_args(
@@ -289,12 +308,16 @@ impl AgentCliProvider {
             &self.model,
             self.policy,
             mcp_config,
+            self.mcp,
         );
         if !self.workdir.as_os_str().is_empty() {
             cmd.current_dir(&self.workdir);
         }
-        cmd.env("NO_COLOR", "1")
-            .stdin(Stdio::null())
+        cmd.env("NO_COLOR", "1");
+        if let Some(home) = codex_home {
+            cmd.env("CODEX_HOME", home);
+        }
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -484,10 +507,88 @@ fn usage_from_json(value: &Value) -> Usage {
 /// process is this program's own `room-mcp` relay, which shuttles bytes
 /// between the CLI's stdio and the room's unix socket. The running binary's
 /// own path is used so the child is always the same gptbots install.
-fn write_claude_mcp_config(socket: &str) -> Result<std::path::PathBuf> {
-    let exe = std::env::current_exe().map_err(|error| {
+/// The binary the agent CLI will spawn as its MCP relay child.
+///
+/// Normally this is the running gptbots install; tests point it at the built
+/// `gptbots` binary via GPTBOTS_MCP_RELAY_BIN, since the test runner itself
+/// has no `room-mcp` subcommand.
+fn relay_binary() -> Result<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("GPTBOTS_MCP_RELAY_BIN") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    std::env::current_exe().map_err(|error| {
         ProviderError::Unsupported(format!("cannot locate own binary for MCP relay: {error}"))
+    })
+}
+
+/// A per-run overlay of the user's codex home.
+///
+/// codex only loads MCP servers from its config file and ignores per-run
+/// overrides, so this builds a temporary `CODEX_HOME`: every entry of the
+/// real `~/.codex` is symlinked (sessions, skills, memories and the rest all
+/// stay exactly where they are) except `config.toml`, which is copied and
+/// extended with the room's MCP server. The child codex therefore keeps the
+/// user's entire setup and gains the board.
+fn write_codex_home(socket: &str) -> Result<std::path::PathBuf> {
+    use std::os::unix::fs::symlink;
+
+    let relay = relay_binary()?;
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            ProviderError::Unsupported("HOME is not set; cannot build a codex overlay".into())
+        })?
+        .join(".codex");
+    if !home.is_dir() {
+        return Err(ProviderError::Unsupported(format!(
+            "{} is not a directory; codex is probably not set up",
+            home.display()
+        )));
+    }
+
+    let overlay = std::env::temp_dir().join(format!(
+        "gptbots-codex-{}-{}",
+        std::process::id(),
+        socket.replace(['/', '.'], "_")
+    ));
+    let _ = std::fs::remove_dir_all(&overlay);
+    std::fs::create_dir_all(&overlay).map_err(|error| {
+        ProviderError::Unsupported(format!("cannot create codex overlay: {error}"))
     })?;
+
+    let mut config = String::new();
+    for entry in std::fs::read_dir(&home).map_err(|error| {
+        ProviderError::Unsupported(format!(
+            "cannot read codex home {}: {error}",
+            home.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            ProviderError::Unsupported(format!("cannot read codex home entry: {error}"))
+        })?;
+        let name = entry.file_name();
+        if name == "config.toml" {
+            config = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            continue;
+        }
+        let _ = symlink(entry.path(), overlay.join(&name));
+    }
+    config.push_str("\n[mcp_servers.gptbots_room]\n");
+    config.push_str(&format!(
+        "command = {}\n",
+        serde_json::to_string(&relay.to_string_lossy()).unwrap()
+    ));
+    config.push_str(&format!(
+        "args = [\"room-mcp\", \"--socket\", \"{}\" ]\n",
+        socket
+    ));
+    std::fs::write(overlay.join("config.toml"), config).map_err(|error| {
+        ProviderError::Unsupported(format!("cannot write codex overlay config: {error}"))
+    })?;
+    Ok(overlay)
+}
+fn write_claude_mcp_config(socket: &str) -> Result<std::path::PathBuf> {
+    let exe = relay_binary()?;
     let config = serde_json::json!({
         "mcpServers": {
             "gptbots-room": {
@@ -531,6 +632,7 @@ fn build_args(
     model: &str,
     policy: AgentPolicy,
     mcp_config: Option<&Path>,
+    mcp: bool,
 ) {
     let (policy_flag, policy_value) = policy_flags(cli, policy);
     let _ = policy_flag;
@@ -546,9 +648,15 @@ fn build_args(
             cmd.arg("exec")
                 .arg("--json")
                 .arg("--skip-git-repo-check")
-                .arg("-s")
-                .arg(policy_value)
                 .arg(prompt);
+            if mcp {
+                // Headless codex refuses MCP tool calls under a plain sandbox;
+                // --approve-for-me routes them through automatic review (and
+                // implies the workspace-write sandbox, so -s must not be set).
+                cmd.arg("--approve-for-me");
+            } else {
+                cmd.arg("-s").arg(policy_value);
+            }
         }
         (CliKind::Codex, Some(session)) => {
             // `codex exec resume` does not take a sandbox flag (the resumed

@@ -130,8 +130,10 @@ whatever sandbox you grant it) looks like:
 [[bots]]
 handle = "coder"
 roles = ["writer"]
-provider = { kind = "cli", cli = "codex", workdir = "/path/to/project", policy = "workspace_write" }
+provider = { kind = "cli", cli = "codex", workdir = "/path/to/project", policy = "workspace_write", mcp = true }
 # policy: read_only | workspace_write | full_access
+# mcp = true serves the room's board to the agent as MCP tools, so it can
+# claim tasks, hand work off, and ask for review mid-episode.
 ```
 
 Each turn the engine spawns `codex exec` (or `claude -p` / `grok -p`) in that
