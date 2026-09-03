@@ -13,3 +13,15 @@ Bundle a .deb / AppImage with the tauri CLI:
 ```bash
 cd src-tauri && cargo install tauri-cli && cargo tauri build
 ```
+
+## Packaging
+
+Build the release binary, then package a .deb (no tauri-cli needed):
+
+```bash
+cd src-tauri && cargo build --release && cd ..
+./packaging/make-deb.sh 0.1.0
+sudo apt install ./gptbots-desktop_0.1.0_amd64.deb
+```
+
+The tauri `tauri.conf.json` also targets deb+appimage for `cargo tauri build`.

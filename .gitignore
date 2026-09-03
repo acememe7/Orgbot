@@ -29,3 +29,5 @@ runs/
 
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
+
+desktop/*.deb
