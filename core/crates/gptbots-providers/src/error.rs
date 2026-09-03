@@ -71,6 +71,15 @@ pub enum ProviderError {
         detail: String,
     },
 
+    /// A spawned agent CLI failed, timed out, or was killed.
+    #[error("{provider} failed: {detail}")]
+    Process {
+        /// Which CLI.
+        provider: String,
+        /// What went wrong, including the exit status or stderr tail.
+        detail: String,
+    },
+
     /// The configuration names something this build cannot do.
     #[error("{0}")]
     Unsupported(String),
@@ -126,6 +135,7 @@ impl From<&ProviderError> for ErrorReport {
             ProviderError::Upstream { provider, .. } => (provider.clone(), "upstream"),
             ProviderError::Transport { provider, .. } => (provider.clone(), "transport"),
             ProviderError::Decode { provider, .. } => (provider.clone(), "decode"),
+            ProviderError::Process { provider, .. } => (provider.clone(), "process"),
             ProviderError::Unsupported(_) => ("unknown".to_string(), "unsupported"),
         };
         Self {

@@ -30,7 +30,7 @@ pub mod room;
 pub mod task;
 pub mod time;
 
-pub use agent::{AgentSpec, AgentStatus, Autonomy, ProviderRef};
+pub use agent::{AgentPolicy, AgentSpec, AgentStatus, Autonomy, CliKind, ProviderRef};
 pub use artifact::{Artifact, ArtifactBody};
 pub use chat::{Audience, Author, ChatMessage, MessageIntent};
 pub use event::{Event, EventEnvelope, Seq};

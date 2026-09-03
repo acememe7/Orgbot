@@ -15,6 +15,9 @@
 //! | Anthropic Messages API | [`anthropic::AnthropicProvider`] | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or an `ant auth login` profile |
 //! | DeepSeek | [`openai::OpenAiProvider::deepseek`] | `DEEPSEEK_API_KEY` |
 //! | OpenAI / Codex / local | [`openai::OpenAiProvider`] | `OPENAI_API_KEY` or `~/.codex/auth.json` |
+//! | Codex CLI session | [`agent_cli::AgentCliProvider`] with [`CliKind::Codex`] | `codex login` on this machine |
+//! | Claude Code session | [`agent_cli::AgentCliProvider`] with [`CliKind::Claude`] | Claude Code sign-in |
+//! | Grok CLI session | [`agent_cli::AgentCliProvider`] with [`CliKind::Grok`] | Grok CLI sign-in |
 //! | None (deterministic) | [`scripted::ScriptedProvider`] | — |
 
 #![forbid(unsafe_code)]
@@ -22,6 +25,7 @@
 // fields inside serde data-carrier variants, which are documented one level up.
 #![warn(missing_debug_implementations, rust_2018_idioms, unreachable_pub)]
 
+pub mod agent_cli;
 pub mod anthropic;
 pub mod auth;
 pub mod error;
@@ -35,6 +39,7 @@ use std::sync::Arc;
 
 use gptbots_proto::agent::ProviderRef;
 
+pub use agent_cli::{locate, AgentCliProvider};
 pub use anthropic::AnthropicProvider;
 pub use auth::Credential;
 pub use error::{ErrorReport, ProviderError, Result};
@@ -78,6 +83,17 @@ pub fn build(reference: &ProviderRef) -> Result<Arc<dyn Provider>> {
             }
         },
         ProviderRef::Scripted { script } => Arc::new(ScriptedProvider::always_says(script.clone())),
+        ProviderRef::CliAgent {
+            cli,
+            model,
+            workdir,
+            policy,
+        } => Arc::new(AgentCliProvider::new(
+            *cli,
+            model.clone(),
+            workdir.clone(),
+            *policy,
+        )?),
     })
 }
 

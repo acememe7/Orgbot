@@ -5,6 +5,58 @@ use serde::{Deserialize, Serialize};
 use crate::ids::AgentId;
 use crate::time::Timestamp;
 
+/// Which installed agent CLI answers for a bot.
+///
+/// The CLI runs as a real agent session: `codex exec`, `claude -p`, or
+/// `grok -p`, each logged in on this machine. Because the CLI itself is the
+/// agent, a bot automatically inherits that CLI's memories, skills, MCP
+/// servers, and model configuration - nothing is reimplemented here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CliKind {
+    /// The OpenAI Codex CLI, signed in with a ChatGPT account or API key.
+    Codex,
+    /// Claude Code, signed in with an Anthropic account.
+    Claude,
+    /// The Grok CLI, signed in with an xAI account.
+    Grok,
+}
+
+impl CliKind {
+    /// The on-disk binary name.
+    pub const fn binary(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Grok => "grok",
+        }
+    }
+
+    /// A stable label for logs and error messages.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "codex-cli",
+            Self::Claude => "claude-cli",
+            Self::Grok => "grok-cli",
+        }
+    }
+}
+
+/// How much of the project folder an agent CLI may touch.
+///
+/// This is a policy at the room boundary, translated to each CLI's own
+/// vocabulary (`--sandbox`, `--permission-mode`) when the agent is spawned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPolicy {
+    /// Read the project and reason; make no changes.
+    ReadOnly,
+    /// May edit files and run commands inside the project folder.
+    WorkspaceWrite,
+    /// Unrestricted. For trusted, externally sandboxed runs only.
+    FullAccess,
+}
+
 /// Which backend answers for a bot.
 ///
 /// Providers are per-bot rather than per-room so a single group chat can mix
@@ -27,6 +79,23 @@ pub enum ProviderRef {
     /// A deterministic in-process bot with no model behind it. Used for
     /// scripted tests and for rule-based roles such as a schema validator.
     Scripted { script: String },
+    /// Drive one of the installed agent CLIs as the bot's backend.
+    ///
+    /// Each turn spawns the CLI as a session in the project folder (`--cd`,
+    /// `--cwd`, or a process chdir), and later turns `resume` that same session,
+    /// so the bot's memory is the CLI's own session history. The agent runs its
+    /// own tool loop (files, shell, MCPs, skills) inside `policy`; it does not
+    /// speak the room's tool protocol in-band yet.
+    CliAgent {
+        /// Which CLI.
+        cli: CliKind,
+        /// Model id, or empty to let the CLI pick its default.
+        model: String,
+        /// The project folder to work in. Empty inherits the process directory.
+        workdir: String,
+        /// How much of the project the agent may touch.
+        policy: AgentPolicy,
+    },
 }
 
 impl ProviderRef {
@@ -37,6 +106,13 @@ impl ProviderRef {
             | Self::DeepSeek { model }
             | Self::OpenAiCompatible { model, .. } => model,
             Self::Scripted { script } => script,
+            Self::CliAgent { cli, model, .. } => {
+                if model.is_empty() {
+                    cli.binary()
+                } else {
+                    model
+                }
+            }
         }
     }
 }
@@ -236,7 +312,10 @@ mod tests {
     fn inspectors_may_inspect_but_not_submit() {
         let a = Autonomy::inspector();
         assert!(a.may_inspect);
-        assert!(!a.may_submit, "inspection and delivery stay separate duties");
+        assert!(
+            !a.may_submit,
+            "inspection and delivery stay separate duties"
+        );
     }
 
     #[test]
@@ -244,7 +323,10 @@ mod tests {
         let a = Autonomy::coordinator();
         assert!(a.may_submit);
         assert!(a.may_create_tasks);
-        assert!(!a.may_inspect, "a coordinator must not sign off on its own plan");
+        assert!(
+            !a.may_inspect,
+            "a coordinator must not sign off on its own plan"
+        );
     }
 
     #[test]
@@ -267,7 +349,10 @@ mod tests {
             profile: "codex".into(),
         };
         let json = serde_json::to_string(&provider).unwrap();
-        assert_eq!(serde_json::from_str::<ProviderRef>(&json).unwrap(), provider);
+        assert_eq!(
+            serde_json::from_str::<ProviderRef>(&json).unwrap(),
+            provider
+        );
         assert_eq!(provider.model(), "gpt-5-codex");
     }
 }

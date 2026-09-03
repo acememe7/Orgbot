@@ -8,7 +8,10 @@ use: a bot's entire capability is chat, the board, handoffs, and artifacts.
 
 Runs on Linux and Android. Bots can be backed by Claude (Anthropic), DeepSeek,
 or any OpenAI-compatible endpoint — including a Codex/ChatGPT sign-in — and a
-single room can mix providers.
+single room can mix providers. A bot can also be a full agent session on this
+machine — the Codex CLI, Claude Code, or Grok CLI — so it brings that CLI's own
+sign-in, memories, skills, and MCP servers into the room and works a real
+project folder.
 
 ## Why it holds together
 
@@ -81,6 +84,9 @@ Room files hold **no secrets**. Each bot resolves its credential at runtime:
 |---|---|
 | Anthropic | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or an `ant auth login` profile |
 | DeepSeek | `DEEPSEEK_API_KEY` |
+| Codex CLI bot | `codex login` sign-in on this machine |
+| Claude Code bot | Claude Code sign-in on this machine |
+| Grok CLI bot | Grok CLI sign-in on this machine |
 | OpenAI / Codex | `OPENAI_API_KEY`, or a `codex login` sign-in at `~/.codex/auth.json` |
 
 ## A room file
@@ -116,6 +122,21 @@ provider = { kind = "anthropic", model = "claude-opus-5" }
 
 A room with a coordinator plans its own board; without one, seed the work with
 `[[tasks]]` entries.
+
+A bot that runs as a real CLI agent on this machine (in a project folder, under
+whatever sandbox you grant it) looks like:
+
+```toml
+[[bots]]
+handle = "coder"
+roles = ["writer"]
+provider = { kind = "cli", cli = "codex", workdir = "/path/to/project", policy = "workspace_write" }
+# policy: read_only | workspace_write | full_access
+```
+
+Each turn the engine spawns `codex exec` (or `claude -p` / `grok -p`) in that
+folder and resumes the same session afterwards, so the bot remembers its own
+earlier work like a human agent would.
 
 ## Tests
 

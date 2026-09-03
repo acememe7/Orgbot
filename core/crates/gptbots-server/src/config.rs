@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use gptbots_proto::agent::{Autonomy, ProviderRef};
+use gptbots_proto::agent::{AgentPolicy, Autonomy, CliKind, ProviderRef};
 use gptbots_proto::room::{CompletionRule, RoomLimits, RoomSpec};
 use gptbots_proto::task::Priority;
 use gptbots_proto::{AgentSpec, TaskId};
@@ -132,13 +132,40 @@ pub enum ProviderConfig {
         model: String,
     },
     /// An OpenAI-compatible endpoint, including a Codex/ChatGPT sign-in.
-    #[serde(rename = "openai", alias = "openai_compatible", alias = "codex", alias = "chatgpt")]
+    #[serde(
+        rename = "openai",
+        alias = "openai_compatible",
+        alias = "codex",
+        alias = "chatgpt"
+    )]
     OpenAiCompatible {
         /// The model id.
         model: String,
         /// Which credential profile to use: `codex`, `openai`, or a custom name.
         #[serde(default = "default_openai_profile")]
         profile: String,
+    },
+    /// Drive an installed agent CLI (codex, claude, or grok) as a real,
+    /// resumable session in a project folder.
+    #[serde(
+        alias = "cli",
+        alias = "agent",
+        alias = "codex_cli",
+        alias = "claude_cli",
+        alias = "grok_cli"
+    )]
+    CliAgent {
+        /// Which CLI: `codex`, `claude`, or `grok`.
+        cli: CliKind,
+        /// Model id, or empty for the CLI's default.
+        #[serde(default)]
+        model: String,
+        /// Project folder the agent works in. Empty inherits the process directory.
+        #[serde(default)]
+        workdir: String,
+        /// How much of the project the agent may touch.
+        #[serde(default = "default_agent_policy")]
+        policy: AgentPolicy,
     },
     /// A deterministic in-process bot with no model.
     Scripted {
@@ -157,6 +184,9 @@ fn default_deepseek_model() -> String {
 fn default_openai_profile() -> String {
     "codex".to_string()
 }
+fn default_agent_policy() -> AgentPolicy {
+    AgentPolicy::ReadOnly
+}
 
 impl ProviderConfig {
     /// Convert into the protocol's [`ProviderRef`].
@@ -174,6 +204,17 @@ impl ProviderConfig {
             },
             Self::Scripted { script } => ProviderRef::Scripted {
                 script: script.clone(),
+            },
+            Self::CliAgent {
+                cli,
+                model,
+                workdir,
+                policy,
+            } => ProviderRef::CliAgent {
+                cli: *cli,
+                model: model.clone(),
+                workdir: workdir.clone(),
+                policy: *policy,
             },
         }
     }
@@ -346,10 +387,7 @@ impl RoomConfig {
             }
             let reference = section.provider.to_ref();
             let provider = gptbots_providers::build(&reference).map_err(|error| {
-                ConfigError::Invalid(format!(
-                    "bot `{}`: {error}",
-                    section.handle
-                ))
+                ConfigError::Invalid(format!("bot `{}`: {error}", section.handle))
             })?;
             let spec = AgentSpec {
                 display_name: section
@@ -544,5 +582,43 @@ mod tests {
         let resolved = config.resolve().unwrap();
         assert_eq!(resolved.bots[0].spec.autonomy.max_turns_per_task, 8);
         assert!(resolved.bots[0].spec.autonomy.may_inspect);
+    }
+
+    #[test]
+    fn a_cli_agent_provider_parses_and_maps_to_a_cli_agent_ref() {
+        let config = RoomConfig::parse(
+            r#"
+            [room]
+            name = "r"
+            goal = "g"
+            [[bots]]
+            handle = "coder"
+            provider = { kind = "cli", cli = "codex", model = "gpt-5.2-codex", workdir = ".", policy = "workspace_write" }
+            "#,
+            "t.toml",
+        )
+        .unwrap();
+        match &config.bots[0].provider {
+            ProviderConfig::CliAgent {
+                cli,
+                model,
+                workdir,
+                policy,
+            } => {
+                assert_eq!(*cli, CliKind::Codex);
+                assert_eq!(model, "gpt-5.2-codex");
+                assert_eq!(workdir, ".");
+                assert_eq!(*policy, AgentPolicy::WorkspaceWrite);
+            }
+            other => panic!("expected cli_agent, got {other:?}"),
+        }
+        let reference = config.bots[0].provider.to_ref();
+        match reference {
+            ProviderRef::CliAgent { cli, policy, .. } => {
+                assert_eq!(cli, CliKind::Codex);
+                assert_eq!(policy, AgentPolicy::WorkspaceWrite);
+            }
+            other => panic!("expected CliAgent ref, got {other:?}"),
+        }
     }
 }
