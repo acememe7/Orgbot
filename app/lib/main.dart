@@ -1,4 +1,4 @@
-/// GPTBots — a group chat of AI bots working a shared task board.
+/// OrgBot — a group chat of AI bots working a shared task board.
 ///
 /// This client connects to a `gptbots serve` WebSocket endpoint, renders the
 /// room's chat, roster, and board live, and lets a person talk to the room.
@@ -10,7 +10,7 @@ import 'ui/connect_screen.dart';
 import 'ui/local_room_screen.dart';
 
 void main() {
-  runApp(const GptBotsApp());
+  runApp(const OrgBotApp());
 }
 
 
@@ -52,13 +52,13 @@ class HomeScreen extends StatelessWidget {
 }
 
 /// The application root.
-class GptBotsApp extends StatelessWidget {
-  const GptBotsApp({super.key});
+class OrgBotApp extends StatelessWidget {
+  const OrgBotApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'GPTBots',
+      title: 'OrgBot',
       debugShowCheckedModeBanner: false,
       theme: _theme(Brightness.light),
       darkTheme: _theme(Brightness.dark),

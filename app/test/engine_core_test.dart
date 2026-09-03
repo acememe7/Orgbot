@@ -2,7 +2,7 @@
 // engine asserts — separation of duties, one claim per task, review before
 // submit, handoffs addressed to the right bot — enforced in Dart.
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gptbots_app/engine/engine_core.dart';
+import 'package:orgbot_app/engine/engine_core.dart';
 
 Engine room({bool workerSubmits = true}) {
   final e = Engine(name: 'r', goal: 'ship it');

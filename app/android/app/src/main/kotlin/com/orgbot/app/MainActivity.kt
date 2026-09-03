@@ -1,4 +1,4 @@
-package com.gptbots.gptbots_app
+package com.orgbot.app
 
 import io.flutter.embedding.android.FlutterActivity
 

@@ -4,8 +4,8 @@
 //
 // ignore_for_file: prefer_interpolation_to_compose_strings
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gptbots_app/engine/engine_core.dart';
-import 'package:gptbots_app/engine/llm_provider.dart';
+import 'package:orgbot_app/engine/engine_core.dart';
+import 'package:orgbot_app/engine/llm_provider.dart';
 
 const openAiToolCall = r'''{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"claim_task","arguments":"{\"task\":\"task_1\"}"}}]}}]}''';
 const openAiText = r'''{"choices":[{"message":{"role":"assistant","content":"on it"}}]}''';

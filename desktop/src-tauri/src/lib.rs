@@ -1,4 +1,4 @@
-//! The GPTBots desktop shell.
+//! The OrgBot desktop shell.
 //!
 //! The backend embeds gptbots-server directly: a room is hosted on
 //! 127.0.0.1 inside this process and the webview attaches to its WebSocket
@@ -58,29 +58,48 @@ fn host_start(app: tauri::AppHandle, config: String) -> Result<HostInfo, String>
     let path = PathBuf::from(&config);
     let addr: SocketAddr = HOST_ADDR.parse().expect("static host addr parses");
     let managed = app.state::<AppState>();
-    let mut state = managed.host.lock().map_err(|_| "state lock poisoned".to_string())?;
-    if state.config.is_some() {
-        // Already hosting a room; starting again is a no-op for the same file
-        // and a replace otherwise.
-        return Ok(HostInfo {
-            running: true,
-            config: Some(config),
-            ws_url: format!("ws://{HOST_ADDR}/ws"),
-        });
+    {
+        let state = managed.host.lock().map_err(|_| "state lock poisoned".to_string())?;
+        if state.config.is_some() {
+            return Ok(HostInfo {
+                running: true,
+                config: Some(config),
+                ws_url: format!("ws://{HOST_ADDR}/ws"),
+            });
+        }
     }
 
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<SocketAddr, String>>();
     let owned = path.clone();
     let task = tauri::async_runtime::spawn(async move {
-        if let Err(error) = gptbots_server::serve_room(&owned, addr).await {
+        if let Err(error) =
+            gptbots_server::serve_room_with_readiness(&owned, addr, Some(ready_tx)).await
+        {
             eprintln!("room host failed: {error}");
         }
     });
-    state.config = Some(path);
-    state.task = Some(task);
+
+    // Wait until the room is actually reachable (or failed) so the UI never
+    // hangs on "starting" for a host that is already gone.
+    let bound = tauri::async_runtime::block_on(async {
+        let wait = tokio::time::timeout(std::time::Duration::from_secs(15), ready_rx).await;
+        match wait {
+            Ok(Ok(Ok(addr))) => Ok(addr),
+            Ok(Ok(Err(reason))) => Err(reason),
+            Ok(Err(_dropped)) => Err("room host stopped before it was ready".to_string()),
+            Err(_elapsed) => Err("room host did not become ready within 15s".to_string()),
+        }
+    })?;
+
+    {
+        let mut state = managed.host.lock().map_err(|_| "state lock poisoned".to_string())?;
+        state.config = Some(path);
+        state.task = Some(task);
+    }
     Ok(HostInfo {
         running: true,
         config: Some(config),
-        ws_url: format!("ws://{HOST_ADDR}/ws"),
+        ws_url: format!("ws://{bound}/ws"),
     })
 }
 
@@ -117,5 +136,5 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![host_start, host_stop, host_status])
         .run(tauri::generate_context!())
-        .expect("error while running the GPTBots desktop shell");
+        .expect("error while running the OrgBot desktop shell");
 }

@@ -1379,18 +1379,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gptbots-desktop"
-version = "0.1.0"
-dependencies = [
- "gptbots-server",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tokio",
-]
-
-[[package]]
 name = "gptbots-engine"
 version = "0.1.0"
 dependencies = [
@@ -2529,6 +2517,18 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "orgbot-desktop"
+version = "0.1.0"
+dependencies = [
+ "gptbots-server",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tokio",
+]
 
 [[package]]
 name = "pango"

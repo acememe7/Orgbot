@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "GPTBots",
+  "productName": "OrgBot",
   "version": "0.1.0",
-  "identifier": "io.gptbots.desktop",
+  "identifier": "io.orgbot.desktop",
   "build": {
     "frontendDist": "../ui"
   },
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "GPTBots",
+        "title": "OrgBot",
         "width": 1500,
         "height": 950,
         "minWidth": 1000,

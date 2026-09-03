@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=OrgBot
+GenericName=AI Agent Rooms
+Comment=Rooms of AI agents that work a shared task board in your projects
+Exec=/usr/lib/orgbot-desktop/orgbot-desktop
+Icon=/usr/lib/orgbot-desktop/icons/orgbot.png
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=true

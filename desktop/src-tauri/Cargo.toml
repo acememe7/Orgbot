@@ -1,11 +1,11 @@
 [package]
-name = "gptbots-desktop"
+name = "orgbot-desktop"
 version = "0.1.0"
-description = "GPTBots desktop: bot rooms that work project folders, hosted locally"
+description = "OrgBot desktop: rooms of AI agents that work project folders, hosted locally"
 edition = "2021"
 
 [lib]
-name = "gptbots_desktop_lib"
+name = "orgbot_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

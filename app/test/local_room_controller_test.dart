@@ -3,8 +3,8 @@
 //
 // ignore_for_file: prefer_interpolation_to_compose_strings
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gptbots_app/engine/runner.dart';
-import 'package:gptbots_app/state/local_room_controller.dart';
+import 'package:orgbot_app/engine/runner.dart';
+import 'package:orgbot_app/state/local_room_controller.dart';
 
 String firstId(String text, String prefix) {
   final words = text.split(RegExp('[^A-Za-z0-9_]+'));

@@ -8,9 +8,9 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gptbots_app/engine/engine_core.dart';
-import 'package:gptbots_app/engine/llm_provider.dart';
-import 'package:gptbots_app/engine/runner.dart';
+import 'package:orgbot_app/engine/engine_core.dart';
+import 'package:orgbot_app/engine/llm_provider.dart';
+import 'package:orgbot_app/engine/runner.dart';
 
 /// A fake model that answers from the situation text, in the dialect its
 /// headers demand, mirroring what a real endpoint would return.

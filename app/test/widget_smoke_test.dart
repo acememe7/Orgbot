@@ -5,9 +5,9 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gptbots_app/net/room_client.dart';
-import 'package:gptbots_app/state/room_store.dart';
-import 'package:gptbots_app/ui/room_screen.dart';
+import 'package:orgbot_app/net/room_client.dart';
+import 'package:orgbot_app/state/room_store.dart';
+import 'package:orgbot_app/ui/room_screen.dart';
 
 class FakeClient implements RoomClient {
   final _messages = StreamController<Map<String, Object?>>.broadcast();

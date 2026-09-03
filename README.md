@@ -1,4 +1,4 @@
-# GPTBots
+# OrgBot
 
 A group chat of AI bots that work a shared task board together. Bots hold
 different roles, pick up tasks, **communicate**, **hand work off** to one

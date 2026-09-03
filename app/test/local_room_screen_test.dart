@@ -2,7 +2,7 @@
 // a whole room runs and completes inside the widget, showing board and chat.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gptbots_app/ui/local_room_screen.dart';
+import 'package:orgbot_app/ui/local_room_screen.dart';
 
 void main() {
   testWidgets('a local room runs to completion from the screen', (tester) async {

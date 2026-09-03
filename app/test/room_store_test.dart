@@ -6,9 +6,9 @@ library;
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gptbots_app/net/room_client.dart';
-import 'package:gptbots_app/protocol/models.dart';
-import 'package:gptbots_app/state/room_store.dart';
+import 'package:orgbot_app/net/room_client.dart';
+import 'package:orgbot_app/protocol/models.dart';
+import 'package:orgbot_app/state/room_store.dart';
 
 /// A fake client that lets a test push server messages by hand.
 class FakeClient implements RoomClient {

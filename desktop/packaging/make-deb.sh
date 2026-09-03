@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-NAME=gptbots-desktop
+NAME=orgbot-desktop
 VERSION=${1:-0.1.0}
 BIN=src-tauri/target/release/gptbots-desktop
 [ -x "$BIN" ] || { echo "missing $BIN - build first: (cd src-tauri && cargo build --release)"; exit 1; }
@@ -16,8 +16,8 @@ mkdir -p "$STAGE/usr/lib/$NAME" "$STAGE/usr/bin" \
          "$STAGE/DEBIAN"
 
 install -m755 "$BIN" "$STAGE/usr/lib/$NAME/$NAME"
-install -m644 packaging/gptbots-desktop.desktop "$STAGE/usr/share/applications/"
-install -m644 src-tauri/icons/icon.png "$STAGE/usr/share/icons/hicolor/256x256/apps/gptbots.png"
+install -m644 packaging/orgbot.desktop "$STAGE/usr/share/applications/"
+install -m644 src-tauri/icons/icon.png "$STAGE/usr/share/icons/hicolor/256x256/apps/orgbot.png"
 ln -s "/usr/lib/$NAME/$NAME" "$STAGE/usr/bin/$NAME"
 
 cat > "$STAGE/DEBIAN/control" <<EOF

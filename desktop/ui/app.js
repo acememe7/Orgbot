@@ -175,8 +175,18 @@ async function refreshHostStatus() {
 $('startBtn').onclick = async () => {
   const path = $('roomPath').value.trim();
   if (!path) return banner('enter a room file path');
-  const info = await invoke('host_start', { config: path });
-  if (info) { $('hostSt').textContent = 'starting…'; setTimeout(() => connect(info.ws_url), 500); }
+  $('hostSt').textContent = 'starting…';
+  try {
+    const info = await invoke('host_start', { config: path });
+    if (info) {
+      $('hostSt').textContent = 'running ' + (info.config || '');
+      clearBanner();
+      connect(info.ws_url);
+    }
+  } catch (err) {
+    $('hostSt').textContent = 'start failed';
+    banner('Start failed: ' + ((err && (err.message || err)) || 'unknown error'));
+  }
 };
 $('stopBtn').onclick = async () => {
   await invoke('host_stop', {});
