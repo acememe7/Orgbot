@@ -5,6 +5,8 @@ library;
 
 import 'dart:math';
 
+import '../engine/agent_cli.dart';
+
 String genId(String prefix) {
   final rnd = Random.secure();
   return prefix +
@@ -15,18 +17,48 @@ String genId(String prefix) {
 }
 
 /// Which brain a bot uses.
+///
+/// The three subscription backends run this machine's own agent CLI, so they
+/// inherit its sign-in — no key is asked for or stored. Only a raw API
+/// endpoint needs one.
 enum ProviderKind {
-  anthropic('anthropic', 'Anthropic'),
+  anthropic('anthropic', 'Anthropic (Claude)'),
+  codex('codex', 'Codex / ChatGPT'),
+  grok('grok', 'Grok'),
   deepseek('deepseek', 'DeepSeek'),
-  openai('openai', 'OpenAI'),
-  scripted('scripted', 'Scripted demo');
+  scripted('scripted', 'Demo (no model)');
 
   final String key;
   final String label;
   const ProviderKind(this.key, this.label);
 
-  static ProviderKind fromKey(String key) =>
-      values.firstWhere((k) => k.key == key, orElse: () => ProviderKind.scripted);
+  static ProviderKind fromKey(String key) => values.firstWhere(
+        (k) => k.key == key,
+        // `openai` was the old name for the Codex backend; map it forward so
+        // bots saved before the rename keep working.
+        orElse: () => key == 'openai' ? ProviderKind.codex : ProviderKind.scripted,
+      );
+
+  /// The agent CLI backing this provider, or null when it talks to an API.
+  CliKind? get cli {
+    switch (this) {
+      case ProviderKind.anthropic:
+        return CliKind.claude;
+      case ProviderKind.codex:
+        return CliKind.codex;
+      case ProviderKind.grok:
+        return CliKind.grok;
+      case ProviderKind.deepseek:
+      case ProviderKind.scripted:
+        return null;
+    }
+  }
+
+  /// Whether this backend signs in through a CLI rather than taking a key.
+  bool get usesSignIn => cli != null;
+
+  /// Whether an API key must be supplied. Only a raw endpoint needs one.
+  bool get needsApiKey => this == ProviderKind.deepseek;
 }
 
 class BotDef {
@@ -43,13 +75,14 @@ class BotDef {
     required this.name,
     String? handle,
     this.persona = '',
-    this.provider = ProviderKind.scripted,
+    this.provider = ProviderKind.anthropic,
     this.model = '',
     this.apiKey = '',
   })  : id = id ?? genId('bot'),
         handle = handle == null || handle.isEmpty ? '' : handle;
 
-  bool get needsKey => provider != ProviderKind.scripted;
+  /// Whether this bot still needs a key from the user.
+  bool get needsKey => provider.needsApiKey && apiKey.trim().isEmpty;
 
   Map<String, Object?> toJson() => {
         'id': id,

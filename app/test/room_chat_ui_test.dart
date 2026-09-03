@@ -12,7 +12,9 @@ Future<void> pumpRoom(WidgetTester tester) async {
   addTearDown(() => tester.binding.setSurfaceSize(null));
 
   final library = Library();
-  final bot = BotDef(name: 'Helper', handle: 'helper');
+  // Explicitly scripted: the default provider now runs a real CLI.
+  final bot = BotDef(
+      name: 'Helper', handle: 'helper', provider: ProviderKind.scripted);
   library.bots.add(bot);
   final room = RoomDef(
     name: 'Release',

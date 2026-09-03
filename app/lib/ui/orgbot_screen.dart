@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../engine/agent_cli.dart';
 import '../engine/engine_core.dart';
 import '../engine/llm_provider.dart';
 import '../engine/runner.dart';
@@ -183,206 +184,16 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
   void _newBot() => _botDialog(null);
 
   Future<void> _botDialog(BotDef? existing) async {
-    final name = TextEditingController(text: existing?.name ?? '');
-    final handle = TextEditingController(text: existing?.handle ?? '');
-    final persona = TextEditingController(text: existing?.persona ?? '');
-    final customModel = TextEditingController();
-    final key = TextEditingController(text: existing?.apiKey ?? '');
-    var provider = existing?.provider ?? ProviderKind.anthropic;
-
-    // The picker holds a model id, or the sentinel below for "type your own".
-    // An existing bot pointed at something not in the catalog opens on Custom
-    // with its id filled in, so editing never silently changes the model.
-    const custom = '__custom__';
-    var selected = existing == null || existing.model.isEmpty
-        ? ModelCatalog.defaultFor(provider)
-        : (ModelCatalog.isKnown(existing.provider, existing.model)
-            ? existing.model
-            : custom);
-    if (selected == custom) customModel.text = existing!.model;
-
-    String resolvedModel() =>
-        selected == custom ? customModel.text.trim() : selected;
-
     await showDialog<void>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setLocal) {
-          final options = ModelCatalog.forProvider(provider);
-          final scheme = Theme.of(context).colorScheme;
-          return AlertDialog(
-            title: Row(
-              children: [
-                const BrandMark(size: 24),
-                const SizedBox(width: 10),
-                Text(existing == null ? 'New bot' : 'Edit bot'),
-              ],
-            ),
-            content: SizedBox(
-              width: 420,
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: name,
-                      textCapitalization: TextCapitalization.words,
-                      decoration: const InputDecoration(
-                        labelText: 'Name',
-                        hintText: 'Iris',
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: handle,
-                      decoration: const InputDecoration(
-                        labelText: 'Handle',
-                        hintText: 'iris',
-                        prefixText: '@',
-                        helperText: 'How the other bots address it',
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: persona,
-                      maxLines: 3,
-                      decoration: const InputDecoration(
-                        labelText: 'Persona',
-                        hintText: 'You write concise, accurate technical prose.',
-                        helperText: 'Standing instructions, given every turn',
-                        alignLabelWithHint: true,
-                      ),
-                    ),
-                    const SizedBox(height: 18),
-                    Text('Brain',
-                        style: Theme.of(context).textTheme.labelLarge),
-                    const SizedBox(height: 8),
-                    DropdownButtonFormField<ProviderKind>(
-                      initialValue: provider,
-                      decoration: const InputDecoration(
-                        labelText: 'Provider',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: ProviderKind.values
-                          .map((k) =>
-                              DropdownMenuItem(value: k, child: Text(k.label)))
-                          .toList(),
-                      onChanged: (v) => setLocal(() {
-                        provider = v ?? provider;
-                        // Models do not carry across providers, so reset to
-                        // the new provider's default rather than leaving an
-                        // id that its API will reject.
-                        selected = ModelCatalog.defaultFor(provider);
-                        customModel.clear();
-                      }),
-                    ),
-                    if (options.isNotEmpty) ...[
-                      const SizedBox(height: 10),
-                      DropdownButtonFormField<String>(
-                        initialValue: selected,
-                        isExpanded: true,
-                        decoration: const InputDecoration(
-                          labelText: 'Model',
-                          border: OutlineInputBorder(),
-                        ),
-                        items: [
-                          for (final option in options)
-                            DropdownMenuItem(
-                              value: option.id,
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(option.label),
-                                  Text(
-                                    option.note,
-                                    style: TextStyle(
-                                        fontSize: 11,
-                                        color: scheme.onSurfaceVariant),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          const DropdownMenuItem(
-                            value: custom,
-                            child: Text('Custom…'),
-                          ),
-                        ],
-                        onChanged: (v) =>
-                            setLocal(() => selected = v ?? selected),
-                      ),
-                    ],
-                    if (selected == custom) ...[
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: customModel,
-                        decoration: const InputDecoration(
-                          labelText: 'Model id',
-                          hintText: 'exact id from your provider',
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                    ],
-                    if (provider != ProviderKind.scripted) ...[
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: key,
-                        obscureText: true,
-                        decoration: const InputDecoration(
-                          labelText: 'API key',
-                          border: OutlineInputBorder(),
-                          helperText: 'Stored on this device only',
-                        ),
-                      ),
-                    ] else ...[
-                      const SizedBox(height: 10),
-                      Text(
-                        'The demo bot needs no key or model — it follows a '
-                        'fixed script, so you can try a room before adding one.',
-                        style: TextStyle(
-                            fontSize: 12, color: scheme.onSurfaceVariant),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('Cancel')),
-              FilledButton(
-                  onPressed: () {
-                    if (name.text.trim().isEmpty) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Give the bot a name')));
-                      return;
-                    }
-                    if (selected == custom && resolvedModel().isEmpty) {
-                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                          content: Text('Enter a model id, or pick one above')));
-                      return;
-                    }
-                    final bot = BotDef(
-                      id: existing?.id,
-                      name: name.text.trim(),
-                      handle: handle.text.trim(),
-                      persona: persona.text.trim(),
-                      provider: provider,
-                      model: resolvedModel(),
-                      apiKey: key.text.trim(),
-                    );
-                    if (existing == null) {
-                      widget.library.addBot(bot);
-                    } else {
-                      widget.library.updateBot(bot);
-                    }
-                    Navigator.pop(context);
-                  },
-                  child: const Text('Save')),
-            ],
-          );
+      builder: (context) => _BotEditor(
+        existing: existing,
+        onSave: (bot) {
+          if (existing == null) {
+            widget.library.addBot(bot);
+          } else {
+            widget.library.updateBot(bot);
+          }
         },
       ),
     );
@@ -525,6 +336,12 @@ class RunningRoomPage extends StatefulWidget {
 class _RunningRoomPageState extends State<RunningRoomPage> {
   LocalRoomController? _controller;
 
+  /// Bots that could not be seated, with the reason, shown as a banner.
+  final List<String> _setupProblems = [];
+
+  static String _reason(Object e) =>
+      e is EngineError ? e.message : e.toString();
+
   @override
   void initState() {
     super.initState();
@@ -537,9 +354,16 @@ class _RunningRoomPageState extends State<RunningRoomPage> {
       final bot = widget.library.botById(slot.botId);
       if (bot == null) continue;
       final roles = [slot.role];
-      final provider = bot.provider == ProviderKind.scripted
-          ? ScriptedRoomBot(bot.handle.isEmpty ? bot.name : bot.handle, slot.role)
-          : _realBot(bot, slot.role);
+      // A bot whose CLI is missing must not take the whole screen down; note
+      // it and carry on seating the others.
+      final BotProvider provider;
+      try {
+        provider = _realBot(bot, slot.role);
+      } catch (e) {
+        _setupProblems.add(
+            '@' + (bot.handle.isEmpty ? bot.name : bot.handle) + ': ' + _reason(e));
+        continue;
+      }
       runner.seat(
         bot.handle.isEmpty ? bot.name : bot.handle,
         roles,
@@ -555,21 +379,30 @@ class _RunningRoomPageState extends State<RunningRoomPage> {
   }
 
   BotProvider _realBot(BotDef bot, String role) {
+    final handle = bot.handle.isEmpty ? bot.name : bot.handle;
     final system = 'You are ' +
         bot.name +
-        ' (' +
+        ' (@' +
+        handle +
+        '), the ' +
         role +
-        ') in a room of bots sharing a task board.\n' +
+        ' in this room. ' +
         bot.persona;
+
+    // A subscription backend runs the machine's own CLI, which carries the
+    // sign-in. Nothing here handles a key for those.
+    final cli = bot.provider.cli;
+    if (cli != null) {
+      return AgentCliBot.resolve(
+        cli: cli,
+        handle: handle,
+        system: system,
+        model: bot.model,
+        workdir: widget.room.path,
+      );
+    }
+
     switch (bot.provider) {
-      case ProviderKind.anthropic:
-        return LlmBot(LlmConfig(
-            kind: LlmKind.anthropic,
-            apiKey: bot.apiKey,
-            model: bot.model.isEmpty
-                ? ModelCatalog.defaultFor(ProviderKind.anthropic)
-                : bot.model,
-            system: system));
       case ProviderKind.deepseek:
         return LlmBot(LlmConfig(
             kind: LlmKind.openAiCompatible,
@@ -579,17 +412,8 @@ class _RunningRoomPageState extends State<RunningRoomPage> {
                 : bot.model,
             baseUrl: 'https://api.deepseek.com/v1',
             system: system));
-      case ProviderKind.openai:
-        return LlmBot(LlmConfig(
-            kind: LlmKind.openAiCompatible,
-            apiKey: bot.apiKey,
-            model: bot.model.isEmpty
-                ? ModelCatalog.defaultFor(ProviderKind.openai)
-                : bot.model,
-            baseUrl: 'https://api.openai.com/v1',
-            system: system));
-      case ProviderKind.scripted:
-        return ScriptedRoomBot(bot.handle.isEmpty ? bot.name : bot.handle, role);
+      default:
+        return ScriptedRoomBot(handle, role);
     }
   }
 
@@ -600,6 +424,7 @@ class _RunningRoomPageState extends State<RunningRoomPage> {
 
   @override
   void dispose() {
+    _controller?.dispose();
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -689,6 +514,8 @@ class _RunningRoomPageState extends State<RunningRoomPage> {
           ),
           body: Column(
             children: [
+              if (_setupProblems.isNotEmpty)
+                _errorBanner(_setupProblems.join('\n')),
               if (controller.error != null) _errorBanner(controller.error!),
               if (_showBoard) _board(controller),
               Expanded(child: _transcript(controller, messages)),
@@ -912,5 +739,332 @@ class _RunningRoomPageState extends State<RunningRoomPage> {
         ],
       ),
     );
+  }
+}
+
+/// The bot editor.
+///
+/// Split out of the screen because it has real state of its own: the model
+/// list is fetched from the provider (a CLI call or an HTTP round trip), so it
+/// arrives after the dialog is already on screen.
+class _BotEditor extends StatefulWidget {
+  final BotDef? existing;
+  final void Function(BotDef) onSave;
+  const _BotEditor({required this.existing, required this.onSave});
+
+  @override
+  State<_BotEditor> createState() => _BotEditorState();
+}
+
+class _BotEditorState extends State<_BotEditor> {
+  late final TextEditingController _name;
+  late final TextEditingController _handle;
+  late final TextEditingController _persona;
+  late final TextEditingController _key;
+  final TextEditingController _customModel = TextEditingController();
+
+  late ProviderKind _provider;
+  String _model = '';
+  bool _custom = false;
+
+  ModelList? _models;
+  bool _loadingModels = false;
+
+  /// Sentinel for the "type your own id" row.
+  static const String _customValue = '__custom__';
+
+  @override
+  void initState() {
+    super.initState();
+    final b = widget.existing;
+    _name = TextEditingController(text: b?.name ?? '');
+    _handle = TextEditingController(text: b?.handle ?? '');
+    _persona = TextEditingController(text: b?.persona ?? '');
+    _key = TextEditingController(text: b?.apiKey ?? '');
+    _provider = b?.provider ?? ProviderKind.anthropic;
+    _model = b?.model ?? '';
+    _loadModels();
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _handle.dispose();
+    _persona.dispose();
+    _key.dispose();
+    _customModel.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadModels() async {
+    setState(() {
+      _loadingModels = true;
+      _models = null;
+    });
+    final list = await ModelCatalog.load(_provider, apiKey: _key.text.trim());
+    if (!mounted) return;
+    setState(() {
+      _models = list;
+      _loadingModels = false;
+      // An id that the provider does not offer is a custom one; keep it and
+      // open on Custom rather than silently switching the bot's model.
+      if (_model.isNotEmpty && !list.options.any((o) => o.id == _model)) {
+        _custom = true;
+        _customModel.text = _model;
+      }
+    });
+  }
+
+  void _changeProvider(ProviderKind next) {
+    setState(() {
+      _provider = next;
+      // Model ids do not carry across providers.
+      _model = ModelCatalog.defaultFor(next);
+      _custom = false;
+      _customModel.clear();
+    });
+    _loadModels();
+  }
+
+  String get _resolvedModel => _custom ? _customModel.text.trim() : _model;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return AlertDialog(
+      title: Row(
+        children: [
+          const BrandMark(size: 24),
+          const SizedBox(width: 10),
+          Text(widget.existing == null ? 'New bot' : 'Edit bot'),
+        ],
+      ),
+      content: SizedBox(
+        width: 430,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: _name,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(
+                    labelText: 'Name', hintText: 'Iris'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _handle,
+                decoration: const InputDecoration(
+                  labelText: 'Handle',
+                  prefixText: '@',
+                  hintText: 'iris',
+                  helperText: 'How the other bots address it',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _persona,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  labelText: 'Persona',
+                  hintText: 'You write concise, accurate technical prose.',
+                  alignLabelWithHint: true,
+                ),
+              ),
+              const SizedBox(height: 18),
+              Text('Brain', style: Theme.of(context).textTheme.labelLarge),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<ProviderKind>(
+                initialValue: _provider,
+                decoration: const InputDecoration(
+                    labelText: 'Provider', border: OutlineInputBorder()),
+                items: ProviderKind.values
+                    .map((k) => DropdownMenuItem(value: k, child: Text(k.label)))
+                    .toList(),
+                onChanged: (v) => _changeProvider(v ?? _provider),
+              ),
+              const SizedBox(height: 10),
+              _authRow(scheme),
+              if (_provider != ProviderKind.scripted) ...[
+                const SizedBox(height: 10),
+                _modelField(scheme),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel')),
+        FilledButton(onPressed: _save, child: const Text('Save')),
+      ],
+    );
+  }
+
+  /// Sign-in status, or a key field — never both.
+  Widget _authRow(ColorScheme scheme) {
+    if (_provider.needsApiKey) {
+      return TextField(
+        controller: _key,
+        obscureText: true,
+        decoration: const InputDecoration(
+          labelText: 'API key',
+          border: OutlineInputBorder(),
+          helperText: 'Stored on this device only',
+        ),
+        // A key unlocks the live model list, so reload once it is entered.
+        onSubmitted: (_) => _loadModels(),
+        onEditingComplete: _loadModels,
+      );
+    }
+    if (_provider == ProviderKind.scripted) {
+      return Text(
+        'The demo bot follows a fixed script, so you can try a room before '
+        'setting anything up.',
+        style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+      );
+    }
+
+    final cli = _provider.cli!;
+    final status = findCli(cli);
+    if (status.available) {
+      return StatusPill(
+        color: Colors.green,
+        label: 'Signed in via ${cli.binary} — no API key needed',
+        icon: Icons.verified_user_outlined,
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const StatusPill(
+          color: Colors.orange,
+          label: 'CLI not found',
+          icon: Icons.error_outline,
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '${status.problem}\nInstall it and sign in with `${cli.binary}`, then '
+          'reopen this dialog.',
+          style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+        ),
+      ],
+    );
+  }
+
+  Widget _modelField(ColorScheme scheme) {
+    if (_loadingModels) {
+      return Row(
+        children: [
+          const SizedBox(
+              width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+          const SizedBox(width: 10),
+          Text('Loading models…',
+              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+        ],
+      );
+    }
+    final list = _models;
+    if (list == null) return const SizedBox.shrink();
+
+    final value = _custom
+        ? _customValue
+        : (list.options.any((o) => o.id == _model) ? _model : list.options.first.id);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        DropdownButtonFormField<String>(
+          initialValue: value,
+          isExpanded: true,
+          decoration: InputDecoration(
+            labelText: 'Model',
+            border: const OutlineInputBorder(),
+            suffixIcon: IconButton(
+              tooltip: 'Reload from the provider',
+              icon: const Icon(Icons.refresh, size: 18),
+              onPressed: () {
+                ModelCatalog.invalidate();
+                _loadModels();
+              },
+            ),
+          ),
+          items: [
+            for (final option in list.options)
+              DropdownMenuItem(
+                value: option.id,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(option.label, overflow: TextOverflow.ellipsis),
+                    if (option.note.isNotEmpty)
+                      Text(option.note,
+                          style: TextStyle(
+                              fontSize: 11, color: scheme.onSurfaceVariant)),
+                  ],
+                ),
+              ),
+            const DropdownMenuItem(value: _customValue, child: Text('Custom…')),
+          ],
+          onChanged: (v) => setState(() {
+            if (v == _customValue) {
+              _custom = true;
+            } else {
+              _custom = false;
+              _model = v ?? _model;
+            }
+          }),
+        ),
+        if (_custom) ...[
+          const SizedBox(height: 10),
+          TextField(
+            controller: _customModel,
+            decoration: const InputDecoration(
+              labelText: 'Model id',
+              hintText: 'exact id from your provider',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+        const SizedBox(height: 6),
+        Text(
+          list.source == ModelSource.live
+              ? 'Loaded from ${_provider.label}.'
+              : 'Showing built-in defaults — ${list.problem ?? "could not reach the provider"}.',
+          style: TextStyle(
+            fontSize: 11,
+            color: list.source == ModelSource.live
+                ? scheme.onSurfaceVariant
+                : Colors.orange,
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _save() {
+    if (_name.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Give the bot a name')));
+      return;
+    }
+    if (_custom && _resolvedModel.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Enter a model id, or pick one above')));
+      return;
+    }
+    widget.onSave(BotDef(
+      id: widget.existing?.id,
+      name: _name.text.trim(),
+      handle: _handle.text.trim(),
+      persona: _persona.text.trim(),
+      provider: _provider,
+      model: _resolvedModel,
+      apiKey: _key.text.trim(),
+    ));
+    Navigator.pop(context);
   }
 }

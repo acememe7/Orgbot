@@ -128,6 +128,13 @@ class LocalRoomController extends ChangeNotifier {
     await _drive();
   }
 
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    _ticker = null;
+    super.dispose();
+  }
+
   void pause() {
     engine.pause();
     state = LocalRunState.paused;
