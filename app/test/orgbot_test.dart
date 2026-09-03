@@ -1,0 +1,67 @@
+// Model + persistence + seed tests for the OrgBot phone app.
+import 'package:flutter_test/flutter_test.dart';
+import 'package:orgbot_app/engine/engine_core.dart';
+import 'package:orgbot_app/orgbot/library.dart';
+import 'package:orgbot_app/orgbot/models.dart';
+
+void main() {
+  test('bots and rooms round-trip through json', () {
+    final bot = BotDef(
+      name: 'Writer',
+      handle: 'writer',
+      persona: 'concise prose',
+      provider: ProviderKind.anthropic,
+      model: 'claude-sonnet-5',
+    );
+    final fromJson = BotDef.fromJson(bot.toJson());
+    expect(fromJson.name, 'Writer');
+    expect(fromJson.provider, ProviderKind.anthropic);
+    expect(fromJson.model, 'claude-sonnet-5');
+    expect(fromJson.id, bot.id);
+
+    final room = RoomDef(
+      name: 'notes',
+      goal: 'write notes',
+      tasks: ['cover every change'],
+      bots: [RoomSlot(bot.id, 'writer')],
+    );
+    final room2 = RoomDef.fromJson(room.toJson());
+    expect(room2.name, 'notes');
+    expect(room2.bots.single.botId, bot.id);
+    expect(room2.bots.single.role, 'writer');
+  });
+
+  test('the library persists bots and rooms through a memory saver', () async {
+    final saver = MemorySaver();
+    final lib = Library(saver: saver);
+    await lib.load();
+    lib.addBot(BotDef(name: 'QA', handle: 'qa', persona: 'checks',
+        provider: ProviderKind.scripted));
+    lib.addRoom(RoomDef(name: 'r', goal: 'g', bots: [
+      RoomSlot(lib.bots.first.id, 'reviewer'),
+    ]));
+    await Future<void>.delayed(Duration.zero); // let persist() settle
+
+    final reloaded = Library(saver: saver);
+    await reloaded.load();
+    expect(reloaded.bots.single.name, 'QA');
+    expect(reloaded.rooms.single.bots.single.role, 'reviewer');
+  });
+
+  test('removing a bot drops it and the rooms that used it', () async {
+    final lib = Library(saver: MemorySaver());
+    await lib.load();
+    final bot = lib.addBot(BotDef(name: 'W'));
+    lib.addRoom(RoomDef(name: 'r', bots: [RoomSlot(bot.id, 'writer')]));
+    lib.removeBot(bot.id);
+    expect(lib.bots, isEmpty);
+    expect(lib.rooms, isEmpty);
+  });
+
+  test('seeding a task puts it on the board in ready state', () {
+    final engine = Engine(name: 'r', goal: 'g');
+    final id = engine.seedTask('t', 'do it', requiredRole: 'writer');
+    expect(engine.tasks[id]!.state, TaskState.ready);
+    expect(engine.tasks[id]!.requiredRole, 'writer');
+  });
+}

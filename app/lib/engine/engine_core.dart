@@ -190,6 +190,20 @@ class Engine {
   Agent requireAgent(String id) => agents[id] ?? (throw EngineError('unknown agent ' + id));
   Task requireTask(String id) => tasks[id] ?? (throw EngineError('unknown task ' + id));
 
+  /// Seed the board directly (no actor, no autonomy check) - the phone
+  /// equivalent of a room file's [[tasks]].
+  String seedTask(String title, String brief, {String? requiredRole}) {
+    final t = Task(
+      title: title,
+      brief: brief,
+      requiredRole: requiredRole,
+    );
+    tasks[t.id] = t;
+    _open(t);
+    _event('task', t.id + ' seeded: ' + title);
+    return t.id;
+  }
+
   void seat(Agent a) {
     if (agents.containsKey(a.id)) throw EngineError('agent ' + a.handle + ' already seated');
     agents[a.id] = a;

@@ -6,8 +6,9 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'orgbot/library.dart';
 import 'ui/connect_screen.dart';
-import 'ui/local_room_screen.dart';
+import 'ui/orgbot_screen.dart';
 
 void main() {
   runApp(const OrgBotApp());
@@ -16,22 +17,23 @@ void main() {
 
 /// Choose: join a hosted room, or run one entirely on this device.
 class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key});
+  final Library library;
+  const HomeScreen({super.key, required this.library});
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('GPTBots')),
+      appBar: AppBar(title: const Text('OrgBot')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
           Card(
             child: ListTile(
-              leading: const Icon(Icons.dns_outlined),
-              title: const Text('Run a room on this device'),
-              subtitle: const Text('Bots work a task board here — no server, no PC.'),
+              leading: const Icon(Icons.smart_toy_outlined),
+              title: const Text('Bots & Rooms'),
+              subtitle: const Text('Create your bots, open a group chat room, and watch them work.'),
               onTap: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const LocalRoomScreen()),
+                MaterialPageRoute(builder: (_) => OrgBotScreen(library: library)),
               ),
             ),
           ),
@@ -52,8 +54,15 @@ class HomeScreen extends StatelessWidget {
 }
 
 /// The application root.
-class OrgBotApp extends StatelessWidget {
+class OrgBotApp extends StatefulWidget {
   const OrgBotApp({super.key});
+
+  @override
+  State<OrgBotApp> createState() => _OrgBotAppState();
+}
+
+class _OrgBotAppState extends State<OrgBotApp> {
+  final Library _library = Library();
 
   @override
   Widget build(BuildContext context) {
@@ -63,7 +72,7 @@ class OrgBotApp extends StatelessWidget {
       theme: _theme(Brightness.light),
       darkTheme: _theme(Brightness.dark),
       themeMode: ThemeMode.dark,
-      home: const HomeScreen(),
+      home: HomeScreen(library: _library),
     );
   }
 

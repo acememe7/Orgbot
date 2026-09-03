@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 NAME=orgbot-desktop
 VERSION=${1:-0.1.0}
-BIN=src-tauri/target/release/gptbots-desktop
+BIN=src-tauri/target/release/orgbot-desktop
 [ -x "$BIN" ] || { echo "missing $BIN - build first: (cd src-tauri && cargo build --release)"; exit 1; }
 
 STAGE=$(mktemp -d)
