@@ -93,6 +93,10 @@ class Runner {
 
   bool actionable(RoomBot bot) {
     final a = bot.agent;
+    // Someone spoke and this bot has not read it yet. This comes first: a
+    // person waiting on an answer outranks anything the room set itself.
+    final pending = engine.pendingHumanAt;
+    if (pending != null && bot.lastSeen <= pending) return true;
     // Live work in hand keeps the assignee awake until it leaves their hands.
     final held = engine.tasks.values
         .where((t) => t.assignee == a.id && !t.state.isTerminal)

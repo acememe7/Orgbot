@@ -11,7 +11,9 @@ import '../engine/runner.dart';
 import '../orgbot/demo_bot.dart';
 import '../orgbot/library.dart';
 import '../orgbot/models.dart';
+import '../orgbot/model_catalog.dart';
 import '../state/local_room_controller.dart';
+import 'brand.dart';
 
 class OrgBotScreen extends StatefulWidget {
   final Library library;
@@ -38,7 +40,27 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
         final lib = widget.library;
         return Scaffold(
           appBar: AppBar(
-            title: Text(_tab == 0 ? 'OrgBot · your bots' : 'OrgBot · rooms'),
+            titleSpacing: 12,
+            title: Row(
+              children: [
+                const BrandMark(size: 28),
+                const SizedBox(width: 10),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('OrgBot', style: TextStyle(fontSize: 17)),
+                    Text(
+                      _tab == 0 ? 'Your bots' : 'Your rooms',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
             actions: [
               IconButton(
                 icon: const Icon(Icons.add),
@@ -70,30 +92,88 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
   // ---- bots ----
   Widget _botsList(Library lib) {
     if (lib.bots.isEmpty) {
-      return const Center(child: Text('No bots yet. Tap + to create one.'));
+      return EmptyState(
+        icon: Icons.smart_toy_outlined,
+        title: 'No bots yet',
+        message: 'A bot is a model with a name, a persona, and a job. '
+            'Create a few, then put them in a room together.',
+        actionLabel: 'Create a bot',
+        onAction: _newBot,
+      );
     }
     return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
       itemCount: lib.bots.length,
       itemBuilder: (context, i) {
         final b = lib.bots[i];
-        return ListTile(
-          leading: CircleAvatar(child: Text(b.name.isNotEmpty ? b.name[0] : '?')),
-          title: Text('@' + (b.handle.isEmpty ? b.name : b.handle)),
-          subtitle: Text(b.provider.label +
-              (b.model.isNotEmpty ? ' · ' + b.model : '') +
-              '\n' +
-              b.persona),
-          isThreeLine: b.persona.isNotEmpty,
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              IconButton(
-                  icon: const Icon(Icons.edit_outlined),
-                  onPressed: () => _botDialog(b)),
-              IconButton(
-                  icon: const Icon(Icons.delete_outline),
-                  onPressed: () => lib.removeBot(b.id)),
-            ],
+        final handle = b.handle.isEmpty ? b.name : b.handle;
+        final scheme = Theme.of(context).colorScheme;
+        final needsKey = b.needsKey && b.apiKey.isEmpty;
+        return Card(
+          margin: const EdgeInsets.only(bottom: 10),
+          elevation: 0,
+          color: scheme.surfaceContainerHighest,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: BorderSide(color: scheme.outlineVariant),
+          ),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(14),
+            onTap: () => _botDialog(b),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      BotAvatar(handle: handle),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('@' + handle,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w700, fontSize: 15)),
+                            const SizedBox(height: 2),
+                            Text(
+                              b.provider.label +
+                                  ' · ' +
+                                  ModelCatalog.labelFor(b.provider, b.model),
+                              style: TextStyle(
+                                  fontSize: 12, color: scheme.onSurfaceVariant),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Delete',
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: () => lib.removeBot(b.id),
+                      ),
+                    ],
+                  ),
+                  if (b.persona.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      b.persona,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
+                    ),
+                  ],
+                  if (needsKey) ...[
+                    const SizedBox(height: 10),
+                    const StatusPill(
+                      color: Colors.orange,
+                      label: 'Needs an API key',
+                      icon: Icons.key_off_outlined,
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ),
         );
       },
@@ -106,69 +186,204 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
     final name = TextEditingController(text: existing?.name ?? '');
     final handle = TextEditingController(text: existing?.handle ?? '');
     final persona = TextEditingController(text: existing?.persona ?? '');
-    final model = TextEditingController(text: existing?.model ?? '');
+    final customModel = TextEditingController();
     final key = TextEditingController(text: existing?.apiKey ?? '');
-    var provider = existing?.provider ?? ProviderKind.scripted;
+    var provider = existing?.provider ?? ProviderKind.anthropic;
+
+    // The picker holds a model id, or the sentinel below for "type your own".
+    // An existing bot pointed at something not in the catalog opens on Custom
+    // with its id filled in, so editing never silently changes the model.
+    const custom = '__custom__';
+    var selected = existing == null || existing.model.isEmpty
+        ? ModelCatalog.defaultFor(provider)
+        : (ModelCatalog.isKnown(existing.provider, existing.model)
+            ? existing.model
+            : custom);
+    if (selected == custom) customModel.text = existing!.model;
+
+    String resolvedModel() =>
+        selected == custom ? customModel.text.trim() : selected;
 
     await showDialog<void>(
       context: context,
       builder: (context) => StatefulBuilder(
-        builder: (context, setLocal) => AlertDialog(
-          title: Text(existing == null ? 'New bot' : 'Edit bot'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+        builder: (context, setLocal) {
+          final options = ModelCatalog.forProvider(provider);
+          final scheme = Theme.of(context).colorScheme;
+          return AlertDialog(
+            title: Row(
               children: [
-                TextField(controller: name, decoration: const InputDecoration(labelText: 'Name')),
-                TextField(controller: handle, decoration: const InputDecoration(labelText: 'Handle (@mention)')),
-                TextField(
-                    controller: persona,
-                    maxLines: 4,
-                    decoration: const InputDecoration(
-                        labelText: 'System prompt / persona')),
-                DropdownButtonFormField<ProviderKind>(
-                  initialValue: provider,
-                  decoration: const InputDecoration(labelText: 'Provider'),
-                  items: ProviderKind.values
-                      .map((k) =>
-                          DropdownMenuItem(value: k, child: Text(k.label)))
-                      .toList(),
-                  onChanged: (v) => setLocal(() => provider = v ?? provider),
-                ),
-                TextField(controller: model, decoration: const InputDecoration(labelText: 'Model (empty = default)')),
-                if (provider != ProviderKind.scripted)
-                  TextField(
-                      controller: key,
-                      obscureText: true,
-                      decoration: const InputDecoration(labelText: 'API key')),
+                const BrandMark(size: 24),
+                const SizedBox(width: 10),
+                Text(existing == null ? 'New bot' : 'Edit bot'),
               ],
             ),
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-            FilledButton(
-                onPressed: () {
-                  if (name.text.trim().isEmpty) return;
-                  final bot = BotDef(
-                    id: existing?.id,
-                    name: name.text.trim(),
-                    handle: handle.text.trim(),
-                    persona: persona.text.trim(),
-                    provider: provider,
-                    model: model.text.trim(),
-                    apiKey: key.text.trim(),
-                  );
-                  if (existing == null) {
-                    widget.library.addBot(bot);
-                  } else {
-                    widget.library.updateBot(bot);
-                  }
-                  Navigator.pop(context);
-                },
-                child: const Text('Save')),
-          ],
-        ),
+            content: SizedBox(
+              width: 420,
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: name,
+                      textCapitalization: TextCapitalization.words,
+                      decoration: const InputDecoration(
+                        labelText: 'Name',
+                        hintText: 'Iris',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: handle,
+                      decoration: const InputDecoration(
+                        labelText: 'Handle',
+                        hintText: 'iris',
+                        prefixText: '@',
+                        helperText: 'How the other bots address it',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: persona,
+                      maxLines: 3,
+                      decoration: const InputDecoration(
+                        labelText: 'Persona',
+                        hintText: 'You write concise, accurate technical prose.',
+                        helperText: 'Standing instructions, given every turn',
+                        alignLabelWithHint: true,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    Text('Brain',
+                        style: Theme.of(context).textTheme.labelLarge),
+                    const SizedBox(height: 8),
+                    DropdownButtonFormField<ProviderKind>(
+                      initialValue: provider,
+                      decoration: const InputDecoration(
+                        labelText: 'Provider',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: ProviderKind.values
+                          .map((k) =>
+                              DropdownMenuItem(value: k, child: Text(k.label)))
+                          .toList(),
+                      onChanged: (v) => setLocal(() {
+                        provider = v ?? provider;
+                        // Models do not carry across providers, so reset to
+                        // the new provider's default rather than leaving an
+                        // id that its API will reject.
+                        selected = ModelCatalog.defaultFor(provider);
+                        customModel.clear();
+                      }),
+                    ),
+                    if (options.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField<String>(
+                        initialValue: selected,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Model',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: [
+                          for (final option in options)
+                            DropdownMenuItem(
+                              value: option.id,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(option.label),
+                                  Text(
+                                    option.note,
+                                    style: TextStyle(
+                                        fontSize: 11,
+                                        color: scheme.onSurfaceVariant),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          const DropdownMenuItem(
+                            value: custom,
+                            child: Text('Custom…'),
+                          ),
+                        ],
+                        onChanged: (v) =>
+                            setLocal(() => selected = v ?? selected),
+                      ),
+                    ],
+                    if (selected == custom) ...[
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: customModel,
+                        decoration: const InputDecoration(
+                          labelText: 'Model id',
+                          hintText: 'exact id from your provider',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ],
+                    if (provider != ProviderKind.scripted) ...[
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: key,
+                        obscureText: true,
+                        decoration: const InputDecoration(
+                          labelText: 'API key',
+                          border: OutlineInputBorder(),
+                          helperText: 'Stored on this device only',
+                        ),
+                      ),
+                    ] else ...[
+                      const SizedBox(height: 10),
+                      Text(
+                        'The demo bot needs no key or model — it follows a '
+                        'fixed script, so you can try a room before adding one.',
+                        style: TextStyle(
+                            fontSize: 12, color: scheme.onSurfaceVariant),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel')),
+              FilledButton(
+                  onPressed: () {
+                    if (name.text.trim().isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Give the bot a name')));
+                      return;
+                    }
+                    if (selected == custom && resolvedModel().isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                          content: Text('Enter a model id, or pick one above')));
+                      return;
+                    }
+                    final bot = BotDef(
+                      id: existing?.id,
+                      name: name.text.trim(),
+                      handle: handle.text.trim(),
+                      persona: persona.text.trim(),
+                      provider: provider,
+                      model: resolvedModel(),
+                      apiKey: key.text.trim(),
+                    );
+                    if (existing == null) {
+                      widget.library.addBot(bot);
+                    } else {
+                      widget.library.updateBot(bot);
+                    }
+                    Navigator.pop(context);
+                  },
+                  child: const Text('Save')),
+            ],
+          );
+        },
       ),
     );
   }
@@ -351,20 +566,26 @@ class _RunningRoomPageState extends State<RunningRoomPage> {
         return LlmBot(LlmConfig(
             kind: LlmKind.anthropic,
             apiKey: bot.apiKey,
-            model: bot.model.isEmpty ? 'claude-sonnet-5' : bot.model,
+            model: bot.model.isEmpty
+                ? ModelCatalog.defaultFor(ProviderKind.anthropic)
+                : bot.model,
             system: system));
       case ProviderKind.deepseek:
         return LlmBot(LlmConfig(
             kind: LlmKind.openAiCompatible,
             apiKey: bot.apiKey,
-            model: bot.model.isEmpty ? 'deepseek-chat' : bot.model,
+            model: bot.model.isEmpty
+                ? ModelCatalog.defaultFor(ProviderKind.deepseek)
+                : bot.model,
             baseUrl: 'https://api.deepseek.com/v1',
             system: system));
       case ProviderKind.openai:
         return LlmBot(LlmConfig(
             kind: LlmKind.openAiCompatible,
             apiKey: bot.apiKey,
-            model: bot.model.isEmpty ? 'gpt-5.2-codex' : bot.model,
+            model: bot.model.isEmpty
+                ? ModelCatalog.defaultFor(ProviderKind.openai)
+                : bot.model,
             baseUrl: 'https://api.openai.com/v1',
             system: system));
       case ProviderKind.scripted:
@@ -372,56 +593,323 @@ class _RunningRoomPageState extends State<RunningRoomPage> {
     }
   }
 
+  final TextEditingController _input = TextEditingController();
+  final ScrollController _scroll = ScrollController();
+  bool _showBoard = false;
+  int _seenMessages = 0;
+
   @override
   void dispose() {
+    _input.dispose();
+    _scroll.dispose();
     super.dispose();
+  }
+
+  void _send() {
+    final controller = _controller;
+    if (controller == null) return;
+    final text = _input.text.trim();
+    if (text.isEmpty) return;
+    _input.clear();
+    controller.say(text);
+  }
+
+  /// Follow the conversation as it grows, but leave the scroll alone while a
+  /// person is reading back through it.
+  void _followTranscript(int count) {
+    if (count == _seenMessages) return;
+    _seenMessages = count;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.animateTo(
+          _scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     final controller = _controller;
     if (controller == null) {
-      return const Scaffold(body: Center(child: Text('no bots in this room')));
+      return Scaffold(
+        appBar: AppBar(title: Text(widget.room.name)),
+        body: const EmptyState(
+          icon: Icons.group_off_outlined,
+          title: 'No bots in this room',
+          message: 'Edit the room and add at least one bot, then start it again.',
+        ),
+      );
     }
-    return Scaffold(
-      appBar: AppBar(title: Text('Room: ' + widget.room.name)),
-      body: AnimatedBuilder(
-        animation: controller,
-        builder: (context, _) {
-          final snap = controller.snapshot();
-          return Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(8),
-                child: Wrap(spacing: 8, children: [
-                  Chip(label: Text('phase: ' + snap.phase)),
-                  if (controller.outcome != null)
-                    Chip(label: Text('outcome: ' + controller.outcome!)),
-                  if (controller.error != null)
-                    Chip(label: Text('error: ' + controller.error!)),
-                  if (controller.state == LocalRunState.running)
-                    TextButton(
-                        onPressed: controller.pause, child: const Text('Pause'))
-                  else if (controller.state == LocalRunState.paused)
-                    TextButton(
-                        onPressed: controller.resume, child: const Text('Resume')),
-                ]),
-              ),
-              Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.all(12),
-                  children: [
-                    Text('Board', style: Theme.of(context).textTheme.titleSmall),
-                    for (final t in snap.tasks) Text('- ' + t),
-                    const SizedBox(height: 12),
-                    Text('Chat', style: Theme.of(context).textTheme.titleSmall),
-                    for (final c in snap.chat) Text(c),
-                  ],
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final messages = controller.engine.messages;
+        _followTranscript(messages.length);
+        return Scaffold(
+          appBar: AppBar(
+            titleSpacing: 8,
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(widget.room.name, style: const TextStyle(fontSize: 17)),
+                Text(
+                  widget.room.goal,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
                 ),
+              ],
+            ),
+            actions: [
+              _runPill(controller),
+              IconButton(
+                tooltip: _showBoard ? 'Hide the board' : 'Show the board',
+                icon: Icon(_showBoard ? Icons.checklist : Icons.checklist_outlined),
+                onPressed: () => setState(() => _showBoard = !_showBoard),
               ),
+              if (controller.state == LocalRunState.running)
+                IconButton(
+                    tooltip: 'Pause',
+                    icon: const Icon(Icons.pause),
+                    onPressed: controller.pause)
+              else if (controller.state == LocalRunState.paused)
+                IconButton(
+                    tooltip: 'Resume',
+                    icon: const Icon(Icons.play_arrow),
+                    onPressed: controller.resume),
+              const SizedBox(width: 4),
             ],
-          );
-        },
+          ),
+          body: Column(
+            children: [
+              if (controller.error != null) _errorBanner(controller.error!),
+              if (_showBoard) _board(controller),
+              Expanded(child: _transcript(controller, messages)),
+              const Divider(height: 1),
+              _composer(controller),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _runPill(LocalRoomController controller) {
+    final (color, label) = switch (controller.state) {
+      LocalRunState.running => (Colors.blue, 'working'),
+      LocalRunState.paused => (Colors.amber, 'paused'),
+      LocalRunState.idle => (Colors.green, 'ready'),
+      LocalRunState.finished => (Colors.green, 'done'),
+      LocalRunState.failed => (Colors.red, 'failed'),
+    };
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Center(child: StatusPill(color: color, label: label)),
+    );
+  }
+
+  Widget _errorBanner(String error) {
+    return Builder(builder: (context) {
+      final scheme = Theme.of(context).colorScheme;
+      return Container(
+        width: double.infinity,
+        color: scheme.errorContainer,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          children: [
+            Icon(Icons.error_outline, size: 18, color: scheme.onErrorContainer),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(error,
+                  style: TextStyle(fontSize: 12, color: scheme.onErrorContainer)),
+            ),
+          ],
+        ),
+      );
+    });
+  }
+
+  Widget _board(LocalRoomController controller) {
+    final scheme = Theme.of(context).colorScheme;
+    final tasks = controller.engine.tasks.values.toList();
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 220),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest,
+        border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+      ),
+      child: tasks.isEmpty
+          ? Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text('The board is empty.',
+                  style: TextStyle(color: scheme.onSurfaceVariant)),
+            )
+          : ListView(
+              padding: const EdgeInsets.all(12),
+              children: [
+                for (final t in tasks)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        StatusPill(
+                            color: _taskColor(t.state.name),
+                            label: t.state.name),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(t.title,
+                                  style: const TextStyle(
+                                      fontSize: 13, fontWeight: FontWeight.w600)),
+                              if (t.assignee != null)
+                                Text(
+                                  '@' +
+                                      (controller.engine.agents[t.assignee]?.handle ??
+                                          '?'),
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      color: scheme.onSurfaceVariant),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+    );
+  }
+
+  static Color _taskColor(String state) {
+    switch (state) {
+      case 'inProgress':
+      case 'claimed':
+        return Colors.blue;
+      case 'blocked':
+        return Colors.amber;
+      case 'inReview':
+        return Colors.purple;
+      case 'approved':
+        return Colors.teal;
+      case 'submitted':
+        return Colors.green;
+      case 'failed':
+      case 'cancelled':
+        return Colors.red;
+      default:
+        return Colors.blueGrey;
+    }
+  }
+
+  Widget _transcript(LocalRoomController controller, List<Message> messages) {
+    if (messages.isEmpty) {
+      return EmptyState(
+        icon: Icons.forum_outlined,
+        title: 'The room is quiet',
+        message: controller.state == LocalRunState.running
+            ? 'The bots are getting started. Anything you say goes to all of them.'
+            : 'Say something to get the bots going.',
+      );
+    }
+    return ListView.builder(
+      controller: _scroll,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      itemCount: messages.length,
+      itemBuilder: (context, i) => _bubble(controller, messages[i]),
+    );
+  }
+
+  Widget _bubble(LocalRoomController controller, Message message) {
+    final scheme = Theme.of(context).colorScheme;
+    final isBot = message.author.startsWith('@');
+    final handle = isBot ? message.author.substring(1) : message.author;
+    final color = isBot ? handleColor(handle) : scheme.primary;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (isBot)
+            BotAvatar(handle: handle, radius: 15)
+          else
+            CircleAvatar(
+              radius: 15,
+              backgroundColor: scheme.primary.withValues(alpha: 0.18),
+              child: Icon(Icons.person, size: 16, color: scheme.primary),
+            ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  message.author,
+                  style: TextStyle(
+                      fontWeight: FontWeight.w700, fontSize: 12.5, color: color),
+                ),
+                const SizedBox(height: 3),
+                SelectableText(
+                  message.body,
+                  style: const TextStyle(fontSize: 14, height: 1.38),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _composer(LocalRoomController controller) {
+    final busy = controller.state == LocalRunState.running;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _input,
+              minLines: 1,
+              maxLines: 5,
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => _send(),
+              decoration: InputDecoration(
+                hintText: busy
+                    ? 'The bots are working — you can still chime in'
+                    : 'Message the room…',
+                filled: true,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(24),
+                  borderSide: BorderSide.none,
+                ),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: _send,
+            style: FilledButton.styleFrom(
+              shape: const CircleBorder(),
+              padding: const EdgeInsets.all(15),
+            ),
+            child: const Icon(Icons.arrow_upward, size: 19),
+          ),
+        ],
       ),
     );
   }

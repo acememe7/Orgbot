@@ -184,6 +184,13 @@ class Engine {
   final List<Message> messages = [];
   final List<String> log = []; // append-only event log, human readable
 
+  /// Where in [log] the most recent message from the person sits, or `null`
+  /// if nobody has spoken. The scheduler compares a bot's `lastSeen` against
+  /// this to tell whether the question has been answered yet — without it a
+  /// human message lands in the transcript and no bot is ever woken to read
+  /// it, which makes the room look dead.
+  int? pendingHumanAt;
+
   Engine({required this.name, required this.goal});
 
   // ---- roster ----
@@ -218,6 +225,19 @@ class Engine {
 
   void pause() => phase = RoomPhase.paused;
   void resume() => phase = RoomPhase.running;
+
+  /// Post a message from the person operating the room.
+  ///
+  /// It goes on the transcript *and* the event log, so every bot reads it in
+  /// its next situation digest, and it marks the room as having something
+  /// unanswered so the scheduler gives someone a turn.
+  void postHuman(String name, String body) {
+    final text = body.trim();
+    if (text.isEmpty) return;
+    messages.add(Message(name, text));
+    _event('chat', name + ': ' + text);
+    pendingHumanAt = log.length - 1;
+  }
 
   // ---- public tool surface ----
   ToolOutcome call(String name, Map<String, Object?> args, String actorId) {

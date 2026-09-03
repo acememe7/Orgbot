@@ -19,6 +19,25 @@ static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
 }
 
+// Point the window at the app's own icon.
+//
+// Flutter bundles anything declared under `assets:` into
+// data/flutter_assets/ next to the executable, so the mark that ships with
+// the app is reused here rather than installing a second copy. Without this
+// the task bar and window switcher show a generic placeholder.
+static void my_application_set_icon(GtkWindow* window) {
+  g_autofree gchar* executable = g_file_read_link("/proc/self/exe", nullptr);
+  if (executable == nullptr) {
+    return;
+  }
+  g_autofree gchar* directory = g_path_get_dirname(executable);
+  g_autofree gchar* icon = g_build_filename(
+      directory, "data", "flutter_assets", "assets", "logo.png", nullptr);
+  if (g_file_test(icon, G_FILE_TEST_EXISTS)) {
+    gtk_window_set_icon_from_file(window, icon, nullptr);
+  }
+}
+
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
@@ -52,6 +71,7 @@ static void my_application_activate(GApplication* application) {
     gtk_window_set_title(window, "OrgBot");
   }
 
+  my_application_set_icon(window);
   gtk_window_set_default_size(window, 1280, 720);
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();

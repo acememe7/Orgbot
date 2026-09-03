@@ -23,7 +23,9 @@ class LocalRoomController extends ChangeNotifier {
   String? error;
   Timer? _ticker;
   bool _working = false;
-  bool _runStarted = false;
+
+  /// How the person is shown in the transcript.
+  String speakerName = 'you';
 
   LocalRoomController({required this.engine, required this.runner});
 
@@ -48,6 +50,10 @@ class LocalRoomController extends ChangeNotifier {
         mayCreate: mayCreate, mayInspect: mayInspect, maySubmit: maySubmit);
   }
 
+  /// Whether the room is resting and would answer if spoken to.
+  bool get isAwaitingYou =>
+      state == LocalRunState.idle || state == LocalRunState.finished;
+
   /// A compact snapshot for the UI.
   ({List<String> log, List<String> tasks, List<String> chat, String phase}) snapshot() {
     return (
@@ -65,24 +71,33 @@ class LocalRoomController extends ChangeNotifier {
     );
   }
 
-  /// Run the room in the background until it finishes, pauses or fails.
-  Future<LocalRunState> start({bool manual = false}) async {
-    if (_working || _runStarted) return state;
+  /// Drive the room until it stops needing to act.
+  ///
+  /// Re-entrant on purpose: pausing, resuming, and speaking all come back
+  /// through here. The old version guarded on a one-shot `_runStarted` flag,
+  /// which meant a paused room could never be restarted and a room that went
+  /// idle was dead for good — the loop had returned and nothing called it
+  /// again.
+  Future<LocalRunState> _drive() async {
+    if (_working) return state;
     _working = true;
-    _runStarted = true;
     state = LocalRunState.running;
     notifyListeners();
 
-    _ticker = Timer.periodic(const Duration(milliseconds: 350), (_) {
+    _ticker ??= Timer.periodic(const Duration(milliseconds: 350), (_) {
       notifyListeners();
     });
 
     try {
       final result = await runner.run();
       outcome = result.name;
-      state = result == RunOutcome.paused
-          ? LocalRunState.paused
-          : LocalRunState.finished;
+      state = switch (result) {
+        RunOutcome.paused => LocalRunState.paused,
+        // Idle is a resting state, not an ending: the bots have nothing to do
+        // until the person says something. The room stays usable.
+        RunOutcome.idle => LocalRunState.idle,
+        _ => LocalRunState.finished,
+      };
     } catch (e) {
       error = e.toString();
       state = LocalRunState.failed;
@@ -95,6 +110,24 @@ class LocalRoomController extends ChangeNotifier {
     return state;
   }
 
+  /// Start the room.
+  Future<LocalRunState> start({bool manual = false}) => _drive();
+
+  /// Say something to the room, and wake it to answer.
+  ///
+  /// Resets the idle counter so a room that had settled does not immediately
+  /// declare itself stalled on the strength of what it did before you spoke.
+  Future<void> say(String text) async {
+    final body = text.trim();
+    if (body.isEmpty) return;
+    engine.postHuman(speakerName, body);
+    runner.idleRounds = 0;
+    if (engine.phase == RoomPhase.paused) engine.resume();
+    if (engine.phase == RoomPhase.completed) return;
+    notifyListeners();
+    await _drive();
+  }
+
   void pause() {
     engine.pause();
     state = LocalRunState.paused;
@@ -103,7 +136,11 @@ class LocalRoomController extends ChangeNotifier {
 
   void resume() {
     engine.resume();
+    runner.idleRounds = 0;
     state = LocalRunState.running;
     notifyListeners();
+    // Restart the loop: `run()` returned when the room paused, so without
+    // this the room would sit in "running" forever without taking a turn.
+    unawaited(_drive());
   }
 }
