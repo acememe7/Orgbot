@@ -7,72 +7,95 @@
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: system-ui, sans-serif; background: #14171c; color: #e6e9ee; height: 100vh; display: flex; flex-direction: column; }
-  header { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-bottom: 1px solid #2a2f37; }
-  header .name { font-weight: 700; }
-  header .goal { opacity: .7; font-size: 13px; }
-  header .chip { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #2a2f37; }
-  header .spacer { flex: 1; }
-  #host { display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-bottom: 1px solid #22262d; background: #101318; font-size: 13px; }
-  #host input { flex: 1; background: #1a1e25; color: inherit; border: 1px solid #2a2f37; border-radius: 6px; padding: 5px 8px; }
-  #host button, button.action { background: #2f6fed; color: white; border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
-  #host button:hover, button.action:hover { filter: brightness(1.15); }
-  #host .st { opacity: .75; }
-  main { flex: 1; display: flex; min-height: 0; }
-  section { display: flex; flex-direction: column; min-width: 0; }
-  #roster { width: 230px; border-right: 1px solid #22262d; }
-  #board { width: 320px; border-left: 1px solid #22262d; }
-  #chat { flex: 1; }
-  .pane-title { padding: 8px 12px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; opacity: .6; border-bottom: 1px solid #22262d; }
-  #roster ul { list-style: none; margin: 0; padding: 6px 8px; overflow: auto; }
-  #roster li { padding: 5px 6px; border-radius: 6px; font-size: 13px; }
-  #roster li .role { opacity: .55; font-size: 11px; }
-  #roster li .dot { display: inline-block; width: 8px; height: 8px; border-radius: 4px; margin-right: 6px; }
-  #board .card { margin: 6px 8px; padding: 8px 10px; border: 1px solid #2a2f37; border-left-width: 3px; border-radius: 8px; font-size: 13px; }
-  #board .card .t { font-weight: 600; }
-  #board .card .meta { opacity: .65; font-size: 11px; margin-top: 2px; }
-  #board .cards { overflow: auto; flex: 1; }
-  #messages { flex: 1; overflow: auto; padding: 10px 14px; }
-  .msg { margin: 8px 0; max-width: 75%; }
-  .msg .who { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
-  .msg .body { background: #20242c; padding: 6px 10px; border-radius: 8px; font-size: 13.5px; line-height: 1.4; white-space: pre-wrap; }
-  .msg.human { margin-left: auto; }
-  .msg.human .body { background: #2f6fed33; }
-  #composer { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid #22262d; }
-  #composer textarea { flex: 1; background: #1a1e25; color: inherit; border: 1px solid #2a2f37; border-radius: 10px; padding: 8px 10px; resize: none; height: 44px; font: inherit; }
-  .banner { display: none; align-items: center; gap: 10px; padding: 10px 14px; background: #3a2f16; color: #f4d27a; font-size: 13px; }
-  .banner.show { display: flex; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #12151b; color: #e8ebf0; height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 18px; border-bottom: 1px solid #262b34; }
+  header .logo { width: 30px; height: 30px; border-radius: 8px; }
+  header h1 { font-size: 17px; margin: 0; }
+  .spacer { flex: 1; }
+  .chip { font-size: 12px; padding: 3px 10px; border-radius: 12px; background: #262b34; }
+  nav { display: flex; gap: 4px; padding: 8px 18px 0; }
+  nav button { background: none; border: 0; color: inherit; padding: 8px 16px; border-radius: 8px 8px 0 0; cursor: pointer; font-size: 14px; }
+  nav button.active { background: #1d222b; box-shadow: inset 0 -2px 0 #6d8bff; }
+  main { flex: 1; overflow: auto; padding: 18px; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .card { background: #1a1f28; border: 1px solid #2a3140; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  .card .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .card .muted { opacity: .6; font-size: 12px; }
+  button.primary, button.ghost { border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 13px; }
+  button.primary { background: #6d8bff; color: #0c0f14; font-weight: 600; }
+  button.ghost { background: #2a3140; color: inherit; }
+  label { display: block; font-size: 12px; opacity: .75; margin: 10px 0 4px; }
+  input, textarea, select { width: 100%; background: #12161d; color: inherit; border: 1px solid #2a3140; border-radius: 8px; padding: 8px 10px; font: inherit; }
+  textarea { resize: vertical; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .botrow { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+  .botrow select, .botrow .who { flex: 1; }
+  .err { color: #ff8f8f; font-size: 13px; margin-top: 8px; white-space: pre-wrap; }
+  .ok { color: #93d9a0; }
+  #live { display: none; height: 100%; flex-direction: column; }
+  #live.show { display: flex; }
+  main.hasLive { padding: 0; overflow: hidden; }
+  .livecols { flex: 1; display: flex; min-height: 0; }
+  #lchat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #lmessages { flex: 1; overflow: auto; padding: 10px 14px; }
+  #lboard { width: 300px; border-left: 1px solid #262b34; overflow: auto; padding: 10px; }
+  .bmsg { margin: 8px 0; }
+  .bmsg .who { font-size: 12px; font-weight: 600; }
+  .bmsg .body { background: #20242e; padding: 6px 10px; border-radius: 8px; white-space: pre-wrap; font-size: 13px; }
+  .tcard { border: 1px solid #2a3140; border-left-width: 3px; border-radius: 8px; padding: 8px; margin: 6px 0; font-size: 12px; }
+  #composer { display: flex; gap: 8px; padding: 10px; border-top: 1px solid #262b34; }
+  #composer input { flex: 1; }
 </style>
 </head>
 <body>
 <header>
-  <span class="name" id="roomName">OrgBot</span>
-  <span class="goal" id="roomGoal"></span>
-  <span class="chip" id="phaseChip"></span>
-  <span class="chip" id="connChip">disconnected</span>
-  <div class="spacer"></div>
-  <button class="action" id="pauseBtn" disabled>Pause</button>
+  <img class="logo" id="logoImg" alt="" />
+  <h1>OrgBot</h1>
+  <span class="chip" id="connChip">offline</span>
+  <span class="spacer"></span>
+  <span class="chip" id="hostChip">no room running</span>
 </header>
-<div id="host">
-  <label>Room file</label>
-  <input id="roomPath" placeholder="/path/to/room.toml" />
-  <button id="startBtn">Start room</button>
-  <button id="stopBtn">Stop</button>
-  <span class="st" id="hostSt">not running</span>
-</div>
-<div class="banner" id="banner"></div>
-<main>
-  <section id="roster"><div class="pane-title">Bots</div><ul id="rosterList"></ul></section>
-  <section id="chat">
-    <div class="pane-title">Room</div>
-    <div id="messages"></div>
-    <div id="composer">
-      <textarea id="msgBox" placeholder="Message the room… (Enter to send, Shift+Enter for newline)"></textarea>
-      <button class="action" id="sendBtn">Send</button>
+<nav id="tabs">
+  <button data-panel="bots" class="active">Bots</button>
+  <button data-panel="rooms">Rooms</button>
+</nav>
+<main id="main">
+  <section id="panel-bots" class="panel active">
+    <div class="row">
+      <h2 style="flex:1;margin:0">Your bots</h2>
+      <button class="primary" id="newBotBtn">+ New bot</button>
     </div>
+    <div id="botList"></div>
+    <div id="botFormWrap"></div>
   </section>
-  <section id="board"><div class="pane-title">Board</div><div class="cards" id="boardCards"></div></section>
+  <section id="panel-rooms" class="panel">
+    <div class="row">
+      <h2 style="flex:1;margin:0">Rooms — group chats of your bots</h2>
+      <button class="primary" id="newRoomBtn">+ New room</button>
+    </div>
+    <div id="roomList"></div>
+    <div id="roomFormWrap"></div>
+  </section>
 </main>
+<div id="live">
+  <div style="display:flex;gap:10px;align-items:center;padding:8px 14px;border-bottom:1px solid #262b34">
+    <strong id="liveName"></strong>
+    <span class="muted" id="liveGoal"></span>
+    <span class="chip" id="livePhase"></span>
+    <span class="spacer"></span>
+    <button class="ghost" id="pauseBtn">Pause</button>
+    <button class="primary" id="stopRoomBtn">Stop room</button>
+  </div>
+  <div class="livecols">
+    <div id="lchat">
+      <div id="lmessages"></div>
+      <div id="composer"><input id="msgBox" placeholder="Message the room…" /><button class="primary" id="sendBtn">Send</button></div>
+    </div>
+    <div id="lboard"></div>
+  </div>
+</div>
 <script src="./app.js"></script>
 </body>
 </html>
