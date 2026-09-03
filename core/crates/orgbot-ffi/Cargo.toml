@@ -1,0 +1,23 @@
+[package]
+name = "orgbot-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A C ABI over the room engine, so a phone can run one in-process."
+
+[lib]
+# cdylib for Android and any other host that loads this through dart:ffi;
+# rlib so the crate's own tests can link against it normally.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+orgbot-proto.workspace = true
+orgbot-engine.workspace = true
+orgbot-runtime.workspace = true
+orgbot-providers.workspace = true
+orgbot-server.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

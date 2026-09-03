@@ -849,6 +849,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "orgbot-ffi"
+version = "0.1.0"
+dependencies = [
+ "orgbot-engine",
+ "orgbot-proto",
+ "orgbot-providers",
+ "orgbot-runtime",
+ "orgbot-server",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "orgbot-proto"
 version = "0.1.0"
 dependencies = [

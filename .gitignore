@@ -33,3 +33,6 @@ desktop/src-tauri/gen/
 desktop/*.deb
 
 app/*.deb
+
+# Machine-specific cross-compile config; generate with core/scripts/build-android.sh
+core/.cargo/
