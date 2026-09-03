@@ -99,6 +99,10 @@ pub struct RoomSession {
     events: broadcast::Sender<ServerMessage>,
     /// The last log position broadcast, so each step ships only new events.
     broadcast_head: Seq,
+    /// Whether the room has finished its work. A settled room takes no more
+    /// turns but stays connected, so its transcript can still be read and a
+    /// person can still speak into it.
+    settled: bool,
 }
 
 impl RoomSession {
@@ -153,6 +157,7 @@ impl RoomSession {
             control: control_rx,
             events: events_tx.clone(),
             broadcast_head: Seq::ZERO,
+            settled: false,
         };
         let handle = SessionHandle {
             control: control_tx,
@@ -178,15 +183,26 @@ impl RoomSession {
                 ControlFlow::Stop(outcome) => return self.close(outcome),
             }
 
-            // A batch stop condition (completion, budgets, stall) ends the room;
-            // Idle does not — that is what the wait branch below is for.
-            if let Some(outcome) = self.orchestrator.stop_condition() {
-                if !matches!(outcome, RunOutcome::Idle) {
-                    return self.close(outcome);
+            // Whether the room should stop taking turns for now.
+            //
+            // Idle and Stalled both mean "nothing useful to do right now",
+            // which for a chat you can talk to is a resting state rather than
+            // an ending — but the room must actually rest. Continuing to take
+            // turns while stalled burned the whole turn budget in milliseconds
+            // and paused the room before a client could even connect.
+            let resting = match self.orchestrator.stop_condition() {
+                None => false,
+                Some(RunOutcome::Idle | RunOutcome::Stalled { .. }) => true,
+                Some(settled) => {
+                    if !self.settled {
+                        self.settled = true;
+                        self.finish(&settled);
+                    }
+                    true
                 }
-            }
+            };
 
-            if self.orchestrator.next_actor().is_some() {
+            if !resting && self.orchestrator.next_actor().is_some() {
                 self.step().await;
                 continue;
             }
@@ -199,7 +215,8 @@ impl RoomSession {
                             return self.close(outcome);
                         }
                     }
-                    // Every handle dropped and nothing left to do.
+                    // Every client and control sender has gone: nothing can
+                    // reach this room again, so it is safe to stop.
                     None => return self.close(RunOutcome::Idle),
                 },
                 _ = ticker.tick() => {
@@ -304,6 +321,9 @@ impl RoomSession {
                 let _ = self.orchestrator.engine_mut().apply(Command::PostMessage {
                     message: Box::new(message),
                 });
+                // Someone spoke: give the room a fresh budget so it does not
+                // immediately re-declare itself stalled on old history.
+                self.orchestrator.wake();
                 self.broadcast_new_events();
             }
             Control::Answer { task, answer } => {
@@ -319,6 +339,8 @@ impl RoomSession {
             }
             Control::Resume => {
                 let _ = self.orchestrator.engine_mut().apply(Command::ResumeRoom);
+                self.orchestrator.wake();
+                self.settled = false;
                 self.broadcast_new_events();
             }
         }
@@ -390,6 +412,22 @@ impl RoomSession {
         }
     }
 
+    /// Record that the room has finished, without disconnecting anyone.
+    ///
+    /// Deliberately does not send [`ServerMessage::Closed`]: that tells clients
+    /// to tear down, and a finished room should still be readable.
+    fn finish(&mut self, outcome: &RunOutcome) {
+        if self.orchestrator.engine().room().phase != RoomPhase::Completed {
+            let _ = self.orchestrator.engine_mut().apply(Command::CloseRoom {
+                reason: describe(outcome),
+            });
+            self.broadcast_new_events();
+        }
+        let _ = self.events.send(ServerMessage::Phase {
+            phase: self.orchestrator.engine().room().phase,
+        });
+    }
+
     /// Close the room and tell every subscriber why.
     fn close(mut self, outcome: RunOutcome) -> RunOutcome {
         // Only a genuinely finished room emits room_closed; a pause or an idle
@@ -435,6 +473,7 @@ fn describe(outcome: &RunOutcome) -> String {
 mod tests {
     use super::*;
     use crate::config::RoomConfig;
+    use orgbot_proto::event::Event;
 
     const SCRIPTED_ROOM: &str = r#"
         [room]
@@ -550,5 +589,113 @@ mod tests {
             }
         }
         assert!(saw_message, "the human message should reach the transcript");
+    }
+}
+
+#[cfg(test)]
+mod resting_tests {
+    use super::*;
+    use crate::config::RoomConfig;
+    use orgbot_proto::event::Event;
+
+    /// A roster with nothing productive to do: one worker that only talks, and
+    /// a task nobody can finish. This is the shape that used to kill a room
+    /// before a client could connect.
+    const UNPRODUCTIVE: &str = r#"
+        [room]
+        name = "test"
+        goal = "respond"
+        completion = "all_tasks_terminal"
+
+        [[bots]]
+        handle = "dennis"
+        roles = ["engineer"]
+        provider = { kind = "scripted", script = "Working on it." }
+
+        [[tasks]]
+        title = "respond"
+        brief = "respond"
+    "#;
+
+    fn session() -> (RoomSession, SessionHandle) {
+        let resolved = RoomConfig::parse(UNPRODUCTIVE, "t.toml")
+            .unwrap()
+            .resolve()
+            .unwrap();
+        RoomSession::build(resolved).unwrap()
+    }
+
+    /// The bug this guards: a stalled room kept taking turns, burned its whole
+    /// budget in milliseconds, paused itself, and every later client was told
+    /// the room had already finished.
+    #[tokio::test]
+    async fn a_room_with_nothing_to_do_rests_instead_of_burning_its_budget() {
+        let (session, handle) = session();
+        let run = tokio::spawn(session.run());
+
+        // Give it long enough to have spent 500 turns if it were spinning.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        let snapshot = handle.snapshot().await.expect("the room must still be up");
+        match snapshot {
+            ServerMessage::Snapshot { room, .. } => {
+                assert_eq!(
+                    room.phase,
+                    RoomPhase::Running,
+                    "a room with nothing to do is resting, not finished"
+                );
+                assert!(
+                    room.turns_used < room.spec.limits.max_total_turns,
+                    "the room spent {} of {} turns while idle",
+                    room.turns_used,
+                    room.spec.limits.max_total_turns
+                );
+            }
+            other => panic!("expected a snapshot, got {other:?}"),
+        }
+
+        drop(handle);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run).await;
+    }
+
+    /// The other half of the same complaint: what you type must appear.
+    #[tokio::test]
+    async fn a_human_message_reaches_the_transcript_and_wakes_the_room() {
+        let (session, handle) = session();
+        let mut events = handle.subscribe();
+        let run = tokio::spawn(session.run());
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            handle
+                .send(Control::HumanMessage {
+                    author: "Tester".into(),
+                    body: "hello?".into(),
+                    task: None,
+                })
+                .await,
+            "the room must still be accepting messages"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        let mut said_it = false;
+        let mut bot_replied = false;
+        while let Ok(message) = events.try_recv() {
+            if let ServerMessage::Event { envelope } = message {
+                if let Event::MessagePosted { message } = &envelope.event {
+                    if message.body.contains("hello?") {
+                        said_it = true;
+                    }
+                    if message.author.agent().is_some() {
+                        bot_replied = true;
+                    }
+                }
+            }
+        }
+        assert!(said_it, "what the person typed must appear in the room");
+        assert!(bot_replied, "and a bot must be woken to answer it");
+
+        drop(handle);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run).await;
     }
 }

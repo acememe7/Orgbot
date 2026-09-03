@@ -331,6 +331,15 @@ impl Orchestrator {
         }
     }
 
+    /// Clear the stall counter, because something new has happened.
+    ///
+    /// A room that ran out of things to do is resting, not finished — when a
+    /// person speaks it should get a fresh budget rather than immediately
+    /// declaring itself stalled again on the strength of what it did before.
+    pub fn wake(&mut self) {
+        self.idle_rounds = 0;
+    }
+
     /// Turns taken so far.
     pub fn turns_used(&self) -> u32 {
         self.engine.room().turns_used

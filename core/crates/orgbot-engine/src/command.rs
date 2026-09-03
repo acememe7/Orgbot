@@ -208,6 +208,10 @@ impl Command {
                 | Self::CloseRoom { .. }
                 | Self::CreateTask { .. }
                 | Self::Tick { .. }
+                // Speaking is always allowed. A paused or finished room still
+                // has a transcript, and a message that is silently refused
+                // leaves the person staring at a chat that swallowed it.
+                | Self::PostMessage { .. }
         )
     }
 }
