@@ -345,6 +345,7 @@ class Engine {
     final t = requireTask(_str(args, 'task'));
     _requireAssignee(t, actorId, 'start');
     t.state = t.state.after('start')!;
+    _event('task', t.id + ' started');
     return ToolOutcome.ok(t.id + ' is in progress.');
   }
 
@@ -366,6 +367,7 @@ class Engine {
       return ToolOutcome.error('add an artifact first - there is nothing to review');
     }
     t.state = t.state.after('submit_for_review')!;
+    _event('review', t.id + ' awaiting review');
     return ToolOutcome.ok(t.id + ' is awaiting review.');
   }
 
@@ -374,6 +376,7 @@ class Engine {
     _requireAssignee(t, actorId, 'release');
     t.state = t.state.after('release')!;
     t.assignee = null;
+    _event('task', t.id + ' released');
     return ToolOutcome.ok(t.id + ' is back on the board.');
   }
 
