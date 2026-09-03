@@ -151,23 +151,21 @@ class Runner {
 
     var progress = false;
     var steps = 0;
+    final results = <String>[];
     while (steps < (bot.agent.maySubmit ? 24 : 12)) {
       steps++;
       bot.stepsUsed++;
       turnsUsed++;
       if (turnsUsed > maxTotalTurns) return false;
-      final situation = buildSituation(bot);
+      var situation = buildSituation(bot);
+      if (results.isNotEmpty) {
+        situation = situation + '\n\nYour last actions:\n' + results.join('\n');
+      }
       final turn = await bot.provider.act(situation: situation);
-      var acted = false;
       for (final call in turn.tools) {
         final outcome = engine.call(call.name, call.args, bot.agent.id);
+        results.add(call.name + ' -> ' + (outcome.isError ? 'error: ' : '') + outcome.content);
         if (!outcome.isError) progress = true;
-        acted = true;
-        if (outcome.isError) {
-          // The model sees the failure and can correct on the next step.
-          bot.lastSaid = outcome.content;
-          break;
-        }
       }
       final said = turn.text;
       if (said != null && said.trim().isNotEmpty) {
@@ -176,16 +174,13 @@ class Runner {
         }
         bot.lastSaid = said.trim();
         engine.call('post_message', {'body': said.trim()}, bot.agent.id);
+        bot.lastSeen = engine.log.length;
       }
-      bot.lastSeen = engine.log.length;
-      if (!acted && (said == null || said.trim().isEmpty)) break;
-      if (acted && turn.tools.isNotEmpty) {
-        // One provider step may finish the work; if it kept asking for more
-        // tools we would loop, so a step that only called tools ends here and
-        // the scheduler wakes the bot again if it still has live work.
-        break;
-      }
+      // The bot keeps acting while it asks for more tools; once it answers
+      // with prose (or nothing) the turn is done.
+      if (turn.tools.isEmpty) break;
     }
+    bot.lastSeen = engine.log.length;
     engine.turnsUsed = turnsUsed;
     if (progress) {
       idleRounds = 0;
