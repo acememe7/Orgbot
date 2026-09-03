@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gptbots-proto",
+    "crates/gptbots-engine",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+gptbots-proto     = { path = "crates/gptbots-proto" }
+gptbots-engine    = { path = "crates/gptbots-engine" }
+gptbots-providers = { path = "crates/gptbots-providers" }
+gptbots-tools     = { path = "crates/gptbots-tools" }
+
+anyhow      = "1"
+thiserror   = "2"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+uuid        = { version = "1", features = ["v4", "serde"] }
+time        = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "process", "signal"] }
+tokio-util  = "0.7"
+futures     = "0.3"
+async-trait = "0.1"
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+reqwest     = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

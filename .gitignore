@@ -1,0 +1,28 @@
+# Rust
+core/target/
+**/*.rs.bk
+
+# Flutter / Dart
+app/build/
+app/.dart_tool/
+app/.flutter-plugins*
+app/linux/flutter/ephemeral/
+app/android/.gradle/
+app/android/local.properties
+**/*.g.dart
+**/*.freezed.dart
+
+# Node
+node_modules/
+sdk-ts/dist/
+
+# Python
+__pycache__/
+.venv/
+*.egg-info/
+sdk-py/dist/
+
+# Local state and secrets
+.env
+*.local.toml
+runs/
