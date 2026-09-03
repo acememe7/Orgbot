@@ -274,6 +274,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "gptbots-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gptbots-engine",
+ "gptbots-proto",
+ "gptbots-providers",
+ "gptbots-tools",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gptbots-tools"
+version = "0.1.0"
+dependencies = [
+ "gptbots-engine",
+ "gptbots-proto",
+ "gptbots-providers",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

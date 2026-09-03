@@ -4,6 +4,8 @@ members = [
     "crates/gptbots-proto",
     "crates/gptbots-engine",
     "crates/gptbots-providers",
+    "crates/gptbots-tools",
+    "crates/gptbots-runtime",
 ]
 
 [workspace.package]
@@ -17,6 +19,7 @@ gptbots-proto     = { path = "crates/gptbots-proto" }
 gptbots-engine    = { path = "crates/gptbots-engine" }
 gptbots-providers = { path = "crates/gptbots-providers" }
 gptbots-tools     = { path = "crates/gptbots-tools" }
+gptbots-runtime   = { path = "crates/gptbots-runtime" }
 
 anyhow      = "1"
 thiserror   = "2"

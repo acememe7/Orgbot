@@ -231,6 +231,18 @@ impl Engine {
             .collect()
     }
 
+    /// Tasks that have passed inspection and are waiting to be delivered.
+    ///
+    /// A coordinator holds no tasks of its own, so without this it has no way
+    /// to discover that there is work to deliver and would never act.
+    pub fn awaiting_delivery(&self) -> Vec<TaskId> {
+        self.tasks
+            .values()
+            .filter(|task| task.state == TaskState::Approved)
+            .map(|task| task.id)
+            .collect()
+    }
+
     /// Whether every dependency of `task` has been submitted.
     fn dependencies_met(&self, task: &Task) -> Result<()> {
         for dep in &task.depends_on {

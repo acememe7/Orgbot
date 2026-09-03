@@ -35,9 +35,12 @@ impl ScriptedProvider {
         Self {
             name: "scripted".into(),
             responses: Mutex::new(responses.into()),
+            // Deliberately empty: an exhausted script must register as a turn
+            // that achieved nothing, so a run ends as stalled instead of
+            // chattering until the turn budget is gone.
             fallback: CompletionResponse {
                 model: "scripted".into(),
-                content: vec![ContentBlock::text("(the script is exhausted)")],
+                content: Vec::new(),
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
             },
@@ -180,11 +183,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_exhausted_script_falls_back_rather_than_failing() {
+    async fn an_exhausted_script_ends_the_turn_saying_nothing() {
         let provider = ScriptedProvider::new(vec![]);
         let response = provider.complete(request(), None).await.unwrap();
         assert_eq!(response.stop_reason, StopReason::EndTurn);
-        assert!(response.text().contains("exhausted"));
+        assert!(
+            response.text().is_empty(),
+            "an exhausted script must not read as progress"
+        );
     }
 
     #[tokio::test]
