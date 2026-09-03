@@ -7,9 +7,48 @@ library;
 import 'package:flutter/material.dart';
 
 import 'ui/connect_screen.dart';
+import 'ui/local_room_screen.dart';
 
 void main() {
   runApp(const GptBotsApp());
+}
+
+
+/// Choose: join a hosted room, or run one entirely on this device.
+class HomeScreen extends StatelessWidget {
+  const HomeScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('GPTBots')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.dns_outlined),
+              title: const Text('Run a room on this device'),
+              subtitle: const Text('Bots work a task board here — no server, no PC.'),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const LocalRoomScreen()),
+              ),
+            ),
+          ),
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.wifi_tethering),
+              title: const Text('Join a hosted room'),
+              subtitle: const Text('Connect to a gptbots serve room over WebSocket.'),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const ConnectScreen()),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// The application root.
@@ -24,7 +63,7 @@ class GptBotsApp extends StatelessWidget {
       theme: _theme(Brightness.light),
       darkTheme: _theme(Brightness.dark),
       themeMode: ThemeMode.dark,
-      home: const ConnectScreen(),
+      home: const HomeScreen(),
     );
   }
 
