@@ -1,0 +1,19 @@
+[package]
+name = "gptbots-desktop"
+version = "0.1.0"
+description = "GPTBots desktop: bot rooms that work project folders, hosted locally"
+edition = "2021"
+
+[lib]
+name = "gptbots_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+gptbots-server = { path = "../../core/crates/gptbots-server" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

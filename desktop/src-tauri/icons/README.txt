@@ -1,0 +1,1 @@
+A 512x512 PNG named icon.png is required by tauri's generate_context. Add real app artwork before bundling.

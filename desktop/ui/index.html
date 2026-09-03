@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GPTBots</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #14171c; color: #e6e9ee; height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-bottom: 1px solid #2a2f37; }
+  header .name { font-weight: 700; }
+  header .goal { opacity: .7; font-size: 13px; }
+  header .chip { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #2a2f37; }
+  header .spacer { flex: 1; }
+  #host { display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-bottom: 1px solid #22262d; background: #101318; font-size: 13px; }
+  #host input { flex: 1; background: #1a1e25; color: inherit; border: 1px solid #2a2f37; border-radius: 6px; padding: 5px 8px; }
+  #host button, button.action { background: #2f6fed; color: white; border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  #host button:hover, button.action:hover { filter: brightness(1.15); }
+  #host .st { opacity: .75; }
+  main { flex: 1; display: flex; min-height: 0; }
+  section { display: flex; flex-direction: column; min-width: 0; }
+  #roster { width: 230px; border-right: 1px solid #22262d; }
+  #board { width: 320px; border-left: 1px solid #22262d; }
+  #chat { flex: 1; }
+  .pane-title { padding: 8px 12px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; opacity: .6; border-bottom: 1px solid #22262d; }
+  #roster ul { list-style: none; margin: 0; padding: 6px 8px; overflow: auto; }
+  #roster li { padding: 5px 6px; border-radius: 6px; font-size: 13px; }
+  #roster li .role { opacity: .55; font-size: 11px; }
+  #roster li .dot { display: inline-block; width: 8px; height: 8px; border-radius: 4px; margin-right: 6px; }
+  #board .card { margin: 6px 8px; padding: 8px 10px; border: 1px solid #2a2f37; border-left-width: 3px; border-radius: 8px; font-size: 13px; }
+  #board .card .t { font-weight: 600; }
+  #board .card .meta { opacity: .65; font-size: 11px; margin-top: 2px; }
+  #board .cards { overflow: auto; flex: 1; }
+  #messages { flex: 1; overflow: auto; padding: 10px 14px; }
+  .msg { margin: 8px 0; max-width: 75%; }
+  .msg .who { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+  .msg .body { background: #20242c; padding: 6px 10px; border-radius: 8px; font-size: 13.5px; line-height: 1.4; white-space: pre-wrap; }
+  .msg.human { margin-left: auto; }
+  .msg.human .body { background: #2f6fed33; }
+  #composer { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid #22262d; }
+  #composer textarea { flex: 1; background: #1a1e25; color: inherit; border: 1px solid #2a2f37; border-radius: 10px; padding: 8px 10px; resize: none; height: 44px; font: inherit; }
+  .banner { display: none; align-items: center; gap: 10px; padding: 10px 14px; background: #3a2f16; color: #f4d27a; font-size: 13px; }
+  .banner.show { display: flex; }
+</style>
+</head>
+<body>
+<header>
+  <span class="name" id="roomName">GPTBots</span>
+  <span class="goal" id="roomGoal"></span>
+  <span class="chip" id="phaseChip"></span>
+  <span class="chip" id="connChip">disconnected</span>
+  <div class="spacer"></div>
+  <button class="action" id="pauseBtn" disabled>Pause</button>
+</header>
+<div id="host">
+  <label>Room file</label>
+  <input id="roomPath" placeholder="/path/to/room.toml" />
+  <button id="startBtn">Start room</button>
+  <button id="stopBtn">Stop</button>
+  <span class="st" id="hostSt">not running</span>
+</div>
+<div class="banner" id="banner"></div>
+<main>
+  <section id="roster"><div class="pane-title">Bots</div><ul id="rosterList"></ul></section>
+  <section id="chat">
+    <div class="pane-title">Room</div>
+    <div id="messages"></div>
+    <div id="composer">
+      <textarea id="msgBox" placeholder="Message the room… (Enter to send, Shift+Enter for newline)"></textarea>
+      <button class="action" id="sendBtn">Send</button>
+    </div>
+  </section>
+  <section id="board"><div class="pane-title">Board</div><div class="cards" id="boardCards"></div></section>
+</main>
+<script src="./app.js"></script>
+</body>
+</html>

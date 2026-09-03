@@ -26,3 +26,6 @@ sdk-py/dist/
 .env
 *.local.toml
 runs/
+
+desktop/src-tauri/target/
+desktop/src-tauri/gen/

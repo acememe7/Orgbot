@@ -2,15 +2,10 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use axum::routing::get;
-use axum::Router;
 use clap::{Parser, Subcommand};
 use gptbots_server::config::RoomConfig;
 use gptbots_server::runner::run_headless;
-use gptbots_server::session::RoomSession;
-use gptbots_server::ws::{self, AppState};
 use tracing_subscriber::EnvFilter;
 
 /// Run and host multi-bot group-chat rooms.
@@ -90,28 +85,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Host a room over WebSocket.
 async fn serve(config: PathBuf, addr: SocketAddr) -> anyhow::Result<()> {
-    let parsed = RoomConfig::load(&config)?;
-    let room_name: Arc<str> = Arc::from(parsed.room.name.as_str());
-    let resolved = parsed.resolve()?;
-    let (session, handle) = RoomSession::build(resolved)?;
-
-    // The room runs on its own task; the HTTP layer only holds a handle.
-    tokio::spawn(session.run());
-
-    let state = AppState {
-        session: handle,
-        room_name: room_name.clone(),
-    };
-    let app = Router::new()
-        .route("/", get(ws::status))
-        .route("/health", get(ws::health))
-        .route("/ws", get(ws::ws_handler))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, room = %room_name, "serving room; connect a client to ws://{addr}/ws");
-    axum::serve(listener, app).await?;
-    Ok(())
+    gptbots_server::serve_room(&config, addr).await
 }
 
 /// Validate a room file and describe what it resolves to.
