@@ -32,7 +32,9 @@ struct Reactive {
 
 impl std::fmt::Debug for Reactive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Reactive").field("name", &self.name).finish()
+        f.debug_struct("Reactive")
+            .field("name", &self.name)
+            .finish()
     }
 }
 
@@ -327,7 +329,11 @@ async fn a_room_plans_works_inspects_and_delivers() {
     room.start().unwrap();
 
     let outcome = room.run(None).await;
-    assert_eq!(outcome, RunOutcome::Completed, "the room should finish its goal");
+    assert_eq!(
+        outcome,
+        RunOutcome::Completed,
+        "the room should finish its goal"
+    );
 
     // Exactly one task, delivered.
     let tasks: Vec<_> = room.engine().tasks().collect();
@@ -497,8 +503,11 @@ async fn a_bot_whose_backend_fails_does_not_take_the_room_down() {
         coordinator(),
     )
     .unwrap();
-    room.seat(spec("w1", &["writer"], Autonomy::default()), Arc::new(Broken))
-        .unwrap();
+    room.seat(
+        spec("w1", &["writer"], Autonomy::default()),
+        Arc::new(Broken),
+    )
+    .unwrap();
     room.seat(
         spec("qa", &["reviewer"], Autonomy::inspector()),
         inspector(),
@@ -531,7 +540,6 @@ async fn a_bot_whose_backend_fails_does_not_take_the_room_down() {
         .all(|task| task.assignee != Some(broken)));
 }
 
-
 #[tokio::test]
 async fn a_bot_is_scheduled_to_answer_a_question_addressed_to_it() {
     // A room that is otherwise idle: one worker, no tasks, manual completion.
@@ -557,21 +565,21 @@ async fn a_bot_is_scheduled_to_answer_a_question_addressed_to_it() {
     let room_id = room.engine().room_id();
     room.engine_mut()
         .apply(gptbots_engine::Command::PostMessage {
-            message: Box::new(
-                gptbots_proto::ChatMessage {
-                    id: gptbots_proto::MessageId::new(),
-                    room: room_id,
-                    author: gptbots_proto::Author::Human { name: "Alex".into() },
-                    audience: gptbots_proto::Audience::Everyone,
-                    intent: gptbots_proto::MessageIntent::Ask,
-                    body: "anyone there?".into(),
-                    task: None,
-                    handoff: None,
-                    reply_to: None,
-                    attachments: vec![],
-                    sent_at: gptbots_proto::Timestamp::now(),
+            message: Box::new(gptbots_proto::ChatMessage {
+                id: gptbots_proto::MessageId::new(),
+                room: room_id,
+                author: gptbots_proto::Author::Human {
+                    name: "Alex".into(),
                 },
-            ),
+                audience: gptbots_proto::Audience::Everyone,
+                intent: gptbots_proto::MessageIntent::Ask,
+                body: "anyone there?".into(),
+                task: None,
+                handoff: None,
+                reply_to: None,
+                attachments: vec![],
+                sent_at: gptbots_proto::Timestamp::now(),
+            }),
         })
         .unwrap();
 
@@ -620,4 +628,202 @@ async fn an_ordinary_broadcast_statement_does_not_wake_the_room() {
         room.next_actor().is_none(),
         "ordinary chatter must not wake the room, or it never settles"
     );
+}
+
+// ------------------------------------------------------------ room MCP bridge
+
+/// A provider that plays the agent CLI's side of the room-MCP bridge: it
+/// connects to its own unix socket and claims the seeded task through the
+/// board tools, mid-episode, exactly as an agent's tool loop would.
+#[derive(Debug)]
+struct McpClientProvider {
+    task_id: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl McpClientProvider {
+    /// Ask the room one question and read its answer.
+    async fn ask(
+        wr: &mut tokio::net::unix::OwnedWriteHalf,
+        reader: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
+        request: &str,
+    ) -> gptbots_providers::Result<Value> {
+        use tokio::io::AsyncWriteExt;
+        wr.write_all(format!("{request}\n").as_bytes())
+            .await
+            .map_err(|error| {
+                gptbots_providers::ProviderError::Unsupported(format!("mcp write: {error}"))
+            })?;
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let read = reader
+                    .next_line()
+                    .await
+                    .map_err(|error| {
+                        gptbots_providers::ProviderError::Unsupported(format!("mcp read: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        gptbots_providers::ProviderError::Unsupported(
+                            "mcp socket closed early".into(),
+                        )
+                    })?;
+                if read.is_empty() {
+                    continue;
+                }
+                if let Ok(value) = serde_json::from_str::<Value>(&read) {
+                    return Ok(value);
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            gptbots_providers::ProviderError::Unsupported("mcp round trip timed out".into())
+        })??;
+        Ok(reply)
+    }
+}
+
+#[async_trait]
+impl Provider for McpClientProvider {
+    fn name(&self) -> &str {
+        "mcp-client"
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+        _sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> gptbots_providers::Result<CompletionResponse> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixStream;
+
+        let socket = request.mcp_socket.ok_or_else(|| {
+            gptbots_providers::ProviderError::Unsupported("no mcp socket on request".into())
+        })?;
+        let stream = UnixStream::connect(&socket).await.map_err(|error| {
+            gptbots_providers::ProviderError::Unsupported(format!(
+                "connect room mcp {socket}: {error}"
+            ))
+        })?;
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half).lines();
+
+        // Standard handshake.
+        let _init = Self::ask(
+            &mut write_half,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"room-test","version":"1"}}}"#,
+        )
+        .await?;
+        write_half
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .await
+            .map_err(|error| {
+                gptbots_providers::ProviderError::Unsupported(format!("mcp notify: {error}"))
+            })?;
+
+        // Claim the seeded task through the board tools.
+        let task = self.task_id.lock().unwrap().clone().ok_or_else(|| {
+            gptbots_providers::ProviderError::Unsupported("no task id supplied".into())
+        })?;
+        let call = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"claim_task\",\"arguments\":{{\"task\":\"{task}\"}}}}}}"
+        );
+        let reply = Self::ask(&mut write_half, &mut reader, &call).await?;
+        if reply
+            .pointer("/result/isError")
+            .is_some_and(|flag| flag.as_bool() == Some(true))
+        {
+            let text = reply
+                .pointer("/result/content/0/text")
+                .cloned()
+                .unwrap_or_default();
+            return Err(gptbots_providers::ProviderError::Unsupported(format!(
+                "claim rejected by the room: {text}"
+            )));
+        }
+
+        Ok(say("claimed the task through the room MCP bridge"))
+    }
+}
+
+#[tokio::test]
+async fn an_mcp_agent_bot_claims_a_seeded_task_in_band() {
+    use std::sync::Mutex;
+
+    let task_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let provider = Arc::new(McpClientProvider {
+        task_id: task_id.clone(),
+    });
+    let bot_spec = AgentSpec::new(
+        "worker-a",
+        "Worker",
+        ProviderRef::CliAgent {
+            cli: gptbots_proto::agent::CliKind::Claude,
+            model: String::new(),
+            workdir: String::new(),
+            policy: gptbots_proto::agent::AgentPolicy::ReadOnly,
+            mcp: true,
+        },
+    )
+    .with_roles(["writer"]);
+
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "bridge-room".into(),
+        goal: "prove in-band claiming".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    room.seat(bot_spec.clone(), provider).unwrap();
+    room.start().unwrap();
+
+    let events = room
+        .engine_mut()
+        .apply(gptbots_engine::Command::CreateTask {
+            title: "mcp-claimed task".into(),
+            brief: "claim me through the bridge".into(),
+            by: None,
+            required_role: Some("writer".into()),
+            priority: gptbots_proto::task::Priority::Normal,
+            acceptance_criteria: vec![],
+            depends_on: vec![],
+            parent: None,
+        })
+        .unwrap();
+    let task_id_value = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            gptbots_proto::Event::TaskCreated { task } => Some(task.id.to_string()),
+            _ => None,
+        })
+        .expect("a task was created");
+    room.engine_mut()
+        .apply(gptbots_engine::Command::OpenTask {
+            task: task_id_value.parse().unwrap(),
+        })
+        .unwrap();
+    *task_id.lock().unwrap() = Some(task_id_value.clone());
+
+    // One working episode: the bot claims its task through the bridge and
+    // reports back. (A real agent would then start the task and do the work;
+    // the scheduler wakes a holder of live work until it does.)
+    let report = room.step(None).await.expect("the bot is actionable");
+    assert!(
+        report.tool_calls >= 1,
+        "the in-band MCP claim must count as work"
+    );
+
+    let task = room
+        .engine()
+        .tasks()
+        .find(|task| task.title == "mcp-claimed task")
+        .expect("the task still exists");
+    assert_eq!(
+        task.state,
+        TaskState::Claimed,
+        "the bot claimed the task in-band through the room MCP bridge"
+    );
+    assert_eq!(task.assignee, Some(bot_spec.id));
 }

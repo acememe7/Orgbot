@@ -39,7 +39,8 @@ async fn codex_cli_runs_a_turn_and_remembers_across_resume() {
         eprintln!("skipped (set GPTBOTS_TEST_LIVE_CLIS=1 with codex installed)");
         return;
     }
-    let provider = AgentCliProvider::new(CliKind::Codex, "", "", AgentPolicy::ReadOnly).unwrap();
+    let provider =
+        AgentCliProvider::new(CliKind::Codex, "", "", AgentPolicy::ReadOnly, false).unwrap();
 
     let first = run_turn(&provider, "Reply with exactly one word: potato")
         .await
@@ -72,7 +73,8 @@ async fn grok_cli_runs_a_turn() {
         eprintln!("skipped (set GPTBOTS_TEST_LIVE_CLIS=1 with grok installed)");
         return;
     }
-    let provider = AgentCliProvider::new(CliKind::Grok, "", "", AgentPolicy::ReadOnly).unwrap();
+    let provider =
+        AgentCliProvider::new(CliKind::Grok, "", "", AgentPolicy::ReadOnly, false).unwrap();
     let answer = run_turn(&provider, "Reply with exactly one word: potato")
         .await
         .unwrap();
@@ -85,7 +87,8 @@ async fn claude_cli_runs_a_turn_when_not_rate_limited() {
         eprintln!("skipped (set GPTBOTS_TEST_LIVE_CLIS=1 with claude installed)");
         return;
     }
-    let provider = AgentCliProvider::new(CliKind::Claude, "", "", AgentPolicy::ReadOnly).unwrap();
+    let provider =
+        AgentCliProvider::new(CliKind::Claude, "", "", AgentPolicy::ReadOnly, false).unwrap();
     match run_turn(&provider, "Reply with exactly one word: potato").await {
         Ok(answer) => assert!(answer.to_lowercase().contains("potato"), "got: {answer}"),
         Err(error) => {

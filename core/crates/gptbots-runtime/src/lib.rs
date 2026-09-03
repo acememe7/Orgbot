@@ -32,8 +32,11 @@
 #![warn(missing_debug_implementations, rust_2018_idioms, unreachable_pub)]
 
 pub mod bot;
+pub mod mcp;
 pub mod orchestrator;
 pub mod prompt;
+pub mod relay;
 
 pub use bot::{Bot, TurnReport};
+pub use mcp::{room_tools_for, McpCall, McpSession};
 pub use orchestrator::{Orchestrator, RunOutcome};

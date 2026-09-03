@@ -166,6 +166,9 @@ pub enum ProviderConfig {
         /// How much of the project the agent may touch.
         #[serde(default = "default_agent_policy")]
         policy: AgentPolicy,
+        /// Serve the room board to this agent as MCP tools.
+        #[serde(default)]
+        mcp: bool,
     },
     /// A deterministic in-process bot with no model.
     Scripted {
@@ -210,11 +213,13 @@ impl ProviderConfig {
                 model,
                 workdir,
                 policy,
+                mcp,
             } => ProviderRef::CliAgent {
                 cli: *cli,
                 model: model.clone(),
                 workdir: workdir.clone(),
                 policy: *policy,
+                mcp: *mcp,
             },
         }
     }
@@ -604,19 +609,24 @@ mod tests {
                 model,
                 workdir,
                 policy,
+                mcp,
             } => {
                 assert_eq!(*cli, CliKind::Codex);
                 assert_eq!(model, "gpt-5.2-codex");
                 assert_eq!(workdir, ".");
                 assert_eq!(*policy, AgentPolicy::WorkspaceWrite);
+                assert!(!mcp);
             }
             other => panic!("expected cli_agent, got {other:?}"),
         }
         let reference = config.bots[0].provider.to_ref();
         match reference {
-            ProviderRef::CliAgent { cli, policy, .. } => {
+            ProviderRef::CliAgent {
+                cli, policy, mcp, ..
+            } => {
                 assert_eq!(cli, CliKind::Codex);
                 assert_eq!(policy, AgentPolicy::WorkspaceWrite);
+                assert!(!mcp);
             }
             other => panic!("expected CliAgent ref, got {other:?}"),
         }

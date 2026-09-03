@@ -26,7 +26,7 @@
 //!   (file edits, shell runs, tool results) is summarised into the agent's final
 //!   message. Full action telemetry can stream later over the same pipe.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -70,6 +70,8 @@ pub struct AgentCliProvider {
     policy: AgentPolicy,
     /// The CLI session id, established on the first turn and resumed after.
     session: Mutex<Option<String>>,
+    /// Whether the room's board is served to the agent as MCP tools.
+    mcp: bool,
     /// Turn ceiling.
     timeout: Duration,
 }
@@ -84,6 +86,7 @@ impl AgentCliProvider {
         model: impl Into<String>,
         workdir: impl Into<String>,
         policy: AgentPolicy,
+        mcp: bool,
     ) -> Result<Self> {
         let bin = locate(cli).ok_or_else(|| {
             ProviderError::Unsupported(format!(
@@ -109,6 +112,7 @@ impl AgentCliProvider {
                 PathBuf::from(workdir)
             },
             policy,
+            mcp,
             session: Mutex::new(None),
             timeout,
         })
@@ -117,6 +121,11 @@ impl AgentCliProvider {
     /// Whether `cli` is installed somewhere the adapter looks.
     pub fn available(cli: CliKind) -> bool {
         locate(cli).is_some()
+    }
+
+    /// Whether the room board is served to the agent as MCP tools.
+    pub fn serves_room_tools(&self) -> bool {
+        self.mcp
     }
 
     /// The session id this provider is currently resuming, if any.
@@ -206,8 +215,28 @@ impl Provider for AgentCliProvider {
         };
 
         let mut episode = Episode::default();
-        self.run_episode(&prompt, resumed.as_deref(), &sink, &mut episode)
-            .await?;
+        let mcp_config = if self.mcp && self.cli == CliKind::Claude {
+            request
+                .mcp_socket
+                .as_deref()
+                .map(write_claude_mcp_config)
+                .transpose()?
+        } else {
+            None
+        };
+        let result = self
+            .run_episode(
+                &prompt,
+                resumed.as_deref(),
+                &sink,
+                &mut episode,
+                mcp_config.as_deref(),
+            )
+            .await;
+        if let Some(path) = &mcp_config {
+            let _ = std::fs::remove_file(path);
+        }
+        result?;
 
         // Remember the session for the next turn. A resumed session reports
         // its id again on init; either way the freshest id wins.
@@ -249,6 +278,7 @@ impl AgentCliProvider {
         resumed: Option<&str>,
         sink: &Option<mpsc::Sender<StreamEvent>>,
         episode: &mut Episode,
+        mcp_config: Option<&Path>,
     ) -> Result<()> {
         let mut cmd = Command::new(&self.bin);
         build_args(
@@ -258,6 +288,7 @@ impl AgentCliProvider {
             resumed,
             &self.model,
             self.policy,
+            mcp_config,
         );
         if !self.workdir.as_os_str().is_empty() {
             cmd.current_dir(&self.workdir);
@@ -447,6 +478,37 @@ fn usage_from_json(value: &Value) -> Usage {
     }
 }
 
+/// Write the --mcp-config file that points an agent CLI at the room bridge.
+///
+/// The CLI spawns the server named in the config as a child process; that
+/// process is this program's own `room-mcp` relay, which shuttles bytes
+/// between the CLI's stdio and the room's unix socket. The running binary's
+/// own path is used so the child is always the same gptbots install.
+fn write_claude_mcp_config(socket: &str) -> Result<std::path::PathBuf> {
+    let exe = std::env::current_exe().map_err(|error| {
+        ProviderError::Unsupported(format!("cannot locate own binary for MCP relay: {error}"))
+    })?;
+    let config = serde_json::json!({
+        "mcpServers": {
+            "gptbots-room": {
+                "command": exe.to_string_lossy(),
+                "args": ["room-mcp", "--socket", socket],
+            }
+        }
+    });
+    let path = std::env::temp_dir().join(format!("gptbots-mcp-{}.json", std::process::id()));
+    let bytes = serde_json::to_vec(&config).map_err(|error| {
+        ProviderError::Unsupported(format!("MCP config serialisation failed: {error}"))
+    })?;
+    std::fs::write(&path, bytes).map_err(|error| {
+        ProviderError::Unsupported(format!(
+            "cannot write MCP config {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(path)
+}
+
 /// The newest instruction for the agent: the last user turn carrying prose.
 ///
 /// The engine pushes a fresh "what changed" situation each turn; anything
@@ -468,9 +530,17 @@ fn build_args(
     resumed: Option<&str>,
     model: &str,
     policy: AgentPolicy,
+    mcp_config: Option<&Path>,
 ) {
     let (policy_flag, policy_value) = policy_flags(cli, policy);
     let _ = policy_flag;
+    if let Some(path) = mcp_config {
+        // Only Claude Code accepts a per-run MCP config today; the other
+        // CLIs ignore it (their attach story is config-managed).
+        if cli == CliKind::Claude {
+            cmd.arg("--mcp-config").arg(path);
+        }
+    }
     match (cli, resumed) {
         (CliKind::Codex, None) => {
             cmd.arg("exec")

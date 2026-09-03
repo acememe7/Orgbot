@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use gptbots_engine::{Command, Engine};
 use gptbots_proto::{AgentId, AgentSpec, Seq};
-use gptbots_providers::types::{CompletionRequest, ContentBlock, StopReason, ToolDef, Turn, Usage};
+use gptbots_providers::types::{
+    CompletionRequest, CompletionResponse, ContentBlock, StopReason, ToolDef, Turn, Usage,
+};
 use gptbots_providers::{Provider, ProviderError, StreamEvent};
 use tokio::sync::mpsc;
 
@@ -58,6 +60,13 @@ pub struct Bot {
     tools: Vec<ToolDef>,
     /// The model id to call.
     model: String,
+    /// Inbound MCP calls from the agent's own tool loop, delivered while a
+    /// turn is in flight. Only agent-CLI bots with the room bridge enabled
+    /// carry one.
+    mcp_rx: Option<mpsc::Receiver<crate::mcp::McpCall>>,
+    /// The unix socket where this bot's room-MCP bridge listens; handed to
+    /// the CLI so its tool loop can reach the board.
+    mcp_socket: Option<std::path::PathBuf>,
 }
 
 impl Bot {
@@ -72,7 +81,25 @@ impl Bot {
             last_seen: Seq::ZERO,
             tools,
             model,
+            mcp_rx: None,
+            mcp_socket: None,
         }
+    }
+
+    /// Wire this bot to the room MCP bridge: while a turn runs, inbound
+    /// [crate::mcp::McpCall]s are dispatched against the engine in-band.
+    pub fn attach_mcp(
+        &mut self,
+        rx: mpsc::Receiver<crate::mcp::McpCall>,
+        socket: std::path::PathBuf,
+    ) {
+        self.mcp_socket = Some(socket);
+        self.mcp_rx = Some(rx);
+    }
+
+    /// The unix socket of this bot's room-MCP bridge, if it has one.
+    pub fn mcp_socket(&self) -> Option<&std::path::Path> {
+        self.mcp_socket.as_deref()
     }
 
     /// The bot's id.
@@ -123,14 +150,34 @@ impl Bot {
         for _ in 0..max_steps {
             self.trim_history();
 
-            let request = CompletionRequest::new(
-                self.model.clone(),
-                system.clone(),
-                self.history.clone(),
-            )
-            .with_tools(self.tools.clone());
+            let mut request =
+                CompletionRequest::new(self.model.clone(), system.clone(), self.history.clone())
+                    .with_tools(self.tools.clone());
+            request = request.with_mcp_socket(
+                self.mcp_socket
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+            );
 
-            let response = match self.provider.complete(request, sink.clone()).await {
+            let response = match self.mcp_rx.as_mut() {
+                Some(rx) => {
+                    let (response, mcp_ok, mcp_err) = complete_with_mcp(
+                        &self.provider,
+                        &self.tools,
+                        engine,
+                        self.spec.id,
+                        request,
+                        sink.clone(),
+                        rx,
+                    )
+                    .await;
+                    report.tool_calls += mcp_ok;
+                    report.tool_errors += mcp_err;
+                    response
+                }
+                None => self.provider.complete(request, sink.clone()).await,
+            };
+            let response = match response {
                 Ok(response) => response,
                 Err(error) => {
                     // Tell the engine, so repeated failures fault the bot and
@@ -232,6 +279,50 @@ fn is_safe_cut_point(turn: &Turn) -> bool {
             .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
 }
 
+/// Run one provider turn while also serving inbound room-MCP calls.
+///
+/// Agent CLIs (claude -p, codex exec, grok -p) run their own tool loop inside
+/// one [crate::mcp::McpSession]; every tools/call they make arrives here while
+/// the provider future is still running and is dispatched against the engine
+/// immediately, so the bot acts on the board mid-episode. Returns the provider
+/// result plus how many MCP calls succeeded or were rejected, which the caller
+/// folds into the turn report so a board action counts as progress.
+async fn complete_with_mcp(
+    provider: &Arc<dyn Provider>,
+    tools: &[ToolDef],
+    engine: &mut Engine,
+    actor: AgentId,
+    request: CompletionRequest,
+    sink: Option<mpsc::Sender<StreamEvent>>,
+    rx: &mut mpsc::Receiver<crate::mcp::McpCall>,
+) -> (Result<CompletionResponse, ProviderError>, usize, usize) {
+    let mut session = crate::mcp::McpSession::new(tools.to_vec());
+    let mut turn = std::pin::pin!(provider.complete(request, sink));
+    let mut calls_ok = 0usize;
+    let mut calls_err = 0usize;
+    loop {
+        tokio::select! {
+            response = &mut turn => return (response, calls_ok, calls_err),
+            inbound = rx.recv() => {
+                let Some(call) = inbound else { continue };
+                let reply = {
+                    let mut dispatch = |name: &str, args: &serde_json::Value| {
+                        let outcome = gptbots_tools::dispatch(engine, actor, name, args);
+                        if outcome.is_error {
+                            calls_err += 1;
+                        } else {
+                            calls_ok += 1;
+                        }
+                        outcome
+                    };
+                    session.handle(&call.request, &mut dispatch)
+                };
+                let _ = call.reply.send(reply);
+            }
+        }
+    }
+}
+
 /// Trim once the conversation passes this many turns.
 const MAX_HISTORY_TURNS: usize = 60;
 
@@ -307,11 +398,12 @@ mod tests {
                     input: json!({}),
                 }],
             });
-            bot.history.push(Turn::tool_results(vec![ContentBlock::ToolResult {
-                tool_use_id: "t1".into(),
-                content: "nothing".into(),
-                is_error: false,
-            }]));
+            bot.history
+                .push(Turn::tool_results(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "nothing".into(),
+                    is_error: false,
+                }]));
         }
         bot.trim_history();
 
@@ -371,5 +463,143 @@ mod tests {
             .made_progress(),
             "a turn of nothing but rejected calls changed nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod mcp_tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use gptbots_engine::{Command, Engine};
+    use gptbots_proto::agent::ProviderRef;
+    use gptbots_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+    use gptbots_proto::AgentSpec;
+    use gptbots_providers::types::{
+        CompletionRequest, CompletionResponse, ContentBlock, StopReason, Usage,
+    };
+    use gptbots_providers::{Provider, ProviderError, StreamEvent};
+    use tokio::sync::{mpsc, oneshot};
+
+    use crate::bot::Bot;
+    use crate::mcp::McpCall;
+
+    /// A provider that signals when its turn starts and then blocks until told
+    /// to finish, so the test can serve MCP calls mid-episode.
+    #[derive(Debug)]
+    struct GateProvider {
+        started: Mutex<Option<oneshot::Sender<()>>>,
+        release: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait]
+    impl Provider for GateProvider {
+        fn name(&self) -> &str {
+            "gate"
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+            _sink: Option<mpsc::Sender<StreamEvent>>,
+        ) -> Result<CompletionResponse, ProviderError> {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            let release = self.release.lock().unwrap().take();
+            if let Some(rx) = release {
+                let _ = rx.await;
+            }
+            Ok(CompletionResponse {
+                model: "gate".into(),
+                content: vec![ContentBlock::text("done")],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    fn engine_with(spec: &AgentSpec) -> Engine {
+        let mut engine = Engine::new(RoomSpec {
+            name: "mcp-room".into(),
+            goal: "prove in-band tools".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+        });
+        engine
+            .apply(Command::JoinAgent {
+                spec: Box::new(spec.clone()),
+            })
+            .unwrap();
+        engine.apply(Command::StartRoom).unwrap();
+        engine
+    }
+
+    async fn rpc(tx: &mpsc::Sender<McpCall>, request: &str) -> Option<String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(McpCall {
+            request: request.to_string(),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        reply_rx.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn mcp_calls_are_dispatched_against_the_engine_mid_turn() {
+        let spec = AgentSpec::new("w1", "Worker", ProviderRef::Scripted { script: "x".into() })
+            .with_roles(["writer"]);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let gate = Arc::new(GateProvider {
+            started: Mutex::new(Some(started_tx)),
+            release: Mutex::new(Some(release_rx)),
+        });
+        let (mcp_tx, mcp_rx) = mpsc::channel(8);
+        let mut engine = engine_with(&spec);
+        let mut bot = Bot::new(spec, gate);
+        bot.attach_mcp(mcp_rx, "/tmp/unused.sock".into());
+
+        let bot_task =
+            tokio::spawn(async move { (bot.take_turn(&mut engine, None).await, engine) });
+
+        // The episode is now blocked inside complete(); the room bridge must
+        // answer MCP calls and act on the engine while it waits.
+        started_rx.await.unwrap();
+
+        let init = rpc(&mcp_tx, r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#)
+            .await
+            .expect("initialize replies");
+        assert!(init.contains("gptbots-room"));
+
+        let listed = rpc(&mcp_tx, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
+            .await
+            .expect("tools/list replies");
+        assert!(listed.contains("room_status"), "{listed}");
+        assert!(listed.contains("claim_task"), "{listed}");
+
+        let status = rpc(
+            &mcp_tx,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"room_status","arguments":{}}}"#,
+        )
+        .await
+        .expect("tools/call replies");
+        assert!(
+            status.contains("prove in-band tools"),
+            "the engine answered mid-episode: {status}"
+        );
+        assert!(!status.contains("isError"), "{status}");
+
+        release_tx.send(()).unwrap();
+        let (result, engine) = bot_task.await.unwrap();
+        let report = result.unwrap();
+        assert_eq!(report.said.as_deref(), Some("done"));
+        assert!(
+            report.tool_calls >= 1,
+            "the in-band MCP call must count as progress"
+        );
+        assert_eq!(engine.room().spec.name, "mcp-room");
     }
 }

@@ -50,6 +50,13 @@ enum CliCommand {
         #[arg(default_value = "room.toml")]
         path: PathBuf,
     },
+    /// Bridge an agent CLI's stdio to a room's MCP socket. Spawned by the
+    /// agent CLI itself from its MCP config; you normally never run this.
+    RoomMcp {
+        /// The room MCP unix socket to connect to.
+        #[arg(long)]
+        socket: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -72,6 +79,12 @@ async fn main() -> anyhow::Result<()> {
         CliCommand::Serve { config, addr } => serve(config, addr).await,
         CliCommand::Check { config } => check(config),
         CliCommand::Init { path } => init(path),
+        CliCommand::RoomMcp { socket } => {
+            gptbots_runtime::relay::run(&socket)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            Ok(())
+        }
     }
 }
 
@@ -129,7 +142,10 @@ fn check(config: PathBuf) -> anyhow::Result<()> {
 /// Write a sample room file.
 fn init(path: PathBuf) -> anyhow::Result<()> {
     if path.exists() {
-        anyhow::bail!("{} already exists; refusing to overwrite it", path.display());
+        anyhow::bail!(
+            "{} already exists; refusing to overwrite it",
+            path.display()
+        );
     }
     std::fs::write(&path, SAMPLE_ROOM)?;
     println!("wrote {}", path.display());

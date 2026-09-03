@@ -188,6 +188,9 @@ pub struct CompletionRequest {
     /// Whether to stream. Required for large `max_tokens` on some backends to
     /// avoid an HTTP timeout mid-response.
     pub stream: bool,
+    /// A unix socket where the room's MCP bridge is listening, for agent-CLI
+    /// bots that act on the board mid-episode.
+    pub mcp_socket: Option<String>,
 }
 
 impl CompletionRequest {
@@ -203,7 +206,8 @@ impl CompletionRequest {
             max_tokens: DEFAULT_MAX_TOKENS,
             effort: Some(Effort::High),
             stream: true,
-            }
+            mcp_socket: None,
+        }
     }
 
     /// Builder: attach the tool set.
@@ -215,6 +219,12 @@ impl CompletionRequest {
     /// Builder: set the effort level.
     pub fn with_effort(mut self, effort: Effort) -> Self {
         self.effort = Some(effort);
+        self
+    }
+
+    /// Builder: point an agent-CLI bot at its room's MCP bridge socket.
+    pub fn with_mcp_socket(mut self, socket: Option<String>) -> Self {
+        self.mcp_socket = socket;
         self
     }
 }

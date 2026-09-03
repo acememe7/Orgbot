@@ -95,6 +95,10 @@ pub enum ProviderRef {
         workdir: String,
         /// How much of the project the agent may touch.
         policy: AgentPolicy,
+        /// Serve the room's board to the agent as MCP tools so it can claim
+        /// tasks, hand work off, and ask for review mid-episode.
+        #[serde(default)]
+        mcp: bool,
     },
 }
 

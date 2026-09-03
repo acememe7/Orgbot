@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gptbots_engine::{Command, Engine};
-use gptbots_proto::room::{CompletionRule, RoomPhase, RoomSpec};
 use gptbots_proto::event::Event;
+use gptbots_proto::room::{CompletionRule, RoomPhase, RoomSpec};
 use gptbots_proto::{AgentId, AgentSpec, AgentStatus, Timestamp};
 use gptbots_providers::{Provider, StreamEvent};
 use tokio::sync::mpsc;
@@ -89,7 +89,11 @@ impl Orchestrator {
         self.engine.apply(Command::JoinAgent {
             spec: Box::new(spec.clone()),
         })?;
-        self.bots.insert(id, Bot::new(spec, provider));
+        let mut bot = Bot::new(spec.clone(), provider);
+        if let Some((rx, socket)) = spawn_mcp_host(&spec) {
+            bot.attach_mcp(rx, socket);
+        }
+        self.bots.insert(id, bot);
         self.rotation.push(id);
         Ok(id)
     }
@@ -331,6 +335,60 @@ impl Orchestrator {
     pub fn turns_used(&self) -> u32 {
         self.engine.room().turns_used
     }
+}
+
+/// Give an agent-CLI bot a room-MCP bridge: a unix socket whose connections
+/// are forwarded into the bot's turn loop, where inbound tools/call requests
+/// are dispatched against the engine mid-episode. Returns the channel the bot
+/// listens on plus the socket path handed to the CLI.
+fn spawn_mcp_host(
+    spec: &gptbots_proto::agent::AgentSpec,
+) -> Option<(
+    tokio::sync::mpsc::Receiver<crate::mcp::McpCall>,
+    std::path::PathBuf,
+)> {
+    use gptbots_proto::agent::ProviderRef;
+
+    if !matches!(&spec.provider, ProviderRef::CliAgent { mcp: true, .. }) {
+        return None;
+    }
+    let socket = std::env::temp_dir().join(format!("gptbots-mcp-{}.sock", spec.id));
+    let _ = std::fs::remove_file(&socket);
+    let std_listener = match std::os::unix::net::UnixListener::bind(&socket) {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::warn!(%error, "room MCP bind failed for {}", socket.display());
+            return None;
+        }
+    };
+    if std_listener.set_nonblocking(true).is_err() {
+        return None;
+    }
+    let listener = match tokio::net::UnixListener::from_std(std_listener) {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::warn!(%error, "room MCP listener setup failed");
+            return None;
+        }
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        crate::mcp::serve_stream(stream, tx).await;
+                    });
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "room MCP accept loop ended");
+                    break;
+                }
+            }
+        }
+    });
+    Some((rx, socket))
 }
 
 /// Consecutive fruitless turns before the run is called stalled.
