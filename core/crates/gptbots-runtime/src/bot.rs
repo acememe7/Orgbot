@@ -85,6 +85,14 @@ impl Bot {
         self.history.len()
     }
 
+    /// The last log position this bot has been shown.
+    ///
+    /// The scheduler reads this to tell whether a message posted since the
+    /// bot's last turn is addressed to it and still unanswered.
+    pub fn last_seen(&self) -> Seq {
+        self.last_seen
+    }
+
     /// Give the bot a turn.
     ///
     /// `sink` receives streaming deltas for the UI; pass `None` when nobody is

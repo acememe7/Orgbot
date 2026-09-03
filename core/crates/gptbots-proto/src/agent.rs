@@ -43,6 +43,7 @@ impl ProviderRef {
 
 /// Limits on what a bot may do without a human in the loop.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Autonomy {
     /// Model turns a bot may take on one task before it must report back.
     pub max_turns_per_task: u32,

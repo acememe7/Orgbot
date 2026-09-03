@@ -6,6 +6,7 @@ members = [
     "crates/gptbots-providers",
     "crates/gptbots-tools",
     "crates/gptbots-runtime",
+    "crates/gptbots-server",
 ]
 
 [workspace.package]

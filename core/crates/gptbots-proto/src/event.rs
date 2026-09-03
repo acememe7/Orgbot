@@ -21,7 +21,7 @@ use crate::time::Timestamp;
 ///
 /// Clients resume with "everything after N", so gaps and reordering are not
 /// permitted: the engine assigns these under the same lock that appends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Seq(pub u64);
 

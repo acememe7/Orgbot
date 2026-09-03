@@ -48,6 +48,7 @@ impl RoomPhase {
 
 /// Safety rails on a whole room.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RoomLimits {
     /// Total model turns across all bots before the room pauses for a human.
     pub max_total_turns: u32,

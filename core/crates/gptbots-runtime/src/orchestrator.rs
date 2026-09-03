@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use gptbots_engine::{Command, Engine};
 use gptbots_proto::room::{CompletionRule, RoomPhase, RoomSpec};
+use gptbots_proto::event::Event;
 use gptbots_proto::{AgentId, AgentSpec, AgentStatus, Timestamp};
 use gptbots_providers::{Provider, StreamEvent};
 use tokio::sync::mpsc;
@@ -60,6 +61,9 @@ pub struct Orchestrator {
     cursor: usize,
     /// Consecutive turns that changed nothing.
     idle_rounds: u32,
+    /// The last thing each bot said, so a bot repeating itself verbatim does
+    /// not read as progress and stall detection still fires.
+    last_said: BTreeMap<AgentId, String>,
 }
 
 impl Orchestrator {
@@ -71,6 +75,7 @@ impl Orchestrator {
             rotation: Vec::new(),
             cursor: 0,
             idle_rounds: 0,
+            last_said: BTreeMap::new(),
         }
     }
 
@@ -118,6 +123,12 @@ impl Orchestrator {
         if !self.engine.offers_for(agent).is_empty() {
             return true;
         }
+        // A question addressed to this bot that it has not answered yet. This
+        // is what lets a human (or another bot) talk to the room and get a
+        // reply, rather than the message landing in the log unheard.
+        if self.has_unanswered_message(agent) {
+            return true;
+        }
         // Work in hand that is not parked.
         let held = self.engine.active_tasks_of(agent);
         let has_live_work = held.iter().any(|id| {
@@ -155,6 +166,22 @@ impl Orchestrator {
         // Free, with work available. A bot whose only tasks are parked is still
         // free to pick up something else.
         held.is_empty() && !self.engine.claimable_by(agent).is_empty()
+    }
+
+    /// Whether a message the bot has not seen yet is addressed to it and
+    /// expects a reply.
+    fn has_unanswered_message(&self, agent: AgentId) -> bool {
+        let Some(bot) = self.bots.get(&agent) else {
+            return false;
+        };
+        let roles = self
+            .engine
+            .agent(agent)
+            .map(|spec| spec.roles.clone())
+            .unwrap_or_default();
+        self.engine.events_since(bot.last_seen()).any(|envelope| {
+            matches!(&envelope.event, Event::MessagePosted { message } if message.wakes(agent, &roles))
+        })
     }
 
     /// The next bot that should act, if any.
@@ -206,7 +233,18 @@ impl Orchestrator {
             now: Timestamp::now(),
         });
 
-        if report.made_progress() {
+        // A successful action is always progress. Saying something is progress
+        // only if it is not a verbatim repeat of what this bot last said — a
+        // bot stuck repeating itself must not keep the room awake.
+        let did_work = report.tool_calls > report.tool_errors;
+        let said_something_new = report
+            .said
+            .as_deref()
+            .is_some_and(|said| self.last_said.get(&agent).map(String::as_str) != Some(said));
+        if let Some(said) = &report.said {
+            self.last_said.insert(agent, said.clone());
+        }
+        if did_work || said_something_new {
             self.idle_rounds = 0;
         } else {
             self.idle_rounds += 1;
@@ -240,8 +278,12 @@ impl Orchestrator {
         }
     }
 
-    /// Whether the run should stop before taking another turn.
-    fn stop_condition(&self) -> Option<RunOutcome> {
+    /// Whether a batch run should stop before taking another turn.
+    ///
+    /// A server hosting a long-lived, human-in-the-loop room reads this too, but
+    /// treats [`RunOutcome::Idle`] as "wait for a person" rather than a reason to
+    /// close — see the note on [`Self::next_actor`].
+    pub fn stop_condition(&self) -> Option<RunOutcome> {
         let room = self.engine.room();
         match room.phase {
             RoomPhase::Paused => return Some(RunOutcome::Paused),

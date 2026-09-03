@@ -530,3 +530,94 @@ async fn a_bot_whose_backend_fails_does_not_take_the_room_down() {
         .tasks()
         .all(|task| task.assignee != Some(broken)));
 }
+
+
+#[tokio::test]
+async fn a_bot_is_scheduled_to_answer_a_question_addressed_to_it() {
+    // A room that is otherwise idle: one worker, no tasks, manual completion.
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "chat".into(),
+        goal: "answer questions".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    let worker = room
+        .seat(
+            spec("helper", &["writer"], Autonomy::default()),
+            reactive("helper", |_last, _all| say("Hi, I am here.")),
+        )
+        .unwrap();
+    room.start().unwrap();
+
+    // With nothing to do, nobody is actionable.
+    assert!(room.next_actor().is_none());
+
+    // A human asks the room a question.
+    let room_id = room.engine().room_id();
+    room.engine_mut()
+        .apply(gptbots_engine::Command::PostMessage {
+            message: Box::new(
+                gptbots_proto::ChatMessage {
+                    id: gptbots_proto::MessageId::new(),
+                    room: room_id,
+                    author: gptbots_proto::Author::Human { name: "Alex".into() },
+                    audience: gptbots_proto::Audience::Everyone,
+                    intent: gptbots_proto::MessageIntent::Ask,
+                    body: "anyone there?".into(),
+                    task: None,
+                    handoff: None,
+                    reply_to: None,
+                    attachments: vec![],
+                    sent_at: gptbots_proto::Timestamp::now(),
+                },
+            ),
+        })
+        .unwrap();
+
+    // Now the worker is actionable, and a step produces its reply.
+    assert_eq!(room.next_actor(), Some(worker));
+    let report = room.step(None).await.expect("the worker should act");
+    assert_eq!(report.agent, worker);
+    assert!(
+        room.engine()
+            .transcript()
+            .iter()
+            .any(|m| m.body.contains("here")),
+        "the worker should have answered into the transcript"
+    );
+}
+
+#[tokio::test]
+async fn an_ordinary_broadcast_statement_does_not_wake_the_room() {
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "chat".into(),
+        goal: "stay quiet".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    room.seat(
+        spec("helper", &["writer"], Autonomy::default()),
+        reactive("helper", |_last, _all| say("unsolicited")),
+    )
+    .unwrap();
+    room.start().unwrap();
+
+    // A plain status broadcast (not a question) must not schedule anyone.
+    let room_id = room.engine().room_id();
+    let speaker = room.engine().agents().next().unwrap().id;
+    room.engine_mut()
+        .apply(gptbots_engine::Command::PostMessage {
+            message: Box::new(gptbots_proto::ChatMessage::say(
+                room_id,
+                speaker,
+                "just working away",
+            )),
+        })
+        .unwrap();
+    assert!(
+        room.next_actor().is_none(),
+        "ordinary chatter must not wake the room, or it never settles"
+    );
+}
