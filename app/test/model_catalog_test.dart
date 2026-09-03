@@ -40,11 +40,14 @@ Available models:
     expect(list.options.any((o) => o.id.isEmpty), isTrue);
   });
 
-  test('deepseek without a key falls back and says why', () async {
+  /// Without a key the API cannot be asked, so nothing is listed. Offering a
+  /// written-down list here would be exactly the hardcoding this replaced, and
+  /// would look authoritative while being a guess.
+  test('deepseek without a key lists nothing and says why', () async {
     final list = await ModelCatalog.load(ProviderKind.deepseek);
-    expect(list.source, ModelSource.fallback);
+    expect(list.source, ModelSource.needsKey);
+    expect(list.options, isEmpty);
     expect(list.problem, contains('API key'));
-    expect(list.options.map((o) => o.id), contains('deepseek-chat'));
   });
 
   test('the scripted demo offers no models', () async {

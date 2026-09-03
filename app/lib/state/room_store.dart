@@ -12,6 +12,34 @@ import 'package:flutter/foundation.dart';
 import '../net/room_client.dart';
 import '../protocol/models.dart';
 
+/// What one bot is doing right now, for the activity panel.
+///
+/// The chat shows what bots *say*; this shows what they are *doing*, which is
+/// most of the work and was previously invisible.
+class BotActivity {
+  BotActivity(this.agent);
+
+  final Agent agent;
+
+  /// The task it currently holds, if any.
+  String? taskId;
+  String? taskTitle;
+
+  /// The most recent thing it did, in plain words.
+  String? lastAction;
+
+  /// When that happened, for an "x ago" label.
+  DateTime? lastActionAt;
+
+  /// True while a model turn is streaming, so the UI can show it thinking.
+  bool streaming = false;
+
+  /// A running count of what it has got done.
+  int tasksSubmitted = 0;
+  int reviewsGiven = 0;
+  int handoffsSent = 0;
+}
+
 /// Observable room state.
 class RoomStore extends ChangeNotifier {
   RoomStore(this._client) {
@@ -34,6 +62,7 @@ class RoomStore extends ChangeNotifier {
   final Map<String, Task> _tasks = {};
   final Map<String, Handoff> _handoffs = {};
   final List<ChatMessage> _messages = [];
+  final Map<String, BotActivity> _activity = {};
 
   /// The roster, in a stable order (coordinators first, then by handle).
   List<Agent> get agents {
@@ -70,6 +99,20 @@ class RoomStore extends ChangeNotifier {
   /// The transcript, oldest first.
   List<ChatMessage> get messages => List.unmodifiable(_messages);
 
+  /// What each bot is doing, in roster order.
+  List<BotActivity> get activity =>
+      agents.map((a) => _activity.putIfAbsent(a.id, () => BotActivity(a))).toList();
+
+  /// Note something a bot did, for the activity panel.
+  void _note(String? agentId, String action) {
+    if (agentId == null) return;
+    final agent = _agents[agentId];
+    if (agent == null) return;
+    final entry = _activity.putIfAbsent(agentId, () => BotActivity(agent));
+    entry.lastAction = action;
+    entry.lastActionAt = DateTime.now();
+  }
+
   /// Pending handoffs, for a status strip.
   List<Handoff> get openHandoffs =>
       _handoffs.values.where((h) => h.state == 'offered' || h.state == 'accepted').toList();
@@ -97,9 +140,16 @@ class RoomStore extends ChangeNotifier {
       case 'phase':
         _applyPhase(message['phase'] as String?);
       case 'stream':
-        // Live typing deltas are cosmetic; the durable event that follows
-        // carries the final text, so the transcript is built from events only.
-        break;
+        // Deltas do not go in the transcript — the durable event that follows
+        // carries the final text — but they are the clearest signal that a bot
+        // is actively thinking, which the activity panel shows.
+        final agentId = message['agent'] as String?;
+        if (agentId != null && _agents.containsKey(agentId)) {
+          final entry = _activity.putIfAbsent(
+              agentId, () => BotActivity(_agents[agentId]!));
+          entry.streaming = true;
+          notifyListeners();
+        }
       case 'closed':
         _room?.phase = RoomPhase.completed;
         notifyListeners();
@@ -158,17 +208,32 @@ class RoomStore extends ChangeNotifier {
       case 'agent_status_changed':
         final id = event['agent'] as String?;
         final agent = id == null ? null : _agents[id];
-        if (agent != null) agent.status = AgentStatus.parse(event['to'] as String?);
+        if (agent != null) {
+          agent.status = AgentStatus.parse(event['to'] as String?);
+          final entry = _activity.putIfAbsent(id!, () => BotActivity(agent));
+          // A turn has finished once the bot is no longer working.
+          if (agent.status != AgentStatus.working) entry.streaming = false;
+        }
       case 'handoff_offered':
         final json = (event['handoff'] as Map?)?.cast<String, Object?>();
         if (json != null) {
           final handoff = Handoff.fromJson(json);
           _handoffs[handoff.id] = handoff;
+          _note(handoff.from, 'asked for help: ${handoff.brief}');
+          _activity[handoff.from]?.handoffsSent += 1;
         }
       case 'handoff_transitioned':
         final id = event['handoff'] as String?;
         final handoff = id == null ? null : _handoffs[id];
         if (handoff != null) handoff.state = event['to'] as String? ?? handoff.state;
+      case 'review_recorded':
+        final review = (event['review'] as Map?)?.cast<String, Object?>();
+        final inspector = review?['inspector'] as String?;
+        final verdict = review?['verdict'] as String?;
+        if (inspector != null) {
+          _note(inspector, 'reviewed work — $verdict');
+          _activity[inspector]?.reviewsGiven += 1;
+        }
       case 'room_closed':
         _room?.phase = RoomPhase.completed;
       case 'agent_joined':
@@ -194,6 +259,36 @@ class RoomStore extends ChangeNotifier {
     final task = id == null ? null : _tasks[id];
     if (task == null) return;
     task.state = TaskState.parse(event['to'] as String?);
+
+    // Describe the change the way a person would say it.
+    final actor = event['actor'] as String?;
+    final phrase = switch (task.state) {
+      TaskState.claimed => 'took “${task.title}”',
+      TaskState.inProgress => 'is working on “${task.title}”',
+      TaskState.blocked => 'is blocked on “${task.title}”',
+      TaskState.inReview => 'sent “${task.title}” for review',
+      TaskState.approved => 'approved “${task.title}”',
+      TaskState.submitted => 'delivered “${task.title}”',
+      TaskState.failed => 'gave up on “${task.title}”',
+      _ => null,
+    };
+    if (phrase != null) _note(actor, phrase);
+    if (actor != null && task.state == TaskState.submitted) {
+      _activity[actor]?.tasksSubmitted += 1;
+    }
+    if (actor != null) {
+      final entry = _activity[actor];
+      if (entry != null) {
+        // Show which task a bot is on, and clear it once it lets go.
+        if (task.state.isActive) {
+          entry.taskId = task.id;
+          entry.taskTitle = task.title;
+        } else if (entry.taskId == task.id) {
+          entry.taskId = null;
+          entry.taskTitle = null;
+        }
+      }
+    }
     // Ownership and blockers are derived from the transition kind.
     final transition = (event['transition'] as Map?)?.cast<String, Object?>();
     final kind = transition?['transition'] as String?;

@@ -23,12 +23,12 @@ void main() {
       name: 'notes',
       goal: 'write notes',
       tasks: ['cover every change'],
-      bots: [RoomSlot(bot.id, 'writer')],
+      bots: [RoomSlot(bot.id)],
     );
     final room2 = RoomDef.fromJson(room.toJson());
     expect(room2.name, 'notes');
-    expect(room2.bots.single.botId, bot.id);
-    expect(room2.bots.single.role, 'writer');
+    expect(room2.bots.single.botId, bot.id,
+        reason: 'a slot names the bot; the role travels with the bot itself');
   });
 
   test('the library persists bots and rooms through a memory saver', () async {
@@ -38,21 +38,21 @@ void main() {
     lib.addBot(BotDef(name: 'QA', handle: 'qa', persona: 'checks',
         provider: ProviderKind.scripted));
     lib.addRoom(RoomDef(name: 'r', goal: 'g', bots: [
-      RoomSlot(lib.bots.first.id, 'reviewer'),
+      RoomSlot(lib.bots.first.id),
     ]));
     await Future<void>.delayed(Duration.zero); // let persist() settle
 
     final reloaded = Library(saver: saver);
     await reloaded.load();
     expect(reloaded.bots.single.name, 'QA');
-    expect(reloaded.rooms.single.bots.single.role, 'reviewer');
+    expect(reloaded.rooms.single.bots.single.botId, reloaded.bots.single.id);
   });
 
   test('removing a bot drops it and the rooms that used it', () async {
     final lib = Library(saver: MemorySaver());
     await lib.load();
     final bot = lib.addBot(BotDef(name: 'W'));
-    lib.addRoom(RoomDef(name: 'r', bots: [RoomSlot(bot.id, 'writer')]));
+    lib.addRoom(RoomDef(name: 'r', bots: [RoomSlot(bot.id)]));
     lib.removeBot(bot.id);
     expect(lib.bots, isEmpty);
     expect(lib.rooms, isEmpty);

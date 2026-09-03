@@ -6,6 +6,7 @@ library;
 import 'dart:math';
 
 import '../engine/agent_cli.dart';
+import 'roles.dart';
 
 String genId(String prefix) {
   final rnd = Random.secure();
@@ -70,6 +71,14 @@ class BotDef {
   String model;
   String apiKey;
 
+  /// The job this bot holds. A property of the bot, not of a room — the same
+  /// reviewer reviews wherever it is seated.
+  String role;
+
+  /// Permissions overriding the role's defaults, when you have deliberately
+  /// changed them. Null means "whatever the role says".
+  RolePowers? powers;
+
   BotDef({
     String? id,
     required this.name,
@@ -78,11 +87,20 @@ class BotDef {
     this.provider = ProviderKind.anthropic,
     this.model = '',
     this.apiKey = '',
+    this.role = Roles.defaultKey,
+    this.powers,
   })  : id = id ?? genId('bot'),
         handle = handle == null || handle.isEmpty ? '' : handle;
 
   /// Whether this bot still needs a key from the user.
   bool get needsKey => provider.needsApiKey && apiKey.trim().isEmpty;
+
+  /// The permissions actually in force: the override if one was set, else the
+  /// role's defaults.
+  RolePowers get effectivePowers => powers ?? Roles.byKey(role).powers;
+
+  /// The role definition this bot holds.
+  RoleDef get roleDef => Roles.byKey(role);
 
   Map<String, Object?> toJson() => {
         'id': id,
@@ -92,6 +110,8 @@ class BotDef {
         'provider': provider.key,
         'model': model,
         'apiKey': apiKey,
+        'role': role,
+        'powers': powers?.toJson(),
       };
 
   factory BotDef.fromJson(Map<String, Object?> json) => BotDef(
@@ -102,18 +122,21 @@ class BotDef {
         provider: ProviderKind.fromKey(json['provider'] as String? ?? ''),
         model: json['model'] as String? ?? '',
         apiKey: json['apiKey'] as String? ?? '',
+        role: json['role'] as String? ?? Roles.defaultKey,
+        powers: json['powers'] is Map
+            ? RolePowers.fromJson((json['powers'] as Map).cast<String, Object?>())
+            : null,
       );
 }
 
+/// A bot seated in a room. The role is no longer here: it belongs to the bot,
+/// so the same reviewer reviews in every room it joins.
 class RoomSlot {
   final String botId;
-  String role; // writer | coordinator | reviewer
-  RoomSlot(this.botId, this.role);
-  Map<String, Object?> toJson() => {'bot_id': botId, 'roles': [role]};
+  RoomSlot(this.botId);
+  Map<String, Object?> toJson() => {'bot_id': botId};
   factory RoomSlot.fromJson(Map<String, Object?> json) =>
-      RoomSlot(json['bot_id'] as String, (json['roles'] as List? ?? []).isNotEmpty
-          ? (json['roles'] as List).first as String
-          : 'writer');
+      RoomSlot(json['bot_id'] as String);
 }
 
 class RoomDef {

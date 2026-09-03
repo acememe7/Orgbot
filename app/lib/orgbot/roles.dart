@@ -12,8 +12,6 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
-import 'package:flutter/material.dart';
-
 /// What a bot is permitted to do on the board.
 class RolePowers {
   /// May add tasks to the board.
@@ -78,7 +76,12 @@ class RoleDef {
   final String brief;
 
   final RoleGroup group;
-  final IconData icon;
+
+  /// Names the icon the UI should draw. Kept as a string so this file stays
+  /// plain Dart — a data model that needs the widget toolkit cannot be used
+  /// by tooling, tests, or anything off the UI thread.
+  final String icon;
+
   final RolePowers powers;
 
   const RoleDef({
@@ -104,7 +107,7 @@ class Roles {
           'parallel, keep the room moving, and deliver work once it passes '
           'inspection. You do not inspect work yourself.',
       group: RoleGroup.leadership,
-      icon: Icons.hub_outlined,
+      icon: 'hub_outlined',
       powers: RolePowers(mayCreateTasks: true, maySubmit: true),
     ),
     RoleDef(
@@ -114,7 +117,7 @@ class Roles {
       brief: 'You decide what is worth building. Write tasks with concrete '
           'acceptance criteria and say what problem each one solves.',
       group: RoleGroup.leadership,
-      icon: Icons.flag_outlined,
+      icon: 'flag_outlined',
       powers: RolePowers(mayCreateTasks: true),
     ),
     RoleDef(
@@ -125,7 +128,7 @@ class Roles {
           'Lay out the approach, the trade-offs, and the pieces others can '
           'take on independently.',
       group: RoleGroup.leadership,
-      icon: Icons.architecture_outlined,
+      icon: 'architecture_outlined',
       powers: RolePowers(mayCreateTasks: true),
     ),
 
@@ -137,7 +140,7 @@ class Roles {
       brief: 'You implement what the task asks for. Record the actual work as '
           'an artifact, not as chat.',
       group: RoleGroup.building,
-      icon: Icons.code,
+      icon: 'code',
     ),
     RoleDef(
       key: 'frontend',
@@ -146,7 +149,7 @@ class Roles {
       brief: 'You build user-facing interfaces. Care about states, edge cases '
           'and how it feels to use, not only that it renders.',
       group: RoleGroup.building,
-      icon: Icons.web_outlined,
+      icon: 'web_outlined',
     ),
     RoleDef(
       key: 'backend',
@@ -155,7 +158,7 @@ class Roles {
       brief: 'You build services, data models and APIs. Be explicit about '
           'failure modes and what happens under load.',
       group: RoleGroup.building,
-      icon: Icons.dns_outlined,
+      icon: 'dns_outlined',
     ),
     RoleDef(
       key: 'designer',
@@ -164,7 +167,7 @@ class Roles {
       brief: 'You decide how the work should look and behave. Be concrete: '
           'layout, hierarchy, states, and what the user should feel.',
       group: RoleGroup.building,
-      icon: Icons.brush_outlined,
+      icon: 'brush_outlined',
     ),
     RoleDef(
       key: 'writer',
@@ -173,7 +176,7 @@ class Roles {
       brief: 'You write clear, accurate prose. Prefer plain language and cut '
           'anything that does not earn its place.',
       group: RoleGroup.building,
-      icon: Icons.edit_outlined,
+      icon: 'edit_outlined',
     ),
     RoleDef(
       key: 'data',
@@ -182,7 +185,7 @@ class Roles {
       brief: 'You answer questions with data. Show what you measured and say '
           'plainly how confident the answer is.',
       group: RoleGroup.building,
-      icon: Icons.query_stats,
+      icon: 'query_stats',
     ),
 
     // ---- quality: may inspect, never submits its own verdict onward ----
@@ -194,7 +197,7 @@ class Roles {
           'by one. Report what you actually found; the verdict follows from '
           'your findings, so do not soften them.',
       group: RoleGroup.quality,
-      icon: Icons.rate_review_outlined,
+      icon: 'rate_review_outlined',
       powers: RolePowers(mayInspect: true),
     ),
     RoleDef(
@@ -204,7 +207,7 @@ class Roles {
       brief: 'You try to break the work. Look for edge cases, bad input and '
           'failure paths, and say exactly how to reproduce anything you find.',
       group: RoleGroup.quality,
-      icon: Icons.bug_report_outlined,
+      icon: 'bug_report_outlined',
       powers: RolePowers(mayInspect: true),
     ),
     RoleDef(
@@ -214,7 +217,7 @@ class Roles {
       brief: 'You review for security: what an attacker could do, what data '
           'could leak, what trust is assumed and should not be.',
       group: RoleGroup.quality,
-      icon: Icons.shield_outlined,
+      icon: 'shield_outlined',
       powers: RolePowers(mayInspect: true),
     ),
     RoleDef(
@@ -224,7 +227,7 @@ class Roles {
       brief: 'You improve other bots\' writing: accuracy first, then clarity, '
           'then length. Say what you changed and why.',
       group: RoleGroup.quality,
-      icon: Icons.spellcheck,
+      icon: 'spellcheck',
       powers: RolePowers(mayInspect: true),
     ),
 
@@ -236,7 +239,7 @@ class Roles {
       brief: 'You find things out and report them with sources. Separate what '
           'you verified from what you inferred.',
       group: RoleGroup.knowledge,
-      icon: Icons.travel_explore_outlined,
+      icon: 'travel_explore_outlined',
     ),
     RoleDef(
       key: 'analyst',
@@ -245,7 +248,7 @@ class Roles {
       brief: 'You weigh options against each other and recommend one. Give '
           'the reasoning, not just the conclusion.',
       group: RoleGroup.knowledge,
-      icon: Icons.insights_outlined,
+      icon: 'insights_outlined',
     ),
     RoleDef(
       key: 'documenter',
@@ -254,7 +257,7 @@ class Roles {
       brief: 'You document how the work actually behaves, including the parts '
           'that are surprising.',
       group: RoleGroup.knowledge,
-      icon: Icons.menu_book_outlined,
+      icon: 'menu_book_outlined',
     ),
 
     // ---- operations ----
@@ -265,7 +268,7 @@ class Roles {
       brief: 'You handle running the thing: deployment, configuration, and '
           'what happens when it goes wrong at 3am.',
       group: RoleGroup.operations,
-      icon: Icons.settings_suggest_outlined,
+      icon: 'settings_suggest_outlined',
     ),
     RoleDef(
       key: 'support',
@@ -274,7 +277,7 @@ class Roles {
       brief: 'You speak for the person who will use this. Flag anything '
           'confusing, undocumented, or likely to generate complaints.',
       group: RoleGroup.operations,
-      icon: Icons.support_agent_outlined,
+      icon: 'support_agent_outlined',
     ),
     RoleDef(
       key: 'generalist',
@@ -282,7 +285,7 @@ class Roles {
       summary: 'Picks up whatever needs doing',
       brief: 'You take on whatever the room needs next.',
       group: RoleGroup.operations,
-      icon: Icons.all_inclusive,
+      icon: 'all_inclusive',
     ),
   ];
 

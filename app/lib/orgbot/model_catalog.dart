@@ -50,6 +50,9 @@ enum ModelSource {
 
   /// The built-in fallback, because the live lookup did not work.
   fallback,
+
+  /// Nothing can be listed until a credential is supplied.
+  needsKey,
 }
 
 /// A resolved model list plus how it was obtained.
@@ -86,7 +89,7 @@ class ModelCatalog {
     } catch (e) {
       result = ModelList(fallbackFor(kind), ModelSource.fallback, e.toString());
     }
-    if (result.options.isEmpty) {
+    if (result.options.isEmpty && result.source != ModelSource.needsKey) {
       result = ModelList(fallbackFor(kind), ModelSource.fallback, result.problem);
     }
     _cache[kind] = result;
@@ -183,8 +186,11 @@ class ModelCatalog {
   /// DeepSeek is a plain API, so its list comes from the models endpoint.
   static Future<ModelList> _fromDeepSeekApi(String apiKey) async {
     if (apiKey.trim().isEmpty) {
-      return ModelList(fallbackFor(ProviderKind.deepseek), ModelSource.fallback,
-          'enter the API key to load the live list');
+      // No key, no list. Showing invented ids here would be the hardcoding
+      // this class exists to remove, and would look authoritative while being
+      // a guess.
+      return const ModelList([], ModelSource.needsKey,
+          'Enter your API key to load DeepSeek\'s models.');
     }
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
@@ -235,11 +241,9 @@ class ModelCatalog {
       case ProviderKind.grok:
         return const [ModelOption('', 'Subscription default')];
       case ProviderKind.deepseek:
-        return const [
-          ModelOption('deepseek-chat', 'DeepSeek Chat', note: 'General purpose'),
-          ModelOption('deepseek-reasoner', 'DeepSeek Reasoner',
-              note: 'Shows its reasoning'),
-        ];
+        // Deliberately empty: DeepSeek's list comes from its API, and a guess
+        // presented as a list is worse than saying a key is needed.
+        return const [];
       case ProviderKind.scripted:
         return const [];
     }

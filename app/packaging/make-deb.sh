@@ -28,6 +28,18 @@ mkdir -p "$STAGE/usr/lib/$NAME" "$STAGE/usr/bin" \
 
 cp -r "$BUNDLE/." "$STAGE/usr/lib/$NAME/"
 chmod 755 "$STAGE/usr/lib/$NAME/orgbot_app"
+
+# The engine the app runs rooms on. Installed as orgbot-engine so it cannot be
+# confused with the app's own /usr/bin/orgbot launcher, which is what
+# findEngine() looks for first.
+ENGINE=${ORGBOT_ENGINE:-../core/target/release/orgbot}
+if [ -x "$ENGINE" ]; then
+  install -m755 "$ENGINE" "$STAGE/usr/lib/$NAME/orgbot-engine"
+  ln -s "/usr/lib/$NAME/orgbot-engine" "$STAGE/usr/bin/orgbot-engine"
+else
+  echo "warning: engine not found at $ENGINE — rooms will not run." >&2
+  echo "  build it with: (cd ../core && cargo build --release)" >&2
+fi
 install -m644 packaging/orgbot.desktop "$STAGE/usr/share/applications/orgbot.desktop"
 install -m644 assets/logo.png "$STAGE/usr/share/icons/hicolor/256x256/apps/$NAME.png"
 ln -s "/usr/lib/$NAME/orgbot_app" "$STAGE/usr/bin/$NAME"

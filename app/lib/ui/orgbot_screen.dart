@@ -6,15 +6,13 @@ library;
 import 'package:flutter/material.dart';
 
 import '../engine/agent_cli.dart';
-import '../engine/engine_core.dart';
-import '../engine/llm_provider.dart';
-import '../engine/runner.dart';
-import '../orgbot/demo_bot.dart';
 import '../orgbot/library.dart';
 import '../orgbot/models.dart';
 import '../orgbot/model_catalog.dart';
-import '../state/local_room_controller.dart';
 import 'brand.dart';
+import 'engine_room_screen.dart';
+import 'role_icons.dart';
+import '../orgbot/roles.dart';
 
 class OrgBotScreen extends StatefulWidget {
   final Library library;
@@ -261,23 +259,19 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                   const Divider(),
                   Text('Who is in the room',
                       style: Theme.of(context).textTheme.titleSmall),
+                  // Each bot brings its own role, set where the bot is
+                  // defined — the same reviewer reviews in every room.
                   for (final b in widget.library.bots)
                     CheckboxListTile(
                       dense: true,
                       value: selected.containsKey(b.id),
+                      secondary: Icon(roleIcon(b.roleDef.icon), size: 20),
                       title: Text('@' + (b.handle.isEmpty ? b.name : b.handle)),
-                      subtitle: DropdownButtonFormField<String>(
-                        initialValue: selected[b.id] ?? 'writer',
-                        items: const [
-                          DropdownMenuItem(value: 'writer', child: Text('Writer')),
-                          DropdownMenuItem(value: 'coordinator', child: Text('Coordinator')),
-                          DropdownMenuItem(value: 'reviewer', child: Text('Inspector')),
-                        ],
-                        onChanged: (v) => setLocal(() => selected[b.id] = v ?? 'writer'),
-                      ),
+                      subtitle: Text(
+                          b.roleDef.label + ' · ' + b.provider.label),
                       onChanged: (v) => setLocal(() {
                         if (v == true) {
-                          selected[b.id] = 'writer';
+                          selected[b.id] = b.role;
                         } else {
                           selected.remove(b.id);
                         }
@@ -302,9 +296,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                     goal: goal.text.trim(),
                     path: path.text.trim(),
                     tasks: [goal.text.trim()].where((t) => t.isNotEmpty).toList(),
-                    bots: selected.entries
-                        .map((e) => RoomSlot(e.key, e.value))
-                        .toList(),
+                    bots: selected.keys.map(RoomSlot.new).toList(),
                   );
                   widget.library.addRoom(room);
                   Navigator.pop(context);
@@ -318,427 +310,8 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
 
   void _runRoom(RoomDef room) {
     Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => RunningRoomPage(room: room, library: widget.library),
+      builder: (_) => EngineRoomScreen(room: room, library: widget.library),
     ));
-  }
-}
-
-/// Runs a saved room on-device: bots (or scripted stand-ins) work the board.
-class RunningRoomPage extends StatefulWidget {
-  final RoomDef room;
-  final Library library;
-  const RunningRoomPage({super.key, required this.room, required this.library});
-
-  @override
-  State<RunningRoomPage> createState() => _RunningRoomPageState();
-}
-
-class _RunningRoomPageState extends State<RunningRoomPage> {
-  LocalRoomController? _controller;
-
-  /// Bots that could not be seated, with the reason, shown as a banner.
-  final List<String> _setupProblems = [];
-
-  static String _reason(Object e) =>
-      e is EngineError ? e.message : e.toString();
-
-  @override
-  void initState() {
-    super.initState();
-    final engine = Engine(name: widget.room.name, goal: widget.room.goal);
-    for (final t in widget.room.tasks) {
-      engine.seedTask(t, t, requiredRole: 'writer');
-    }
-    final runner = Runner(engine);
-    for (final slot in widget.room.bots) {
-      final bot = widget.library.botById(slot.botId);
-      if (bot == null) continue;
-      final roles = [slot.role];
-      // A bot whose CLI is missing must not take the whole screen down; note
-      // it and carry on seating the others.
-      final BotProvider provider;
-      try {
-        provider = _realBot(bot, slot.role);
-      } catch (e) {
-        _setupProblems.add(
-            '@' + (bot.handle.isEmpty ? bot.name : bot.handle) + ': ' + _reason(e));
-        continue;
-      }
-      runner.seat(
-        bot.handle.isEmpty ? bot.name : bot.handle,
-        roles,
-        provider,
-        mayCreate: slot.role == 'coordinator',
-        maySubmit: slot.role != 'reviewer',
-        mayInspect: slot.role == 'reviewer',
-      );
-    }
-    final controller = LocalRoomController(engine: engine, runner: runner);
-    _controller = controller;
-    controller.start();
-  }
-
-  BotProvider _realBot(BotDef bot, String role) {
-    final handle = bot.handle.isEmpty ? bot.name : bot.handle;
-    final system = 'You are ' +
-        bot.name +
-        ' (@' +
-        handle +
-        '), the ' +
-        role +
-        ' in this room. ' +
-        bot.persona;
-
-    // A subscription backend runs the machine's own CLI, which carries the
-    // sign-in. Nothing here handles a key for those.
-    final cli = bot.provider.cli;
-    if (cli != null) {
-      return AgentCliBot.resolve(
-        cli: cli,
-        handle: handle,
-        system: system,
-        model: bot.model,
-        workdir: widget.room.path,
-      );
-    }
-
-    switch (bot.provider) {
-      case ProviderKind.deepseek:
-        return LlmBot(LlmConfig(
-            kind: LlmKind.openAiCompatible,
-            apiKey: bot.apiKey,
-            model: bot.model.isEmpty
-                ? ModelCatalog.defaultFor(ProviderKind.deepseek)
-                : bot.model,
-            baseUrl: 'https://api.deepseek.com/v1',
-            system: system));
-      default:
-        return ScriptedRoomBot(handle, role);
-    }
-  }
-
-  final TextEditingController _input = TextEditingController();
-  final ScrollController _scroll = ScrollController();
-  bool _showBoard = false;
-  int _seenMessages = 0;
-
-  @override
-  void dispose() {
-    _controller?.dispose();
-    _input.dispose();
-    _scroll.dispose();
-    super.dispose();
-  }
-
-  void _send() {
-    final controller = _controller;
-    if (controller == null) return;
-    final text = _input.text.trim();
-    if (text.isEmpty) return;
-    _input.clear();
-    controller.say(text);
-  }
-
-  /// Follow the conversation as it grows, but leave the scroll alone while a
-  /// person is reading back through it.
-  void _followTranscript(int count) {
-    if (count == _seenMessages) return;
-    _seenMessages = count;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
-        _scroll.animateTo(
-          _scroll.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOut,
-        );
-      }
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final controller = _controller;
-    if (controller == null) {
-      return Scaffold(
-        appBar: AppBar(title: Text(widget.room.name)),
-        body: const EmptyState(
-          icon: Icons.group_off_outlined,
-          title: 'No bots in this room',
-          message: 'Edit the room and add at least one bot, then start it again.',
-        ),
-      );
-    }
-    return AnimatedBuilder(
-      animation: controller,
-      builder: (context, _) {
-        final messages = controller.engine.messages;
-        _followTranscript(messages.length);
-        return Scaffold(
-          appBar: AppBar(
-            titleSpacing: 8,
-            title: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(widget.room.name, style: const TextStyle(fontSize: 17)),
-                Text(
-                  widget.room.goal,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-            actions: [
-              _runPill(controller),
-              IconButton(
-                tooltip: _showBoard ? 'Hide the board' : 'Show the board',
-                icon: Icon(_showBoard ? Icons.checklist : Icons.checklist_outlined),
-                onPressed: () => setState(() => _showBoard = !_showBoard),
-              ),
-              if (controller.state == LocalRunState.running)
-                IconButton(
-                    tooltip: 'Pause',
-                    icon: const Icon(Icons.pause),
-                    onPressed: controller.pause)
-              else if (controller.state == LocalRunState.paused)
-                IconButton(
-                    tooltip: 'Resume',
-                    icon: const Icon(Icons.play_arrow),
-                    onPressed: controller.resume),
-              const SizedBox(width: 4),
-            ],
-          ),
-          body: Column(
-            children: [
-              if (_setupProblems.isNotEmpty)
-                _errorBanner(_setupProblems.join('\n')),
-              if (controller.error != null) _errorBanner(controller.error!),
-              if (_showBoard) _board(controller),
-              Expanded(child: _transcript(controller, messages)),
-              const Divider(height: 1),
-              _composer(controller),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _runPill(LocalRoomController controller) {
-    final (color, label) = switch (controller.state) {
-      LocalRunState.running => (Colors.blue, 'working'),
-      LocalRunState.paused => (Colors.amber, 'paused'),
-      LocalRunState.idle => (Colors.green, 'ready'),
-      LocalRunState.finished => (Colors.green, 'done'),
-      LocalRunState.failed => (Colors.red, 'failed'),
-    };
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
-      child: Center(child: StatusPill(color: color, label: label)),
-    );
-  }
-
-  Widget _errorBanner(String error) {
-    return Builder(builder: (context) {
-      final scheme = Theme.of(context).colorScheme;
-      return Container(
-        width: double.infinity,
-        color: scheme.errorContainer,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        child: Row(
-          children: [
-            Icon(Icons.error_outline, size: 18, color: scheme.onErrorContainer),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(error,
-                  style: TextStyle(fontSize: 12, color: scheme.onErrorContainer)),
-            ),
-          ],
-        ),
-      );
-    });
-  }
-
-  Widget _board(LocalRoomController controller) {
-    final scheme = Theme.of(context).colorScheme;
-    final tasks = controller.engine.tasks.values.toList();
-    return Container(
-      constraints: const BoxConstraints(maxHeight: 220),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest,
-        border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
-      ),
-      child: tasks.isEmpty
-          ? Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text('The board is empty.',
-                  style: TextStyle(color: scheme.onSurfaceVariant)),
-            )
-          : ListView(
-              padding: const EdgeInsets.all(12),
-              children: [
-                for (final t in tasks)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        StatusPill(
-                            color: _taskColor(t.state.name),
-                            label: t.state.name),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(t.title,
-                                  style: const TextStyle(
-                                      fontSize: 13, fontWeight: FontWeight.w600)),
-                              if (t.assignee != null)
-                                Text(
-                                  '@' +
-                                      (controller.engine.agents[t.assignee]?.handle ??
-                                          '?'),
-                                  style: TextStyle(
-                                      fontSize: 11,
-                                      color: scheme.onSurfaceVariant),
-                                ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-              ],
-            ),
-    );
-  }
-
-  static Color _taskColor(String state) {
-    switch (state) {
-      case 'inProgress':
-      case 'claimed':
-        return Colors.blue;
-      case 'blocked':
-        return Colors.amber;
-      case 'inReview':
-        return Colors.purple;
-      case 'approved':
-        return Colors.teal;
-      case 'submitted':
-        return Colors.green;
-      case 'failed':
-      case 'cancelled':
-        return Colors.red;
-      default:
-        return Colors.blueGrey;
-    }
-  }
-
-  Widget _transcript(LocalRoomController controller, List<Message> messages) {
-    if (messages.isEmpty) {
-      return EmptyState(
-        icon: Icons.forum_outlined,
-        title: 'The room is quiet',
-        message: controller.state == LocalRunState.running
-            ? 'The bots are getting started. Anything you say goes to all of them.'
-            : 'Say something to get the bots going.',
-      );
-    }
-    return ListView.builder(
-      controller: _scroll,
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      itemCount: messages.length,
-      itemBuilder: (context, i) => _bubble(controller, messages[i]),
-    );
-  }
-
-  Widget _bubble(LocalRoomController controller, Message message) {
-    final scheme = Theme.of(context).colorScheme;
-    final isBot = message.author.startsWith('@');
-    final handle = isBot ? message.author.substring(1) : message.author;
-    final color = isBot ? handleColor(handle) : scheme.primary;
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (isBot)
-            BotAvatar(handle: handle, radius: 15)
-          else
-            CircleAvatar(
-              radius: 15,
-              backgroundColor: scheme.primary.withValues(alpha: 0.18),
-              child: Icon(Icons.person, size: 16, color: scheme.primary),
-            ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  message.author,
-                  style: TextStyle(
-                      fontWeight: FontWeight.w700, fontSize: 12.5, color: color),
-                ),
-                const SizedBox(height: 3),
-                SelectableText(
-                  message.body,
-                  style: const TextStyle(fontSize: 14, height: 1.38),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _composer(LocalRoomController controller) {
-    final busy = controller.state == LocalRunState.running;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _input,
-              minLines: 1,
-              maxLines: 5,
-              textInputAction: TextInputAction.send,
-              onSubmitted: (_) => _send(),
-              decoration: InputDecoration(
-                hintText: busy
-                    ? 'The bots are working — you can still chime in'
-                    : 'Message the room…',
-                filled: true,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(24),
-                  borderSide: BorderSide.none,
-                ),
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          FilledButton(
-            onPressed: _send,
-            style: FilledButton.styleFrom(
-              shape: const CircleBorder(),
-              padding: const EdgeInsets.all(15),
-            ),
-            child: const Icon(Icons.arrow_upward, size: 19),
-          ),
-        ],
-      ),
-    );
   }
 }
 
@@ -764,6 +337,8 @@ class _BotEditorState extends State<_BotEditor> {
   final TextEditingController _customModel = TextEditingController();
 
   late ProviderKind _provider;
+  late String _role;
+  RolePowers? _powers;
   String _model = '';
   bool _custom = false;
 
@@ -782,6 +357,8 @@ class _BotEditorState extends State<_BotEditor> {
     _persona = TextEditingController(text: b?.persona ?? '');
     _key = TextEditingController(text: b?.apiKey ?? '');
     _provider = b?.provider ?? ProviderKind.anthropic;
+    _role = b?.role ?? Roles.defaultKey;
+    _powers = b?.powers;
     _model = b?.model ?? '';
     _loadModels();
   }
@@ -873,6 +450,10 @@ class _BotEditorState extends State<_BotEditor> {
                 ),
               ),
               const SizedBox(height: 18),
+              Text('Job', style: Theme.of(context).textTheme.labelLarge),
+              const SizedBox(height: 8),
+              _rolePicker(scheme),
+              const SizedBox(height: 18),
               Text('Brain', style: Theme.of(context).textTheme.labelLarge),
               const SizedBox(height: 8),
               DropdownButtonFormField<ProviderKind>(
@@ -899,6 +480,85 @@ class _BotEditorState extends State<_BotEditor> {
             onPressed: () => Navigator.pop(context),
             child: const Text('Cancel')),
         FilledButton(onPressed: _save, child: const Text('Save')),
+      ],
+    );
+  }
+
+  /// The job the bot holds, grouped the way an organisation is.
+  Widget _rolePicker(ColorScheme scheme) {
+    final role = Roles.byKey(_role);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        DropdownButtonFormField<String>(
+          initialValue: _role,
+          isExpanded: true,
+          decoration: const InputDecoration(
+              labelText: 'Role', border: OutlineInputBorder()),
+          items: [
+            for (final group in RoleGroup.values) ...[
+              DropdownMenuItem<String>(
+                enabled: false,
+                value: '__group_${group.name}',
+                child: Text(group.label.toUpperCase(),
+                    style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.6,
+                        color: scheme.onSurfaceVariant)),
+              ),
+              for (final r in Roles.inGroup(group))
+                DropdownMenuItem<String>(
+                  value: r.key,
+                  child: Row(
+                    children: [
+                      Icon(roleIcon(r.icon), size: 16),
+                      const SizedBox(width: 8),
+                      Flexible(
+                          child: Text(r.label, overflow: TextOverflow.ellipsis)),
+                    ],
+                  ),
+                ),
+            ],
+          ],
+          onChanged: (v) {
+            if (v == null || v.startsWith('__group_')) return;
+            // Changing the job resets any hand-tuned permissions, so the new
+            // role's defaults are what actually apply.
+            setState(() {
+              _role = v;
+              _powers = null;
+            });
+          },
+        ),
+        const SizedBox(height: 6),
+        Text(role.summary,
+            style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
+        const SizedBox(height: 8),
+        _powerChips(scheme, role),
+      ],
+    );
+  }
+
+  /// What the role is allowed to do, and a way to override it.
+  Widget _powerChips(ColorScheme scheme, RoleDef role) {
+    final powers = _powers ?? role.powers;
+    Widget chip(String label, bool on, RolePowers Function(bool) apply) =>
+        FilterChip(
+          label: Text(label, style: const TextStyle(fontSize: 11)),
+          selected: on,
+          visualDensity: VisualDensity.compact,
+          onSelected: (v) => setState(() => _powers = apply(v)),
+        );
+    return Wrap(
+      spacing: 6,
+      runSpacing: 4,
+      children: [
+        chip('Creates tasks', powers.mayCreateTasks,
+            (v) => powers.copyWith(mayCreateTasks: v)),
+        chip('Inspects work', powers.mayInspect,
+            (v) => powers.copyWith(mayInspect: v)),
+        chip('Delivers', powers.maySubmit, (v) => powers.copyWith(maySubmit: v)),
       ],
     );
   }
@@ -969,9 +629,27 @@ class _BotEditorState extends State<_BotEditor> {
     final list = _models;
     if (list == null) return const SizedBox.shrink();
 
+    if (list.options.isEmpty && !_custom) {
+      // Nothing can be listed yet — say why rather than inventing options.
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(list.problem ?? 'No models available yet.',
+              style: TextStyle(fontSize: 12, color: Colors.orange)),
+          const SizedBox(height: 6),
+          TextButton.icon(
+            onPressed: () => setState(() => _custom = true),
+            icon: const Icon(Icons.edit, size: 15),
+            label: const Text('Enter a model id instead'),
+          ),
+        ],
+      );
+    }
     final value = _custom
         ? _customValue
-        : (list.options.any((o) => o.id == _model) ? _model : list.options.first.id);
+        : (list.options.any((o) => o.id == _model)
+            ? _model
+            : (list.options.isEmpty ? _customValue : list.options.first.id));
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1064,6 +742,8 @@ class _BotEditorState extends State<_BotEditor> {
       provider: _provider,
       model: _resolvedModel,
       apiKey: _key.text.trim(),
+      role: _role,
+      powers: _powers,
     ));
     Navigator.pop(context);
   }
