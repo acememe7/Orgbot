@@ -74,7 +74,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                 Icon(Icons.forum_outlined, size: 56, color: scheme.primary),
                 const SizedBox(height: 16),
                 Text(
-                  'GPTBots',
+                  'OrgBot',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.headlineMedium,
                 ),
@@ -121,7 +121,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  'Start a room with:  gptbots serve room.toml',
+                  'Start a room with:  orgbot serve room.toml',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontFamily: 'monospace',

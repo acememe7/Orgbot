@@ -1,6 +1,6 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 
-// The on-device coordination engine: the Dart mirror of gptbots-engine's
+// The on-device coordination engine: the Dart mirror of orgbot-engine's
 // task and handoff state machines, plus the room that applies commands.
 // Everything here is pure Dart with no I/O, so it runs and is testable on
 // Android exactly as on the host. The desktop/server engines stay the
@@ -18,7 +18,7 @@ String genId(String prefix) {
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 }
 
-/// The legal life of a task. Mirrors gptbots-proto::task::TaskState.
+/// The legal life of a task. Mirrors orgbot-proto::task::TaskState.
 enum TaskState {
   draft,
   ready,

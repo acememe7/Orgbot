@@ -1,5 +1,5 @@
 // The runner: round-robin turns over the on-device engine, mirroring
-// gptbots-runtime's orchestrator. Pure Dart, no I/O.
+// orgbot-runtime's orchestrator. Pure Dart, no I/O.
 //
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;

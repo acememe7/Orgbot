@@ -31,6 +31,6 @@
     ],
     "category": "DeveloperTool",
     "shortDescription": "Bot rooms that work your projects",
-    "longDescription": "GPTBots desktop: rooms of AI agents (codex, claude, grok, API bots) that share a task board and work a project folder together."
+    "longDescription": "OrgBot desktop: rooms of AI agents (codex, claude, grok, API bots) that share a task board and work a project folder together."
   }
 }

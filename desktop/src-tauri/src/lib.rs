@@ -1,6 +1,6 @@
 //! OrgBot desktop shell: a bot library and group-chat rooms over the local
 //! engine. Rooms are persisted as JSON under the app data dir; starting one
-//! writes a room definition the embedded gptbots host runs, with agent-CLI
+//! writes a room definition the embedded orgbot host runs, with agent-CLI
 //! bots working the room's project path.
 
 use std::net::SocketAddr;
@@ -313,7 +313,7 @@ fn start_host(app: tauri::AppHandle, config: PathBuf) -> Result<HostInfo, String
     let owned = config.clone();
     let task = tauri::async_runtime::spawn(async move {
         if let Err(error) =
-            gptbots_server::serve_room_with_readiness(&owned, addr, Some(ready_tx)).await
+            orgbot_server::serve_room_with_readiness(&owned, addr, Some(ready_tx)).await
         {
             eprintln!("room host failed: {error}");
         }
@@ -367,7 +367,7 @@ fn host_status(app: tauri::AppHandle) -> HostInfo {
 
 // -------------------------------------------------------- room generation
 
-/// Render a room as the TOML the embedded gptbots host runs. Agent-CLI bots
+/// Render a room as the TOML the embedded orgbot host runs. Agent-CLI bots
 /// work the room's project path; scripted bots are deterministic stand-ins.
 fn room_toml(room: &RoomDef, bots: &[BotDef]) -> Result<String, String> {
     let mut out = String::new();

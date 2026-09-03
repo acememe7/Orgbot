@@ -6,7 +6,7 @@
 // directly and no key is ever entered or stored. Only a raw API endpoint such
 // as DeepSeek still needs one.
 //
-// The invocations here mirror gptbots-providers::agent_cli in the Rust core,
+// The invocations here mirror orgbot-providers::agent_cli in the Rust core,
 // which is the proven version; the difference is what comes back. The Rust
 // build hands the CLI an MCP relay so it can drive the board with real tool
 // calls. There is no such relay on-device, so instead the room's tool surface

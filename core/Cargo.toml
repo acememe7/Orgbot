@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/gptbots-proto",
-    "crates/gptbots-engine",
-    "crates/gptbots-providers",
-    "crates/gptbots-tools",
-    "crates/gptbots-runtime",
-    "crates/gptbots-server",
+    "crates/orgbot-proto",
+    "crates/orgbot-engine",
+    "crates/orgbot-providers",
+    "crates/orgbot-tools",
+    "crates/orgbot-runtime",
+    "crates/orgbot-server",
 ]
 
 [workspace.package]
@@ -16,11 +16,11 @@ rust-version = "1.82"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-gptbots-proto     = { path = "crates/gptbots-proto" }
-gptbots-engine    = { path = "crates/gptbots-engine" }
-gptbots-providers = { path = "crates/gptbots-providers" }
-gptbots-tools     = { path = "crates/gptbots-tools" }
-gptbots-runtime   = { path = "crates/gptbots-runtime" }
+orgbot-proto     = { path = "crates/orgbot-proto" }
+orgbot-engine    = { path = "crates/orgbot-engine" }
+orgbot-providers = { path = "crates/orgbot-providers" }
+orgbot-tools     = { path = "crates/orgbot-tools" }
+orgbot-runtime   = { path = "crates/orgbot-runtime" }
 
 anyhow      = "1"
 thiserror   = "2"

@@ -1,0 +1,13 @@
+[package]
+name = "orgbot-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Wire protocol, identifiers, and state machines shared by every OrgBot surface."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true

@@ -1,6 +1,6 @@
 /// OrgBot — a group chat of AI bots working a shared task board.
 ///
-/// This client connects to a `gptbots serve` WebSocket endpoint, renders the
+/// This client connects to a `orgbot serve` WebSocket endpoint, renders the
 /// room's chat, roster, and board live, and lets a person talk to the room.
 library;
 

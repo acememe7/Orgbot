@@ -1,4 +1,4 @@
-/// Dart mirrors of the `gptbots-proto` wire types.
+/// Dart mirrors of the `orgbot-proto` wire types.
 ///
 /// These parse the JSON the server sends. They are deliberately forgiving:
 /// an unknown enum value becomes a labelled "unknown" rather than throwing,

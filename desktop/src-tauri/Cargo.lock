@@ -1379,10 +1379,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "gptbots-engine"
+name = "orgbot-engine"
 version = "0.1.0"
 dependencies = [
- "gptbots-proto",
+ "orgbot-proto",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1391,7 +1391,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gptbots-proto"
+name = "orgbot-proto"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -1401,12 +1401,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "gptbots-providers"
+name = "orgbot-providers"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
- "gptbots-proto",
+ "orgbot-proto",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -1416,14 +1416,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "gptbots-runtime"
+name = "orgbot-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "gptbots-engine",
- "gptbots-proto",
- "gptbots-providers",
- "gptbots-tools",
+ "orgbot-engine",
+ "orgbot-proto",
+ "orgbot-providers",
+ "orgbot-tools",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1432,18 +1432,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "gptbots-server"
+name = "orgbot-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
  "clap",
  "futures",
- "gptbots-engine",
- "gptbots-proto",
- "gptbots-providers",
- "gptbots-runtime",
- "gptbots-tools",
+ "orgbot-engine",
+ "orgbot-proto",
+ "orgbot-providers",
+ "orgbot-runtime",
+ "orgbot-tools",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1456,12 +1456,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "gptbots-tools"
+name = "orgbot-tools"
 version = "0.1.0"
 dependencies = [
- "gptbots-engine",
- "gptbots-proto",
- "gptbots-providers",
+ "orgbot-engine",
+ "orgbot-proto",
+ "orgbot-providers",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -2522,7 +2522,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 name = "orgbot-desktop"
 version = "0.1.0"
 dependencies = [
- "gptbots-server",
+ "orgbot-server",
  "serde",
  "serde_json",
  "tauri",

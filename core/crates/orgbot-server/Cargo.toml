@@ -1,0 +1,35 @@
+[package]
+name = "orgbot-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Hosts group-chat rooms over WebSocket, and runs them headless from the CLI."
+default-run = "orgbot"
+
+[[bin]]
+name = "orgbot"
+path = "src/main.rs"
+
+[dependencies]
+orgbot-proto.workspace = true
+orgbot-engine.workspace = true
+orgbot-providers.workspace = true
+orgbot-tools.workspace = true
+orgbot-runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

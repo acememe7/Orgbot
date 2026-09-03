@@ -1,4 +1,4 @@
-/// A thin WebSocket connection to a gptbots server.
+/// A thin WebSocket connection to a orgbot server.
 ///
 /// This owns the socket and nothing else: it decodes inbound frames to JSON
 /// maps and forwards them, and it encodes outbound client messages. All

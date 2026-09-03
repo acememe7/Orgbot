@@ -39,12 +39,12 @@ client can attach mid-run and catch up, and a run is reproducible after the fact
 
 ```
 core/                     Rust workspace — the whole backend
-  gptbots-proto           wire types + the task/handoff state machines
-  gptbots-engine          the room: task board, handoff routing, deadlock detection
-  gptbots-providers       model backends: Anthropic, DeepSeek, OpenAI-compatible, scripted
-  gptbots-tools           the tool surface bots act through (chat, board, handoffs, review)
-  gptbots-runtime         the bot turn loop and the scheduler
-  gptbots-server          TOML rooms, a WebSocket host, and the `gptbots` CLI
+  orgbot-proto           wire types + the task/handoff state machines
+  orgbot-engine          the room: task board, handoff routing, deadlock detection
+  orgbot-providers       model backends: Anthropic, DeepSeek, OpenAI-compatible, scripted
+  orgbot-tools           the tool surface bots act through (chat, board, handoffs, review)
+  orgbot-runtime         the bot turn loop and the scheduler
+  orgbot-server          TOML rooms, a WebSocket host, and the `orgbot` CLI
 app/                      Flutter client for Linux + Android
 ```
 
@@ -59,15 +59,15 @@ cd core && cargo build --release
 Create a room, check it, and run it headless (live transcript in your terminal):
 
 ```bash
-./target/release/gptbots init room.toml
-./target/release/gptbots check room.toml
-./target/release/gptbots run room.toml
+./target/release/orgbot init room.toml
+./target/release/orgbot check room.toml
+./target/release/orgbot run room.toml
 ```
 
 Or host it for the app to attach to:
 
 ```bash
-./target/release/gptbots serve room.toml --addr 127.0.0.1:8787
+./target/release/orgbot serve room.toml --addr 127.0.0.1:8787
 ```
 
 Then run the Flutter app and connect to `ws://127.0.0.1:8787/ws`:

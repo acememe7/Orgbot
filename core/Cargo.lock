@@ -472,96 +472,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gptbots-engine"
-version = "0.1.0"
-dependencies = [
- "gptbots-proto",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "gptbots-proto"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "uuid",
-]
-
-[[package]]
-name = "gptbots-providers"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "gptbots-proto",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "gptbots-runtime"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "gptbots-engine",
- "gptbots-proto",
- "gptbots-providers",
- "gptbots-tools",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "gptbots-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "futures",
- "gptbots-engine",
- "gptbots-proto",
- "gptbots-providers",
- "gptbots-runtime",
- "gptbots-tools",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "toml",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "gptbots-tools"
-version = "0.1.0"
-dependencies = [
- "gptbots-engine",
- "gptbots-proto",
- "gptbots-providers",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -925,6 +835,96 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "orgbot-engine"
+version = "0.1.0"
+dependencies = [
+ "orgbot-proto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "orgbot-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
+name = "orgbot-providers"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "orgbot-proto",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "orgbot-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "orgbot-engine",
+ "orgbot-proto",
+ "orgbot-providers",
+ "orgbot-tools",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "orgbot-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures",
+ "orgbot-engine",
+ "orgbot-proto",
+ "orgbot-providers",
+ "orgbot-runtime",
+ "orgbot-tools",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "orgbot-tools"
+version = "0.1.0"
+dependencies = [
+ "orgbot-engine",
+ "orgbot-proto",
+ "orgbot-providers",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+]
 
 [[package]]
 name = "percent-encoding"

@@ -1,4 +1,4 @@
-# gptbots_app
+# orgbot_app
 
 A new Flutter project.
 

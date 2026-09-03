@@ -27,9 +27,9 @@ Section: devel
 Priority: optional
 Architecture: amd64
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0, libayatana-appindicator3-1, librsvg2-common
-Maintainer: GPTBots <theaeceme@gmail.com>
+Maintainer: OrgBot <theaeceme@gmail.com>
 Description: Rooms of AI agents working a shared task board
- GPTBots hosts a room of AI bots (codex, claude, grok, or API-backed) that
+ OrgBot hosts a room of AI bots (codex, claude, grok, or API-backed) that
  plan, hand off, inspect and submit work on a shared task board inside your
  project folders. This desktop shell hosts a room locally and shows its
  chat, roster and board.
