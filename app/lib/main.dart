@@ -72,8 +72,9 @@ class HomeScreen extends StatelessWidget {
                   icon: Icons.key_outlined,
                   title: 'Sign in',
                   subtitle:
-                      'Bring your Claude, Codex or Grok subscription to this '
-                      'device so your bots can use it.',
+                      'Use the ChatGPT or Grok subscription you already pay '
+                      'for. Approve a code in your browser, and this device '
+                      'has its own sign-in.',
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute(
                         builder: (_) => SignInScreen(credentials: credentials)),

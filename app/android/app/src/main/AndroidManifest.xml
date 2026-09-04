@@ -1,4 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The engine runs in this process and calls the provider APIs itself, so
+         the release build needs network access. Flutter's template only grants
+         it in the debug and profile manifests, which leaves a release APK
+         unable to reach anything. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="OrgBot"
         android:name="${applicationName}"
