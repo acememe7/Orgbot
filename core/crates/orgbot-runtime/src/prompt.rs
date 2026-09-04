@@ -76,6 +76,21 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            Someone is blocked on your answer.\n\n",
     );
 
+    // An agent CLI reaches the board through MCP, and every MCP client
+    // namespaces a server's tools by its name. The prompt above calls them
+    // `claim_task` and so on; the agent will only find `orgbot_room__claim_task`.
+    // Without this it hunts for the bare names, concludes it has no room tools,
+    // and does nothing — which is exactly a room where the board stays empty.
+    if let orgbot_proto::agent::ProviderRef::CliAgent { mcp: true, .. } = spec.provider {
+        out.push_str(
+            "Your room tools arrive over MCP and are prefixed with the server \
+             name. Every tool named above is called as `orgbot_room__<name>` — \
+             `orgbot_room__claim_task`, `orgbot_room__create_task`, \
+             `orgbot_room__add_artifact`, and so on. Use those exact names; the \
+             unprefixed ones do not exist.\n\n",
+        );
+    }
+
     out.push_str(
         "Style: you are talking to colleagues. Be brief and concrete. Say what you \
          did and what you need, not what you are about to do. Do not narrate your \

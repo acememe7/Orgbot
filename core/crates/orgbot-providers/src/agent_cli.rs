@@ -70,6 +70,8 @@ pub struct AgentCliProvider {
     policy: AgentPolicy,
     /// The CLI session id, established on the first turn and resumed after.
     session: Mutex<Option<String>>,
+    /// The socket handed in on the last request, for diagnostics.
+    last_socket: Mutex<Option<String>>,
     /// Whether the room's board is served to the agent as MCP tools.
     mcp: bool,
     /// Turn ceiling.
@@ -114,6 +116,7 @@ impl AgentCliProvider {
             policy,
             mcp,
             session: Mutex::new(None),
+            last_socket: Mutex::new(None),
             timeout,
         })
     }
@@ -126,6 +129,11 @@ impl AgentCliProvider {
     /// Whether the room board is served to the agent as MCP tools.
     pub fn serves_room_tools(&self) -> bool {
         self.mcp
+    }
+
+    /// Whether a room MCP socket was supplied on the last request, for logs.
+    fn mcp_socket_debug(&self) -> Option<String> {
+        self.last_socket.lock().unwrap().clone()
     }
 
     /// The session id this provider is currently resuming, if any.
@@ -203,6 +211,7 @@ impl Provider for AgentCliProvider {
         request: CompletionRequest,
         sink: Option<mpsc::Sender<StreamEvent>>,
     ) -> Result<CompletionResponse> {
+        *self.last_socket.lock().unwrap() = request.mcp_socket.clone();
         let resumed = self.session.lock().unwrap().clone();
         let situation = latest_instruction(&request.messages);
         let prompt = match (&resumed, situation) {
@@ -321,6 +330,13 @@ impl AgentCliProvider {
             cmd.current_dir(&self.workdir);
         }
         cmd.env("NO_COLOR", "1");
+        tracing::debug!(
+            cli = self.cli.binary(),
+            overlay = ?codex_home,
+            mcp = self.mcp,
+            socket = ?self.mcp_socket_debug(),
+            "spawning agent CLI"
+        );
         if let Some(home) = codex_home {
             // Both CLIs discover MCP servers through their config home; the
             // variable that points at it differs.

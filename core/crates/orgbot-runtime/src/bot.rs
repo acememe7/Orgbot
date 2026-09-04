@@ -308,6 +308,12 @@ async fn complete_with_mcp(
                 let reply = {
                     let mut dispatch = |name: &str, args: &serde_json::Value| {
                         let outcome = orgbot_tools::dispatch(engine, actor, name, args);
+                        tracing::debug!(
+                            tool = name,
+                            error = outcome.is_error,
+                            result = %outcome.content.chars().take(160).collect::<String>(),
+                            "mcp tool call"
+                        );
                         if outcome.is_error {
                             calls_err += 1;
                         } else {
