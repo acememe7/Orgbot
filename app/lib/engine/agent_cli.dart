@@ -67,7 +67,7 @@ class CliStatus {
 /// `which` is not used: these CLIs are commonly installed under ~/.local/bin
 /// or a version manager's shims, which a non-login shell's PATH may not carry.
 CliStatus findCli(CliKind cli) {
-  if (!_canSpawn) {
+  if (!canRunAgentClis) {
     return const CliStatus(null,
         'Agent CLIs run on desktop only — this platform cannot start one.');
   }
@@ -102,9 +102,12 @@ bool _isExecutable(String path) {
   }
 }
 
-/// Whether this platform can start a subprocess at all. Android cannot run
-/// these CLIs, so the UI must offer a different backend there.
-bool get _canSpawn => Platform.isLinux || Platform.isMacOS || Platform.isWindows;
+/// Whether this device can run the agent CLIs at all.
+///
+/// A phone cannot, so anything that depends on a CLI must either use a
+/// signed-in subscription over the API or be left out of the picker.
+bool get canRunAgentClis =>
+    Platform.isLinux || Platform.isMacOS || Platform.isWindows;
 
 /// A bot that runs one of the machine's agent CLIs as a resumable session.
 class AgentCliBot implements BotProvider {

@@ -507,7 +507,6 @@ fn describe(outcome: &RunOutcome) -> String {
 mod tests {
     use super::*;
     use crate::config::RoomConfig;
-    use orgbot_proto::event::Event;
 
     const SCRIPTED_ROOM: &str = r#"
         [room]
@@ -562,10 +561,16 @@ mod tests {
         let mut events = handle.subscribe();
         let run = tokio::spawn(session.run());
 
-        // The scripted coordinator has nothing to do with a task it cannot work,
-        // so the room stalls quickly — but a subscriber still sees real events
-        // (at minimum the closing message) before it ends.
-        let outcome = run.await.unwrap();
+        // The scripted coordinator has nothing to do with a task it cannot
+        // work, so the room settles into rest quickly. A room you can talk to
+        // does not end there — it waits — so close it the way a client does,
+        // by going away.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        drop(handle);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+            .await
+            .expect("a resting room must stop once its last client is gone")
+            .unwrap();
         assert!(matches!(
             outcome,
             RunOutcome::Stalled { .. } | RunOutcome::Idle | RunOutcome::Completed
@@ -589,12 +594,13 @@ mod tests {
         let run = tokio::spawn(session.run());
 
         let snapshot = handle.snapshot().await;
-        // The room may finish before the request lands; either a snapshot or a
-        // cleanly stopped room is acceptable, never a hang.
+        // The room may already be resting when the request lands; either a
+        // snapshot or a cleanly stopped room is acceptable, never a hang.
         if let Some(ServerMessage::Snapshot { roster, .. }) = snapshot {
             assert_eq!(roster.len(), 1);
         }
-        let _ = run.await;
+        drop(handle);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run).await;
     }
 
     #[tokio::test]
@@ -611,7 +617,12 @@ mod tests {
             })
             .await;
 
-        let _ = run.await;
+        // Give the room a moment to fold the message into the transcript, then
+        // close it: a resting room waits for a client rather than ending.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        drop(handle);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run).await;
+
         let mut saw_message = false;
         while let Ok(message) = events.try_recv() {
             if let ServerMessage::Event { envelope } = message {

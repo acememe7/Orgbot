@@ -477,6 +477,10 @@ class _BotEditorState extends State<_BotEditor> {
                 decoration: const InputDecoration(
                     labelText: 'Provider', border: OutlineInputBorder()),
                 items: ProviderKind.values
+                    // Anthropic has no device-code sign-in, so off a computer
+                    // it would be an option that can never work.
+                    .where((k) =>
+                        k.cli == null || canRunAgentClis || k.signsInOnDevice)
                     .map((k) => DropdownMenuItem(value: k, child: Text(k.label)))
                     .toList(),
                 onChanged: (v) => _changeProvider(v ?? _provider),
@@ -603,7 +607,8 @@ class _BotEditorState extends State<_BotEditor> {
       );
     }
 
-    // A paired sign-in works everywhere, including a phone with no CLIs.
+    // A signed-in subscription works everywhere, including a phone with
+    // no CLIs, because the engine calls the provider's API directly.
     final paired = ModelCatalog.credentials?.forProvider(_provider);
     if (paired != null) {
       return StatusPill(
@@ -624,20 +629,25 @@ class _BotEditorState extends State<_BotEditor> {
         icon: Icons.verified_user_outlined,
       );
     }
+    // Not signed in, and no CLI to sign in with. Where the provider offers a
+    // device-code flow that is the fix; otherwise the CLI is the only route.
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const StatusPill(
+        StatusPill(
           color: Colors.orange,
-          label: 'CLI not found',
+          label: _provider.signsInOnDevice ? 'Not signed in' : 'CLI not found',
           icon: Icons.error_outline,
         ),
         const SizedBox(height: 6),
         Text(
-          '${status.problem}\n'
-          'Either install ${cli.binary} and sign in with it, or bring a '
-          'sign-in from a machine that has it — run `orgbot pair` there and '
-          'import it from Sign in.',
+          _provider.signsInOnDevice
+              ? 'Open Sign in and approve ${_provider.label} with the account '
+                  'you already pay for. No API key, and nothing to install.'
+              : '${status.problem}\n'
+                  'Install ${cli.binary} and sign in with it, or bring a '
+                  'sign-in from a machine that has it — run `orgbot pair` '
+                  'there and import it from Sign in.',
           style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
         ),
       ],

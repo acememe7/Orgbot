@@ -1,10 +1,12 @@
 // The sign-ins this device holds.
 //
-// A phone has no agent CLIs to sign in with, but the tokens those CLIs hold on
-// a desktop are ordinary OAuth access tokens that the provider APIs accept
-// directly. So the phone does not need its own OAuth client — it needs the
-// sign-in you already have, carried across. `orgbot pair` on the desktop emits
-// the bundle this reads.
+// A phone has no agent CLIs, so it signs in to a subscription itself with the
+// device-code flow in `oauth/device_auth.dart`. Carrying a desktop's sign-ins
+// across with `orgbot pair` still works and is the fallback for a provider
+// with no device flow, but it is no longer the way in.
+//
+// Access tokens expire within hours, so what is stored is the refresh token
+// alongside them; [Credentials.freshToken] renews on demand.
 //
 // Tokens are secrets. They are stored on the device and never written into a
 // room file, and `toString` on anything here redacts them, because these
@@ -19,6 +21,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'model_catalog.dart';
+import 'oauth/device_auth.dart';
 import 'models.dart';
 
 /// How a credential authenticates.
@@ -45,7 +48,27 @@ class ProviderCredential {
     this.plan,
     this.models = const [],
     this.importedAt,
+    this.refreshToken,
+    this.expiresAt,
   });
+
+  /// Build from a completed device-code sign-in.
+  factory ProviderCredential.fromToken(
+    ProviderKind provider,
+    OAuthToken token, {
+    List<ModelOption> models = const [],
+  }) =>
+      ProviderCredential(
+        provider: provider,
+        token: token.accessToken,
+        kind: CredentialKind.bearer,
+        account: token.account,
+        plan: token.plan,
+        models: models,
+        importedAt: DateTime.now(),
+        refreshToken: token.refreshToken,
+        expiresAt: token.expiresAt,
+      );
 
   /// Which backend this signs in to.
   final ProviderKind provider;
@@ -68,6 +91,28 @@ class ProviderCredential {
   /// When this was imported.
   final DateTime? importedAt;
 
+  /// Renews [token] without asking the person again. Absent for a pasted
+  /// bundle, whose token cannot be renewed on this device.
+  final String? refreshToken;
+
+  /// When [token] stops working, where the provider said.
+  final DateTime? expiresAt;
+
+  /// Whether the token is close enough to expiry to renew before using.
+  ///
+  /// The margin covers a room that starts just before the token lapses; a
+  /// turn that begins valid must not fail partway through.
+  bool get needsRenewal {
+    final expiry = expiresAt;
+    if (expiry == null) return false;
+    return DateTime.now()
+        .add(const Duration(minutes: 10))
+        .isAfter(expiry);
+  }
+
+  /// Whether this can be renewed at all.
+  bool get canRenew => (refreshToken ?? '').isNotEmpty;
+
   Map<String, Object?> toJson() => {
         'provider': provider.key,
         'token': token,
@@ -78,6 +123,8 @@ class ProviderCredential {
           for (final model in models) {'id': model.id, 'label': model.label},
         ],
         'imported_at': (importedAt ?? DateTime.now()).millisecondsSinceEpoch,
+        'refresh_token': refreshToken,
+        'expires_at': expiresAt?.millisecondsSinceEpoch,
       };
 
   static ProviderCredential? fromJson(Map<String, Object?> json) {
@@ -103,6 +150,10 @@ class ProviderCredential {
           : const [],
       importedAt: json['imported_at'] is num
           ? DateTime.fromMillisecondsSinceEpoch((json['imported_at'] as num).toInt())
+          : null,
+      refreshToken: json['refresh_token'] as String?,
+      expiresAt: json['expires_at'] is num
+          ? DateTime.fromMillisecondsSinceEpoch((json['expires_at'] as num).toInt())
           : null,
     );
   }
@@ -218,6 +269,65 @@ class Credentials extends ChangeNotifier {
     await _persist();
     notifyListeners();
     return imported;
+  }
+
+  /// Record a completed device-code sign-in.
+  ///
+  /// The models list is kept from any previous sign-in to the same provider,
+  /// so signing in again after a token lapses does not empty the picker.
+  Future<void> signIn(ProviderKind provider, OAuthToken token) async {
+    final existing = _byProvider[provider];
+    _byProvider[provider] = ProviderCredential.fromToken(
+      provider,
+      token,
+      models: existing?.models ?? const [],
+    );
+    await _persist();
+    notifyListeners();
+  }
+
+  /// Attach a freshly loaded model list to a sign-in.
+  Future<void> setModels(
+      ProviderKind provider, List<ModelOption> models) async {
+    final existing = _byProvider[provider];
+    if (existing == null || models.isEmpty) return;
+    _byProvider[provider] = ProviderCredential(
+      provider: existing.provider,
+      token: existing.token,
+      kind: existing.kind,
+      account: existing.account,
+      plan: existing.plan,
+      models: models,
+      importedAt: existing.importedAt,
+      refreshToken: existing.refreshToken,
+      expiresAt: existing.expiresAt,
+    );
+    await _persist();
+    notifyListeners();
+  }
+
+  /// An access token that will still be valid when it is used, renewing first
+  /// if the stored one is close to expiry.
+  ///
+  /// Returns null when this provider is not signed in, or when the sign-in has
+  /// lapsed and cannot be renewed — the caller should send the person back to
+  /// the sign-in screen rather than starting a room that will fail mid-turn.
+  Future<String?> freshToken(ProviderKind provider, {DeviceAuth? auth}) async {
+    final credential = _byProvider[provider];
+    if (credential == null) return null;
+    if (!credential.needsRenewal) return credential.token;
+    if (!credential.canRenew) return null;
+    try {
+      final renewed = await (auth ?? DeviceAuth())
+          .refresh(provider, credential.refreshToken!);
+      await signIn(provider, renewed);
+      return renewed.accessToken;
+    } on SignInError {
+      // A refusal here means the sign-in is gone for good; drop it so the UI
+      // shows the provider as signed out rather than silently failing rooms.
+      await forget(provider);
+      return null;
+    }
   }
 
   /// Forget one provider's sign-in.

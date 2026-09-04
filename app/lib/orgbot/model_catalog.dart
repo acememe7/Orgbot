@@ -111,11 +111,14 @@ class ModelCatalog {
   }
 
   static Future<ModelList> _loadLive(ProviderKind kind, String apiKey) async {
+    // A signed-in subscription can ask the provider directly, which is the
+    // only route on a phone and the more current one anywhere.
+    final token = credentials?.forProvider(kind)?.token;
     switch (kind) {
       case ProviderKind.codex:
-        return _fromCodexCache();
+        return token == null ? _fromCodexCache() : _fromCodexApi(token);
       case ProviderKind.grok:
-        return _fromGrokCli();
+        return token == null ? _fromGrokCli() : _fromGrokApi(token);
       case ProviderKind.anthropic:
         return ModelList(_claudeAliases, ModelSource.live);
       case ProviderKind.deepseek:
@@ -195,6 +198,101 @@ class ModelCatalog {
       options.add(ModelOption(id, id, note: isDefault ? 'Default' : ''));
     }
     return ModelList(options, ModelSource.live);
+  }
+
+  /// The Codex client version the models endpoint is asked for. It is a
+  /// required query parameter, and the backend tailors the list to it.
+  static const String _codexClientVersion = '0.153.2';
+
+  /// Ask the ChatGPT backend what a signed-in subscription may run.
+  static Future<ModelList> _fromCodexApi(String token) async {
+    final body = await _get(
+      Uri.parse('https://chatgpt.com/backend-api/codex/models'
+          '?client_version=$_codexClientVersion'),
+      {
+        'authorization': 'Bearer ' + token,
+        'originator': 'codex_cli_rs',
+        'user-agent': 'codex_cli_rs/$_codexClientVersion (OrgBot)',
+        'accept': 'application/json',
+      },
+      ProviderKind.codex,
+    );
+    if (body is ModelList) return body;
+    final root = jsonDecode(body as String);
+    final models = root is Map ? root['models'] : null;
+    if (models is! List) {
+      return ModelList(fallbackFor(ProviderKind.codex), ModelSource.fallback,
+          'unexpected response shape');
+    }
+    final options = <ModelOption>[];
+    for (final entry in models) {
+      if (entry is! Map) continue;
+      final slug = entry['slug'];
+      if (slug is! String || slug.isEmpty) continue;
+      if (entry['visibility'] == 'hidden') continue;
+      final display = entry['display_name'];
+      options.add(ModelOption(
+        slug,
+        display is String && display.isNotEmpty ? display : slug,
+        note: entry['description'] is String
+            ? _firstSentence(entry['description'] as String)
+            : '',
+      ));
+    }
+    return ModelList(options, ModelSource.live);
+  }
+
+  /// Ask the xAI API what a signed-in subscription may run. The OAuth token
+  /// the sign-in produced is accepted here exactly like an API key.
+  static Future<ModelList> _fromGrokApi(String token) async {
+    final body = await _get(
+      Uri.parse('https://api.x.ai/v1/models'),
+      {'authorization': 'Bearer ' + token, 'accept': 'application/json'},
+      ProviderKind.grok,
+    );
+    if (body is ModelList) return body;
+    final root = jsonDecode(body as String);
+    final data = root is Map ? root['data'] : null;
+    if (data is! List) {
+      return ModelList(fallbackFor(ProviderKind.grok), ModelSource.fallback,
+          'unexpected response shape');
+    }
+    final options = <ModelOption>[];
+    for (final entry in data) {
+      if (entry is! Map) continue;
+      final id = entry['id'];
+      if (id is! String || id.isEmpty) continue;
+      options.add(ModelOption(id, id));
+    }
+    return ModelList(options, ModelSource.live);
+  }
+
+  /// GET a URL, returning the body on success or a ready-made fallback list
+  /// describing what went wrong. Shared by the two subscription endpoints.
+  static Future<Object> _get(
+    Uri url,
+    Map<String, String> headers,
+    ProviderKind kind,
+  ) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client.getUrl(url);
+      headers.forEach(request.headers.set);
+      final response =
+          await request.close().timeout(const Duration(seconds: 12));
+      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        return ModelList(fallbackFor(kind), ModelSource.fallback,
+            'that sign-in has expired — sign in again');
+      }
+      if (response.statusCode != 200) {
+        return ModelList(fallbackFor(kind), ModelSource.fallback,
+            'the provider returned HTTP ${response.statusCode}');
+      }
+      return body;
+    } finally {
+      client.close(force: true);
+    }
   }
 
   /// DeepSeek is a plain API, so its list comes from the models endpoint.

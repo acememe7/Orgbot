@@ -13,8 +13,7 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
-import 'dart:io';
-
+import '../engine/agent_cli.dart';
 import 'credentials.dart';
 import 'models.dart';
 import 'room_check.dart';
@@ -39,11 +38,13 @@ RoomFile buildRoomFile(
   RoomDef room,
   List<BotDef> bots, {
   Credentials? credentials,
+  bool? canRunClis,
 }) {
   // A CLI can only run where the binary exists. Everywhere else — a phone,
-  // most obviously — the same subscription is used through its API with the
-  // token a paired sign-in carries.
-  final canRunClis = Platform.isLinux || Platform.isMacOS || Platform.isWindows;
+  // most obviously — the same subscription is reached through its API with
+  // the token this device signed in for. Overridable so the phone path can
+  // be tested from a desktop.
+  final runsClis = canRunClis ?? canRunAgentClis;
   final buffer = StringBuffer();
   final environment = <String, String>{};
   final skipped = <String>[];
@@ -83,7 +84,14 @@ RoomFile buildRoomFile(
 
     final paired = credentials?.forProvider(bot.provider);
     final cli = bot.provider.cli;
-    if (cli != null && !canRunClis && paired != null) {
+    if (cli != null && !runsClis && !bot.provider.signsInOnDevice) {
+      skipped.add('@' + handle + ': ' +
+          bot.provider.label +
+          ' has no sign-in that works without its CLI, so it can only run '
+          'on a computer');
+      _rollbackLastBot(buffer);
+      continue;
+    } else if (cli != null && !runsClis && paired != null) {
       // API-backed, using the paired subscription token.
       environment[_envVarFor(bot.provider)] = paired.token;
       buffer
@@ -93,11 +101,10 @@ RoomFile buildRoomFile(
       if (bot.provider != ProviderKind.anthropic) {
         buffer.writeln('profile = ' + _s(bot.provider.key));
       }
-    } else if (cli != null && !canRunClis) {
+    } else if (cli != null && !runsClis) {
       skipped.add('@' + handle + ': ' +
           bot.provider.label +
-          ' needs a sign-in on this device — run `orgbot pair` on your '
-          'computer and import it');
+          ' is not signed in on this device — open Sign in and approve it');
       _rollbackLastBot(buffer);
       continue;
     } else if (cli != null) {
@@ -152,7 +159,10 @@ String _envVarFor(ProviderKind provider) {
       // provider layer sends it as a bearer with the oauth beta header.
       return 'ANTHROPIC_AUTH_TOKEN';
     case ProviderKind.codex:
-      return 'OPENAI_API_KEY';
+      // A ChatGPT sign-in is not an OpenAI API key: it authenticates against
+      // ChatGPT's own backend, which the engine reaches through its own
+      // adapter, so it travels under its own name.
+      return 'CODEX_AUTH_TOKEN';
     case ProviderKind.grok:
       return 'GROK_API_KEY';
     case ProviderKind.deepseek:

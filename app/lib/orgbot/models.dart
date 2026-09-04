@@ -60,6 +60,13 @@ enum ProviderKind {
 
   /// Whether an API key must be supplied. Only a raw endpoint needs one.
   bool get needsApiKey => this == ProviderKind.deepseek;
+
+  /// Whether a device with no agent CLIs can sign in to this itself.
+  ///
+  /// Codex and Grok publish device-code flows; Anthropic does not, so a
+  /// Claude subscription can only be used where its CLI runs.
+  bool get signsInOnDevice =>
+      this == ProviderKind.codex || this == ProviderKind.grok;
 }
 
 class BotDef {

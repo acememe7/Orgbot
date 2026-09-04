@@ -110,6 +110,10 @@ class EngineRoomController extends ChangeNotifier {
       // parks every task in review.
       issues = checkRoom(room, bots);
 
+      // Subscription tokens last hours, so renew before the room starts
+      // rather than letting a bot fail its first turn on a stale one.
+      await _renewSignIns(bots);
+
       final file = buildRoomFile(room, bots,
           credentials: ModelCatalog.credentials);
       skipped = file.skipped;
@@ -130,6 +134,24 @@ class EngineRoomController extends ChangeNotifier {
       error = e.toString();
       await _teardown();
       _to(RoomLaunch.failed);
+    }
+  }
+
+  /// Refresh any sign-in this room needs that is close to expiry.
+  ///
+  /// A failure here is deliberately not fatal: the bot that needed it is
+  /// reported as skipped when the room file is built, which says which
+  /// provider to sign in to again, and the rest of the room still runs.
+  Future<void> _renewSignIns(List<BotDef> bots) async {
+    final credentials = ModelCatalog.credentials;
+    if (credentials == null) return;
+    for (final provider in bots.map((b) => b.provider).toSet()) {
+      if (!credentials.isSignedIn(provider)) continue;
+      try {
+        await credentials.freshToken(provider);
+      } catch (_) {
+        // Left to the room file to report as a skipped bot.
+      }
     }
   }
 

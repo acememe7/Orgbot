@@ -29,6 +29,7 @@ pub mod agent_cli;
 pub mod anthropic;
 pub mod auth;
 pub mod error;
+pub mod codex;
 pub mod openai;
 pub mod provider;
 pub mod scripted;
@@ -42,6 +43,7 @@ use orgbot_proto::agent::ProviderRef;
 pub use agent_cli::{locate, AgentCliProvider};
 pub use anthropic::AnthropicProvider;
 pub use auth::Credential;
+pub use codex::CodexProvider;
 pub use error::{ErrorReport, ProviderError, Result};
 pub use openai::OpenAiProvider;
 pub use provider::Provider;
@@ -61,8 +63,11 @@ pub fn build(reference: &ProviderRef) -> Result<Arc<dyn Provider>> {
         ProviderRef::Anthropic { .. } => Arc::new(AnthropicProvider::from_env()?),
         ProviderRef::DeepSeek { .. } => Arc::new(OpenAiProvider::deepseek()?),
         ProviderRef::OpenAiCompatible { profile, .. } => match profile.as_str() {
-            "codex" | "chatgpt" => Arc::new(OpenAiProvider::codex()?),
+            // A ChatGPT sign-in speaks the Responses dialect on ChatGPT's own
+            // backend, not chat completions on api.openai.com.
+            "codex" | "chatgpt" => Arc::new(CodexProvider::from_env()?),
             "openai" => Arc::new(OpenAiProvider::openai()?),
+            "grok" | "xai" => Arc::new(OpenAiProvider::grok()?),
             other => {
                 // A custom profile needs its endpoint supplied out of band.
                 let base = std::env::var(format!(

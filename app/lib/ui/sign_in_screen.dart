@@ -1,24 +1,39 @@
-// Signing in on a device that has no agent CLIs.
+// Signing this device in to the subscriptions it will run bots on.
 //
-// The desktop signs in by running `claude`, `codex` or `grok`. A phone cannot,
-// so it carries those sign-ins across instead: `orgbot pair` on the desktop
-// prints a bundle, and this imports it. The tokens are the same OAuth tokens
-// the CLIs hold, and the provider APIs accept them directly.
+// Codex and Grok each publish a device-code flow that accepts their own CLI's
+// public client id, so this device signs in by itself: it shows a short code,
+// the person approves it in a browser, and the provider hands back a token.
+// Nothing here depends on a desktop.
+//
+// Anthropic publishes no device flow, so a Claude subscription cannot be
+// signed in to this way. On a device with the CLIs installed it is used
+// directly; elsewhere it is absent rather than pretending to offer a sign-in
+// that cannot work.
 //
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../orgbot/credentials.dart';
+import '../orgbot/models.dart';
+import '../orgbot/oauth/device_auth.dart';
 import 'brand.dart';
 
-/// Import and manage this device's sign-ins.
+/// Sign in to providers, and manage what this device already holds.
 class SignInScreen extends StatefulWidget {
-  const SignInScreen({super.key, required this.credentials});
+  const SignInScreen({
+    super.key,
+    required this.credentials,
+    this.auth,
+  });
 
   final Credentials credentials;
+
+  /// Injectable so the flows can be driven in tests without a network.
+  final DeviceAuth? auth;
 
   @override
   State<SignInScreen> createState() => _SignInScreenState();
@@ -29,11 +44,66 @@ class _SignInScreenState extends State<SignInScreen> {
   String? _error;
   String? _success;
   bool _busy = false;
+  bool _showPairing = false;
+
+  /// The sign-in currently waiting on the person, if any.
+  DeviceSignIn? _pending;
+
+  DeviceAuth get _auth => widget.auth ?? DeviceAuth();
 
   @override
   void dispose() {
+    _pending?.cancel();
     _bundle.dispose();
     super.dispose();
+  }
+
+  void _report({String? error, String? success}) {
+    if (!mounted) return;
+    setState(() {
+      _error = error;
+      _success = success;
+    });
+  }
+
+  Future<void> _signIn(ProviderKind provider) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+      _success = null;
+    });
+    DeviceSignIn? flow;
+    try {
+      flow = await _auth.start(provider);
+      if (!mounted) {
+        flow.cancel();
+        return;
+      }
+      setState(() {
+        _pending = flow;
+        _busy = false;
+      });
+      final token = await flow.token;
+      await widget.credentials.signIn(provider, token);
+      if (!mounted) return;
+      setState(() => _pending = null);
+      _report(success: 'Signed in to ' + provider.label + '.');
+    } on SignInCancelled {
+      if (mounted) setState(() => _pending = null);
+    } on SignInError catch (e) {
+      if (mounted) setState(() => _pending = null);
+      _report(error: e.message);
+    } catch (e) {
+      if (mounted) setState(() => _pending = null);
+      _report(error: e.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  void _cancelPending() {
+    _pending?.cancel();
+    setState(() => _pending = null);
   }
 
   Future<void> _import() async {
@@ -46,15 +116,15 @@ class _SignInScreenState extends State<SignInScreen> {
       final count = await widget.credentials.importBundle(_bundle.text);
       if (!mounted) return;
       _bundle.clear();
-      setState(() {
-        _success = count == 1
+      _report(
+        success: count == 1
             ? 'Signed in to 1 provider.'
-            : 'Signed in to $count providers.';
-      });
+            : 'Signed in to $count providers.',
+      );
     } on PairingError catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      _report(error: e.message);
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      _report(error: e.toString());
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -86,12 +156,20 @@ class _SignInScreenState extends State<SignInScreen> {
       body: ListenableBuilder(
         listenable: widget.credentials,
         builder: (context, _) {
+          final pending = _pending;
+          if (pending != null) {
+            return _DeviceCodePanel(
+              flow: pending,
+              onCancel: _cancelPending,
+            );
+          }
           final signedIn = widget.credentials.all;
           return ListView(
             padding: const EdgeInsets.all(20),
             children: [
               if (signedIn.isNotEmpty) ...[
-                Text('Signed in', style: Theme.of(context).textTheme.labelLarge),
+                Text('Signed in',
+                    style: Theme.of(context).textTheme.labelLarge),
                 const SizedBox(height: 10),
                 for (final credential in signedIn)
                   _CredentialCard(
@@ -102,52 +180,34 @@ class _SignInScreenState extends State<SignInScreen> {
                 const SizedBox(height: 24),
               ],
               Text(
-                signedIn.isEmpty ? 'Bring your sign-ins here' : 'Add more',
+                signedIn.isEmpty ? 'Use your subscriptions' : 'Add another',
                 style: Theme.of(context).textTheme.labelLarge,
               ),
               const SizedBox(height: 8),
               Text(
-                'This device has no agent CLIs to sign in with, so it uses the '
-                'sign-ins from a machine that does. On that machine run:',
+                'Sign in with the account you already pay for. A code appears '
+                'here, you approve it in a browser, and this device gets its '
+                'own token.',
                 style: TextStyle(
                     fontSize: 13, height: 1.4, color: scheme.onSurfaceVariant),
               ),
-              const SizedBox(height: 10),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(13),
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(10),
+              const SizedBox(height: 14),
+              for (final provider in kDeviceSignInProviders)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 9),
+                  child: _SignInButton(
+                    provider: provider,
+                    signedIn: widget.credentials.isSignedIn(provider),
+                    enabled: !_busy,
+                    onPressed: () => _signIn(provider),
+                  ),
                 ),
-                child: const SelectableText(
-                  'orgbot pair',
-                  style: TextStyle(fontFamily: 'monospace', fontSize: 13),
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'Then paste everything it printed below. It contains live '
-                'access tokens, so treat it like a password.',
-                style: TextStyle(
-                    fontSize: 12, height: 1.4, color: scheme.onSurfaceVariant),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _bundle,
-                maxLines: 5,
-                minLines: 3,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-                decoration: const InputDecoration(
-                  labelText: 'Pairing bundle',
-                  hintText: '{"version":1,...}',
-                  border: OutlineInputBorder(),
-                  alignLabelWithHint: true,
-                ),
-              ),
               if (_error != null) ...[
                 const SizedBox(height: 12),
-                _Banner(text: _error!, tone: scheme.error, icon: Icons.error_outline),
+                _Banner(
+                    text: _error!,
+                    tone: scheme.error,
+                    icon: Icons.error_outline),
               ],
               if (_success != null) ...[
                 const SizedBox(height: 12),
@@ -156,29 +216,82 @@ class _SignInScreenState extends State<SignInScreen> {
                     tone: Colors.green,
                     icon: Icons.check_circle_outline),
               ],
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed: _busy ? null : _import,
-                      icon: _busy
-                          ? const SizedBox(
-                              width: 15,
-                              height: 15,
-                              child: CircularProgressIndicator(strokeWidth: 2))
-                          : const Icon(Icons.login),
-                      label: const Text('Sign in'),
+              const SizedBox(height: 20),
+              Text(
+                'DeepSeek takes an API key instead, entered on the bot that '
+                'uses it. Claude has no sign-in that works without its CLI, so '
+                'it is only available on a computer.',
+                style: TextStyle(
+                    fontSize: 12, height: 1.45, color: scheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 18),
+              const Divider(),
+              TextButton.icon(
+                onPressed: () => setState(() => _showPairing = !_showPairing),
+                icon: Icon(
+                    _showPairing ? Icons.expand_less : Icons.expand_more,
+                    size: 18),
+                label: const Text('Bring a sign-in from a computer instead'),
+              ),
+              if (_showPairing) ...[
+                const SizedBox(height: 6),
+                Text(
+                  'On a computer that has the CLIs signed in, run this and '
+                  'paste everything it prints. It contains live tokens, so '
+                  'treat it like a password.',
+                  style: TextStyle(
+                      fontSize: 12.5,
+                      height: 1.4,
+                      color: scheme.onSurfaceVariant),
+                ),
+                const SizedBox(height: 10),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(13),
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const SelectionArea(
+                    child: Text(
+                      'orgbot pair',
+                      style: TextStyle(fontFamily: 'monospace', fontSize: 13),
                     ),
                   ),
-                  const SizedBox(width: 10),
-                  OutlinedButton.icon(
-                    onPressed: _busy ? null : _paste,
-                    icon: const Icon(Icons.content_paste),
-                    label: const Text('Paste'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _bundle,
+                  maxLines: 4,
+                  minLines: 2,
+                  style:
+                      const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  decoration: const InputDecoration(
+                    labelText: 'Pairing bundle',
+                    hintText: '{"version":1,...}',
+                    border: OutlineInputBorder(),
+                    alignLabelWithHint: true,
                   ),
-                ],
-              ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.tonalIcon(
+                        onPressed: _busy ? null : _import,
+                        icon: const Icon(Icons.download_outlined),
+                        label: const Text('Import'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    OutlinedButton.icon(
+                      onPressed: _busy ? null : _paste,
+                      icon: const Icon(Icons.content_paste),
+                      label: const Text('Paste'),
+                    ),
+                  ],
+                ),
+              ],
               if (signedIn.isNotEmpty) ...[
                 const SizedBox(height: 24),
                 TextButton.icon(
@@ -196,6 +309,139 @@ class _SignInScreenState extends State<SignInScreen> {
   }
 }
 
+/// The code to type, and where to type it.
+class _DeviceCodePanel extends StatelessWidget {
+  const _DeviceCodePanel({required this.flow, required this.onCancel});
+
+  final DeviceSignIn flow;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final challenge = flow.challenge;
+    return ListView(
+      padding: const EdgeInsets.all(24),
+      children: [
+        const SizedBox(height: 12),
+        Center(
+          child: Text(
+            'Approve ' + flow.provider.label,
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Center(
+          child: Text(
+            'Open the page below and enter this code.',
+            style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
+          ),
+        ),
+        const SizedBox(height: 26),
+        Center(
+          child: Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 26, vertical: 18),
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: scheme.outlineVariant),
+            ),
+            child: SelectionArea(
+              child: Text(
+                challenge.userCode,
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 30,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 3,
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        Center(
+          child: TextButton.icon(
+            onPressed: () => Clipboard.setData(
+                ClipboardData(text: challenge.userCode)),
+            icon: const Icon(Icons.copy, size: 16),
+            label: const Text('Copy code'),
+          ),
+        ),
+        const SizedBox(height: 22),
+        FilledButton.icon(
+          onPressed: () => launchUrl(
+            Uri.parse(challenge.bestUri),
+            mode: LaunchMode.externalApplication,
+          ),
+          icon: const Icon(Icons.open_in_new),
+          label: const Text('Open the sign-in page'),
+        ),
+        const SizedBox(height: 12),
+        Center(
+          child: SelectionArea(
+            child: Text(
+              challenge.verificationUri,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  fontSize: 12, color: scheme.onSurfaceVariant),
+            ),
+          ),
+        ),
+        const SizedBox(height: 30),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const SizedBox(
+              width: 15,
+              height: 15,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 11),
+            Text('Waiting for you to approve…',
+                style:
+                    TextStyle(fontSize: 13, color: scheme.onSurfaceVariant)),
+          ],
+        ),
+        const SizedBox(height: 26),
+        Center(
+          child: TextButton(onPressed: onCancel, child: const Text('Cancel')),
+        ),
+      ],
+    );
+  }
+}
+
+/// One provider's sign-in button.
+class _SignInButton extends StatelessWidget {
+  const _SignInButton({
+    required this.provider,
+    required this.signedIn,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  final ProviderKind provider;
+  final bool signedIn;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final label =
+        signedIn ? 'Sign in to ' + provider.label + ' again' : 'Sign in with ' + provider.label;
+    return SizedBox(
+      width: double.infinity,
+      child: FilledButton.icon(
+        onPressed: enabled ? onPressed : null,
+        icon: Icon(signedIn ? Icons.refresh : Icons.login),
+        label: Text(label),
+      ),
+    );
+  }
+}
+
 class _CredentialCard extends StatelessWidget {
   const _CredentialCard({required this.credential, required this.onForget});
 
@@ -205,17 +451,23 @@ class _CredentialCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final lapsed = credential.needsRenewal && !credential.canRenew;
     return Container(
       margin: const EdgeInsets.only(bottom: 9),
       padding: const EdgeInsets.all(13),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: scheme.outlineVariant),
+        border: Border.all(
+            color: lapsed ? scheme.error : scheme.outlineVariant),
       ),
       child: Row(
         children: [
-          Icon(Icons.verified_user_outlined, size: 20, color: Colors.green),
+          Icon(
+            lapsed ? Icons.error_outline : Icons.verified_user_outlined,
+            size: 20,
+            color: lapsed ? scheme.error : Colors.green,
+          ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -226,13 +478,17 @@ class _CredentialCard extends StatelessWidget {
                         fontWeight: FontWeight.w700, fontSize: 14)),
                 const SizedBox(height: 2),
                 Text(
-                  [
-                    if (credential.plan != null) credential.plan!,
-                    if (credential.account != null) credential.account!,
-                    '${credential.models.length} model(s)',
-                  ].join(' · '),
-                  style:
-                      TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant),
+                  lapsed
+                      ? 'Expired — sign in again'
+                      : [
+                          if (credential.plan != null) credential.plan!,
+                          if (credential.account != null) credential.account!,
+                          '${credential.models.length} model(s)',
+                        ].join(' · '),
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    color: lapsed ? scheme.error : scheme.onSurfaceVariant,
+                  ),
                 ),
               ],
             ),

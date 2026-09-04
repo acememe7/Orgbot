@@ -116,6 +116,42 @@ pub fn deepseek() -> Result<Credential> {
         })
 }
 
+/// Resolve a Grok credential.
+///
+/// `GROK_API_KEY` carries either an xAI API key or the OAuth access token the
+/// Grok CLI holds. `api.x.ai` accepts both as a bearer, so the distinction
+/// does not change the request. The CLI's own sign-in is the fallback, so a
+/// user who has run `grok` does not have to mint a key as well.
+pub fn grok() -> Result<Credential> {
+    if let Some(key) = env_var("GROK_API_KEY").or_else(|| env_var("XAI_API_KEY")) {
+        return Ok(Credential::Bearer(key));
+    }
+    if let Some(token) = home_dir().and_then(|h| grok_token_from(&h.join(".grok/auth.json"))) {
+        return Ok(Credential::Bearer(token));
+    }
+    Err(ProviderError::MissingCredential {
+        provider: "grok".into(),
+        detail: "set GROK_API_KEY, or sign in with `grok`".into(),
+    })
+}
+
+/// Read the access token the Grok CLI stored.
+///
+/// The file is a map keyed by issuer, and the token is named `key`. That
+/// layout has already moved once between versions, so this takes the first
+/// entry carrying a token rather than pinning one path.
+pub fn grok_token_from(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    parsed.as_object()?.values().find_map(|entry| {
+        entry
+            .get("key")
+            .and_then(|v| v.as_str())
+            .filter(|k| !k.trim().is_empty())
+            .map(str::to_string)
+    })
+}
+
 /// Resolve a credential for an OpenAI-compatible endpoint.
 ///
 /// `env` names the variable to read first (e.g. `OPENAI_API_KEY`); the Codex
@@ -211,6 +247,8 @@ pub fn base_url(provider: &str, default: &str) -> String {
     let override_var = match provider {
         "anthropic" => "ANTHROPIC_BASE_URL",
         "deepseek" => "DEEPSEEK_BASE_URL",
+        "grok" | "xai" => "GROK_BASE_URL",
+        "codex" | "chatgpt" => "CODEX_BASE_URL",
         _ => "OPENAI_BASE_URL",
     };
     env_var(override_var)

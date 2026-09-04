@@ -147,7 +147,7 @@ impl McpSession {
 /// room's in-turn dispatcher and write its reply back. The dispatcher lives in
 /// the bot's turn loop, so a request that arrives between turns simply waits.
 pub async fn serve_stream(stream: tokio::net::UnixStream, tx: mpsc::Sender<McpCall>) {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, BufReader};
 
     let mut reader = BufReader::new(stream);
     loop {

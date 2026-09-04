@@ -1018,7 +1018,6 @@ impl Provider for ScriptedMcpClient {
 
 #[tokio::test]
 async fn a_room_cycle_claim_work_review_submit_runs_through_the_bridge() {
-    use std::sync::atomic::Ordering;
     use std::sync::Mutex;
 
     let task_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));

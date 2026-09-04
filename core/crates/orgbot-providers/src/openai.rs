@@ -69,6 +69,19 @@ impl OpenAiProvider {
         ))
     }
 
+    /// Grok, through the xAI API, which speaks the OpenAI dialect.
+    ///
+    /// Unlike a ChatGPT sign-in, a Grok subscription token is accepted by the
+    /// published API directly, so this is the same stable surface the API key
+    /// path uses.
+    pub fn grok() -> Result<Self> {
+        Ok(Self::new(
+            "grok",
+            auth::base_url("grok", "https://api.x.ai"),
+            auth::grok()?,
+        ))
+    }
+
     /// Any other OpenAI-compatible endpoint.
     pub fn custom(
         name: impl Into<String>,
