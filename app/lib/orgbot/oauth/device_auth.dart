@@ -29,6 +29,14 @@ class SignInError implements Exception {
   String toString() => message;
 }
 
+/// The network could not be reached. Distinct from a refusal, because while
+/// someone is approving the code in their browser this app is in the
+/// background, where Android suspends its network — so a blip here means
+/// "try again in a moment", not "this sign-in failed".
+class SignInTransportError extends SignInError {
+  SignInTransportError(super.message);
+}
+
 /// The person took too long, or the code expired.
 class SignInExpired extends SignInError {
   SignInExpired() : super('That code expired. Start again to get a new one.');
@@ -134,6 +142,12 @@ const String _grokTokenUrl = 'https://auth.x.ai/oauth2/token';
 const String _grokScopes =
     'openid profile email offline_access grok-cli:access api:access';
 
+/// How many consecutive network failures to ride out while polling.
+///
+/// At the usual five-second interval this is a couple of minutes offline,
+/// which comfortably covers the trip out to a browser and back.
+const int _offlineTolerance = 24;
+
 /// Which providers a device with no CLIs can sign in to by itself.
 const List<ProviderKind> kDeviceSignInProviders = [
   ProviderKind.codex,
@@ -209,22 +223,32 @@ class DeviceAuth {
     Completer<void> cancelled,
   ) async {
     final deadline = DateTime.now().add(const Duration(minutes: 15));
+    var offline = 0;
     while (DateTime.now().isBefore(deadline)) {
       if (cancelled.isCompleted) throw SignInCancelled();
       await Future<void>.delayed(interval);
       if (cancelled.isCompleted) throw SignInCancelled();
 
-      final response = await _http.post(
-        _codexDevicePoll,
-        headers: const {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'device_auth_id': deviceAuthId,
-          'user_code': userCode,
-        }),
-      );
+      final HttpResponse response;
+      try {
+        response = await _http.post(
+          _codexDevicePoll,
+          headers: const {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'device_auth_id': deviceAuthId,
+            'user_code': userCode,
+          }),
+        );
+        offline = 0;
+      } on SignInTransportError {
+        // Expected: approving the code happens in a browser, so this app is
+        // in the background and Android suspends its network. Keep waiting.
+        if (++offline > _offlineTolerance) rethrow;
+        continue;
+      }
       // Not approved yet: the endpoint says so with a 403 or a 404 rather
       // than the usual authorization_pending body.
       if (response.status == 403 || response.status == 404) continue;
@@ -244,20 +268,23 @@ class DeviceAuth {
   }
 
   Future<OAuthToken> _exchangeCodex(String code, String verifier) async {
-    final response = await _http.post(
-      _codexTokenUrl,
-      headers: const {
-        'Accept': 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: _form({
-        'grant_type': 'authorization_code',
-        'code': code,
-        'redirect_uri': _codexRedirectUri,
-        'client_id': kCodexClientId,
-        'code_verifier': verifier,
-      }),
-    );
+    // This runs the instant the person comes back from the browser, so the
+    // network may still be waking up. A failed attempt never reached the
+    // server, which leaves the one-shot code good for another try.
+    final response = await _withRetry(() => _http.post(
+          _codexTokenUrl,
+          headers: const {
+            'Accept': 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: _form({
+            'grant_type': 'authorization_code',
+            'code': code,
+            'redirect_uri': _codexRedirectUri,
+            'client_id': kCodexClientId,
+            'code_verifier': verifier,
+          }),
+        ));
     if (response.status != 200) {
       throw SignInError('ChatGPT would not issue a token (HTTP ' +
           response.status.toString() +
@@ -313,21 +340,30 @@ class DeviceAuth {
     Completer<void> cancelled,
   ) async {
     var wait = interval;
+    var offline = 0;
     final deadline = DateTime.now().add(lifetime);
     while (DateTime.now().isBefore(deadline)) {
       if (cancelled.isCompleted) throw SignInCancelled();
       await Future<void>.delayed(wait);
       if (cancelled.isCompleted) throw SignInCancelled();
 
-      final response = await _http.post(
-        _grokTokenUrl,
-        headers: const {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: _form({
-          'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
-          'device_code': deviceCode,
-          'client_id': kGrokClientId,
-        }),
-      );
+      final HttpResponse response;
+      try {
+        response = await _http.post(
+          _grokTokenUrl,
+          headers: const {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: _form({
+            'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
+            'device_code': deviceCode,
+            'client_id': kGrokClientId,
+          }),
+        );
+        offline = 0;
+      } on SignInTransportError {
+        // See the note in the Codex poll: backgrounded means no network.
+        if (++offline > _offlineTolerance) rethrow;
+        continue;
+      }
       final body = _decode(response.body);
       if (response.status == 200) {
         return _tokenFrom(body, plan: 'grok');
@@ -393,6 +429,20 @@ class DeviceAuth {
   }
 
   // --- Shared ------------------------------------------------------------
+
+  /// Retry a request a few times while the network is still coming back.
+  Future<HttpResponse> _withRetry(Future<HttpResponse> Function() send) async {
+    SignInTransportError? last;
+    for (var attempt = 0; attempt < 5; attempt++) {
+      try {
+        return await send();
+      } on SignInTransportError catch (e) {
+        last = e;
+        await Future<void>.delayed(Duration(seconds: attempt + 1));
+      }
+    }
+    throw last!;
+  }
 
   Duration _interval(Object? raw) {
     final seconds = raw is num
@@ -518,10 +568,21 @@ class _IoTransport implements HttpTransport {
       final response = await request.close().timeout(const Duration(seconds: 30));
       final text = await response.transform(utf8.decoder).join();
       return HttpResponse(response.statusCode, text);
-    } on SocketException {
-      throw SignInError('No connection. Check the network and try again.');
+    } on SocketException catch (e) {
+      // Say which host failed and why. "No connection" on a device that is
+      // plainly online sends someone to check their wifi instead of the
+      // actual fault, which has cost real time here.
+      throw SignInTransportError('Could not reach ' +
+          Uri.parse(url).host +
+          ': ' +
+          (e.osError?.message ?? e.message));
+    } on HandshakeException catch (e) {
+      throw SignInTransportError(
+          'Could not establish a secure connection to ' + Uri.parse(url).host +
+              ': ' + e.message);
     } on TimeoutException {
-      throw SignInError('The provider did not answer in time. Try again.');
+      throw SignInTransportError(
+          Uri.parse(url).host + ' did not answer in time.');
     } finally {
       client.close(force: true);
     }

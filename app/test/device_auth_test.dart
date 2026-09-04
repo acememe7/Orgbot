@@ -21,6 +21,10 @@ class FakeTransport implements HttpTransport {
   /// Every request made, for asserting on the wire format.
   final List<({String url, String body})> calls = [];
 
+  /// URLs that should throw a transport failure for the first N calls, the
+  /// way Android does while the app is in the background.
+  final Map<String, int> offlineFor = {};
+
   @override
   Future<HttpResponse> post(
     String url, {
@@ -28,6 +32,11 @@ class FakeTransport implements HttpTransport {
     required String body,
   }) async {
     calls.add((url: url, body: body));
+    final remaining = offlineFor[url] ?? 0;
+    if (remaining > 0) {
+      offlineFor[url] = remaining - 1;
+      throw SignInTransportError('Could not reach host: Network unreachable');
+    }
     final queued = responses[url];
     if (queued == null || queued.isEmpty) {
       return const HttpResponse(500, '{}');
@@ -264,5 +273,94 @@ void main() {
       () => authWith(FakeTransport({})).start(ProviderKind.anthropic),
       throwsA(isA<SignInError>()),
     );
+  });
+
+  group('losing the network mid-flow', () {
+    /// The exact failure seen on a phone: the code is shown, the person goes
+    /// to a browser to approve it, and while the app is backgrounded Android
+    /// takes its network away. That must not end the sign-in.
+    test('Codex keeps polling while the app is backgrounded', () async {
+      final transport = FakeTransport({
+        _codexStart: [
+          HttpResponse(200,
+              jsonEncode({'device_auth_id': 'da_1', 'user_code': 'ABC-123', 'interval': 1})),
+        ],
+        _codexPoll: [
+          HttpResponse(200,
+              jsonEncode({'authorization_code': 'ac_1', 'code_verifier': 'cv_1'})),
+        ],
+        _codexToken: [
+          HttpResponse(200, jsonEncode({'access_token': _jwt, 'expires_in': 3600})),
+        ],
+      })
+        // Offline for the whole trip out to the browser and back.
+        ..offlineFor[_codexPoll] = 6;
+
+      final token = await (await authWith(transport).start(ProviderKind.codex)).token;
+      expect(token.accessToken, _jwt);
+    });
+
+    test('Grok keeps polling while the app is backgrounded', () async {
+      final transport = FakeTransport({
+        _grokStart: [
+          HttpResponse(
+              200,
+              jsonEncode({
+                'device_code': 'dc_1',
+                'user_code': 'X',
+                'verification_uri': 'https://accounts.x.ai/oauth2/device',
+                'interval': 1,
+              })),
+        ],
+        _grokToken: [
+          HttpResponse(200, jsonEncode({'access_token': 'grok_at'})),
+        ],
+      })..offlineFor[_grokToken] = 6;
+
+      final token = await (await authWith(transport).start(ProviderKind.grok)).token;
+      expect(token.accessToken, 'grok_at');
+    });
+
+    test('the token exchange retries rather than losing the approval',
+        () async {
+      final transport = FakeTransport({
+        _codexStart: [
+          HttpResponse(200,
+              jsonEncode({'device_auth_id': 'da_1', 'user_code': 'ABC-123', 'interval': 1})),
+        ],
+        _codexPoll: [
+          HttpResponse(200,
+              jsonEncode({'authorization_code': 'ac_1', 'code_verifier': 'cv_1'})),
+        ],
+        _codexToken: [
+          HttpResponse(200, jsonEncode({'access_token': _jwt, 'expires_in': 3600})),
+        ],
+      })
+        // Coming back from the browser, the first exchange attempts fail.
+        ..offlineFor[_codexToken] = 2;
+
+      final token = await (await authWith(transport).start(ProviderKind.codex)).token;
+      expect(token.accessToken, _jwt);
+    });
+
+    test('a network that never comes back is eventually reported', () async {
+      final transport = FakeTransport({
+        _codexStart: [
+          HttpResponse(200,
+              jsonEncode({'device_auth_id': 'da_1', 'user_code': 'ABC-123', 'interval': 1})),
+        ],
+      })..offlineFor[_codexPoll] = 1000;
+
+      final flow = await authWith(transport).start(ProviderKind.codex);
+      await expectLater(flow.token, throwsA(isA<SignInTransportError>()));
+    });
+
+    test('a failure to start still names the host', () async {
+      final transport = FakeTransport({})..offlineFor[_grokStart] = 1;
+      await expectLater(
+        authWith(transport).start(ProviderKind.grok),
+        throwsA(isA<SignInTransportError>()),
+      );
+    });
   });
 }
