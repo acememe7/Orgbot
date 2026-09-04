@@ -178,7 +178,13 @@ fn policy_flags(cli: CliKind, policy: AgentPolicy) -> (&'static str, &'static st
         (CliKind::Codex, AgentPolicy::ReadOnly) => "read-only",
         (CliKind::Codex, AgentPolicy::WorkspaceWrite) => "workspace-write",
         (CliKind::Codex, AgentPolicy::FullAccess) => "danger-full-access",
-        (CliKind::Claude | CliKind::Grok, AgentPolicy::ReadOnly) => "plan",
+        // Not "plan": plan mode blocks *every* tool, including the room
+        // board — and the board is not a file operation, it is the bot's job.
+        // A read-only bot should still be able to claim, inspect and submit;
+        // what it must not do is change the project, and `default` refuses
+        // that in a headless session because nothing can approve it. The room
+        // tools come through because they are allow-listed explicitly.
+        (CliKind::Claude | CliKind::Grok, AgentPolicy::ReadOnly) => "default",
         (CliKind::Claude | CliKind::Grok, AgentPolicy::WorkspaceWrite) => "acceptEdits",
         (CliKind::Claude | CliKind::Grok, AgentPolicy::FullAccess) => "bypassPermissions",
     };
@@ -779,9 +785,45 @@ fn build_args(
         }
     }
     if !model.is_empty() {
-        cmd.arg("-m").arg(model);
+        // Claude Code spells this out; codex and grok take the short form.
+        // Sending `-m` to claude is "unknown option '-m'" and kills the turn.
+        match cli {
+            CliKind::Claude => cmd.arg("--model").arg(model),
+            CliKind::Codex | CliKind::Grok => cmd.arg("-m").arg(model),
+        };
+    }
+
+    // Let the room's own tools through the permission gate.
+    //
+    // Under a normal permission mode an MCP tool call needs approval, and a
+    // headless session has nobody to approve it — the agent sees the tools,
+    // calls one, and is refused, which shows up in the transcript as "room
+    // tooling is permission-blocked". The room board is this bot's job, so it
+    // is allowed explicitly rather than by loosening the sandbox generally.
+    if mcp {
+        match cli {
+            CliKind::Claude | CliKind::Grok => {
+                // Both the bare server name and an explicit wildcard: the
+                // CLIs differ on which form matches a whole server, and an
+                // unmatched rule is simply ignored.
+                cmd.arg("--allowedTools")
+                    .arg(ROOM_TOOL_PATTERN)
+                    .arg(ROOM_TOOL_WILDCARD);
+            }
+            // codex routes MCP approvals through --approve-for-me, set above.
+            CliKind::Codex => {}
+        }
     }
 }
+
+/// Matches every tool the room's MCP server exposes.
+///
+/// Both Claude Code and Grok namespace MCP tools as `mcp__<server>__<tool>`
+/// in their permission rules; naming the server allows all of its tools.
+const ROOM_TOOL_PATTERN: &str = "mcp__orgbot_room";
+
+/// The same set, spelled as a wildcard for CLIs that want one.
+const ROOM_TOOL_WILDCARD: &str = "mcp__orgbot_room__*";
 
 #[cfg(test)]
 mod tests {
@@ -903,9 +945,18 @@ mod tests {
             policy_flags(CliKind::Codex, AgentPolicy::FullAccess),
             ("-s", "danger-full-access")
         );
+        // Deliberately not "plan". Plan mode blocks every tool, including
+        // the room board, so a read-only bot could see its tools, be refused
+        // on every call, and sit there reporting that it is blocked. Read-only
+        // means "do not change the project", not "do nothing".
         assert_eq!(
             policy_flags(CliKind::Claude, AgentPolicy::ReadOnly),
-            ("--permission-mode", "plan")
+            ("--permission-mode", "default")
+        );
+        assert_ne!(
+            policy_flags(CliKind::Grok, AgentPolicy::ReadOnly).1,
+            "plan",
+            "plan mode makes a bot unable to touch the board at all"
         );
         assert_eq!(
             policy_flags(CliKind::Grok, AgentPolicy::FullAccess),

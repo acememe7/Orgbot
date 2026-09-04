@@ -205,9 +205,15 @@ class RoomStore extends ChangeNotifier {
         // is actively thinking, which the activity panel shows.
         final agentId = message['agent'] as String?;
         if (agentId != null && _agents.containsKey(agentId)) {
-          final entry = _activity.putIfAbsent(
-              agentId, () => BotActivity(_agents[agentId]!));
-          entry.streaming = true;
+          // Exactly one bot holds a turn at a time, so a delta from this one
+          // means every other is no longer composing. Without clearing them
+          // the flags accumulate and the room claims nine bots are thinking.
+          for (final entry in _activity.entries) {
+            entry.value.streaming = entry.key == agentId;
+          }
+          _activity
+              .putIfAbsent(agentId, () => BotActivity(_agents[agentId]!))
+              .streaming = true;
           notifyListeners();
         }
       case 'closed':
@@ -309,6 +315,9 @@ class RoomStore extends ChangeNotifier {
           final entry =
               _activity.putIfAbsent(agentId, () => BotActivity(agent));
           entry.lastError = event['error'] as String? ?? 'the turn failed';
+          for (final other in _activity.values) {
+            other.streaming = false;
+          }
           entry.errorStreak = (event['attempt'] as num?)?.toInt() ?? 1;
           entry.streaming = false;
           _note(agentId, 'turn failed: ${entry.lastError}');
