@@ -11,6 +11,8 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
+import 'dart:io';
+
 import 'models.dart';
 import 'roles.dart';
 
@@ -34,6 +36,19 @@ class RoomIssue {
   final String fix;
 
   const RoomIssue(this.severity, this.summary, this.fix);
+}
+
+/// Expand a leading `~` to the home directory.
+///
+/// A shell does this before a program sees a path; a program does not, so a
+/// folder typed as `~/projects/x` reaches the engine as a literal directory
+/// that does not exist.
+String expandHome(String path) {
+  final trimmed = path.trim();
+  if (trimmed != '~' && !trimmed.startsWith('~/')) return trimmed;
+  final home = Platform.environment['HOME'] ?? '';
+  if (home.isEmpty) return trimmed;
+  return trimmed == '~' ? home : home + '/' + trimmed.substring(2);
 }
 
 /// Check whether a roster can carry a piece of work end to end.
@@ -109,6 +124,20 @@ List<RoomIssue> checkRoom(RoomDef room, List<BotDef> bots) {
       'There is no work and nobody who can create any.',
       'Give the room a task, or add a Coordinator, Product manager or '
           'Architect who can break the goal down.',
+    ));
+  }
+
+  // A project folder that does not exist fails every agent turn at spawn
+  // time, which reads as a room that simply does nothing.
+  final path = expandHome(room.path);
+  if (path.isNotEmpty &&
+      bots.any((b) => b.provider.usesSignIn) &&
+      !Directory(path).existsSync()) {
+    issues.add(RoomIssue(
+      CheckSeverity.blocking,
+      'The project folder does not exist: ' + path,
+      'Agent CLIs run inside it, so every turn will fail to start. Fix the '
+          'path, or clear it to use the app\'s own folder.',
     ));
   }
 

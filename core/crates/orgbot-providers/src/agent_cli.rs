@@ -233,7 +233,14 @@ impl Provider for AgentCliProvider {
                         .transpose()?;
                     (None, path)
                 }
-                CliKind::Grok => (None, None),
+                CliKind::Grok => {
+                    let path = request
+                        .mcp_socket
+                        .as_deref()
+                        .map(write_grok_home)
+                        .transpose()?;
+                    (None, path)
+                }
             }
         } else {
             (None, None)
@@ -315,7 +322,15 @@ impl AgentCliProvider {
         }
         cmd.env("NO_COLOR", "1");
         if let Some(home) = codex_home {
-            cmd.env("CODEX_HOME", home);
+            // Both CLIs discover MCP servers through their config home; the
+            // variable that points at it differs.
+            cmd.env(
+                match self.cli {
+                    CliKind::Grok => "GROK_HOME",
+                    _ => "CODEX_HOME",
+                },
+                home,
+            );
         }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -529,42 +544,89 @@ fn relay_binary() -> Result<std::path::PathBuf> {
 /// stay exactly where they are) except `config.toml`, which is copied and
 /// extended with the room's MCP server. The child codex therefore keeps the
 /// user's entire setup and gains the board.
+/// Build a Grok config home that carries the room's MCP server.
+///
+/// Grok's MCP is config-managed rather than a per-run flag, and it honours
+/// `GROK_HOME` — so the same overlay trick as codex works: symlink the real
+/// home so the sign-in, sessions and settings all still apply, and add one
+/// server entry pointing at the relay. Without this a Grok bot can talk but
+/// can never touch the board, which is exactly a room where nothing happens.
+fn write_grok_home(socket: &str) -> Result<std::path::PathBuf> {
+    write_agent_home(socket, ".grok", "grok", |config, relay, socket| {
+        config.push_str("\n[mcp_servers.orgbot_room]\n");
+        config.push_str(&format!(
+            "command = {}\n",
+            serde_json::to_string(&relay.to_string_lossy()).unwrap()
+        ));
+        config.push_str(&format!(
+            "args = [\"room-mcp\", \"--socket\", \"{socket}\" ]\n"
+        ));
+        // Grok keeps servers switched off unless told otherwise.
+        config.push_str("enabled = true\n");
+    })
+}
+
 fn write_codex_home(socket: &str) -> Result<std::path::PathBuf> {
+    write_agent_home(socket, ".codex", "codex", |config, relay, socket| {
+        config.push_str("\n[mcp_servers.orgbot_room]\n");
+        config.push_str(&format!(
+            "command = {}\n",
+            serde_json::to_string(&relay.to_string_lossy()).unwrap()
+        ));
+        config.push_str(&format!(
+            "args = [\"room-mcp\", \"--socket\", \"{socket}\" ]\n"
+        ));
+    })
+}
+
+/// Build a throwaway config home for a CLI that manages MCP through config.
+///
+/// The real home is symlinked entry by entry so the CLI keeps its sign-in,
+/// sessions and settings; only `config.toml` is replaced, with the room's MCP
+/// server appended to whatever was already there.
+fn write_agent_home(
+    socket: &str,
+    dot_dir: &str,
+    label: &str,
+    add_server: impl Fn(&mut String, &std::path::Path, &str),
+) -> Result<std::path::PathBuf> {
     use std::os::unix::fs::symlink;
 
     let relay = relay_binary()?;
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .ok_or_else(|| {
-            ProviderError::Unsupported("HOME is not set; cannot build a codex overlay".into())
+            ProviderError::Unsupported(format!(
+                "HOME is not set; cannot build a {label} overlay"
+            ))
         })?
-        .join(".codex");
+        .join(dot_dir);
     if !home.is_dir() {
         return Err(ProviderError::Unsupported(format!(
-            "{} is not a directory; codex is probably not set up",
+            "{} is not a directory; {label} is probably not set up",
             home.display()
         )));
     }
 
     let overlay = std::env::temp_dir().join(format!(
-        "orgbot-codex-{}-{}",
+        "orgbot-{label}-{}-{}",
         std::process::id(),
         socket.replace(['/', '.'], "_")
     ));
     let _ = std::fs::remove_dir_all(&overlay);
     std::fs::create_dir_all(&overlay).map_err(|error| {
-        ProviderError::Unsupported(format!("cannot create codex overlay: {error}"))
+        ProviderError::Unsupported(format!("cannot create {label} overlay: {error}"))
     })?;
 
     let mut config = String::new();
     for entry in std::fs::read_dir(&home).map_err(|error| {
         ProviderError::Unsupported(format!(
-            "cannot read codex home {}: {error}",
+            "cannot read {label} home {}: {error}",
             home.display()
         ))
     })? {
         let entry = entry.map_err(|error| {
-            ProviderError::Unsupported(format!("cannot read codex home entry: {error}"))
+            ProviderError::Unsupported(format!("cannot read {label} home entry: {error}"))
         })?;
         let name = entry.file_name();
         if name == "config.toml" {
@@ -573,17 +635,9 @@ fn write_codex_home(socket: &str) -> Result<std::path::PathBuf> {
         }
         let _ = symlink(entry.path(), overlay.join(&name));
     }
-    config.push_str("\n[mcp_servers.orgbot_room]\n");
-    config.push_str(&format!(
-        "command = {}\n",
-        serde_json::to_string(&relay.to_string_lossy()).unwrap()
-    ));
-    config.push_str(&format!(
-        "args = [\"room-mcp\", \"--socket\", \"{}\" ]\n",
-        socket
-    ));
+    add_server(&mut config, &relay, socket);
     std::fs::write(overlay.join("config.toml"), config).map_err(|error| {
-        ProviderError::Unsupported(format!("cannot write codex overlay config: {error}"))
+        ProviderError::Unsupported(format!("cannot write {label} overlay config: {error}"))
     })?;
     Ok(overlay)
 }

@@ -114,7 +114,8 @@ class _BotRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final (color, label) = _status(entry.agent.status, entry.streaming);
+    final (color, label) =
+        _status(entry.agent.status, entry.streaming, entry.lastError != null);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
@@ -170,6 +171,27 @@ class _BotRow extends StatelessWidget {
               ],
             ),
           ],
+          if (entry.lastError != null) ...[
+            const SizedBox(height: 9),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: scheme.errorContainer.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(7),
+              ),
+              child: Text(
+                entry.errorStreak > 1
+                    ? '${entry.lastError} (${entry.errorStreak} in a row)'
+                    : entry.lastError!,
+                maxLines: 4,
+                style: TextStyle(
+                    fontSize: 10.5,
+                    height: 1.35,
+                    color: scheme.onErrorContainer),
+              ),
+            ),
+          ],
           if (entry.lastAction != null) ...[
             const SizedBox(height: 8),
             Text(
@@ -199,7 +221,11 @@ class _BotRow extends StatelessWidget {
     );
   }
 
-  static (Color, String) _status(AgentStatus status, bool streaming) {
+  static (Color, String) _status(
+      AgentStatus status, bool streaming, bool failing) {
+    // A backend that will not start outranks anything else: a bot that cannot
+    // take a turn must never read as "ready".
+    if (failing) return (Colors.red, 'failing');
     if (streaming) return (Colors.lightBlue, 'thinking');
     switch (status) {
       case AgentStatus.working:
@@ -254,8 +280,9 @@ class Transcript extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final failing = store.failing;
     final messages = store.messages;
-    if (messages.isEmpty) {
+    if (messages.isEmpty && failing.isEmpty) {
       return const EmptyState(
         icon: Icons.forum_outlined,
         title: 'The room is quiet',
@@ -263,16 +290,29 @@ class Transcript extends StatelessWidget {
             'of them — watch the activity panel to see what they are doing.',
       );
     }
+    if (failing.isNotEmpty) {
+      return Column(
+        children: [
+          _FailureBanner(failing: failing),
+          Expanded(child: _list(context, store, messages)),
+        ],
+      );
+    }
+    return _list(context, store, messages);
+  }
+
+  Widget _list(
+      BuildContext context, RoomStore store, List<ChatMessage> messages) {
     // SelectionArea rather than a SelectableText per bubble: it selects across
-    // the whole conversation, which is what you want when copying one out, and
-    // it avoids EditableText, which never settles inside a widget test.
-    // A bot turn can run for a minute. Showing who is composing turns that
+    // the whole conversation, and avoids EditableText, which never settles
+    // inside a widget test.
+    //
+    // A bot turn can run for a minute, so showing who is composing turns that
     // wait from "nothing is happening" into "something is happening".
     final composing = store.activity
         .where((entry) => entry.streaming)
         .map((entry) => entry.agent.handle)
         .toList();
-
     return SelectionArea(
       child: ListView.builder(
         controller: controller,
@@ -536,6 +576,61 @@ class Composer extends StatelessWidget {
               padding: const EdgeInsets.all(15),
             ),
             child: const Icon(Icons.arrow_upward, size: 19),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Says why a room is doing nothing.
+///
+/// Every bot failing to take a turn used to be indistinguishable from every
+/// bot having nothing to do. The most common cause is a backend that will not
+/// start — a project folder that does not exist, or a CLI that is not signed
+/// in — and the message from the provider usually names it exactly.
+class _FailureBanner extends StatelessWidget {
+  const _FailureBanner({required this.failing});
+
+  final List<BotActivity> failing;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final worst = failing.first;
+    return Container(
+      width: double.infinity,
+      color: scheme.errorContainer,
+      padding: const EdgeInsets.fromLTRB(16, 11, 16, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.error_outline, size: 16, color: scheme.onErrorContainer),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  failing.length == 1
+                      ? '@${worst.agent.handle} cannot take a turn'
+                      : '${failing.length} bots cannot take a turn',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: scheme.onErrorContainer,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 5),
+          Text(
+            worst.lastError ?? 'the backend did not respond',
+            maxLines: 3,
+            style: TextStyle(
+                fontSize: 11.5,
+                height: 1.35,
+                color: scheme.onErrorContainer.withValues(alpha: 0.9)),
           ),
         ],
       ),

@@ -14,6 +14,7 @@
 library;
 
 import 'models.dart';
+import 'room_check.dart';
 import 'roles.dart';
 
 /// A room file plus the environment the server needs to run it.
@@ -76,7 +77,7 @@ RoomFile buildRoomFile(RoomDef room, List<BotDef> bots) {
         ..writeln('kind = "cli_agent"')
         ..writeln('cli = ' + _s(cli.binary))
         ..writeln('model = ' + _s(bot.model))
-        ..writeln('workdir = ' + _s(room.path))
+        ..writeln('workdir = ' + _s(expandHome(room.path)))
         // The board as MCP tools, on top of the CLI's own memories, skills
         // and MCP servers.
         ..writeln('mcp = true')

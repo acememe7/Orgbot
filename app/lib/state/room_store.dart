@@ -34,6 +34,16 @@ class BotActivity {
   /// True while a model turn is streaming, so the UI can show it thinking.
   bool streaming = false;
 
+  /// The most recent failure from this bot's backend, if it is failing.
+  ///
+  /// Without this a bot whose provider cannot start looks identical to one
+  /// with nothing to do — which is how a room where every turn failed to
+  /// spawn appeared as ten bots sitting quietly at "ready".
+  String? lastError;
+
+  /// How many turns in a row have failed.
+  int errorStreak = 0;
+
   /// A running count of what it has got done.
   int tasksSubmitted = 0;
   int reviewsGiven = 0;
@@ -142,6 +152,12 @@ class RoomStore extends ChangeNotifier {
         candidate.author.name == arrived.author.name);
     if (index >= 0) _pending.removeAt(index);
   }
+
+  /// Bots whose backend is currently failing, with the reason.
+  ///
+  /// A room where nothing happens should say why rather than looking idle.
+  List<BotActivity> get failing =>
+      activity.where((entry) => entry.lastError != null).toList();
 
   /// What each bot is doing, in roster order.
   List<BotActivity> get activity =>
@@ -285,6 +301,17 @@ class RoomStore extends ChangeNotifier {
         if (inspector != null) {
           _note(inspector, 'reviewed work — $verdict');
           _activity[inspector]?.reviewsGiven += 1;
+        }
+      case 'agent_errored':
+        final agentId = event['agent'] as String?;
+        final agent = agentId == null ? null : _agents[agentId];
+        if (agent != null && agentId != null) {
+          final entry =
+              _activity.putIfAbsent(agentId, () => BotActivity(agent));
+          entry.lastError = event['error'] as String? ?? 'the turn failed';
+          entry.errorStreak = (event['attempt'] as num?)?.toInt() ?? 1;
+          entry.streaming = false;
+          _note(agentId, 'turn failed: ${entry.lastError}');
         }
       case 'room_closed':
         _room?.phase = RoomPhase.completed;

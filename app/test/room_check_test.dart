@@ -5,6 +5,8 @@
 // may not inspect its own work and there is nobody else.
 //
 // ignore_for_file: prefer_interpolation_to_compose_strings
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:orgbot_app/orgbot/models.dart';
 import 'package:orgbot_app/orgbot/room_check.dart';
@@ -20,6 +22,8 @@ List<String> summaries(List<RoomIssue> issues) =>
     issues.map((i) => i.summary).toList();
 
 void main() {
+  _pathTests();
+
   test('the exact room that stalled is reported as unable to finish', () {
     final issues = checkRoom(room(), [bot('dennis', 'engineer')]);
     expect(hasBlockingIssue(issues), isTrue);
@@ -126,5 +130,84 @@ void main() {
       expect(issue.fix.trim(), isNotEmpty,
           reason: 'a warning without a fix just makes someone feel stuck');
     }
+  });
+}
+
+void _pathTests() {
+  group('the project folder', () {
+    /// The bug this guards: a room whose folder was typed as `~/projects/High`
+    /// spawned every agent turn against a literal `~` directory, so ten bots
+    /// sat at "ready" and the room did nothing at all.
+    test('a leading tilde is expanded', () {
+      final home = Platform.environment['HOME'] ?? '';
+      expect(expandHome('~'), home);
+      expect(expandHome('~/projects/High'), '$home/projects/High');
+    });
+
+    test('other paths are left alone', () {
+      expect(expandHome('/tmp/work'), '/tmp/work');
+      expect(expandHome(''), '');
+      expect(expandHome('/tmp/~backup'), '/tmp/~backup');
+    });
+
+    test('a folder that does not exist blocks a room of CLI bots', () {
+      final room = RoomDef(
+        name: 'r',
+        goal: 'ship',
+        path: '/definitely/not/here',
+        tasks: const ['work'],
+      );
+      final issues = checkRoom(room, [
+        BotDef(name: 'lead', handle: 'lead', role: 'coordinator'),
+        BotDef(name: 'dev', handle: 'dev', role: 'engineer'),
+        BotDef(name: 'qa', handle: 'qa', role: 'reviewer'),
+      ]);
+      expect(hasBlockingIssue(issues), isTrue);
+      expect(summaries(issues).join(' '), contains('does not exist'));
+    });
+
+    test('an existing folder is fine', () {
+      final room = RoomDef(
+        name: 'r',
+        goal: 'ship',
+        path: Directory.systemTemp.path,
+        tasks: const ['work'],
+      );
+      final issues = checkRoom(room, [
+        BotDef(name: 'lead', handle: 'lead', role: 'coordinator'),
+        BotDef(name: 'dev', handle: 'dev', role: 'engineer'),
+        BotDef(name: 'qa', handle: 'qa', role: 'reviewer'),
+      ]);
+      expect(hasBlockingIssue(issues), isFalse,
+          reason: summaries(issues).join('; '));
+    });
+
+    /// Scripted bots do not spawn anything, so the folder is irrelevant.
+    test('a room of scripted bots is unaffected by the folder', () {
+      final room = RoomDef(
+        name: 'r',
+        goal: 'ship',
+        path: '/definitely/not/here',
+        tasks: const ['work'],
+      );
+      final issues = checkRoom(room, [
+        BotDef(
+            name: 'lead',
+            handle: 'lead',
+            role: 'coordinator',
+            provider: ProviderKind.scripted),
+        BotDef(
+            name: 'dev',
+            handle: 'dev',
+            role: 'engineer',
+            provider: ProviderKind.scripted),
+        BotDef(
+            name: 'qa',
+            handle: 'qa',
+            role: 'reviewer',
+            provider: ProviderKind.scripted),
+      ]);
+      expect(summaries(issues).join(' '), isNot(contains('does not exist')));
+    });
   });
 }

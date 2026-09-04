@@ -217,7 +217,9 @@ impl ProviderConfig {
             } => ProviderRef::CliAgent {
                 cli: *cli,
                 model: model.clone(),
-                workdir: workdir.clone(),
+                // A tilde here is a literal directory to Command::current_dir,
+                // so expand it or every turn fails to spawn.
+                workdir: expand_home(workdir),
                 policy: *policy,
                 mcp: *mcp,
             },
@@ -341,6 +343,27 @@ pub struct ResolvedTask {
     pub priority: Priority,
     /// Whether to open it immediately.
     pub open: bool,
+}
+
+/// Expand a leading `~` to the user's home directory.
+///
+/// A shell expands this before a program ever sees it, so a path typed into a
+/// UI or written into a room file by hand arrives with the tilde intact —
+/// and `Command::current_dir` then fails with "No such file or directory",
+/// which surfaces as every bot silently failing every turn.
+pub fn expand_home(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed == "~" || trimmed.starts_with("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = home.to_string_lossy().into_owned();
+            return if trimmed == "~" {
+                home
+            } else {
+                format!("{home}/{}", &trimmed[2..])
+            };
+        }
+    }
+    trimmed.to_string()
 }
 
 /// A room file, parsed and validated into runnable pieces.
@@ -630,5 +653,40 @@ mod tests {
             }
             other => panic!("expected CliAgent ref, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod home_tests {
+    use super::*;
+
+    /// The failure this guards: a room whose project folder was typed with a
+    /// tilde spawned every CLI turn against a directory that does not exist,
+    /// so ten bots sat "ready" and nothing ever happened.
+    #[test]
+    fn a_leading_tilde_is_expanded() {
+        let home = std::env::var("HOME").expect("a home directory");
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("~/projects/High"), format!("{home}/projects/High"));
+    }
+
+    #[test]
+    fn an_absolute_or_relative_path_is_left_alone() {
+        assert_eq!(expand_home("/tmp/work"), "/tmp/work");
+        assert_eq!(expand_home("."), ".");
+        assert_eq!(expand_home(""), "");
+    }
+
+    /// A tilde inside a path is part of the name, not a home reference.
+    #[test]
+    fn a_tilde_that_is_not_leading_is_untouched() {
+        assert_eq!(expand_home("/tmp/~backup"), "/tmp/~backup");
+        assert_eq!(expand_home("./~odd"), "./~odd");
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        let home = std::env::var("HOME").expect("a home directory");
+        assert_eq!(expand_home("  ~/work  "), format!("{home}/work"));
     }
 }
