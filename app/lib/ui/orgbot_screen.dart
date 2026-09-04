@@ -603,6 +603,18 @@ class _BotEditorState extends State<_BotEditor> {
       );
     }
 
+    // A paired sign-in works everywhere, including a phone with no CLIs.
+    final paired = ModelCatalog.credentials?.forProvider(_provider);
+    if (paired != null) {
+      return StatusPill(
+        color: Colors.green,
+        label: 'Signed in' +
+            (paired.plan != null ? ' — ${paired.plan}' : '') +
+            ' · no API key needed',
+        icon: Icons.verified_user_outlined,
+      );
+    }
+
     final cli = _provider.cli!;
     final status = findCli(cli);
     if (status.available) {
@@ -622,8 +634,10 @@ class _BotEditorState extends State<_BotEditor> {
         ),
         const SizedBox(height: 6),
         Text(
-          '${status.problem}\nInstall it and sign in with `${cli.binary}`, then '
-          'reopen this dialog.',
+          '${status.problem}\n'
+          'Either install ${cli.binary} and sign in with it, or bring a '
+          'sign-in from a machine that has it — run `orgbot pair` there and '
+          'import it from Sign in.',
           style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
         ),
       ],

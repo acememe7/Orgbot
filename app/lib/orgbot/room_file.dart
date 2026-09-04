@@ -13,6 +13,9 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
+import 'dart:io';
+
+import 'credentials.dart';
 import 'models.dart';
 import 'room_check.dart';
 import 'roles.dart';
@@ -32,7 +35,15 @@ class RoomFile {
 }
 
 /// Render a room and its bots as a room file.
-RoomFile buildRoomFile(RoomDef room, List<BotDef> bots) {
+RoomFile buildRoomFile(
+  RoomDef room,
+  List<BotDef> bots, {
+  Credentials? credentials,
+}) {
+  // A CLI can only run where the binary exists. Everywhere else — a phone,
+  // most obviously — the same subscription is used through its API with the
+  // token a paired sign-in carries.
+  final canRunClis = Platform.isLinux || Platform.isMacOS || Platform.isWindows;
   final buffer = StringBuffer();
   final environment = <String, String>{};
   final skipped = <String>[];
@@ -70,8 +81,26 @@ RoomFile buildRoomFile(RoomDef room, List<BotDef> bots) {
       ..writeln('may_inspect = ' + powers.mayInspect.toString())
       ..writeln('may_submit = ' + powers.maySubmit.toString());
 
+    final paired = credentials?.forProvider(bot.provider);
     final cli = bot.provider.cli;
-    if (cli != null) {
+    if (cli != null && !canRunClis && paired != null) {
+      // API-backed, using the paired subscription token.
+      environment[_envVarFor(bot.provider)] = paired.token;
+      buffer
+        ..writeln('[bots.provider]')
+        ..writeln('kind = ' + _s(_apiKindFor(bot.provider)))
+        ..writeln('model = ' + _s(bot.model));
+      if (bot.provider != ProviderKind.anthropic) {
+        buffer.writeln('profile = ' + _s(bot.provider.key));
+      }
+    } else if (cli != null && !canRunClis) {
+      skipped.add('@' + handle + ': ' +
+          bot.provider.label +
+          ' needs a sign-in on this device — run `orgbot pair` on your '
+          'computer and import it');
+      _rollbackLastBot(buffer);
+      continue;
+    } else if (cli != null) {
       buffer
         ..writeln('[bots.provider]')
         ..writeln('kind = "cli_agent"')
@@ -113,6 +142,38 @@ RoomFile buildRoomFile(RoomDef room, List<BotDef> bots) {
   }
 
   return RoomFile(buffer.toString(), environment, skipped);
+}
+
+/// The environment variable the provider layer reads a credential from.
+String _envVarFor(ProviderKind provider) {
+  switch (provider) {
+    case ProviderKind.anthropic:
+      // A subscription token is an OAuth token, not an API key, and the
+      // provider layer sends it as a bearer with the oauth beta header.
+      return 'ANTHROPIC_AUTH_TOKEN';
+    case ProviderKind.codex:
+      return 'OPENAI_API_KEY';
+    case ProviderKind.grok:
+      return 'GROK_API_KEY';
+    case ProviderKind.deepseek:
+      return 'DEEPSEEK_API_KEY';
+    case ProviderKind.scripted:
+      return '';
+  }
+}
+
+/// The API-backed provider kind for a subscription, used where no CLI can run.
+String _apiKindFor(ProviderKind provider) {
+  switch (provider) {
+    case ProviderKind.anthropic:
+      return 'anthropic';
+    case ProviderKind.codex:
+      return 'openai';
+    case ProviderKind.grok:
+      return 'openai';
+    default:
+      return 'scripted';
+  }
 }
 
 /// A bot's full standing instruction: its own persona plus its role's brief.

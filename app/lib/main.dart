@@ -6,9 +6,12 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'orgbot/credentials.dart';
 import 'orgbot/library.dart';
+import 'orgbot/model_catalog.dart';
 import 'ui/brand.dart';
 import 'ui/connect_screen.dart';
+import 'ui/sign_in_screen.dart';
 import 'ui/orgbot_screen.dart';
 
 void main() {
@@ -19,7 +22,9 @@ void main() {
 /// Choose: join a hosted room, or run one entirely on this device.
 class HomeScreen extends StatelessWidget {
   final Library library;
-  const HomeScreen({super.key, required this.library});
+  final Credentials credentials;
+  const HomeScreen(
+      {super.key, required this.library, required this.credentials});
 
   @override
   Widget build(BuildContext context) {
@@ -60,6 +65,18 @@ class HomeScreen extends StatelessWidget {
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute(
                         builder: (_) => OrgBotScreen(library: library)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _HomeCard(
+                  icon: Icons.key_outlined,
+                  title: 'Sign in',
+                  subtitle:
+                      'Bring your Claude, Codex or Grok subscription to this '
+                      'device so your bots can use it.',
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                        builder: (_) => SignInScreen(credentials: credentials)),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -154,6 +171,16 @@ class OrgBotApp extends StatefulWidget {
 
 class _OrgBotAppState extends State<OrgBotApp> {
   final Library _library = Library();
+  final Credentials _credentials = Credentials();
+
+  @override
+  void initState() {
+    super.initState();
+    // The model catalog consults these before falling back to local CLIs,
+    // which a phone does not have.
+    ModelCatalog.credentials = _credentials;
+    _credentials.load();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -163,7 +190,7 @@ class _OrgBotAppState extends State<OrgBotApp> {
       theme: _theme(Brightness.light),
       darkTheme: _theme(Brightness.dark),
       themeMode: ThemeMode.dark,
-      home: HomeScreen(library: _library),
+      home: HomeScreen(library: _library, credentials: _credentials),
     );
   }
 

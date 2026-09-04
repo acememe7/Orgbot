@@ -21,6 +21,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../engine/agent_cli.dart';
+import 'credentials.dart';
 import 'models.dart';
 
 /// One selectable model.
@@ -78,10 +79,23 @@ class ModelCatalog {
   /// Discard cached lists so the next lookup goes back to the source.
   static void invalidate() => _cache.clear();
 
-  /// The models `kind` offers, from the machine where possible.
+  /// A paired sign-in, when one has been imported. Consulted before the
+  /// local CLIs, because a phone has none of those but may well be signed in.
+  static Credentials? credentials;
+
+  /// The models `kind` offers, from the machine or from a paired sign-in.
   static Future<ModelList> load(ProviderKind kind, {String apiKey = ''}) async {
     final cached = _cache[kind];
     if (cached != null) return cached;
+
+    // A paired sign-in carries the model list the desktop's own CLI reported,
+    // which is the real list — and the only one available on a phone.
+    final paired = credentials?.forProvider(kind);
+    if (paired != null && paired.models.isNotEmpty) {
+      final list = ModelList(paired.models, ModelSource.live);
+      _cache[kind] = list;
+      return list;
+    }
 
     ModelList result;
     try {

@@ -47,6 +47,16 @@ enum CliCommand {
     },
     /// Bridge an agent CLI's stdio to a room's MCP socket. Spawned by the
     /// agent CLI itself from its MCP config; you normally never run this.
+    /// Carry this machine's sign-ins to another device, such as a phone.
+    ///
+    /// A phone has no agent CLIs, but the tokens those CLIs hold are ordinary
+    /// OAuth tokens the provider APIs accept — so the phone does not need its
+    /// own sign-in, it needs this one.
+    Pair {
+        /// Write the bundle here instead of printing it.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
     RoomMcp {
         /// The room MCP unix socket to connect to.
         #[arg(long)]
@@ -74,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
         CliCommand::Serve { config, addr } => serve(config, addr).await,
         CliCommand::Check { config } => check(config),
         CliCommand::Init { path } => init(path),
+        CliCommand::Pair { out } => pair(out),
         CliCommand::RoomMcp { socket } => {
             orgbot_runtime::relay::run(&socket)
                 .await
@@ -179,3 +190,49 @@ provider = { kind = "anthropic", model = "claude-opus-5" }
 # required_role = "writer"
 # priority = "high"
 "#;
+
+/// Collect this machine's sign-ins into a bundle for another device.
+fn pair(out: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    let bundle = orgbot_server::pair::collect();
+    if bundle.providers.is_empty() {
+        anyhow::bail!(
+            "no sign-ins found. Sign in with `claude`, `codex` or `grok` first."
+        );
+    }
+    let json = serde_json::to_string(&bundle)?;
+
+    match out {
+        Some(path) => {
+            std::fs::write(&path, &json)?;
+            // The bundle carries live access tokens; keep it off other users'
+            // eyes even on a shared machine.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &path,
+                    std::fs::Permissions::from_mode(0o600),
+                );
+            }
+            eprintln!("wrote {} ({} provider(s))", path.display(), bundle.providers.len());
+            for provider in &bundle.providers {
+                eprintln!(
+                    "  {} — {} model(s){}",
+                    provider.provider,
+                    provider.models.len(),
+                    provider
+                        .plan
+                        .as_deref()
+                        .map(|plan| format!(" [{plan}]"))
+                        .unwrap_or_default()
+                );
+            }
+            eprintln!();
+            eprintln!("This file contains live access tokens. Move it to the device");
+            eprintln!("and delete it afterwards.");
+        }
+        // Printed on stdout so it can be piped; the summary goes to stderr.
+        None => println!("{json}"),
+    }
+    Ok(())
+}

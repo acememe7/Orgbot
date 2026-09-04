@@ -18,6 +18,7 @@ import '../engine/embedded_engine.dart';
 import '../net/room_client.dart';
 import '../orgbot/library.dart';
 import '../orgbot/models.dart';
+import '../orgbot/model_catalog.dart';
 import '../orgbot/room_check.dart';
 import '../orgbot/room_file.dart';
 import 'room_store.dart';
@@ -109,7 +110,8 @@ class EngineRoomController extends ChangeNotifier {
       // parks every task in review.
       issues = checkRoom(room, bots);
 
-      final file = buildRoomFile(room, bots);
+      final file = buildRoomFile(room, bots,
+          credentials: ModelCatalog.credentials);
       skipped = file.skipped;
       if (file.toml.contains('[[bots]]') == false) {
         throw EngineStartError(skipped.isEmpty
