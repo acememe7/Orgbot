@@ -159,6 +159,7 @@ pub async fn serve_stream(stream: tokio::net::UnixStream, tx: mpsc::Sender<McpCa
                 if trimmed.is_empty() {
                     continue;
                 }
+                let id = request_id(&trimmed);
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                 if tx
                     .send(McpCall {
@@ -168,27 +169,53 @@ pub async fn serve_stream(stream: tokio::net::UnixStream, tx: mpsc::Sender<McpCa
                     .await
                     .is_err()
                 {
-                    break; // the turn loop is gone
+                    // The turn loop has gone. Answer rather than vanish: a
+                    // client left waiting on a request that never returns
+                    // decides the server died, which is what
+                    // "the orgbot-room server dropped" was.
+                    let _ = write_line(&mut reader, &response_error(id, -32603, BETWEEN_TURNS)).await;
+                    break;
                 }
-                if let Ok(Some(reply)) = reply_rx.await {
-                    if reader
-                        .get_mut()
-                        .write_all(
-                            format!(
-                                "{reply}
-"
-                            )
-                            .as_bytes(),
-                        )
-                        .await
-                        .is_err()
-                    {
+                let reply = match reply_rx.await {
+                    Ok(Some(reply)) => Some(reply),
+                    Ok(None) => None, // a notification; nothing to answer
+                    // The turn ended while this call was in flight and the
+                    // sender was dropped. Same reasoning as above.
+                    Err(_) => Some(response_error(id, -32603, BETWEEN_TURNS)),
+                };
+                if let Some(reply) = reply {
+                    if write_line(&mut reader, &reply).await.is_err() {
                         break;
                     }
                 }
             }
         }
     }
+}
+
+/// Told to a client whose call arrived outside a bot's turn.
+///
+/// The room only dispatches tool calls while the bot that owns them is taking
+/// a turn. A call outside that window cannot be served, but it must still be
+/// answered — an unanswered JSON-RPC request looks to the client like the
+/// server has died, and it tears the session down and reconnects.
+const BETWEEN_TURNS: &str =
+    "the room is between turns; retry this call during your turn";
+
+/// Write one newline-delimited JSON-RPC message back to the client.
+async fn write_line(
+    reader: &mut tokio::io::BufReader<tokio::net::UnixStream>,
+    line: &str,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    reader.get_mut().write_all(format!("{line}\n").as_bytes()).await
+}
+
+/// The `id` of a request, so a failure can be attributed to it.
+fn request_id(request: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(request)
+        .ok()
+        .and_then(|value| value.get("id").cloned())
 }
 
 fn response_ok(id: Option<Value>, result: Value) -> String {

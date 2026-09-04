@@ -60,7 +60,7 @@ class RoomStore extends ChangeNotifier {
     });
   }
 
-  final RoomClient _client;
+  final RoomLink _client;
 
   LinkState _connection = LinkState.disconnected;
   LinkState get connection => _connection;

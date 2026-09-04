@@ -36,3 +36,6 @@ app/*.deb
 
 # Machine-specific cross-compile config; generate with core/scripts/build-android.sh
 core/.cargo/
+
+# Engine library, produced by core/scripts/build-android.sh
+app/android/app/src/main/jniLibs/

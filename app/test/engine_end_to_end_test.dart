@@ -5,7 +5,6 @@
 // runs the suite. Build it with: (cd core && cargo build --release)
 //
 // ignore_for_file: prefer_interpolation_to_compose_strings
-import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:orgbot_app/engine/core_server.dart';

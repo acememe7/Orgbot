@@ -302,7 +302,28 @@ async fn complete_with_mcp(
     let mut calls_err = 0usize;
     loop {
         tokio::select! {
-            response = &mut turn => return (response, calls_ok, calls_err),
+            response = &mut turn => {
+                // The model has finished, but the CLI may have calls already
+                // queued. Serve them before returning: dropping the reply
+                // channel leaves the client waiting on a request that never
+                // comes back, and it concludes the server has died.
+                while let Ok(call) = rx.try_recv() {
+                    let reply = {
+                        let mut dispatch = |name: &str, args: &serde_json::Value| {
+                            let outcome = orgbot_tools::dispatch(engine, actor, name, args);
+                            if outcome.is_error {
+                                calls_err += 1;
+                            } else {
+                                calls_ok += 1;
+                            }
+                            outcome
+                        };
+                        session.handle(&call.request, &mut dispatch)
+                    };
+                    let _ = call.reply.send(reply);
+                }
+                return (response, calls_ok, calls_err);
+            }
             inbound = rx.recv() => {
                 let Some(call) = inbound else { continue };
                 let reply = {

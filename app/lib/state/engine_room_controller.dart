@@ -11,7 +11,10 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'dart:io';
+
 import '../engine/core_server.dart';
+import '../engine/embedded_engine.dart';
 import '../net/room_client.dart';
 import '../orgbot/library.dart';
 import '../orgbot/models.dart';
@@ -42,8 +45,19 @@ class EngineRoomController extends ChangeNotifier {
   List<RoomIssue> issues = const [];
 
   CoreServer? _server;
-  RoomClient? _client;
+  RoomLink? _client;
   RoomStore? _store;
+
+  /// Set when the room runs inside this process rather than as a subprocess.
+  EmbeddedEngine? _embedded;
+  int _embeddedRoom = 0;
+  Timer? _pump;
+
+  /// Whether a room here runs in-process.
+  ///
+  /// A phone cannot spawn a subprocess, so it loads the engine as a library
+  /// instead. Same engine either way — only how it is started differs.
+  static bool get runsInProcess => Platform.isAndroid || Platform.isIOS;
 
   /// The live room state, once connected.
   RoomStore? get store => _store;
@@ -104,20 +118,10 @@ class EngineRoomController extends ChangeNotifier {
       }
 
       _to(RoomLaunch.starting);
-      final server = await startRoom(file);
-      _server = server;
-
-      _to(RoomLaunch.connecting);
-      final client = RoomClient();
-      _client = client;
-      final store = RoomStore(client);
-      _store = store;
-      // Repaint the screen whenever room state changes.
-      store.addListener(notifyListeners);
-
-      await client.connect(server.url);
-      if (client.current == LinkState.error) {
-        throw EngineStartError('Connected to the engine but the socket failed.');
+      if (runsInProcess) {
+        await _startEmbedded(file);
+      } else {
+        await _startSubprocess(file);
       }
       _to(RoomLaunch.running);
     } catch (e) {
@@ -125,6 +129,53 @@ class EngineRoomController extends ChangeNotifier {
       await _teardown();
       _to(RoomLaunch.failed);
     }
+  }
+
+  /// Run the room as a child process and talk to it over a socket.
+  Future<void> _startSubprocess(RoomFile file) async {
+    final server = await startRoom(file);
+    _server = server;
+
+    _to(RoomLaunch.connecting);
+    final client = RoomClient();
+    _client = client;
+    final store = RoomStore(client);
+    _store = store;
+    store.addListener(notifyListeners);
+
+    await client.connect(server.url);
+    if (client.current == LinkState.error) {
+      throw EngineStartError('Connected to the engine but the socket failed.');
+    }
+  }
+
+  /// Run the room inside this process, through the engine library.
+  Future<void> _startEmbedded(RoomFile file) async {
+    final engine = EmbeddedEngine.load();
+    _embedded = engine;
+    _embeddedRoom = engine.openRoom(file.toml, file.environment);
+
+    _to(RoomLaunch.connecting);
+    // The store is fed the same wire messages the socket would carry, so
+    // nothing above it knows which transport it got.
+    final client = LocalRoomClient();
+    _client = client;
+    final store = RoomStore(client);
+    _store = store;
+    store.addListener(notifyListeners);
+
+    final snapshot = engine.snapshot(_embeddedRoom);
+    if (snapshot != null) client.deliver(snapshot);
+
+    // Poll rather than call back: a callback from a Rust worker thread has to
+    // be marshalled to this isolate, and getting that wrong is a crash.
+    _pump = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      final room = _embeddedRoom;
+      if (room == 0) return;
+      for (final message in engine.poll(room)) {
+        client.deliver(message);
+      }
+    });
   }
 
   /// Say something to the room.
@@ -136,7 +187,12 @@ class EngineRoomController extends ChangeNotifier {
     final body = text.trim();
     if (body.isEmpty) return;
     _store?.addPending(author, body);
-    _client?.sendMessage(author, body);
+    final embedded = _embedded;
+    if (embedded != null && _embeddedRoom != 0) {
+      embedded.say(_embeddedRoom, author, body);
+    } else {
+      _client?.sendMessage(author, body);
+    }
     notifyListeners();
   }
 
@@ -148,6 +204,14 @@ class EngineRoomController extends ChangeNotifier {
   }
 
   Future<void> _teardown() async {
+    _pump?.cancel();
+    _pump = null;
+    final embedded = _embedded;
+    if (embedded != null && _embeddedRoom != 0) {
+      embedded.closeRoom(_embeddedRoom);
+      _embeddedRoom = 0;
+    }
+    _embedded = null;
     _store?.removeListener(notifyListeners);
     await _client?.close();
     _client = null;
