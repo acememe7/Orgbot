@@ -32,7 +32,7 @@ class FakeClient implements RoomClient {
   @override
   void resync() {}
   @override
-  Future<void> connect(String url) async {}
+  Future<void> connect(String url, {String? token}) async {}
   @override
   Future<void> close() async {}
 }

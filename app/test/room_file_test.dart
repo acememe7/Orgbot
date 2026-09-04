@@ -6,6 +6,7 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:orgbot_app/orgbot/credentials.dart';
 import 'package:orgbot_app/orgbot/models.dart';
 import 'package:orgbot_app/orgbot/room_file.dart';
@@ -125,6 +126,8 @@ void main() {
     /// API, not by reaching past it.
     Future<Credentials> signedInTo(ProviderKind provider) async {
       SharedPreferences.setMockInitialValues({});
+      // Secrets live in the keystore now, which needs a stand-in under test.
+      FlutterSecureStorage.setMockInitialValues({});
       final credentials = Credentials();
       await credentials.importBundle(jsonEncode({
         'version': 1,

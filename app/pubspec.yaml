@@ -38,6 +38,9 @@ dependencies:
   # Loading the engine library in-process on Android.
   ffi: ^2.1.3
   shared_preferences: ^2.5.5
+  # Sign-ins and room tokens live in the platform keystore, not in
+  # plaintext preferences.
+  flutter_secure_storage: ^9.2.4
   # Opening the provider's sign-in page from the device-code screen.
   url_launcher: ^6.3.2
 

@@ -8,9 +8,11 @@
 // Access tokens expire within hours, so what is stored is the refresh token
 // alongside them; [Credentials.freshToken] renews on demand.
 //
-// Tokens are secrets. They are stored on the device and never written into a
-// room file, and `toString` on anything here redacts them, because these
-// objects otherwise end up in logs and error messages.
+// Tokens are secrets. They are held in the platform keystore — Android's
+// EncryptedSharedPreferences, the iOS keychain — never written into a room
+// file, and redacted by `toString`, because these objects otherwise end up in
+// logs and error messages. Anything stored by an older build in plaintext
+// preferences is moved across on first load and the plaintext copy deleted.
 //
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
@@ -18,6 +20,7 @@ library;
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'model_catalog.dart';
@@ -177,13 +180,19 @@ const int kBundleVersion = 1;
 
 /// The sign-ins held on this device.
 class Credentials extends ChangeNotifier {
-  // The field is filled lazily from SharedPreferences.getInstance() when it
+  // `_prefs` is filled lazily from SharedPreferences.getInstance() when it
   // was not injected, so it cannot be an initializing formal.
-  // ignore: prefer_initializing_formals
-  Credentials({SharedPreferences? prefs}) : _prefs = prefs;
+  Credentials({SharedPreferences? prefs, FlutterSecureStorage? secure})
+      // ignore: prefer_initializing_formals
+      : _prefs = prefs,
+        _secure = secure ?? const FlutterSecureStorage();
 
   static const _key = 'orgbot_credentials_v1';
 
+  /// Where secrets actually live.
+  final FlutterSecureStorage _secure;
+
+  /// Only consulted to rescue what an older build left in the clear.
   SharedPreferences? _prefs;
   final Map<ProviderKind, ProviderCredential> _byProvider = {};
 
@@ -201,9 +210,16 @@ class Credentials extends ChangeNotifier {
   bool isSignedIn(ProviderKind provider) => _byProvider.containsKey(provider);
 
   /// Load what was stored previously.
+  ///
+  /// Reads the keystore first; if nothing is there, rescues anything an
+  /// older build left in plaintext preferences and removes it.
   Future<void> load() async {
-    final prefs = _prefs ??= await SharedPreferences.getInstance();
-    final raw = prefs.getString(_key);
+    var raw = await _readSecure();
+    var rescued = false;
+    if (raw == null || raw.isEmpty) {
+      raw = await _rescuePlaintext();
+      rescued = raw != null;
+    }
     if (raw == null || raw.isEmpty) return;
     try {
       final decoded = jsonDecode(raw);
@@ -217,10 +233,34 @@ class Credentials extends ChangeNotifier {
           if (credential != null) _byProvider[credential.provider] = credential;
         }
       }
+      if (rescued) await _persist();
       notifyListeners();
     } catch (_) {
       // Corrupt storage should not stop the app starting; the person can
-      // simply pair again.
+      // simply sign in again.
+    }
+  }
+
+  /// Read the keystore, tolerating a device where it is unavailable.
+  Future<String?> _readSecure() async {
+    try {
+      return await _secure.read(key: _key);
+    } catch (_) {
+      // A locked or broken keystore must not stop the app starting.
+      return null;
+    }
+  }
+
+  /// Take anything an older build wrote in the clear, and delete it.
+  Future<String?> _rescuePlaintext() async {
+    try {
+      final prefs = _prefs ??= await SharedPreferences.getInstance();
+      final raw = prefs.getString(_key);
+      if (raw == null || raw.isEmpty) return null;
+      await prefs.remove(_key);
+      return raw;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -346,14 +386,11 @@ class Credentials extends ChangeNotifier {
   }
 
   Future<void> _persist() async {
-    final prefs = _prefs ??= await SharedPreferences.getInstance();
-    await prefs.setString(
-      _key,
-      jsonEncode({
-        'version': kBundleVersion,
-        'source': source,
-        'providers': [for (final c in _byProvider.values) c.toJson()],
-      }),
-    );
+    final encoded = jsonEncode({
+      'version': kBundleVersion,
+      'source': source,
+      'providers': [for (final c in _byProvider.values) c.toJson()],
+    });
+    await _secure.write(key: _key, value: encoded);
   }
 }

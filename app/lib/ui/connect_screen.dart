@@ -18,12 +18,15 @@ class ConnectScreen extends StatefulWidget {
 class _ConnectScreenState extends State<ConnectScreen> {
   final _url = TextEditingController(text: 'ws://127.0.0.1:8787/ws');
   final _name = TextEditingController(text: 'you');
+  final _token = TextEditingController();
   bool _connecting = false;
+  bool _showToken = false;
 
   @override
   void dispose() {
     _url.dispose();
     _name.dispose();
+    _token.dispose();
     super.dispose();
   }
 
@@ -35,7 +38,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     setState(() => _connecting = true);
     final client = RoomClient();
     final store = RoomStore(client);
-    await client.connect(url);
+    await client.connect(url, token: _token.text);
 
     if (!mounted) return;
     setState(() => _connecting = false);
@@ -92,6 +95,24 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     hintText: 'ws://host:8787/ws',
                     border: OutlineInputBorder(),
                     prefixIcon: Icon(Icons.link),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _token,
+                  obscureText: !_showToken,
+                  decoration: InputDecoration(
+                    labelText: 'Room token',
+                    helperText: 'Printed by the room when it started',
+                    border: const OutlineInputBorder(),
+                    prefixIcon: const Icon(Icons.key_outlined),
+                    suffixIcon: IconButton(
+                      icon: Icon(_showToken
+                          ? Icons.visibility_off_outlined
+                          : Icons.visibility_outlined),
+                      onPressed: () => setState(() => _showToken = !_showToken),
+                      tooltip: _showToken ? 'Hide' : 'Show',
+                    ),
                   ),
                 ),
                 const SizedBox(height: 12),

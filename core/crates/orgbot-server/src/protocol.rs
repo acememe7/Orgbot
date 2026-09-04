@@ -32,6 +32,13 @@ pub enum ClientMessage {
         /// Resume the tail after this sequence number. `0` means from the start.
         #[serde(default)]
         since: Seq,
+        /// The room's token, when it has one.
+        ///
+        /// Sent in the first frame rather than as a header or a query
+        /// parameter: a header can be stripped by a proxy, and a URL ends up
+        /// in logs and history. Absent for a loopback room with no token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
     },
     /// Post a human message into the chat.
     SendMessage {
@@ -144,6 +151,7 @@ mod tests {
             ClientMessage::Hello {
                 wire_version: 1,
                 since: Seq::ZERO,
+                token: None,
             }
         );
     }

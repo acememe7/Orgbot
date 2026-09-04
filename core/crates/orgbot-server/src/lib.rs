@@ -38,8 +38,40 @@ pub use session::{Control, RoomSession, SessionHandle};
 /// bots, runs the room on its own task, and serves the HTTP/WS surface at
 /// `addr` (the Flutter app, a browser, or the desktop shell attach there).
 /// It returns when the listener stops serving.
-pub async fn serve_room(config: &Path, addr: SocketAddr) -> anyhow::Result<()> {
-    serve_room_with_readiness(config, addr, None).await
+pub async fn serve_room(
+    config: &Path,
+    addr: SocketAddr,
+    access: Access,
+) -> anyhow::Result<()> {
+    serve_room_with_readiness(config, addr, access, None).await
+}
+
+/// How a room is reached from outside this process.
+///
+/// A room's snapshot is the whole thing — roster, board and transcript — and
+/// a client can post as a person and drive the bots. So reaching the port is
+/// reaching the room, and everything that is not loopback needs a token.
+#[derive(Debug, Clone, Default)]
+pub struct Access {
+    /// The token a client must present in its opening `Hello`.
+    ///
+    /// `None` means anyone who can reach the port is in, which is only
+    /// defensible when the operating system is the boundary.
+    pub token: Option<String>,
+}
+
+impl Access {
+    /// An open room, for loopback only.
+    pub fn open() -> Self {
+        Self { token: None }
+    }
+
+    /// A room that requires this token.
+    pub fn with_token(token: impl Into<String>) -> Self {
+        Self {
+            token: Some(token.into()),
+        }
+    }
 }
 
 /// Like [serve_room], but reports readiness over a channel.
@@ -52,6 +84,7 @@ pub async fn serve_room(config: &Path, addr: SocketAddr) -> anyhow::Result<()> {
 pub async fn serve_room_with_readiness(
     config: &Path,
     addr: SocketAddr,
+    access: Access,
     ready: Option<tokio::sync::oneshot::Sender<Result<std::net::SocketAddr, String>>>,
 ) -> anyhow::Result<()> {
     let mut ready = ready;
@@ -83,6 +116,7 @@ pub async fn serve_room_with_readiness(
     let state = ws::AppState {
         session: handle,
         room_name,
+        token: access.token.map(Arc::from),
     };
     let app = Router::new()
         .route("/", get(ws::status))

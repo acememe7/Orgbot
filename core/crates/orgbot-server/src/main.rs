@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use orgbot_server::config::RoomConfig;
+use orgbot_server::Access;
 use orgbot_server::runner::run_headless;
 use tracing_subscriber::EnvFilter;
 
@@ -33,6 +34,18 @@ enum CliCommand {
         /// Address to bind.
         #[arg(long, default_value = "127.0.0.1:8787")]
         addr: SocketAddr,
+        /// The token clients must present. Generated and printed when a
+        /// reachable room is served without one. Also read from
+        /// ORGBOT_ROOM_TOKEN, so it need not appear in a process list.
+        #[arg(long)]
+        token: Option<String>,
+        /// Serve plain HTTP on a reachable address because TLS is terminated
+        /// in front of this process — a Cloudflare tunnel, nginx, Caddy.
+        ///
+        /// Without this, binding anything but loopback is refused, because
+        /// the token would otherwise cross the network in the clear.
+        #[arg(long)]
+        behind_proxy: bool,
     },
     /// Parse and validate a room file, printing what it resolves to.
     Check {
@@ -81,7 +94,12 @@ async fn main() -> anyhow::Result<()> {
             println!("outcome: {outcome:?}");
             Ok(())
         }
-        CliCommand::Serve { config, addr } => serve(config, addr).await,
+        CliCommand::Serve {
+            config,
+            addr,
+            token,
+            behind_proxy,
+        } => serve(config, addr, token, behind_proxy).await,
         CliCommand::Check { config } => check(config),
         CliCommand::Init { path } => init(path),
         CliCommand::Pair { out } => pair(out),
@@ -95,8 +113,92 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Host a room over WebSocket.
-async fn serve(config: PathBuf, addr: SocketAddr) -> anyhow::Result<()> {
-    orgbot_server::serve_room(&config, addr).await
+async fn serve(
+    config: PathBuf,
+    addr: SocketAddr,
+    token: Option<String>,
+    behind_proxy: bool,
+) -> anyhow::Result<()> {
+    // A token on the command line is visible to every process on the box, so
+    // the environment is the better place for it; the flag stays for
+    // convenience when trying things out.
+    let token = token.or_else(|| {
+        std::env::var("ORGBOT_ROOM_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    });
+    let access = access_for(addr, token, behind_proxy)?;
+    orgbot_server::serve_room(&config, addr, access).await
+}
+
+/// Decide how a room is protected, and refuse to serve one that is not.
+///
+/// Reaching the port is reaching the room: a client receives the whole
+/// transcript and can post as a person and drive the bots. Loopback is fine
+/// because the operating system is the boundary. Anything else needs a token,
+/// and needs TLS somewhere in front of it.
+fn access_for(
+    addr: SocketAddr,
+    token: Option<String>,
+    behind_proxy: bool,
+) -> anyhow::Result<Access> {
+    if addr.ip().is_loopback() {
+        return Ok(match token {
+            Some(token) => Access::with_token(token),
+            None => Access::open(),
+        });
+    }
+
+    if !behind_proxy {
+        anyhow::bail!(
+            concat!(
+                "refusing to serve {} without TLS.\n\n",
+                "This address is reachable from other machines, and plain ",
+                "HTTP would put the room's token on the wire in the clear.",
+                "\n\nPut TLS in front of it - a Cloudflare tunnel, nginx ",
+                "or Caddy - then pass --behind-proxy.\n",
+                "To try it on this machine only, bind 127.0.0.1 instead.",
+            ),
+            addr
+        );
+    }
+
+    let token = match token {
+        Some(token) if token.trim().len() >= MIN_TOKEN_LEN => token,
+        Some(_) => anyhow::bail!(
+            concat!(
+                "that token is too short to be worth having; use at least ",
+                "{} characters, or omit --token and one will ",
+                "be generated",
+            ),
+            MIN_TOKEN_LEN
+        ),
+        None => {
+            let generated = generate_token();
+            // Printed rather than written anywhere: it is the room's key, and
+            // the operator decides where it goes.
+            println!("Room token (needed to connect): {generated}");
+            // Block-buffered when stdout is a pipe: without this the one
+            // thing the operator needs can be lost on shutdown.
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            generated
+        }
+    };
+    Ok(Access::with_token(token))
+}
+
+/// The shortest token worth accepting. Long enough that guessing is hopeless.
+const MIN_TOKEN_LEN: usize = 20;
+
+/// A fresh random token.
+fn generate_token() -> String {
+    // Two v4 UUIDs: 244 bits of randomness from the OS, no new dependency.
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 /// Validate a room file and describe what it resolves to.

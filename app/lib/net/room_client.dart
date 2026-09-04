@@ -52,7 +52,10 @@ abstract class RoomLink {
   void resync();
 
   /// Connect. An in-process link is already connected.
-  Future<void> connect(String url);
+  ///
+  /// [token] is the room's key, sent in the opening frame. A room reachable
+  /// from another machine always has one; a loopback room may not.
+  Future<void> connect(String url, {String? token});
 
   /// Disconnect and release resources.
   Future<void> close();
@@ -87,12 +90,13 @@ class RoomClient implements RoomLink {
     if (!_state.isClosed) _state.add(state);
   }
 
-  /// Connect to a server. [url] is like `ws://127.0.0.1:8787/ws`.
+  /// Connect to a server. [url] is like `wss://box.example.com/ws`.
   ///
   /// Any existing connection is torn down first, so calling this to reconnect
-  /// is safe.
+  /// is safe. The token travels in the opening frame rather than the URL,
+  /// because a URL ends up in logs, history and crash reports.
   @override
-  Future<void> connect(String url) async {
+  Future<void> connect(String url, {String? token}) async {
     await _teardown();
     _setState(LinkState.connecting);
     try {
@@ -102,7 +106,11 @@ class RoomClient implements RoomLink {
       // error state instead of a silent dead socket.
       await channel.ready;
       _setState(LinkState.connected);
-      send({'type': 'hello', 'wire_version': wireVersion});
+      send({
+        'type': 'hello',
+        'wire_version': wireVersion,
+        if (token != null && token.trim().isNotEmpty) 'token': token.trim(),
+      });
 
       _subscription = channel.stream.listen(
         _onFrame,
@@ -234,9 +242,10 @@ class LocalRoomClient implements RoomLink {
   @override
   void resync() => sent.add({'type': 'resync'});
 
-  /// Nothing to connect to; the engine is already running here.
+  /// Nothing to connect to; the engine is already running here, so there is
+  /// no network for a token to protect.
   @override
-  Future<void> connect(String url) async {}
+  Future<void> connect(String url, {String? token}) async {}
 
   @override
   Future<void> close() async {
