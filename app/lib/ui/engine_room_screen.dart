@@ -14,6 +14,7 @@ import '../orgbot/library.dart';
 import '../orgbot/models.dart' as defs;
 import '../protocol/models.dart';
 import '../state/engine_room_controller.dart';
+import '../orgbot/room_check.dart';
 import '../state/room_store.dart';
 import 'brand.dart';
 import 'room_widgets.dart';
@@ -248,6 +249,7 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
     _follow(store.messages.length);
     final chat = Column(
       children: [
+        if (_controller.issues.isNotEmpty) _issuesBanner(),
         if (_controller.skipped.isNotEmpty) _skippedBanner(),
         if (_showBoard) BoardStrip(store: store),
         Expanded(child: Transcript(store: store, controller: _scroll)),
@@ -279,6 +281,45 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
         const VerticalDivider(width: 1),
         SizedBox(width: 320, child: ActivityRail(store: store)),
       ],
+    );
+  }
+
+  /// Why this room may never deliver anything.
+  Widget _issuesBanner() {
+    final scheme = Theme.of(context).colorScheme;
+    final blocking = hasBlockingIssue(_controller.issues);
+    final tone = blocking ? scheme.error : Colors.orange;
+    return Container(
+      width: double.infinity,
+      color: tone.withValues(alpha: 0.12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(blocking ? Icons.error_outline : Icons.info_outline,
+                  size: 15, color: tone),
+              const SizedBox(width: 8),
+              Text(
+                blocking
+                    ? 'This room cannot finish its work'
+                    : 'Worth knowing about this room',
+                style: TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w700, color: tone),
+              ),
+            ],
+          ),
+          for (final issue in _controller.issues) ...[
+            const SizedBox(height: 5),
+            Text('${issue.summary}  ${issue.fix}',
+                style: TextStyle(
+                    fontSize: 11,
+                    height: 1.35,
+                    color: scheme.onSurfaceVariant)),
+          ],
+        ],
+      ),
     );
   }
 

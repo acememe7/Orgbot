@@ -15,6 +15,7 @@ import '../engine/core_server.dart';
 import '../net/room_client.dart';
 import '../orgbot/library.dart';
 import '../orgbot/models.dart';
+import '../orgbot/room_check.dart';
 import '../orgbot/room_file.dart';
 import 'room_store.dart';
 
@@ -35,6 +36,10 @@ class EngineRoomController extends ChangeNotifier {
 
   /// Bots left out of the room, with the reason — a missing key, say.
   List<String> skipped = const [];
+
+  /// Reasons this roster may never finish its work. Reported rather than
+  /// refused: it is your room, and a room that only chats is a fair use of it.
+  List<RoomIssue> issues = const [];
 
   CoreServer? _server;
   RoomClient? _client;
@@ -86,6 +91,10 @@ class EngineRoomController extends ChangeNotifier {
         throw EngineStartError('This room has no bots in it.');
       }
 
+      // Surfaced now, because a room with no inspector looks fine and then
+      // parks every task in review.
+      issues = checkRoom(room, bots);
+
       final file = buildRoomFile(room, bots);
       skipped = file.skipped;
       if (file.toml.contains('[[bots]]') == false) {
@@ -119,9 +128,16 @@ class EngineRoomController extends ChangeNotifier {
   }
 
   /// Say something to the room.
+  ///
+  /// Shown straight away rather than waiting for the room to echo it back: a
+  /// bot turn can run for a minute and messages are applied between turns, so
+  /// the round trip is long enough to look like the app lost what you typed.
   void say(String author, String text) {
-    if (text.trim().isEmpty) return;
-    _client?.sendMessage(author, text.trim());
+    final body = text.trim();
+    if (body.isEmpty) return;
+    _store?.addPending(author, body);
+    _client?.sendMessage(author, body);
+    notifyListeners();
   }
 
   /// Pause or resume, depending on where the room is.

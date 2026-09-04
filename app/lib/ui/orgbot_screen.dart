@@ -13,6 +13,7 @@ import 'brand.dart';
 import 'engine_room_screen.dart';
 import 'role_icons.dart';
 import '../orgbot/roles.dart';
+import '../orgbot/room_check.dart';
 
 class OrgBotScreen extends StatefulWidget {
   final Library library;
@@ -259,6 +260,21 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                   const Divider(),
                   Text('Who is in the room',
                       style: Theme.of(context).textTheme.titleSmall),
+                  Builder(builder: (context) {
+                    final chosen = widget.library.bots
+                        .where((b) => selected.containsKey(b.id))
+                        .toList();
+                    final issues = checkRoom(
+                        RoomDef(
+                            name: name.text,
+                            goal: goal.text,
+                            tasks: [goal.text.trim()]
+                                .where((t) => t.isNotEmpty)
+                                .toList()),
+                        chosen);
+                    if (issues.isEmpty) return const SizedBox.shrink();
+                    return _RoomIssues(issues: issues);
+                  }),
                   // Each bot brings its own role, set where the bot is
                   // defined — the same reviewer reviews in every room.
                   for (final b in widget.library.bots)
@@ -746,5 +762,62 @@ class _BotEditorState extends State<_BotEditor> {
       powers: _powers,
     ));
     Navigator.pop(context);
+  }
+}
+
+/// Warnings about a room that will not be able to finish its work.
+///
+/// Shown while the roster is being chosen rather than after a run stalls: a
+/// room with no inspector looks perfectly fine until tasks pile up in review.
+class _RoomIssues extends StatelessWidget {
+  const _RoomIssues({required this.issues});
+
+  final List<RoomIssue> issues;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final blocking = hasBlockingIssue(issues);
+    final tone = blocking ? scheme.error : Colors.orange;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: tone.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: tone.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(blocking ? Icons.error_outline : Icons.info_outline,
+                  size: 16, color: tone),
+              const SizedBox(width: 8),
+              Text(
+                blocking
+                    ? 'This room cannot finish work yet'
+                    : 'Worth knowing',
+                style: TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w700, color: tone),
+              ),
+            ],
+          ),
+          for (final issue in issues) ...[
+            const SizedBox(height: 8),
+            Text(issue.summary,
+                style: const TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w600)),
+            Text(issue.fix,
+                style: TextStyle(
+                    fontSize: 11,
+                    height: 1.35,
+                    color: scheme.onSurfaceVariant)),
+          ],
+        ],
+      ),
+    );
   }
 }

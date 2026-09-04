@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use orgbot_engine::Command;
 use orgbot_proto::chat::Audience;
-use orgbot_proto::event::Seq;
+use orgbot_proto::event::{EventEnvelope, Seq};
 use orgbot_proto::task::BlockReason;
 use orgbot_proto::{
     Author, ChatMessage, MessageIntent, RoomPhase, TaskId, TaskState, Timestamp,
@@ -38,6 +38,17 @@ const BROADCAST_CAPACITY: usize = 1024;
 pub enum Control {
     /// Request a fresh snapshot of the whole room.
     Snapshot(oneshot::Sender<ServerMessage>),
+    /// Ask for the durable log after `since`.
+    ///
+    /// A client that attaches after the room has started would otherwise never
+    /// see what already happened: the snapshot carries the roster and the
+    /// board, but the transcript lives in the event log.
+    Backlog {
+        /// Everything after this position.
+        since: Seq,
+        /// Where to send it.
+        reply: oneshot::Sender<Vec<EventEnvelope>>,
+    },
     /// A human speaks into the chat.
     HumanMessage {
         /// The person's name.
@@ -88,6 +99,20 @@ impl SessionHandle {
             return None;
         }
         rx.await.ok()
+    }
+
+    /// Everything in the room's log after `since`.
+    pub async fn backlog(&self, since: Seq) -> Vec<EventEnvelope> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .control
+            .send(Control::Backlog { since, reply: tx })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
     }
 }
 
@@ -299,6 +324,15 @@ impl RoomSession {
         match control {
             Control::Snapshot(reply) => {
                 let _ = reply.send(self.snapshot());
+            }
+            Control::Backlog { since, reply } => {
+                let events = self
+                    .orchestrator
+                    .engine()
+                    .events_since(since)
+                    .cloned()
+                    .collect();
+                let _ = reply.send(events);
             }
             Control::HumanMessage { author, body, task } => {
                 let room = self.orchestrator.engine().room_id();
@@ -653,6 +687,39 @@ mod resting_tests {
             }
             other => panic!("expected a snapshot, got {other:?}"),
         }
+
+        drop(handle);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run).await;
+    }
+
+    /// A client that attaches after the room has started must still see what
+    /// was already said. The snapshot carries the roster and the board but not
+    /// the transcript, so without a replay a message posted in the gap between
+    /// the engine starting and the UI connecting simply vanished.
+    #[tokio::test]
+    async fn a_late_client_can_still_read_what_it_missed() {
+        let (session, handle) = session();
+        let run = tokio::spawn(session.run());
+
+        // Let the room get going before anyone is listening.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        let backlog = handle.backlog(Seq::ZERO).await;
+        assert!(
+            !backlog.is_empty(),
+            "the room's log must be replayable from the beginning"
+        );
+        assert!(
+            backlog.windows(2).all(|pair| pair[0].seq < pair[1].seq),
+            "the replay must be in order so a client can track what it applied"
+        );
+
+        // Asking for everything after the last one yields nothing new.
+        let head = backlog.last().expect("a last event").seq;
+        assert!(
+            handle.backlog(head).await.is_empty(),
+            "a caught-up client must not be sent the same events again"
+        );
 
         drop(handle);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run).await;

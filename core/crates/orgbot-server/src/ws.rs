@@ -17,6 +17,8 @@ use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::broadcast;
 
+use orgbot_proto::event::Seq;
+
 use crate::protocol::{ClientMessage, ServerMessage, WIRE_VERSION};
 use crate::session::{Control, SessionHandle};
 
@@ -67,6 +69,23 @@ async fn serve_client(socket: WebSocket, state: AppState) {
                 },
             )
             .await;
+            return;
+        }
+    }
+
+    // Replay what already happened.
+    //
+    // The snapshot carries the roster and the board, but the transcript lives
+    // in the event log — so without this a client that attaches after the room
+    // started never sees anything said before it connected, and a message can
+    // simply vanish. The subscription was taken before the snapshot, so a few
+    // events may arrive twice; clients drop anything at or below the highest
+    // sequence they have already applied.
+    for envelope in state.session.backlog(Seq::ZERO).await {
+        let event = ServerMessage::Event {
+            envelope: Box::new(envelope),
+        };
+        if send(&mut sender, &event).await.is_err() {
             return;
         }
     }

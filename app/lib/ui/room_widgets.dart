@@ -266,22 +266,79 @@ class Transcript extends StatelessWidget {
     // SelectionArea rather than a SelectableText per bubble: it selects across
     // the whole conversation, which is what you want when copying one out, and
     // it avoids EditableText, which never settles inside a widget test.
+    // A bot turn can run for a minute. Showing who is composing turns that
+    // wait from "nothing is happening" into "something is happening".
+    final composing = store.activity
+        .where((entry) => entry.streaming)
+        .map((entry) => entry.agent.handle)
+        .toList();
+
     return SelectionArea(
       child: ListView.builder(
         controller: controller,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        itemCount: messages.length,
-        itemBuilder: (context, i) => _Bubble(message: messages[i], store: store),
+        itemCount: messages.length + (composing.isEmpty ? 0 : 1),
+        itemBuilder: (context, i) {
+          if (i >= messages.length) return _Typing(handles: composing);
+          return _Bubble(
+            message: messages[i],
+            store: store,
+            pending: store.isPending(messages[i]),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Shown while one or more bots are composing a reply.
+class _Typing extends StatelessWidget {
+  const _Typing({required this.handles});
+
+  final List<String> handles;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final who = handles.length == 1
+        ? '@${handles.first} is thinking'
+        : '${handles.length} bots are thinking';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        children: [
+          BotAvatar(handle: handles.first, radius: 15),
+          const SizedBox(width: 11),
+          SizedBox(
+            width: 13,
+            height: 13,
+            child: CircularProgressIndicator(
+                strokeWidth: 2, color: scheme.onSurfaceVariant),
+          ),
+          const SizedBox(width: 9),
+          Text(who,
+              style: TextStyle(
+                  fontSize: 12,
+                  fontStyle: FontStyle.italic,
+                  color: scheme.onSurfaceVariant)),
+        ],
       ),
     );
   }
 }
 
 class _Bubble extends StatelessWidget {
-  const _Bubble({required this.message, required this.store});
+  const _Bubble({
+    required this.message,
+    required this.store,
+    this.pending = false,
+  });
 
   final ChatMessage message;
   final RoomStore store;
+
+  /// Sent, but the room has not confirmed it yet.
+  final bool pending;
 
   @override
   Widget build(BuildContext context) {
@@ -331,7 +388,11 @@ class _Bubble extends StatelessWidget {
                             fontWeight: FontWeight.w700,
                             fontSize: 12.5,
                             color: color)),
-                    if (message.intent == 'ask') ...[
+                    if (pending) ...[
+                      const SizedBox(width: 6),
+                      Icon(Icons.schedule,
+                          size: 11, color: scheme.onSurfaceVariant),
+                    ] else if (message.intent == 'ask') ...[
                       const SizedBox(width: 6),
                       Icon(Icons.help_outline,
                           size: 12, color: scheme.onSurfaceVariant),
@@ -339,8 +400,11 @@ class _Bubble extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 3),
-                Text(message.body,
-                    style: const TextStyle(fontSize: 14, height: 1.4)),
+                Opacity(
+                  opacity: pending ? 0.55 : 1,
+                  child: Text(message.body,
+                      style: const TextStyle(fontSize: 14, height: 1.4)),
+                ),
               ],
             ),
           ),

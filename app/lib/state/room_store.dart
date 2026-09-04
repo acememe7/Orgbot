@@ -64,6 +64,20 @@ class RoomStore extends ChangeNotifier {
   final List<ChatMessage> _messages = [];
   final Map<String, BotActivity> _activity = {};
 
+  /// Messages typed here but not yet confirmed by the engine.
+  ///
+  /// A bot turn can run for a minute, and the room applies a message between
+  /// turns — so without this your own text sits invisible until the current
+  /// turn ends, which reads as the app having swallowed it.
+  final List<ChatMessage> _pending = [];
+
+  /// The highest log position applied so far.
+  ///
+  /// On connect the server replays the room's log so nothing said before the
+  /// client attached is lost. The live subscription is taken first, so a few
+  /// events arrive twice; this drops the repeats rather than showing them.
+  int _appliedTo = 0;
+
   /// The roster, in a stable order (coordinators first, then by handle).
   List<Agent> get agents {
     final list = _agents.values.toList();
@@ -96,8 +110,38 @@ class RoomStore extends ChangeNotifier {
     return list;
   }
 
-  /// The transcript, oldest first.
-  List<ChatMessage> get messages => List.unmodifiable(_messages);
+  /// The transcript, oldest first, with anything you have said but the room
+  /// has not confirmed yet shown at the end.
+  List<ChatMessage> get messages =>
+      List.unmodifiable([..._messages, ..._pending]);
+
+  /// Whether `message` is still awaiting confirmation from the room.
+  bool isPending(ChatMessage message) =>
+      _pending.any((candidate) => identical(candidate, message));
+
+  /// Show something you just said, before the room has echoed it back.
+  void addPending(String author, String body) {
+    final text = body.trim();
+    if (text.isEmpty) return;
+    _pending.add(ChatMessage(
+      id: 'pending_${DateTime.now().microsecondsSinceEpoch}',
+      author: Author(kind: 'human', name: author),
+      body: text,
+      intent: 'ask',
+      taskId: null,
+      sentAt: Timestamp(DateTime.now().millisecondsSinceEpoch),
+    ));
+    notifyListeners();
+  }
+
+  /// Drop a pending message once the room has confirmed the same text.
+  void _confirmPending(ChatMessage arrived) {
+    if (!arrived.author.isHuman) return;
+    final index = _pending.indexWhere((candidate) =>
+        candidate.body == arrived.body &&
+        candidate.author.name == arrived.author.name);
+    if (index >= 0) _pending.removeAt(index);
+  }
 
   /// What each bot is doing, in roster order.
   List<BotActivity> get activity =>
@@ -190,13 +234,21 @@ class RoomStore extends ChangeNotifier {
 
   void _applyEvent(Map<String, Object?>? envelope) {
     if (envelope == null) return;
+    final seq = (envelope['seq'] as num?)?.toInt() ?? 0;
+    // A replayed event the client has already seen.
+    if (seq != 0 && seq <= _appliedTo) return;
+    if (seq > _appliedTo) _appliedTo = seq;
     final event = (envelope['event'] as Map?)?.cast<String, Object?>();
     if (event == null) return;
 
     switch (event['event'] as String?) {
       case 'message_posted':
         final json = (event['message'] as Map?)?.cast<String, Object?>();
-        if (json != null) _messages.add(ChatMessage.fromJson(json));
+        if (json != null) {
+          final message = ChatMessage.fromJson(json);
+          _confirmPending(message);
+          _messages.add(message);
+        }
       case 'task_created':
         final json = (event['task'] as Map?)?.cast<String, Object?>();
         if (json != null) {
