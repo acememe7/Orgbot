@@ -119,6 +119,47 @@ pub struct PendingDecision {
     pub objective: Option<TaskId>,
 }
 
+/// What one bot is doing, for a view of where the room's effort is going.
+///
+/// A room with idle bots and queued work is a scheduling failure, not a
+/// capacity problem, and it is invisible unless someone can see both at once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotState {
+    /// The bot.
+    pub agent: AgentId,
+    /// Its handle, so the view needs no second lookup.
+    pub handle: String,
+    /// What it is doing, in one word: working, reviewing, waiting, idle,
+    /// blocked, or offline.
+    pub doing: String,
+    /// How much live work it holds.
+    pub holding: u32,
+    /// Whether it could take something now.
+    pub free: bool,
+}
+
+/// Where the room's effort is going.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Utilization {
+    /// Every bot, busiest first.
+    pub bots: Vec<BotState>,
+    /// Bots holding nothing.
+    pub idle: u32,
+    /// Claimable work nobody has taken.
+    pub unclaimed: u32,
+}
+
+impl Utilization {
+    /// Whether work is queued while bots sit free.
+    ///
+    /// The specific failure worth naming: five bots idle while twenty tasks
+    /// show as ready means the scheduler is not matching them, and no count
+    /// on its own reveals it.
+    pub const fn is_wasting_capacity(&self) -> bool {
+        self.idle > 0 && self.unclaimed > 0
+    }
+}
+
 /// Signals that the room is coordinating more than it is working.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Health {
@@ -132,6 +173,15 @@ pub struct Health {
     pub closed_as_duplicate: u32,
     /// Whether the record count is growing much faster than the outcomes.
     pub coordination_expansion: bool,
+    /// Mean review cycles per task that has been reviewed at all. Above two
+    /// means work is routinely going round more than once.
+    pub average_review_cycles: f32,
+    /// Records done by a bot standing in for the role the work asked for. A
+    /// high share means the roster does not match the work.
+    pub stand_in_records: u32,
+    /// How long the critical path is. Its length, not the task count, is what
+    /// decides when the room can finish.
+    pub critical_path_length: u32,
 }
 
 impl Health {
@@ -156,6 +206,8 @@ pub struct RoomDigest {
     pub critical_path: Vec<TaskId>,
     /// Whether the room is coordinating more than it is working.
     pub health: Health,
+    /// Where the room's effort is going.
+    pub utilization: Utilization,
 }
 
 impl RoomDigest {
@@ -297,10 +349,10 @@ pub fn digest<'a>(
     let outcomes = counts.objectives.max(1) as f32;
     let inflation = counts.raw_records as f32 / outcomes;
 
+    let path = critical_path(&tasks, &by_id);
     RoomDigest {
         objectives,
         needs_you,
-        critical_path: critical_path(&tasks, &by_id),
         health: Health {
             inflation_ratio: inflation,
             supporting_records: supporting,
@@ -312,8 +364,15 @@ pub fn digest<'a>(
                 .count() as u32,
             coordination_expansion: counts.objectives > 0
                 && inflation > Health::EXPANSION_THRESHOLD,
+            // Filled by the engine, which can see the review history.
+            average_review_cycles: 0.0,
+            stand_in_records: live.iter().filter(|task| task.stood_in).count() as u32,
+            critical_path_length: path.len() as u32,
         },
+        critical_path: path,
         counts,
+        // Filled by the engine, which can see the roster.
+        utilization: Utilization::default(),
     }
 }
 

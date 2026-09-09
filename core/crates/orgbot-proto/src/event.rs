@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::graph::TaskKind;
 use crate::decision::{Answer, Decision};
 use crate::agent::{AgentSpec, AgentStatus};
 use crate::artifact::Artifact;
@@ -86,6 +87,15 @@ pub enum Event {
     /// events can still render the change coherently.
     TaskTransitioned {
         task: TaskId,
+        /// The task's title, for the same reason `from` and `to` are both
+        /// here: a reader should not need the rest of the log to understand
+        /// one event.
+        #[serde(default)]
+        title: String,
+        /// What kind of record moved. A delivered objective is a milestone; a
+        /// delivered subtask is the room working.
+        #[serde(default)]
+        kind: TaskKind,
         from: TaskState,
         to: TaskState,
         transition: Box<TaskTransition>,

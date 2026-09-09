@@ -383,7 +383,82 @@ impl Engine {
     /// graph stays available through [`Engine::tasks`] for the bots, which
     /// need all of it.
     pub fn digest(&self) -> crate::digest::RoomDigest {
-        crate::digest::digest(self.tasks(), &self.decisions)
+        let mut view = crate::digest::digest(self.tasks(), &self.decisions);
+        view.utilization = self.utilization();
+
+        // Review history lives here, not on the tasks, so the digest cannot
+        // work this out for itself.
+        let reviewed: Vec<usize> = self
+            .tasks
+            .keys()
+            .map(|task| self.review_cycles(*task).len())
+            .filter(|cycles| *cycles > 0)
+            .collect();
+        view.health.average_review_cycles = if reviewed.is_empty() {
+            0.0
+        } else {
+            reviewed.iter().sum::<usize>() as f32 / reviewed.len() as f32
+        };
+        view
+    }
+
+    /// Where the room's effort is going, bot by bot.
+    pub fn utilization(&self) -> crate::digest::Utilization {
+        let mut bots: Vec<crate::digest::BotState> = self
+            .specs
+            .values()
+            .map(|spec| {
+                let holding = self.workload(spec.id);
+                let status = self.status(spec.id);
+                // The bot's own state first, then what its work says. A bot
+                // holding only blocked tasks is waiting, not working, however
+                // recently it took a turn.
+                let doing = match status {
+                    AgentStatus::Offline => "offline",
+                    AgentStatus::Faulted => "faulted",
+                    _ if holding == 0 => "idle",
+                    _ if self.holds_only_blocked(spec.id) => "waiting",
+                    _ if self.holds_a_review(spec.id) => "reviewing",
+                    _ => "working",
+                };
+                crate::digest::BotState {
+                    agent: spec.id,
+                    handle: spec.handle.clone(),
+                    doing: doing.to_string(),
+                    holding,
+                    free: status.accepts_work() && holding == 0,
+                }
+            })
+            .collect();
+        bots.sort_by(|a, b| b.holding.cmp(&a.holding).then(a.handle.cmp(&b.handle)));
+
+        crate::digest::Utilization {
+            idle: bots.iter().filter(|bot| bot.free).count() as u32,
+            unclaimed: self
+                .tasks
+                .values()
+                .filter(|task| task.readiness().is_claimable())
+                .count() as u32,
+            bots,
+        }
+    }
+
+    /// Whether every task this bot holds is blocked.
+    fn holds_only_blocked(&self, agent: AgentId) -> bool {
+        let mut held = self
+            .tasks
+            .values()
+            .filter(|task| task.assignee == Some(agent) && !task.state.is_terminal())
+            .peekable();
+        held.peek().is_some()
+            && held.all(|task| !task.readiness().is_progressing() || task.state == TaskState::Blocked)
+    }
+
+    /// Whether this bot is holding something it is inspecting.
+    fn holds_a_review(&self, agent: AgentId) -> bool {
+        self.tasks.values().any(|task| {
+            task.assignee == Some(agent) && task.kind == TaskKind::Review
+        })
     }
 
     pub fn tasks(&self) -> impl Iterator<Item = &Task> {
@@ -2165,8 +2240,14 @@ impl Engine {
         }
         record.state = to;
         record.updated_at = Timestamp::now();
+        // Carried on the event so a reader needs nothing else to understand
+        // it, and so a delivered objective can be told from a delivered
+        // subtask without a second lookup.
+        let (title, kind) = (record.title.clone(), record.kind);
 
         let mut events = vec![self.emit(Event::TaskTransitioned {
+            title,
+            kind,
             task,
             from,
             to,
