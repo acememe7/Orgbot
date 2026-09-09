@@ -277,6 +277,7 @@ void main() {
 
   _answerTests();
   _viewTests();
+  _graphTests();
 }
 
 // ------------------------------------------------------- answering a decision
@@ -398,6 +399,114 @@ void _viewTests() {
       await tester.pumpAndSettle();
       expect(find.text('What decides when this finishes'), findsNothing);
       expect(find.text('Who is doing what'), findsNothing);
+    });
+  });
+}
+
+// ------------------------------------------------------- the expanded graph
+
+void _graphTests() {
+  group('the graph', () {
+    Widget wrap(RoomStore store) => MaterialApp(
+          home: Scaffold(body: ObjectivesPane(store: store)),
+        );
+
+    RoomStore withBoard() => storeWith([
+          {
+            'type': 'snapshot',
+            'room': {'id': 'room_1', 'name': 'test', 'goal': 'g'},
+            'roster': [],
+            'tasks': [
+              {'id': 'task_r1', 'title': 'rebuild', 'state': 'ready', 'depends_on': ['task_r2']},
+              {'id': 'task_r2', 'title': 'recover the source', 'state': 'in_progress'},
+            ],
+            'digest': digestJson(objectives: 1),
+          }
+        ]);
+
+    /// A chain should read as a chain, not as a list that happens to be in
+    /// order.
+    testWidgets('expanding a card shows what each record waits on',
+        (tester) async {
+      final store = withBoard();
+      await tester.pumpWidget(wrap(store));
+
+      await tester.tap(find.text('2 records behind it'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('rebuild'), findsOneWidget);
+      expect(find.text('↳ waits on recover the source'), findsOneWidget);
+    });
+
+    /// Work nobody has picked up looks exactly like work in progress unless
+    /// something says otherwise.
+    testWidgets('an unaccepted delegation is called out', (tester) async {
+      final store = storeWith([
+        {
+          'type': 'snapshot',
+          'room': {'id': 'room_1', 'name': 'test', 'goal': 'g'},
+          'roster': [],
+          'tasks': [
+            {'id': 'task_r1', 'title': 'rebuild', 'state': 'blocked'},
+            {'id': 'task_r2', 'title': 'recover', 'state': 'ready'},
+          ],
+          'digest': digestJson(objectives: 1),
+        },
+        {
+          'type': 'event',
+          'envelope': {
+            'id': 'ev_1',
+            'seq': 1,
+            'room': 'room_1',
+            'at': 0,
+            'event': {
+              'event': 'handoff_offered',
+              'handoff': {
+                'id': 'ho_1',
+                'task': 'task_r1',
+                'from': 'bot_1',
+                'kind': 'assist',
+                'state': 'offered',
+                'brief': 'please help',
+              },
+            },
+          },
+        },
+      ]);
+      await tester.pumpWidget(wrap(store));
+
+      await tester.tap(find.text('2 records behind it'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('↳ handed off — nobody has picked this up yet'),
+        findsOneWidget,
+      );
+    });
+
+    test('a handoff says where it has got to', () {
+      final offered = Handoff(
+        id: 'ho_1',
+        taskId: 'task_1',
+        from: 'bot_1',
+        kind: 'assist',
+        state: 'offered',
+        brief: '',
+      );
+      expect(offered.awaitingAcceptance, isTrue);
+      expect(offered.progress, 'nobody has picked this up yet');
+
+      final accepted = Handoff(
+        id: 'ho_1',
+        taskId: 'task_1',
+        from: 'bot_1',
+        kind: 'assist',
+        state: 'accepted',
+        brief: '',
+        acceptedBy: 'bot_2',
+      );
+      expect(accepted.awaitingAcceptance, isFalse);
+      expect(accepted.progress, 'accepted and being worked on');
     });
   });
 }

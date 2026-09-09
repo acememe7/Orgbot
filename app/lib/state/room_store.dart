@@ -244,6 +244,9 @@ class RoomStore extends ChangeNotifier {
   }
 
   /// Pending handoffs, for a status strip.
+  /// Every handoff, so a view can say whether a delegation was picked up.
+  List<Handoff> get handoffs => _handoffs.values.toList();
+
   List<Handoff> get openHandoffs => _handoffs.values
       .where((h) => h.state == 'offered' || h.state == 'accepted')
       .toList();

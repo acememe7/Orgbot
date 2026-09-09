@@ -482,7 +482,8 @@ class _ObjectiveTileState extends State<_ObjectiveTile> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  for (final id in card.records) _RecordLine(id: id, store: widget.store),
+                  for (final id in card.records)
+                    _RecordLine(id: id, store: widget.store),
                 ],
               ),
             ),
@@ -492,41 +493,88 @@ class _ObjectiveTileState extends State<_ObjectiveTile> {
   }
 }
 
-/// One record beneath an objective, in the expanded view.
+/// One record beneath an objective, with what it is waiting on.
+///
+/// The expanded view is the graph: each record shows the edge out of it, so a
+/// chain reads as a chain rather than as a flat list that happens to be in
+/// order. Drawing it as an indented tree rather than a canvas keeps it legible
+/// on a phone and readable by a screen reader.
 class _RecordLine extends StatelessWidget {
   const _RecordLine({required this.id, required this.store});
 
   final String id;
   final RoomStore store;
 
+  Task? _task(String id) =>
+      store.tasks.where((t) => t.id == id).cast<Task?>().firstOrNull;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final task =
-        store.tasks.where((t) => t.id == id).cast<Task?>().firstOrNull;
+    final task = _task(id);
+    final handoff = store.handoffs
+        .where((h) =>
+            h.taskId == id && (h.state == 'offered' || h.state == 'accepted'))
+        .cast<Handoff?>()
+        .firstOrNull;
+
     return Padding(
       padding: const EdgeInsets.only(top: 6),
-      child: Row(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Container(
-              width: 5,
-              height: 5,
-              decoration: BoxDecoration(
-                color: scheme.onSurfaceVariant,
-                shape: BoxShape.circle,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Container(
+                  width: 5,
+                  height: 5,
+                  decoration: BoxDecoration(
+                    color: scheme.onSurfaceVariant,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  task?.title ?? id,
+                  style:
+                      TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+                ),
+              ),
+            ],
+          ),
+          // The edge out of this node.
+          if (task != null)
+            for (final upstream in task.dependsOn)
+              Padding(
+                padding: const EdgeInsets.only(left: 14, top: 3),
+                child: Text(
+                  '↳ waits on ${_task(upstream)?.title ?? upstream}',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    color: scheme.onSurfaceVariant.withValues(alpha: 0.8),
+                  ),
+                ),
+              ),
+          // Delegation nobody has picked up looks exactly like work in
+          // progress unless something says otherwise.
+          if (handoff != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 14, top: 3),
+              child: Text(
+                '↳ handed off — ${handoff.progress}',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: handoff.awaitingAcceptance
+                      ? Colors.amber
+                      : scheme.onSurfaceVariant.withValues(alpha: 0.8),
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 9),
-          Expanded(
-            child: Text(
-              task?.title ?? id,
-              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
-            ),
-          ),
         ],
       ),
     );

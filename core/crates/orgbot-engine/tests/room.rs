@@ -2467,3 +2467,59 @@ fn a_policy_hold_outranks_conversation() {
     let err = f.reject(Command::ClaimTask { task, by: worker });
     assert!(matches!(err, EngineError::NotReady { .. }), "got {err:?}");
 }
+
+/// "Assigned" and "being worked on" are different things, and the record says
+/// which — without disturbing the structured link the engine uses to wake the
+/// sender when the handoff completes.
+#[test]
+fn an_accepted_handoff_records_who_took_it() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.start_task("write the notes", worker);
+
+    let events = f.apply(Command::OfferHandoff {
+        task,
+        from: worker,
+        to: Recipient::Agent { agent: worker2 },
+        kind: HandoffKind::Assist,
+        brief: "please draft the summary".into(),
+        expects: vec![],
+        context: vec![],
+        blocks_sender: Some(true),
+        timeout_ms: None,
+    });
+    let handoff = offered_handoff(&events);
+
+    // Offered: nobody has it yet.
+    let offered = f.engine.handoff(handoff).unwrap();
+    assert_eq!(offered.state, HandoffState::Offered);
+    assert_eq!(offered.accepted_by, None);
+
+    f.apply(Command::AcceptHandoff {
+        handoff,
+        by: worker2,
+    });
+
+    // Accepted: the record names who took it, so a board can say so rather
+    // than reporting only that a handoff exists.
+    let accepted = f.engine.handoff(handoff).unwrap();
+    assert_eq!(accepted.state, HandoffState::Accepted);
+    assert_eq!(accepted.accepted_by, Some(worker2));
+
+    // And the sender is still linked to it, so completing it still wakes them.
+    assert!(f
+        .engine
+        .task(task)
+        .unwrap()
+        .blocked_on
+        .iter()
+        .any(|r| matches!(r, BlockReason::AwaitingHandoff { handoff: h } if *h == handoff)));
+
+    f.apply(Command::CompleteHandoff {
+        handoff,
+        by: worker2,
+        artifacts: vec![],
+        summary: "done".into(),
+    });
+    assert_eq!(f.state(task), TaskState::InProgress, "the sender wakes");
+}

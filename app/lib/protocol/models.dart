@@ -204,6 +204,7 @@ class Task {
     required this.revision,
     required this.acceptanceCriteria,
     required this.requiredRole,
+    this.dependsOn = const [],
     this.blockReasons = const [],
   });
 
@@ -217,6 +218,9 @@ class Task {
   int revision;
   final List<String> acceptanceCriteria;
   final String? requiredRole;
+
+  /// Tasks that must land before this one can start. The edges of the graph.
+  final List<String> dependsOn;
   List<Map<String, Object?>> blockReasons;
 
   factory Task.fromJson(Map<String, Object?> json) => Task(
@@ -235,6 +239,7 @@ class Task {
     acceptanceCriteria:
         (json['acceptance_criteria'] as List?)?.cast<String>() ?? const [],
     requiredRole: json['required_role'] as String?,
+    dependsOn: (json['depends_on'] as List? ?? const []).cast<String>(),
   );
 }
 
@@ -340,6 +345,7 @@ class Handoff {
     required this.kind,
     required this.state,
     required this.brief,
+    this.acceptedBy,
   });
 
   final String id;
@@ -349,6 +355,27 @@ class Handoff {
   String state;
   final String brief;
 
+  /// Who took it, once anyone has. Null while it is only offered.
+  String? acceptedBy;
+
+  /// Whether this is sitting unanswered.
+  ///
+  /// The distinction that matters to whoever is waiting: work nobody has
+  /// picked up looks exactly like work in progress unless something says so.
+  bool get awaitingAcceptance => state == 'offered';
+
+  /// A line for whoever is waiting on it.
+  String get progress => switch (state) {
+        'offered' => 'nobody has picked this up yet',
+        'accepted' => 'accepted and being worked on',
+        'completed' => 'finished',
+        'rejected' => 'declined',
+        'expired' => 'nobody answered in time',
+        'withdrawn' => 'pulled back',
+        'failed' => 'the delegate could not finish it',
+        _ => state,
+      };
+
   factory Handoff.fromJson(Map<String, Object?> json) => Handoff(
     id: json['id'] as String? ?? '',
     taskId: json['task'] as String? ?? '',
@@ -356,6 +383,7 @@ class Handoff {
     kind: json['kind'] as String? ?? 'assist',
     state: json['state'] as String? ?? 'offered',
     brief: json['brief'] as String? ?? '',
+    acceptedBy: json['accepted_by'] as String?,
   );
 }
 
