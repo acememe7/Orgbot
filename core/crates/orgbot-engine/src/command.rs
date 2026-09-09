@@ -5,7 +5,7 @@
 //! tool calls, the UI issues them through the WebSocket, and tests issue them
 //! directly — all three go down the same validation path.
 
-use orgbot_proto::graph::AuthorizationState;
+use orgbot_proto::graph::{AuthorizationState, TaskOrigin};
 use orgbot_proto::artifact::ArtifactBody;
 use orgbot_proto::handoff::{HandoffKind, Recipient};
 use orgbot_proto::review::Finding;
@@ -46,7 +46,8 @@ pub enum Command {
         priority: Priority,
         acceptance_criteria: Vec<String>,
         depends_on: Vec<TaskId>,
-        parent: Option<TaskId>,
+        /// What kind of record this is, and what it descends from.
+        origin: TaskOrigin,
     },
     /// Publish a draft so bots can claim it.
     OpenTask { task: TaskId },

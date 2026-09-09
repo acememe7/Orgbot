@@ -155,6 +155,63 @@ impl Lineage {
     }
 }
 
+/// What a task is and where it sits, supplied when it is created.
+///
+/// Bundled rather than passed as loose arguments because the two travel
+/// together: a review with no `review_of` is just another top-level card, which
+/// is the thing this whole model exists to stop.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TaskOrigin {
+    /// What kind of record this is.
+    #[serde(default)]
+    pub kind: TaskKind,
+    /// What it descends from and what it is about.
+    #[serde(default)]
+    pub lineage: Lineage,
+}
+
+impl TaskOrigin {
+    /// An ordinary top-level task, as everything was before kinds existed.
+    pub fn plain() -> Self {
+        Self::default()
+    }
+
+    /// A record of `kind` hanging beneath `parent`.
+    pub fn under(kind: TaskKind, parent: TaskId) -> Self {
+        Self {
+            kind,
+            lineage: Lineage {
+                parent: Some(parent),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// A review of `task`.
+    pub fn review_of(task: TaskId) -> Self {
+        Self {
+            kind: TaskKind::Review,
+            lineage: Lineage {
+                parent: Some(task),
+                review_of: Some(task),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Work addressing what a review of `task` found.
+    pub fn remediation_of(task: TaskId) -> Self {
+        Self {
+            kind: TaskKind::Remediation,
+            lineage: Lineage {
+                parent: Some(task),
+                remediation_of: Some(task),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 /// Whether the work a task needs has actually landed.
 ///
 /// Distinct from the workflow state because a task can be perfectly healthy

@@ -15,6 +15,7 @@
 //! and can correct itself. A bare `InvalidArgument` wastes a turn.
 
 use orgbot_engine::{Command, Engine, EngineError};
+use orgbot_proto::graph::{Lineage, TaskKind, TaskOrigin};
 use orgbot_proto::agent::AgentSpec;
 use orgbot_proto::artifact::ArtifactBody;
 use orgbot_proto::handoff::{HandoffKind, Recipient};
@@ -291,10 +292,16 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
     if spec.autonomy.may_create_tasks {
         tools.push(tool(
             "create_task",
-            "Add a task to the board. Split work along lines that let different bots \
-             work in parallel, and write acceptance criteria concrete enough that an \
-             inspector can check them without asking you. Use `depends_on` for work \
-             that genuinely cannot start until something else has shipped.",
+            "Add work to the board. Before you do, ask: is this a new, independently \
+             owned outcome? If it is not — if it is a review, a fix for what a review \
+             found, evidence for a claim, or restoring something the room already \
+             produced — then set `kind` and point `of` at the task it belongs to. It \
+             is still tracked and still real work; it just stops the board filling up \
+             with cards that all describe one objective.\n\
+             Split work along lines that let different bots work in parallel, and \
+             write acceptance criteria concrete enough that an inspector can check \
+             them without asking you. Use `depends_on` for work that genuinely cannot \
+             start until something else has shipped.",
             schema::object(
                 vec![
                     ("title", schema::string("A one-line summary.")),
@@ -319,6 +326,32 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                         schema::string_array("Task ids that must be submitted first."),
                     ),
                     ("open", schema::boolean("Publish immediately. Defaults to true.")),
+                    (
+                        "kind",
+                        schema::enumerated(
+                            "What this record is. \"objective\" is a top-level outcome; \
+                             everything else attaches to one via `of`. Defaults to \
+                             \"task\".",
+                            &[
+                                "objective",
+                                "task",
+                                "subtask",
+                                "review",
+                                "remediation",
+                                "evidence",
+                                "recovery",
+                                "continuation",
+                            ],
+                        ),
+                    ),
+                    (
+                        "of",
+                        schema::string(
+                            "The task this belongs to. Required for every kind except \
+                             \"objective\" and \"task\" — a review with no `of` is just \
+                             another top-level card.",
+                        ),
+                    ),
                 ],
                 &["title", "brief"],
             ),
@@ -676,6 +709,72 @@ fn list_tasks(engine: &Engine, actor: AgentId, input: &Value) -> ToolOutcome {
     ToolOutcome::ok(format!("Tasks ({filter}):\n{}", render_tasks(engine, ids)))
 }
 
+/// Read the `kind` and `of` arguments into a [`TaskOrigin`].
+///
+/// A supporting record with no subject is refused rather than quietly created
+/// as a top-level card, because that silent fallback is exactly how a board
+/// ends up with ninety-six peers of one another. The error says what to do.
+fn task_origin(input: &Value) -> Result<TaskOrigin, String> {
+    let kind = match optional_str(input, "kind").unwrap_or("task") {
+        "objective" => TaskKind::Objective,
+        "task" => TaskKind::Task,
+        "subtask" => TaskKind::Subtask,
+        "review" => TaskKind::Review,
+        "remediation" => TaskKind::Remediation,
+        "evidence" => TaskKind::Evidence,
+        "recovery" => TaskKind::Recovery,
+        "continuation" => TaskKind::Continuation,
+        other => {
+            return Err(format!(
+                "`{other}` is not a kind of work. Use one of: objective, task, \
+                 subtask, review, remediation, evidence, recovery, continuation."
+            ))
+        }
+    };
+
+    let of = match optional_str(input, "of") {
+        Some(raw) => Some(parse_id::<TaskId>(raw, "of", "task")?),
+        None => None,
+    };
+
+    let Some(subject) = of else {
+        if matches!(kind, TaskKind::Objective | TaskKind::Task) {
+            return Ok(TaskOrigin {
+                kind,
+                lineage: Lineage::default(),
+            });
+        }
+        return Err(format!(
+            "a `{}` has to say what it is about. Pass `of` with the task id it \
+             belongs to, or create it as a plain task if it really is a new, \
+             independently owned outcome.",
+            kind.as_str()
+        ));
+    };
+
+    let mut lineage = Lineage {
+        parent: Some(subject),
+        ..Default::default()
+    };
+    match kind {
+        TaskKind::Review => lineage.review_of = Some(subject),
+        TaskKind::Remediation => lineage.remediation_of = Some(subject),
+        TaskKind::Recovery => lineage.recovery_for = Some(subject),
+        TaskKind::Continuation => lineage.continuation_of = Some(subject),
+        // A subtask or evidence record hangs beneath its parent without
+        // being *about* it in the review sense.
+        TaskKind::Subtask | TaskKind::Evidence | TaskKind::Task => {}
+        TaskKind::Objective => {
+            return Err(
+                "an objective is a top-level outcome, so it cannot belong to \
+                 another task. Drop `of`, or pick a different kind."
+                    .into(),
+            )
+        }
+    }
+    Ok(TaskOrigin { kind, lineage })
+}
+
 fn create_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
     let (title, brief) = match (required_str(input, "title"), required_str(input, "brief")) {
         (Ok(title), Ok(brief)) => (title.to_string(), brief.to_string()),
@@ -696,6 +795,11 @@ fn create_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcom
         Err(message) => return ToolOutcome::error(message),
     };
 
+    let origin = match task_origin(input) {
+        Ok(origin) => origin,
+        Err(message) => return ToolOutcome::error(message),
+    };
+
     let events = match engine.apply(Command::CreateTask {
         title: title.clone(),
         brief,
@@ -704,7 +808,7 @@ fn create_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcom
         priority,
         acceptance_criteria: string_list(input, "acceptance_criteria"),
         depends_on,
-        parent: None,
+        origin,
     }) {
         Ok(events) => events,
         Err(error) => return explain(error),

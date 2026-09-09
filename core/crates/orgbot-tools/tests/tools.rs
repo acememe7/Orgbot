@@ -565,3 +565,173 @@ fn a_deadlock_broken_during_a_block_is_reported_back_to_the_bot() {
         "the bot must be told, or it will sit there: {message}"
     );
 }
+
+// --------------------------------------------------------- attaching work
+//
+// A board went from twelve objectives to ninety-six records because every
+// review, fix and evidence gap became another top-level card. The tool now
+// makes attaching the easy path, and refuses the silent fallback that made
+// piling up the easy one.
+
+use orgbot_proto::graph::{Lineage, TaskKind};
+
+impl Fixture {
+    /// Create a record through the tool, as a bot would, and recover its id
+    /// from what the bot was told.
+    fn make(&mut self, input: Value) -> String {
+        let told = self.ok(self.lead, "create_task", input);
+        id_in(&told, "task")
+    }
+}
+
+/// A supporting record must say what it is about. Silently creating it as a
+/// top-level card is the exact behaviour that inflated the board.
+#[test]
+fn a_review_without_a_subject_is_refused_with_instructions() {
+    let mut f = fixture();
+    let told = f.err(
+        f.lead,
+        "create_task",
+        json!({ "title": "review the notes", "brief": "check them", "kind": "review" }),
+    );
+    assert!(told.contains("`of`"), "the refusal should say how to fix it: {told}");
+}
+
+#[test]
+fn a_review_attaches_to_the_task_it_reviews() {
+    let mut f = fixture();
+    let subject = f.make(json!({ "title": "write the notes", "brief": "write them" }));
+
+    f.ok(
+        f.lead,
+        "create_task",
+        json!({
+            "title": "review the notes",
+            "brief": "check them",
+            "kind": "review",
+            "of": subject,
+        }),
+    );
+
+    let review = f
+        .engine
+        .tasks()
+        .find(|t| t.kind == TaskKind::Review)
+        .expect("the review exists");
+    assert_eq!(review.lineage.review_of.unwrap().to_string(), subject);
+    assert_eq!(review.lineage.parent.unwrap().to_string(), subject);
+    assert!(!review.kind.is_headline(), "a review is not a headline card");
+}
+
+/// However deep it sits, attached work knows which outcome it serves — so
+/// progress can be counted against objectives rather than raw records.
+#[test]
+fn attached_work_inherits_the_objective_it_serves() {
+    let mut f = fixture();
+    let objective = f.make(json!({
+        "title": "repair the harness",
+        "brief": "the whole objective",
+        "kind": "objective",
+    }));
+    let implementation = f.make(json!({
+        "title": "implement it",
+        "brief": "the work",
+        "kind": "subtask",
+        "of": objective,
+    }));
+    // Two levels down, and still attributed to the objective.
+    f.ok(
+        f.lead,
+        "create_task",
+        json!({
+            "title": "review it",
+            "brief": "check",
+            "kind": "review",
+            "of": implementation,
+        }),
+    );
+
+    for task in f.engine.tasks() {
+        if task.id.to_string() == objective {
+            assert_eq!(
+                task.lineage.root_objective, None,
+                "an objective is its own root"
+            );
+        } else {
+            assert_eq!(
+                task.lineage.root_objective.map(|id| id.to_string()),
+                Some(objective.clone()),
+                "`{}` should serve the objective",
+                task.title
+            );
+        }
+    }
+}
+
+/// Only one record in that room is a headline, however many exist.
+#[test]
+fn one_objective_with_work_under_it_is_one_headline() {
+    let mut f = fixture();
+    let objective = f.make(json!({
+        "title": "repair the harness",
+        "brief": "everything",
+        "kind": "objective",
+    }));
+    for i in 0..6 {
+        f.make(json!({
+            "title": format!("step {i}"),
+            "brief": "work",
+            "kind": "subtask",
+            "of": objective,
+        }));
+    }
+
+    let headlines = f.engine.tasks().filter(|t| t.kind.is_headline()).count();
+    assert_eq!(headlines, 1, "seven records, one outcome");
+    assert_eq!(f.engine.tasks().count(), 7, "and all seven are still tracked");
+}
+
+/// An objective belongs to nothing, by definition.
+#[test]
+fn an_objective_cannot_belong_to_another_task() {
+    let mut f = fixture();
+    let other = f.make(json!({ "title": "something else", "brief": "x" }));
+    let told = f.err(
+        f.lead,
+        "create_task",
+        json!({
+            "title": "a second objective",
+            "brief": "x",
+            "kind": "objective",
+            "of": other,
+        }),
+    );
+    assert!(told.contains("top-level outcome"), "{told}");
+}
+
+/// An unrecognised kind gets the real list back, not a schema error.
+#[test]
+fn an_unknown_kind_lists_the_real_ones() {
+    let mut f = fixture();
+    let told = f.err(
+        f.lead,
+        "create_task",
+        json!({ "title": "x", "brief": "y", "kind": "epic" }),
+    );
+    assert!(told.contains("remediation"), "{told}");
+}
+
+/// Plain tasks still work exactly as they did before any of this.
+#[test]
+fn an_ordinary_task_needs_no_kind_at_all() {
+    let mut f = fixture();
+    f.make(json!({ "title": "ordinary work", "brief": "do it" }));
+
+    let task = f
+        .engine
+        .tasks()
+        .find(|t| t.title == "ordinary work")
+        .expect("task exists");
+    assert_eq!(task.kind, TaskKind::Task);
+    assert_eq!(task.lineage, Lineage::default());
+}

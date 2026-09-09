@@ -17,7 +17,7 @@ use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope, Seq};
 use orgbot_proto::handoff::{Handoff, HandoffKind, HandoffState, HandoffTransition, Recipient};
 use orgbot_proto::review::{Finding, Review, Verdict};
 use orgbot_proto::room::{Room, RoomPhase, RoomSpec};
-use orgbot_proto::graph::{AuthorizationState, DependencyState};
+use orgbot_proto::graph::{AuthorizationState, DependencyState, TaskOrigin};
 use orgbot_proto::task::{BlockReason, Priority, Task, TaskState, TaskTransition};
 use orgbot_proto::{
     AgentId, AgentSpec, ArtifactId, ChatMessage, HandoffId, RoomId, TaskId, Timestamp,
@@ -432,6 +432,34 @@ impl Engine {
         Ok(())
     }
 
+    /// Which objective a new task ultimately serves.
+    ///
+    /// Walks up whatever link the creator gave — a parent, or the task a review
+    /// or remediation is about — until it reaches something declared an
+    /// objective, and inherits that. A record created with no links serves
+    /// itself, which is what makes an objective an objective.
+    fn root_objective_for(&self, task: &Task) -> Option<TaskId> {
+        if task.kind.is_headline() {
+            return None;
+        }
+        let mut current = task.lineage.parent.or_else(|| task.lineage.subject())?;
+        for _ in 0..32 {
+            let record = self.tasks.get(&current)?;
+            if record.kind.is_headline() {
+                return Some(current);
+            }
+            // Inherit an already-resolved answer rather than walking further.
+            if let Some(root) = record.lineage.root_objective {
+                return Some(root);
+            }
+            match record.lineage.parent.or_else(|| record.lineage.subject()) {
+                Some(next) if next != current => current = next,
+                _ => return None,
+            }
+        }
+        None
+    }
+
     /// Follow a supersession chain to the task that now carries the work.
     ///
     /// Five downstream tasks depending on one replaced upstream should all
@@ -582,7 +610,7 @@ impl Engine {
                 priority,
                 acceptance_criteria,
                 depends_on,
-                parent,
+                origin,
             } => self.create_task(
                 title,
                 brief,
@@ -591,7 +619,7 @@ impl Engine {
                 priority,
                 acceptance_criteria,
                 depends_on,
-                parent,
+                origin,
             ),
             Command::OpenTask { task } => self.transition(task, TaskTransition::Open, None),
             Command::ClaimTask { task, by } => self.claim_task(task, by),
@@ -820,7 +848,7 @@ impl Engine {
         priority: Priority,
         acceptance_criteria: Vec<String>,
         depends_on: Vec<TaskId>,
-        parent: Option<TaskId>,
+        origin: TaskOrigin,
     ) -> Result<Vec<EventEnvelope>> {
         if let Some(creator) = by {
             let spec = self.require_agent(creator)?;
@@ -841,7 +869,15 @@ impl Engine {
         task.priority = priority;
         task.acceptance_criteria = acceptance_criteria;
         task.depends_on = depends_on;
-        task.parent = parent;
+        task.kind = origin.kind;
+        task.lineage = origin.lineage;
+        // The board counts progress against objectives, so every record has to
+        // know which one it serves. Working it out here means a bot only has to
+        // say what a record is about, not trace the chain itself.
+        task.lineage.root_objective = self.root_objective_for(&task);
+        // `parent` stays in step with the lineage so nothing that already reads
+        // it has to learn about the new field.
+        task.parent = task.lineage.parent;
         self.tasks.insert(task.id, task.clone());
         Ok(vec![self.emit(Event::TaskCreated {
             task: Box::new(task),

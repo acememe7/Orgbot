@@ -1,6 +1,7 @@
 //! Regression checks for the defects reproduced during the repository audit.
 use futures::{SinkExt, StreamExt};
 use orgbot_engine::{Command, Engine};
+use orgbot_proto::graph::TaskOrigin;
 use orgbot_proto::agent::{Autonomy, ProviderRef};
 use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
 use orgbot_proto::{AgentSpec, Event, Priority, TaskId};
@@ -188,7 +189,7 @@ fn invalid_review_and_unowned_delegation_are_atomic_rejections() {
             priority: Priority::Normal,
             acceptance_criteria: vec![],
             depends_on: vec![],
-            parent: None,
+            origin: TaskOrigin::plain(),
         })
         .unwrap();
     let task: TaskId = events

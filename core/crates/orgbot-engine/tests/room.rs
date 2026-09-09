@@ -97,7 +97,7 @@ impl Fixture {
             priority: Priority::Normal,
             acceptance_criteria: vec!["it is correct".into()],
             depends_on: vec![],
-            parent: None,
+            origin: TaskOrigin::plain(),
         });
         let task = created_task(&events);
         self.apply(Command::OpenTask { task });
@@ -855,7 +855,7 @@ fn a_task_cannot_start_before_its_dependency_is_submitted() {
         priority: Priority::Normal,
         acceptance_criteria: vec![],
         depends_on: vec![first],
-        parent: None,
+        origin: TaskOrigin::plain(),
     });
     let second = created_task(&events);
     f.apply(Command::OpenTask { task: second });
@@ -913,7 +913,7 @@ fn the_claimable_list_is_ordered_by_priority_then_age() {
             priority,
             acceptance_criteria: vec![],
             depends_on: vec![],
-            parent: None,
+            origin: TaskOrigin::plain(),
         });
         let task = created_task(&events);
         f.apply(Command::OpenTask { task });
@@ -1052,7 +1052,7 @@ fn a_rejected_command_changes_nothing() {
 // that: what the scheduler is allowed to offer, and what happens on its own
 // when an upstream task lands.
 
-use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness};
+use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness, TaskOrigin};
 
 impl Fixture {
     /// An open task that cannot start until `blockers` are submitted.
@@ -1065,7 +1065,7 @@ impl Fixture {
             priority: Priority::Normal,
             acceptance_criteria: vec![],
             depends_on: blockers,
-            parent: None,
+            origin: TaskOrigin::plain(),
         });
         let task = created_task(&events);
         self.apply(Command::OpenTask { task });

@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use orgbot_engine::Command;
+use orgbot_proto::graph::TaskOrigin;
 use orgbot_proto::chat::Audience;
 use orgbot_proto::event::{EventEnvelope, Seq};
 use orgbot_proto::task::BlockReason;
@@ -232,7 +233,7 @@ impl RoomSession {
                     priority: task.priority,
                     acceptance_criteria: task.acceptance_criteria,
                     depends_on: vec![],
-                    parent: None,
+                    origin: TaskOrigin::plain(),
                 })
                 .map_err(|e| anyhow::anyhow!("seeding a task: {e}"))?;
             if task.open {

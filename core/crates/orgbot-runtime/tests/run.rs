@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use orgbot_proto::graph::TaskOrigin;
 use orgbot_proto::agent::{Autonomy, ProviderRef};
 use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
 use orgbot_proto::{AgentSpec, TaskState};
@@ -787,7 +788,7 @@ async fn an_mcp_agent_bot_claims_a_seeded_task_in_band() {
             priority: orgbot_proto::task::Priority::Normal,
             acceptance_criteria: vec![],
             depends_on: vec![],
-            parent: None,
+            origin: TaskOrigin::plain(),
         })
         .unwrap();
     let task_id_value = events
@@ -887,7 +888,7 @@ async fn a_real_codex_bot_claims_a_task_through_the_room_bridge() {
             priority: orgbot_proto::task::Priority::High,
             acceptance_criteria: vec![],
             depends_on: vec![],
-            parent: None,
+            origin: TaskOrigin::plain(),
         })
         .unwrap();
     let task_id = events
@@ -1092,7 +1093,7 @@ async fn a_room_cycle_claim_work_review_submit_runs_through_the_bridge() {
             priority: orgbot_proto::task::Priority::High,
             acceptance_criteria: vec![],
             depends_on: vec![],
-            parent: None,
+            origin: TaskOrigin::plain(),
         })
         .unwrap();
     let task = events
