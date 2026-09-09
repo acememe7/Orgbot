@@ -47,6 +47,18 @@ enum CliCommand {
         #[arg(long)]
         behind_proxy: bool,
     },
+    /// Say why a saved room is not making progress.
+    ///
+    /// Answers the question a stalled room raises — "nine bots free, eight
+    /// tasks open, why is nothing happening?" — which has several unrelated
+    /// causes that look identical from those two numbers.
+    Diagnose {
+        /// Path to the room's saved state.
+        state: PathBuf,
+        /// Look at one bot in particular.
+        #[arg(long)]
+        bot: Option<String>,
+    },
     /// Parse and validate a room file, printing what it resolves to.
     Check {
         /// Path to the room's TOML definition.
@@ -100,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
             token,
             behind_proxy,
         } => serve(config, addr, token, behind_proxy).await,
+        CliCommand::Diagnose { state, bot } => diagnose(&state, bot.as_deref()),
         CliCommand::Check { config } => check(config),
         CliCommand::Init { path } => init(path),
         CliCommand::Pair { out } => pair(out),
@@ -182,6 +195,102 @@ fn generate_token() -> String {
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
     )
+}
+
+/// Say why a saved room is not making progress.
+fn diagnose(state: &std::path::Path, bot: Option<&str>) -> anyhow::Result<()> {
+    let raw = std::fs::read_to_string(state)?;
+    let saved: serde_json::Value = serde_json::from_str(&raw)?;
+    // The app wraps the engine; a bare engine dump works too.
+    let engine_json = saved.get("engine").unwrap_or(&saved);
+    let engine: orgbot_engine::Engine = serde_json::from_value(engine_json.clone())?;
+
+    let view = engine.digest();
+    println!("{}\n", view.summary(&engine.room().spec.name));
+
+    println!("Phase: {:?}", engine.room().phase);
+    println!(
+        "Turns: {} of {}",
+        engine.room().turns_used,
+        engine.room().spec.limits.max_total_turns
+    );
+
+    let utilization = engine.utilization();
+    println!("\nWho is doing what:");
+    for state in &utilization.bots {
+        println!("  @{:<14} {:<10} holding {}", state.handle, state.doing, state.holding);
+    }
+
+    println!("\nOpen work, and who could take it:");
+    let mut open = 0;
+    for task in engine.tasks() {
+        if !task.readiness().is_claimable() {
+            continue;
+        }
+        open += 1;
+        let takers: Vec<String> = engine
+            .agents()
+            .filter(|spec| {
+                engine
+                    .eligibility(spec.id, task.required_role.as_deref())
+                    .is_eligible()
+            })
+            .map(|spec| {
+                let free = engine.workload(spec.id) == 0;
+                format!("@{}{}", spec.handle, if free { "" } else { " (busy)" })
+            })
+            .collect();
+        println!(
+            "  [{}] {}\n      {}",
+            task.required_role.as_deref().unwrap_or("any role"),
+            task.title,
+            if takers.is_empty() {
+                "NOBODY is eligible — no bot holds this role or a stand-in for it".to_string()
+            } else {
+                takers.join(", ")
+            }
+        );
+    }
+    if open == 0 {
+        println!("  (nothing is claimable; everything open is waiting on something)");
+    }
+
+    if utilization.is_short_handed() {
+        println!("\nShort-handed. No free bot can cover:");
+        for (role, count) in &utilization.starved_roles {
+            println!("  {role}: {count} task(s)");
+        }
+        println!("  Add a bot holding that role, or declare a stand-in for it.");
+    } else if utilization.is_wasting_capacity() {
+        println!(
+            "\n{} bot(s) free while work they could take sits unclaimed. The \
+             scheduler is offering it; if they keep declining, the reason is in \
+             what they are being told, not in who is eligible.",
+            utilization.idle
+        );
+    }
+
+    if let Some(handle) = bot {
+        match engine.agents().find(|spec| spec.handle == handle) {
+            Some(spec) => {
+                println!("\n--- what @{handle} would be told this turn ---");
+                println!(
+                    "{}",
+                    orgbot_runtime::prompt::situation(&engine, spec.id, engine.head())
+                );
+            }
+            None => println!("\nNo bot called @{handle} in this room."),
+        }
+    }
+
+    let broken = engine.inconsistencies();
+    if !broken.is_empty() {
+        println!("\nThe room is inconsistent:");
+        for violation in &broken {
+            println!("  {violation}");
+        }
+    }
+    Ok(())
 }
 
 /// Validate a room file and describe what it resolves to.
