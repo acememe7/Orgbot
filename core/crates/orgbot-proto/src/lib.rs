@@ -32,6 +32,7 @@ pub mod review;
 pub mod roles;
 pub mod room;
 pub mod task;
+pub mod text;
 pub mod time;
 
 pub use agent::{AgentPolicy, AgentSpec, AgentStatus, Autonomy, CliKind, ProviderRef};

@@ -18,6 +18,7 @@ use orgbot_proto::handoff::{Handoff, HandoffKind, HandoffState, HandoffTransitio
 use orgbot_proto::review::{Finding, Review, Verdict};
 use orgbot_proto::room::{Room, RoomPhase, RoomSpec};
 use orgbot_proto::convergence::{self, Convergence};
+use orgbot_proto::text;
 use orgbot_proto::decision::{Answer, Decision, DecisionLog, Settled};
 use orgbot_proto::roles::{Eligibility, RoleTable};
 use orgbot_proto::ids::DecisionId;
@@ -30,6 +31,13 @@ use orgbot_proto::{
 use crate::command::Command;
 use crate::deadlock::{self, WaitGraph};
 use crate::error::{EngineError, Result};
+
+/// How many open remediations one task may carry before the room is told to
+/// consolidate rather than add another.
+///
+/// Three leaves room for genuinely separate follow-ups from one review while
+/// stopping the chains that turned twelve objectives into ninety-six records.
+pub const MAX_OPEN_REMEDIATIONS: usize = 3;
 
 /// Why the work graph refuses this task, in words aimed at a bot.
 ///
@@ -429,6 +437,33 @@ impl Engine {
                 .then(a.id.cmp(&b.id))
         });
         open.into_iter().map(|(t, _)| t.id).collect()
+    }
+
+    /// Live work that looks like the same thing as `title`.
+    ///
+    /// Asked before a task is created. A board grows fastest when several bots
+    /// independently notice the same gap and each raise it, and the records
+    /// are near-impossible to reconcile afterwards because nothing links them.
+    pub fn work_like(&self, title: &str) -> Vec<TaskId> {
+        self.tasks
+            .values()
+            .filter(|task| !task.state.is_terminal() && !task.lineage.is_superseded())
+            .filter(|task| text::looks_like_the_same_work(&task.title, title))
+            .map(|task| task.id)
+            .collect()
+    }
+
+    /// How many live remediations already hang off `task`.
+    ///
+    /// One review finding should not be able to spawn an open-ended chain of
+    /// follow-up work. Past a handful, the answer is to consolidate rather
+    /// than add another.
+    pub fn remediation_count(&self, task: TaskId) -> usize {
+        self.tasks
+            .values()
+            .filter(|record| !record.state.is_terminal() && !record.lineage.is_superseded())
+            .filter(|record| record.lineage.remediation_of == Some(task))
+            .count()
     }
 
     /// Set how many times a task may come back from inspection.
@@ -1031,6 +1066,22 @@ impl Engine {
         for dep in &depends_on {
             if !self.tasks.contains_key(dep) {
                 return Err(EngineError::UnknownTask { task: *dep });
+            }
+        }
+        // One review finding must not spawn an open-ended chain. Past a
+        // handful of open remediations on one task, adding another is not
+        // progress — consolidating them is.
+        if let Some(subject) = origin.lineage.remediation_of {
+            let open = self.remediation_count(subject);
+            if open >= MAX_OPEN_REMEDIATIONS {
+                return Err(EngineError::NotReady {
+                    task: subject,
+                    reason: format!(
+                        "it already has {open} open remediations. Fold this into \
+                         one of them, or raise a single remediation that covers \
+                         the invariant they share."
+                    ),
+                });
             }
         }
         let mut task = Task::draft(self.room.id, title, brief);

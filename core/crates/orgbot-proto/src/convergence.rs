@@ -65,32 +65,12 @@ fn keywords(summary: &str) -> String {
 
 /// The words of a summary that carry meaning.
 fn content_words(summary: &str) -> Vec<String> {
-    const NOISE: &[&str] = &[
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "to", "of", "in", "on", "for",
-        "and", "or", "not", "no", "it", "its", "this", "that", "with", "without", "should",
-        "must", "may", "can", "does", "do", "has", "have", "there", "here", "but",
-    ];
-    summary
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| word.len() > 2 && !NOISE.contains(word))
-        .map(str::to_string)
-        .collect()
+    crate::text::content_words(summary)
 }
 
 /// How much two findings' vocabularies overlap, from 0 to 1.
 fn overlap(a: &Finding, b: &Finding) -> f32 {
-    let (mut left, mut right) = (content_words(&a.summary), content_words(&b.summary));
-    left.sort();
-    left.dedup();
-    right.sort();
-    right.dedup();
-    if left.is_empty() || right.is_empty() {
-        return f32::from(u8::from(a.summary.trim().eq_ignore_ascii_case(b.summary.trim())));
-    }
-    let shared = left.iter().filter(|word| right.contains(word)).count();
-    let union = left.len() + right.len() - shared;
-    shared as f32 / union as f32
+    crate::text::similarity(&a.summary, &b.summary)
 }
 
 /// How much vocabulary two findings must share to be one recurring problem.

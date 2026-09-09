@@ -844,3 +844,110 @@ fn submitting_for_review_freezes_the_artifacts() {
     let sealed = f.engine.artifact(id).expect("artifact exists");
     assert!(sealed.sealed, "the reviewed version is frozen");
 }
+
+// ------------------------------------------------- not making the same card twice
+//
+// A board grows fastest when several bots independently notice the same gap
+// and each raise it, because nothing links the records afterwards.
+
+#[test]
+fn work_that_already_exists_is_pointed_at_rather_than_duplicated() {
+    let mut f = fixture();
+    f.make(json!({
+        "title": "restore the missing B3-C source",
+        "brief": "get it back",
+    }));
+
+    let told = f.err(
+        f.lead,
+        "create_task",
+        json!({
+            "title": "the B3-C source, restore it",
+            "brief": "same thing, different words",
+        }),
+    );
+    assert!(told.contains("already exists"), "{told}");
+    assert!(told.contains("B3-C"), "it should name the existing task: {told}");
+    assert!(told.contains("supersede"), "and say what to do: {told}");
+}
+
+/// Genuinely separate work still gets through, once the caller says so.
+#[test]
+fn separate_work_can_be_created_deliberately() {
+    let mut f = fixture();
+    f.make(json!({"title": "restore the B3-C source", "brief": "x"}));
+
+    f.ok(
+        f.lead,
+        "create_task",
+        json!({
+            "title": "restore the B3-C source",
+            "brief": "a second, independent copy for the archive",
+            "anyway": "true",
+        }),
+    );
+    assert_eq!(f.engine.tasks().count(), 2);
+}
+
+/// Numbered work is not the same work.
+#[test]
+fn numbered_steps_are_not_duplicates_of_each_other() {
+    let mut f = fixture();
+    for i in 0..4 {
+        f.make(json!({"title": format!("step {i}"), "brief": "work"}));
+    }
+    assert_eq!(f.engine.tasks().count(), 4);
+}
+
+/// Finished work does not block raising the same thing again later.
+#[test]
+fn a_delivered_task_does_not_block_new_work() {
+    let mut f = fixture();
+    let done = f.make(json!({"title": "restore the B3-C source", "brief": "x"}));
+    let id: orgbot_proto::TaskId = done.parse().unwrap();
+    f.engine
+        .apply(Command::RetireTask {
+            task: id,
+            reason: "superseded by a new approach".into(),
+        })
+        .unwrap();
+
+    f.ok(
+        f.lead,
+        "create_task",
+        json!({"title": "restore the B3-C source", "brief": "again"}),
+    );
+}
+
+/// One review finding must not spawn an open-ended chain of follow-ups.
+#[test]
+fn remediations_stop_multiplying_and_ask_to_be_consolidated() {
+    let mut f = fixture();
+    let subject = f.make(json!({"title": "the handler", "brief": "x"}));
+
+    for i in 0..3 {
+        f.ok(
+            f.lead,
+            "create_task",
+            json!({
+                "title": format!("fence the {i} case"),
+                "brief": "patch",
+                "kind": "remediation",
+                "of": subject.clone(),
+            }),
+        );
+    }
+
+    let told = f.err(
+        f.lead,
+        "create_task",
+        json!({
+            "title": "fence the fourth case",
+            "brief": "patch",
+            "kind": "remediation",
+            "of": subject,
+        }),
+    );
+    assert!(told.contains("open remediations"), "{told}");
+    assert!(told.contains("invariant they share"), "{told}");
+}

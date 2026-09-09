@@ -339,6 +339,13 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                     ),
                     ("open", schema::boolean("Publish immediately. Defaults to true.")),
                     (
+                        "anyway",
+                        schema::string(
+                            "Pass \"true\" to create this even though similar work \
+                             exists. Say in the brief how it differs.",
+                        ),
+                    ),
+                    (
                         "kind",
                         schema::enumerated(
                             "What this record is. \"objective\" is a top-level outcome; \
@@ -811,6 +818,26 @@ fn create_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcom
         Ok(origin) => origin,
         Err(message) => return ToolOutcome::error(message),
     };
+
+    // Several bots independently noticing the same gap and each raising it is
+    // how a board grows fastest, and the records are near-impossible to
+    // reconcile afterwards because nothing links them. Say so now, while the
+    // caller can still attach to the existing one.
+    let existing = engine.work_like(&title);
+    if !existing.is_empty() && optional_str(input, "anyway") != Some("true") {
+        let named: Vec<String> = existing
+            .iter()
+            .filter_map(|id| engine.task(*id))
+            .map(|task| format!("{} — \"{}\"", task.id, task.title))
+            .collect();
+        return ToolOutcome::error(format!(
+            "This looks like work that already exists:\n{}\n\nUse the existing \
+             task — claim it, add a subtask under it, or supersede it if yours \
+             replaces it. If it really is separate work, call this again with \
+             `anyway: \"true\"` and say in the brief how it differs.",
+            named.join("\n")
+        ));
+    }
 
     let events = match engine.apply(Command::CreateTask {
         title: title.clone(),
