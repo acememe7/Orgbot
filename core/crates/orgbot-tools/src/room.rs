@@ -682,8 +682,47 @@ fn room_status(engine: &Engine, actor: AgentId) -> ToolOutcome {
             },
         ));
     }
-    out.push_str("\nBoard:\n");
-    out.push_str(&render_tasks(engine, engine.tasks().map(|t| t.id).collect()));
+    // The board, compacted the same way it is for a person. A room with
+    // ninety-six records is as unreadable to a model as to anyone else, and
+    // pasting all of them costs a turn's worth of context to say very little.
+    let view = engine.digest();
+    out.push_str(&format!("\n{}\n", view.summary("Board")));
+
+    if view.health.coordination_expansion {
+        out.push_str(&format!(
+            "\nCoordination expansion: {:.1} records per objective, {} of them \
+             reviews and follow-ups. Attach supporting work to the objective it \
+             serves rather than raising it top-level.\n",
+            view.health.inflation_ratio, view.health.supporting_records,
+        ));
+    }
+    if !view.critical_path.is_empty() {
+        let chain: Vec<String> = view
+            .critical_path
+            .iter()
+            .filter_map(|id| engine.task(*id))
+            .map(|task| task.title.clone())
+            .collect();
+        out.push_str(&format!(
+            "\nThe chain deciding when this room finishes: {}\n",
+            chain.join(" → ")
+        ));
+    }
+
+    // Then only what this bot can act on. Everything else is one call away.
+    let mine = engine.active_tasks_of(actor);
+    if !mine.is_empty() {
+        out.push_str("\nYours:\n");
+        out.push_str(&render_tasks(engine, mine));
+    }
+    let claimable = engine.claimable_by(actor);
+    if !claimable.is_empty() {
+        out.push_str("\nYou could take:\n");
+        out.push_str(&render_tasks(engine, claimable.into_iter().take(10).collect()));
+    }
+    out.push_str(
+        "\nThat is the board compacted. Call list_tasks for the full set.\n",
+    );
     ToolOutcome::ok(out)
 }
 

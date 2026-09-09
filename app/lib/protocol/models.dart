@@ -548,12 +548,77 @@ class BoardCounts {
       );
 }
 
+/// What one bot is doing.
+class BotState {
+  const BotState({
+    required this.agent,
+    required this.handle,
+    required this.doing,
+    required this.holding,
+    required this.free,
+  });
+
+  final String agent;
+  final String handle;
+
+  /// One word: working, reviewing, waiting, idle, faulted, offline.
+  final String doing;
+
+  /// How much live work it holds.
+  final int holding;
+
+  /// Whether it could take something now.
+  final bool free;
+
+  factory BotState.fromJson(Map<String, Object?> json) => BotState(
+        agent: json['agent'] as String? ?? '',
+        handle: json['handle'] as String? ?? '',
+        doing: json['doing'] as String? ?? 'idle',
+        holding: (json['holding'] as num?)?.toInt() ?? 0,
+        free: json['free'] as bool? ?? false,
+      );
+}
+
+/// Where the room's effort is going.
+class Utilization {
+  const Utilization({
+    required this.bots,
+    required this.idle,
+    required this.unclaimed,
+  });
+
+  final List<BotState> bots;
+  final int idle;
+  final int unclaimed;
+
+  const Utilization.empty()
+      : bots = const [],
+        idle = 0,
+        unclaimed = 0;
+
+  /// Bots free while work sits unclaimed — a scheduling failure that no
+  /// single count reveals.
+  bool get isWastingCapacity => idle > 0 && unclaimed > 0;
+
+  factory Utilization.fromJson(Map<String, Object?> json) => Utilization(
+        bots: (json['bots'] as List? ?? const [])
+            .whereType<Map>()
+            .map((b) => BotState.fromJson(b.cast<String, Object?>()))
+            .toList(),
+        idle: (json['idle'] as num?)?.toInt() ?? 0,
+        unclaimed: (json['unclaimed'] as num?)?.toInt() ?? 0,
+      );
+}
+
 /// Signals that the room is coordinating more than it is working.
 class RoomHealth {
   const RoomHealth({
     required this.inflationRatio,
     required this.supportingRecords,
     required this.coordinationExpansion,
+    required this.averageReviewCycles,
+    required this.standInRecords,
+    required this.criticalPathLength,
   });
 
   /// Live records per objective.
@@ -565,16 +630,35 @@ class RoomHealth {
   /// Whether the record count is outrunning the outcomes.
   final bool coordinationExpansion;
 
+  /// Mean review rounds per reviewed task. Above two means work routinely
+  /// goes round more than once.
+  final double averageReviewCycles;
+
+  /// Records done by a bot standing in for the role asked for. A high share
+  /// means the roster does not match the work.
+  final int standInRecords;
+
+  /// How long the chain deciding completion is.
+  final int criticalPathLength;
+
   const RoomHealth.healthy()
       : inflationRatio = 0,
         supportingRecords = 0,
-        coordinationExpansion = false;
+        coordinationExpansion = false,
+        averageReviewCycles = 0,
+        standInRecords = 0,
+        criticalPathLength = 0;
 
   factory RoomHealth.fromJson(Map<String, Object?> json) => RoomHealth(
         inflationRatio: (json['inflation_ratio'] as num?)?.toDouble() ?? 0,
         supportingRecords: (json['supporting_records'] as num?)?.toInt() ?? 0,
         coordinationExpansion:
             json['coordination_expansion'] as bool? ?? false,
+        averageReviewCycles:
+            (json['average_review_cycles'] as num?)?.toDouble() ?? 0,
+        standInRecords: (json['stand_in_records'] as num?)?.toInt() ?? 0,
+        criticalPathLength:
+            (json['critical_path_length'] as num?)?.toInt() ?? 0,
       );
 }
 
@@ -586,6 +670,7 @@ class RoomDigest {
     required this.needsYou,
     required this.criticalPath,
     required this.health,
+    required this.utilization,
   });
 
   /// The outcomes, most urgent first.
@@ -603,13 +688,17 @@ class RoomDigest {
   /// Whether the room is coordinating more than it is working.
   final RoomHealth health;
 
+  /// Where the room's effort is going.
+  final Utilization utilization;
+
   /// The state before a room has said anything.
   const RoomDigest.empty()
       : objectives = const [],
         counts = const BoardCounts.empty(),
         needsYou = const [],
         criticalPath = const [],
-        health = const RoomHealth.healthy();
+        health = const RoomHealth.healthy(),
+        utilization = const Utilization.empty();
 
   /// Whether there is anything to show yet.
   bool get isEmpty => objectives.isEmpty && needsYou.isEmpty;
@@ -628,5 +717,7 @@ class RoomDigest {
         criticalPath: (json['critical_path'] as List? ?? const []).cast<String>(),
         health: RoomHealth.fromJson(
             (json['health'] as Map?)?.cast<String, Object?>() ?? const {}),
+        utilization: Utilization.fromJson(
+            (json['utilization'] as Map?)?.cast<String, Object?>() ?? const {}),
       );
 }

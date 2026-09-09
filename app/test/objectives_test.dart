@@ -236,6 +236,12 @@ void main() {
       ]);
       await tester.pumpWidget(wrap(store));
 
+      // It sits below the objectives, so the list has to build that far.
+      await tester.scrollUntilVisible(
+        find.text('Coordination expansion'),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
       expect(find.text('Coordination expansion'), findsOneWidget);
       expect(find.textContaining('9.0 records per objective'), findsOneWidget);
     });
@@ -253,6 +259,11 @@ void main() {
         ),
       ));
 
+      await tester.scrollUntilVisible(
+        find.text('Show all 18 work records'),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
       await tester.tap(find.text('Show all 18 work records'));
       expect(opened, isTrue, reason: 'compression is a layer, not deletion');
     });
@@ -265,6 +276,7 @@ void main() {
   });
 
   _answerTests();
+  _viewTests();
 }
 
 // ------------------------------------------------------- answering a decision
@@ -291,6 +303,101 @@ void _answerTests() {
         'dec_1',
         reason: 'the answer is addressed to the question, not to a task',
       );
+    });
+  });
+}
+
+// ----------------------------------------------------------------- the views
+
+void _viewTests() {
+  group('views', () {
+    Widget wrap(RoomStore store) => MaterialApp(
+          home: Scaffold(body: ObjectivesPane(store: store)),
+        );
+
+    /// The point of the split: a real decision must not sit among ninety-five
+    /// records that are all fine.
+    testWidgets('Needs me shows only what waits on a person', (tester) async {
+      final store = storeWith([
+        {'type': 'digest', 'digest': digestJson(objectives: 4, needsYou: 1)}
+      ]);
+      await tester.pumpWidget(wrap(store));
+
+      expect(find.text('objective 1'), findsOneWidget);
+      await tester.tap(find.text('Needs me 1'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('objective 0'), findsOneWidget, reason: 'the one that needs you');
+      expect(find.text('objective 1'), findsNothing, reason: 'and nothing else');
+    });
+
+    /// An empty slice explains itself, and the good case says so warmly.
+    testWidgets('an empty Needs me is reassuring, not blank', (tester) async {
+      final store = storeWith([
+        {'type': 'digest', 'digest': digestJson()}
+      ]);
+      await tester.pumpWidget(wrap(store));
+
+      await tester.tap(find.text('Needs me 0'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Nothing needs you'),
+        findsWidgets,
+      );
+    });
+
+    testWidgets('the chain deciding completion is shown', (tester) async {
+      final store = storeWith([
+        {'type': 'digest', 'digest': digestJson()}
+      ]);
+      await tester.pumpWidget(wrap(store));
+
+      await tester.scrollUntilVisible(
+        find.text('What decides when this finishes'),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('What decides when this finishes'), findsOneWidget);
+    });
+
+    testWidgets('who is doing what is shown, and idle capacity called out',
+        (tester) async {
+      final digest = digestJson();
+      digest['utilization'] = {
+        'bots': [
+          {'agent': 'bot_1', 'handle': 'eng1', 'doing': 'working', 'holding': 2, 'free': false},
+          {'agent': 'bot_2', 'handle': 'eng2', 'doing': 'idle', 'holding': 0, 'free': true},
+        ],
+        'idle': 1,
+        'unclaimed': 4,
+      };
+      final store = storeWith([{'type': 'digest', 'digest': digest}]);
+      await tester.pumpWidget(wrap(store));
+
+      await tester.scrollUntilVisible(
+        find.text('Who is doing what'),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('@eng1 · working'), findsOneWidget);
+      expect(find.text('@eng2 · idle'), findsOneWidget);
+      expect(
+        find.textContaining('1 free while 4 piece(s) of work sit unclaimed'),
+        findsOneWidget,
+      );
+    });
+
+    /// Detail views stay focused: no critical path or roster strip there.
+    testWidgets('the extra panels belong to the overview only', (tester) async {
+      final store = storeWith([
+        {'type': 'digest', 'digest': digestJson(objectives: 3)}
+      ]);
+      await tester.pumpWidget(wrap(store));
+
+      await tester.tap(find.text('Active 1'));
+      await tester.pumpAndSettle();
+      expect(find.text('What decides when this finishes'), findsNothing);
+      expect(find.text('Who is doing what'), findsNothing);
     });
   });
 }
