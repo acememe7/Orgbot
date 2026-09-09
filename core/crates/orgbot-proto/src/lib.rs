@@ -23,6 +23,7 @@ pub mod agent;
 pub mod artifact;
 pub mod chat;
 pub mod event;
+pub mod graph;
 pub mod handoff;
 pub mod ids;
 pub mod review;

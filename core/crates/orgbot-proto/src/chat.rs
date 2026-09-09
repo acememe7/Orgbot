@@ -113,7 +113,25 @@ pub struct ChatMessage {
     pub reply_to: Option<MessageId>,
     /// Artifacts referenced by the message.
     pub attachments: Vec<ArtifactId>,
+    /// User files saved beside the room checkpoint, never inline binary data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ChatFile>,
     pub sent_at: Timestamp,
+}
+
+/// A user attachment's durable manifest. Paths are derived from its id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatFile {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub bytes: u64,
+    #[serde(default)]
+    pub has_text: bool,
+    #[serde(default)]
+    pub images: u32,
+    #[serde(default)]
+    pub note: String,
 }
 
 impl ChatMessage {
@@ -130,6 +148,7 @@ impl ChatMessage {
             handoff: None,
             reply_to: None,
             attachments: Vec::new(),
+            files: Vec::new(),
             sent_at: Timestamp::now(),
         }
     }
@@ -147,6 +166,7 @@ impl ChatMessage {
             handoff: None,
             reply_to: None,
             attachments: Vec::new(),
+            files: Vec::new(),
             sent_at: Timestamp::now(),
         }
     }
@@ -200,8 +220,7 @@ mod tests {
     #[test]
     fn a_bot_is_never_woken_by_its_own_message() {
         let (room, bot) = (room(), AgentId::new());
-        let msg = ChatMessage::say(room, bot, "thinking out loud")
-            .with_intent(MessageIntent::Ask);
+        let msg = ChatMessage::say(room, bot, "thinking out loud").with_intent(MessageIntent::Ask);
         assert!(!msg.wakes(bot, &[]));
     }
 
@@ -227,8 +246,7 @@ mod tests {
     fn a_direct_message_wakes_its_target_whatever_the_intent() {
         let (room, speaker, target, bystander) =
             (room(), AgentId::new(), AgentId::new(), AgentId::new());
-        let msg = ChatMessage::say(room, speaker, "here is the file")
-            .to_agents(vec![target]);
+        let msg = ChatMessage::say(room, speaker, "here is the file").to_agents(vec![target]);
         assert!(msg.wakes(target, &[]));
         assert!(!msg.wakes(bystander, &[]));
     }

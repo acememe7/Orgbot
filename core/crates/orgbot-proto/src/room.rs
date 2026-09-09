@@ -40,7 +40,7 @@ impl RoomPhase {
         matches!(self, Self::Running)
     }
 
-    /// Whether the room has finished for good.
+    /// Whether the current execution has ended.
     pub const fn is_finished(self) -> bool {
         matches!(self, Self::Completed | Self::Aborted)
     }
