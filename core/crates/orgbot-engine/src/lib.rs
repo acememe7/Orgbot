@@ -30,12 +30,14 @@
 #![warn(missing_debug_implementations, rust_2018_idioms, unreachable_pub)]
 
 pub mod command;
+pub mod consistency;
 pub mod deadlock;
 pub mod digest;
 pub mod engine;
 pub mod error;
 
 pub use command::Command;
+pub use consistency::Violation;
 pub use deadlock::WaitGraph;
 pub use digest::{digest, BoardCounts, ObjectiveCard, Progress, RoomDigest};
 pub use engine::Engine;

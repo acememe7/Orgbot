@@ -19,10 +19,10 @@ use orgbot_proto::review::{Finding, Review, Verdict};
 use orgbot_proto::room::{Room, RoomPhase, RoomSpec};
 use orgbot_proto::convergence::{self, Convergence};
 use orgbot_proto::text;
-use orgbot_proto::decision::{Answer, Decision, DecisionLog, Settled};
+use orgbot_proto::decision::{Answer, Decision, DecisionLog, Governance, Request, Settled};
 use orgbot_proto::roles::{Eligibility, RoleTable};
 use orgbot_proto::ids::DecisionId;
-use orgbot_proto::graph::{AuthorizationState, DependencyState, TaskOrigin};
+use orgbot_proto::graph::{AuthorizationState, DependencyState, TaskKind, TaskOrigin};
 use orgbot_proto::task::{DEFAULT_LEASE_MILLIS, BlockReason, Priority, Task, TaskState, TaskTransition};
 use orgbot_proto::{
     AgentId, AgentSpec, ArtifactId, ChatMessage, HandoffId, RoomId, TaskId, Timestamp,
@@ -94,6 +94,9 @@ pub struct Engine {
     /// keep matching roles by name exactly as it always did.
     #[serde(default)]
     roles: RoleTable,
+    /// The room's standing rules, and which version of each is in force.
+    #[serde(default)]
+    governance: Governance,
 }
 
 impl Engine {
@@ -261,6 +264,7 @@ impl Engine {
             error_streak: BTreeMap::new(),
             decisions: DecisionLog::default(),
             roles: RoleTable::default(),
+            governance: Governance::default(),
         };
         let (id, name, goal) = (
             engine.room.id,
@@ -321,6 +325,34 @@ impl Engine {
     }
 
     /// Every task on the board.
+    /// Adopt a standing rule, returning the version now in force.
+    ///
+    /// A rule answers a class of questions in advance so they never have to be
+    /// asked. Adopting one with an existing name replaces it rather than
+    /// sitting beside it, so an obsolete rule cannot resurface as live
+    /// authority.
+    pub fn adopt_policy(&mut self, policy: orgbot_proto::decision::Policy) -> u32 {
+        self.governance.adopt(policy)
+    }
+
+    /// Withdraw a rule, keeping it on the record.
+    pub fn withdraw_policy(&mut self, name: &str) -> bool {
+        self.governance.withdraw(name)
+    }
+
+    /// The room's standing rules.
+    pub const fn governance(&self) -> &Governance {
+        &self.governance
+    }
+
+    /// Whether a standing rule already permits `request`.
+    ///
+    /// Consulted before a decision is raised: if a rule covers it, nobody
+    /// needs to be asked.
+    pub fn policy_permits(&self, request: &Request) -> Option<&orgbot_proto::decision::Policy> {
+        self.governance.permits(request, Timestamp::now())
+    }
+
     /// Declare what each role can do and who may stand in for it.
     pub fn set_roles(&mut self, roles: RoleTable) {
         self.roles = roles;
@@ -486,6 +518,24 @@ impl Engine {
             .filter(|record| !record.state.is_terminal() && !record.lineage.is_superseded())
             .filter(|record| record.lineage.remediation_of == Some(task))
             .count()
+    }
+
+    /// Mutable access to one task.
+    ///
+    /// Used by the consistency check's tests to construct states the command
+    /// surface refuses, and by callers restoring a room from storage. Ordinary
+    /// changes go through commands so the transition rules apply.
+    pub fn task_mut(&mut self, id: TaskId) -> Option<&mut Task> {
+        self.tasks.get_mut(&id)
+    }
+
+    /// Every invariant this room breaks, if any.
+    ///
+    /// An empty result means it is coherent. Anything returned is a bug
+    /// upstream rather than a state to work around, so this reports and does
+    /// not repair.
+    pub fn inconsistencies(&self) -> Vec<crate::consistency::Violation> {
+        crate::consistency::check(self)
     }
 
     /// Set how many times a task may come back from inspection.
@@ -1198,6 +1248,9 @@ impl Engine {
             let mut decision = Decision::ask(self.room.id, because.clone());
             decision.options = options.clone();
             decision.task = Some(task);
+            // Record which rules were in force. Old work should be read
+            // against the rules that governed it, not the ones adopted since.
+            decision.governed_by = self.governance.stamp();
             let raised = decision.clone();
             match self.decisions.ask(decision) {
                 Settled::Asked(_) => {
@@ -1229,13 +1282,83 @@ impl Engine {
                 Settled::AlreadyAsked(_) => {}
             }
         }
+        // A hold for want of proof is a request for work, not a wall. Raise
+        // the evidence task here rather than leaving the room to notice that
+        // it could go and find out.
+        let evidence = match &authorization {
+            AuthorizationState::SecurityHold { finding, material } if !material => {
+                Some(finding.clone())
+            }
+            _ => None,
+        };
+
         let record = self
             .tasks
             .get_mut(&task)
             .ok_or(EngineError::UnknownTask { task })?;
         record.authorization = authorization;
         record.updated_at = Timestamp::now();
-        Ok(Vec::new())
+
+        match evidence {
+            Some(finding) => self.raise_evidence_for(task, &finding),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Raise the work that would settle a security hold, once.
+    ///
+    /// Attached to the task it unblocks rather than created as a peer, so
+    /// gathering proof does not add another top-level card. Raised once: a
+    /// hold restated in different words should not produce a second identical
+    /// errand.
+    fn raise_evidence_for(
+        &mut self,
+        task: TaskId,
+        finding: &str,
+    ) -> Result<Vec<EventEnvelope>> {
+        let title = format!("Evidence: {finding}");
+        let already = self.tasks.values().any(|record| {
+            record.lineage.parent == Some(task)
+                && record.kind == TaskKind::Evidence
+                && !record.state.is_terminal()
+                && text::looks_like_the_same_work(&record.title, &title)
+        });
+        if already {
+            return Ok(Vec::new());
+        }
+
+        let required_role = self
+            .tasks
+            .get(&task)
+            .and_then(|record| record.required_role.clone());
+        let events = self.create_task(
+            title,
+            format!(
+                "Security is holding `{}` for want of proof: {finding}. Gather \
+                 what is needed and attach it, then the review can be run \
+                 again. This is the room's own work; nobody outside it needs \
+                 to be asked.",
+                self.tasks
+                    .get(&task)
+                    .map_or_else(String::new, |record| record.title.clone())
+            ),
+            None,
+            required_role,
+            Priority::High,
+            vec!["the evidence is attached as an artifact".into()],
+            Vec::new(),
+            TaskOrigin::under(TaskKind::Evidence, task),
+        )?;
+        let raised = events.iter().find_map(|envelope| match &envelope.event {
+            Event::TaskCreated { task } => Some(task.id),
+            _ => None,
+        });
+        // Open it, or it sits as a draft nobody can claim.
+        let mut events = events;
+        if let Some(id) = raised {
+            events.extend(self.transition(id, TaskTransition::Open, None)?);
+        }
+        Ok(events)
     }
 
     /// Record the operator's answer, and release whatever it unblocks.

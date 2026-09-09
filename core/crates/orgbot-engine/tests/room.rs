@@ -2157,3 +2157,177 @@ fn ordinary_work_can_be_corrected_by_anyone() {
 
     assert!(f.engine.may_replace(notes, worker2));
 }
+
+// ------------------------------------------- standing rules and evidence
+//
+// Two ways a room asked for things it could have settled itself: it re-asked
+// questions a standing rule had already answered, and it treated "we cannot
+// prove this yet" as a decision for a person.
+
+use orgbot_proto::decision::{Envelope, Policy, Request};
+
+/// A rule answers a class of questions in advance, so they never get asked.
+#[test]
+fn a_standing_rule_answers_before_anyone_is_asked() {
+    let mut f = fixture();
+    f.engine.adopt_policy(
+        Policy::new("confined-docker", "Docker on the approved VPS is fine.").granting(
+            Envelope {
+                allowed: vec!["container:*".into()],
+                environment: "same-vps-confined-docker".into(),
+                ..Default::default()
+            },
+        ),
+    );
+
+    let permitted = f
+        .engine
+        .policy_permits(&Request::new("container:rebuild", "same-vps-confined-docker"));
+    assert_eq!(permitted.map(|p| p.name.as_str()), Some("confined-docker"));
+    assert!(f
+        .engine
+        .policy_permits(&Request::new("container:rebuild", "somewhere-else"))
+        .is_none());
+}
+
+/// A decision records the rules that governed it, so old work is not read
+/// against rules adopted since.
+#[test]
+fn a_decision_records_the_rules_in_force_when_it_was_asked() {
+    let mut f = fixture();
+    f.engine
+        .adopt_policy(Policy::new("author-recovers", "The author re-emits."));
+
+    let task = f.open_task("provision the VPS", None);
+    let decision = asked_decision(&f.gate(task, "it provisions paid infrastructure"));
+
+    let recorded = f
+        .engine
+        .decisions()
+        .decisions
+        .iter()
+        .find(|d| d.id == decision)
+        .expect("the decision exists");
+    assert!(
+        recorded.governed_by.contains("author-recovers@1"),
+        "got {:?}",
+        recorded.governed_by
+    );
+}
+
+/// "We cannot prove this yet" is work, not a question.
+#[test]
+fn a_security_hold_raises_the_evidence_work_itself() {
+    let mut f = fixture();
+    let task = f.open_task("ship the container", None);
+
+    f.apply(Command::SetAuthorization {
+        task,
+        authorization: AuthorizationState::SecurityHold {
+            finding: "need merged-filesystem classification".into(),
+            material: false,
+        },
+    });
+
+    let evidence: Vec<&orgbot_proto::task::Task> = f
+        .engine
+        .tasks()
+        .filter(|t| t.kind == orgbot_proto::graph::TaskKind::Evidence)
+        .collect();
+    assert_eq!(evidence.len(), 1, "the errand should be raised once");
+    assert_eq!(evidence[0].lineage.parent, Some(task));
+    assert!(evidence[0].title.contains("merged-filesystem"));
+    assert!(
+        evidence[0].readiness().is_claimable(),
+        "and be claimable, not left as a draft"
+    );
+    assert_eq!(
+        f.engine.decisions().pending().count(),
+        0,
+        "nobody outside the room needs to be asked"
+    );
+}
+
+/// A hold restated should not produce a second identical errand.
+#[test]
+fn evidence_work_is_not_raised_twice_for_one_hold() {
+    let mut f = fixture();
+    let task = f.open_task("ship the container", None);
+
+    for wording in [
+        "need merged-filesystem classification",
+        "merged-filesystem classification is needed",
+    ] {
+        f.apply(Command::SetAuthorization {
+            task,
+            authorization: AuthorizationState::SecurityHold {
+                finding: wording.into(),
+                material: false,
+            },
+        });
+    }
+
+    let count = f
+        .engine
+        .tasks()
+        .filter(|t| t.kind == orgbot_proto::graph::TaskKind::Evidence)
+        .count();
+    assert_eq!(count, 1, "one errand, however the hold is worded");
+}
+
+/// A material incident is a person's call and raises no errand.
+#[test]
+fn a_material_incident_does_not_become_an_errand() {
+    let mut f = fixture();
+    let task = f.open_task("ship the container", None);
+
+    f.apply(Command::SetAuthorization {
+        task,
+        authorization: AuthorizationState::SecurityHold {
+            finding: "a live credential was published".into(),
+            material: true,
+        },
+    });
+
+    assert_eq!(
+        f.engine
+            .tasks()
+            .filter(|t| t.kind == orgbot_proto::graph::TaskKind::Evidence)
+            .count(),
+        0
+    );
+    assert!(f.engine.task(task).unwrap().needs_operator());
+}
+
+/// Everything above must leave the room coherent.
+#[test]
+fn the_room_stays_consistent_through_all_of_it() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let objective = f.open_task("repair the harness", None);
+    let dependent = f.open_task_after("rebuild", vec![objective]);
+    f.apply(Command::ClaimTask {
+        task: objective,
+        by: worker,
+    });
+    f.apply(Command::SetAuthorization {
+        task: dependent,
+        authorization: AuthorizationState::SecurityHold {
+            finding: "need a classification".into(),
+            material: false,
+        },
+    });
+    let replaced = f.open_task("an old attempt", None);
+    let replacement = f.open_task("the canonical attempt", None);
+    f.apply(Command::SupersedeTask {
+        task: replaced,
+        replacement,
+        reason: "merged".into(),
+    });
+
+    assert_eq!(
+        f.engine.inconsistencies(),
+        vec![],
+        "a room built only through commands must never break its own rules"
+    );
+}

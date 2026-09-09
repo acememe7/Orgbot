@@ -214,6 +214,12 @@ pub struct Decision {
     /// A later decision that replaces this one's authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<DecisionId>,
+    /// Which standing rules were in force when this was asked.
+    ///
+    /// So a decision can be read against the rules that governed it rather
+    /// than the ones adopted since.
+    #[serde(default)]
+    pub governed_by: String,
 }
 
 impl Decision {
@@ -229,6 +235,7 @@ impl Decision {
             answer: None,
             asked_at: Timestamp::now(),
             superseded_by: None,
+            governed_by: String::new(),
         }
     }
 
@@ -281,6 +288,126 @@ fn normalise(text: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// A standing rule a room operates under.
+///
+/// The difference between this and a decision is who it binds. A decision
+/// answers one question; a policy answers a class of them in advance, so the
+/// question never has to be asked. "Internal evidence recovery does not need
+/// the operator" is a policy — nothing about it is specific to any one task,
+/// and re-deciding it every time is exactly the pestering worth removing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Policy {
+    /// A short stable name, referenced when a hold cites it.
+    pub name: String,
+    /// What the rule says, in words a bot reads.
+    pub rule: String,
+    /// What it permits, if it grants anything.
+    #[serde(default)]
+    pub envelope: Envelope,
+    /// Which revision of this rule is in force.
+    ///
+    /// Stamped onto anything the policy governed, so a later reading can tell
+    /// which version of the rules a decision was made under rather than
+    /// judging old work by new rules.
+    #[serde(default)]
+    pub version: u32,
+    /// Whether it is still in force. A withdrawn policy is kept so that work
+    /// governed by it can still be understood.
+    #[serde(default = "yes")]
+    pub active: bool,
+}
+
+const fn yes() -> bool {
+    true
+}
+
+impl Policy {
+    /// A new rule at version one.
+    pub fn new(name: impl Into<String>, rule: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            rule: rule.into(),
+            envelope: Envelope::default(),
+            version: 1,
+            active: true,
+        }
+    }
+
+    /// Builder: what this policy permits.
+    pub fn granting(mut self, envelope: Envelope) -> Self {
+        self.envelope = envelope;
+        self
+    }
+}
+
+/// A room's standing rules.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Governance {
+    /// Every rule, current and withdrawn.
+    #[serde(default)]
+    pub policies: Vec<Policy>,
+}
+
+impl Governance {
+    /// Add or replace a rule, bumping its version.
+    ///
+    /// Replacing rather than appending is what stops an obsolete rule
+    /// resurfacing as live authority beside the one that replaced it.
+    pub fn adopt(&mut self, policy: Policy) -> u32 {
+        match self.policies.iter_mut().find(|p| p.name == policy.name) {
+            Some(existing) => {
+                let version = existing.version + 1;
+                *existing = Policy {
+                    version,
+                    ..policy
+                };
+                version
+            }
+            None => {
+                let version = policy.version.max(1);
+                self.policies.push(Policy { version, ..policy });
+                version
+            }
+        }
+    }
+
+    /// Withdraw a rule, keeping it for the record.
+    pub fn withdraw(&mut self, name: &str) -> bool {
+        match self.policies.iter_mut().find(|p| p.name == name) {
+            Some(policy) => {
+                policy.active = false;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The rules currently in force.
+    pub fn in_force(&self) -> impl Iterator<Item = &Policy> {
+        self.policies.iter().filter(|policy| policy.active)
+    }
+
+    /// Which rule, if any, already permits `request`.
+    pub fn permits(&self, request: &Request, now: Timestamp) -> Option<&Policy> {
+        self.in_force()
+            .find(|policy| policy.envelope.covers(request, now).is_ok())
+    }
+
+    /// A stamp naming the rules in force, for recording what governed an
+    /// action.
+    ///
+    /// Kept as text rather than a structure because its only job is to be read
+    /// back later and understood: "which rules applied when this happened?".
+    pub fn stamp(&self) -> String {
+        let mut named: Vec<String> = self
+            .in_force()
+            .map(|policy| format!("{}@{}", policy.name, policy.version))
+            .collect();
+        named.sort();
+        named.join(",")
+    }
 }
 
 /// Every decision a room has taken, and the authority that survives.
@@ -676,5 +803,123 @@ mod tests {
         let json = serde_json::to_string(&log).unwrap();
         let back: DecisionLog = serde_json::from_str(&json).unwrap();
         assert_eq!(back, log);
+    }
+}
+
+#[cfg(test)]
+mod governance_tests {
+    use super::*;
+
+    fn docker() -> Policy {
+        Policy::new(
+            "confined-docker",
+            "Docker on the approved VPS is fine inside its boundary.",
+        )
+        .granting(Envelope {
+            allowed: vec!["container:*".into()],
+            environment: "same-vps-confined-docker".into(),
+            ..Default::default()
+        })
+    }
+
+    /// A rule answers a class of questions in advance, so they never get asked.
+    #[test]
+    fn a_standing_rule_permits_without_a_decision() {
+        let mut governance = Governance::default();
+        governance.adopt(docker());
+
+        let permitted = governance.permits(
+            &Request::new("container:rebuild", "same-vps-confined-docker"),
+            Timestamp::now(),
+        );
+        assert_eq!(permitted.map(|p| p.name.as_str()), Some("confined-docker"));
+    }
+
+    #[test]
+    fn a_rule_does_not_stretch_past_its_boundary() {
+        let mut governance = Governance::default();
+        governance.adopt(docker());
+
+        assert!(governance
+            .permits(
+                &Request::new("container:rebuild", "a-different-vps"),
+                Timestamp::now()
+            )
+            .is_none());
+    }
+
+    /// Replacing rather than appending is what stops an obsolete rule
+    /// resurfacing beside the one that replaced it.
+    #[test]
+    fn adopting_the_same_rule_again_replaces_it_and_bumps_the_version() {
+        let mut governance = Governance::default();
+        assert_eq!(governance.adopt(docker()), 1);
+
+        let narrower = Policy::new("confined-docker", "Only tests now.").granting(Envelope {
+            allowed: vec!["run-tests".into()],
+            environment: "same-vps-confined-docker".into(),
+            ..Default::default()
+        });
+        assert_eq!(governance.adopt(narrower), 2);
+
+        assert_eq!(governance.policies.len(), 1, "one rule, not two");
+        assert!(
+            governance
+                .permits(
+                    &Request::new("container:rebuild", "same-vps-confined-docker"),
+                    Timestamp::now()
+                )
+                .is_none(),
+            "the old grant must stop applying"
+        );
+    }
+
+    /// A withdrawn rule is kept, so work it governed can still be understood.
+    #[test]
+    fn a_withdrawn_rule_stops_applying_but_stays_on_the_record() {
+        let mut governance = Governance::default();
+        governance.adopt(docker());
+        assert!(governance.withdraw("confined-docker"));
+
+        assert_eq!(governance.in_force().count(), 0);
+        assert_eq!(governance.policies.len(), 1);
+        assert!(governance
+            .permits(
+                &Request::new("container:rebuild", "same-vps-confined-docker"),
+                Timestamp::now()
+            )
+            .is_none());
+    }
+
+    /// Which rules were in force is recorded, so old work is not judged by
+    /// rules adopted after it happened.
+    #[test]
+    fn the_stamp_names_the_rules_and_their_versions() {
+        let mut governance = Governance::default();
+        governance.adopt(docker());
+        governance.adopt(Policy::new("author-recovers", "The author re-emits."));
+
+        let stamp = governance.stamp();
+        assert!(stamp.contains("confined-docker@1"), "{stamp}");
+        assert!(stamp.contains("author-recovers@1"), "{stamp}");
+
+        governance.adopt(docker());
+        assert!(governance.stamp().contains("confined-docker@2"));
+    }
+
+    #[test]
+    fn a_withdrawn_rule_leaves_the_stamp() {
+        let mut governance = Governance::default();
+        governance.adopt(docker());
+        governance.withdraw("confined-docker");
+        assert_eq!(governance.stamp(), "");
+    }
+
+    #[test]
+    fn governance_round_trips() {
+        let mut governance = Governance::default();
+        governance.adopt(docker());
+        let json = serde_json::to_string(&governance).unwrap();
+        assert_eq!(serde_json::from_str::<Governance>(&json).unwrap(), governance);
     }
 }
