@@ -5,7 +5,9 @@
 //! tool calls, the UI issues them through the WebSocket, and tests issue them
 //! directly — all three go down the same validation path.
 
+use orgbot_proto::decision::Answer;
 use orgbot_proto::graph::{AuthorizationState, TaskOrigin};
+use orgbot_proto::ids::DecisionId;
 use orgbot_proto::artifact::ArtifactBody;
 use orgbot_proto::handoff::{HandoffKind, Recipient};
 use orgbot_proto::review::Finding;
@@ -174,6 +176,15 @@ pub enum Command {
         authorization: AuthorizationState,
     },
 
+    /// Record the operator's answer to a question, releasing whatever it
+    /// unblocks. One answer clears every task waiting on that same question.
+    AnswerDecision {
+        /// The question being answered.
+        decision: DecisionId,
+        /// What they said.
+        answer: Answer,
+    },
+
     // ---- engine housekeeping ----
     /// Charge one model turn against the room budget.
     RecordTurn { agent: AgentId },
@@ -223,6 +234,7 @@ impl Command {
             Self::SupersedeTask { .. } => "supersede_task",
             Self::RetireTask { .. } => "retire_task",
             Self::SetAuthorization { .. } => "set_authorization",
+            Self::AnswerDecision { .. } => "answer_decision",
             Self::RecordTurn { .. } => "record_turn",
             Self::ReportError { .. } => "report_error",
             Self::Tick { .. } => "tick",

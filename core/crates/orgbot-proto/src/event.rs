@@ -8,11 +8,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::decision::{Answer, Decision};
 use crate::agent::{AgentSpec, AgentStatus};
 use crate::artifact::Artifact;
 use crate::chat::ChatMessage;
 use crate::handoff::{Handoff, HandoffState, HandoffTransition};
-use crate::ids::{AgentId, ArtifactId, EventId, HandoffId, RoomId, TaskId};
+use crate::ids::{AgentId, ArtifactId, DecisionId, EventId, HandoffId, RoomId, TaskId};
 use crate::review::Review;
 use crate::task::{Task, TaskState, TaskTransition};
 use crate::time::Timestamp;
@@ -60,6 +61,27 @@ pub enum Event {
 
     /// A task was added to the board.
     TaskCreated { task: Box<Task> },
+    /// A task was let through by authority the operator had already given,
+    /// rather than by asking them again.
+    TaskAuthorized {
+        /// The task released.
+        task: TaskId,
+        /// The standing decision that covered it.
+        decision: DecisionId,
+    },
+    /// A question was put to the operator. Carries the whole decision, so a
+    /// room rebuilt from its log knows what it has already asked.
+    DecisionAsked {
+        /// The question, with the authority an approval would grant.
+        decision: Box<Decision>,
+    },
+    /// The operator answered.
+    DecisionAnswered {
+        /// The question answered.
+        decision: DecisionId,
+        /// What they said.
+        answer: Answer,
+    },
     /// A task changed state. Carries both ends so a client that missed earlier
     /// events can still render the change coherently.
     TaskTransitioned {
@@ -131,6 +153,9 @@ impl Event {
             Self::AgentStatusChanged { .. } => "agent_status_changed",
             Self::MessagePosted { .. } => "message_posted",
             Self::TaskCreated { .. } => "task_created",
+            Self::TaskAuthorized { .. } => "task_authorized",
+            Self::DecisionAsked { .. } => "decision_asked",
+            Self::DecisionAnswered { .. } => "decision_answered",
             Self::TaskTransitioned { .. } => "task_transitioned",
             Self::HandoffOffered { .. } => "handoff_offered",
             Self::HandoffTransitioned { .. } => "handoff_transitioned",

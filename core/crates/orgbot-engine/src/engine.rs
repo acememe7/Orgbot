@@ -17,6 +17,8 @@ use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope, Seq};
 use orgbot_proto::handoff::{Handoff, HandoffKind, HandoffState, HandoffTransition, Recipient};
 use orgbot_proto::review::{Finding, Review, Verdict};
 use orgbot_proto::room::{Room, RoomPhase, RoomSpec};
+use orgbot_proto::decision::{Answer, Decision, DecisionLog, Settled};
+use orgbot_proto::ids::DecisionId;
 use orgbot_proto::graph::{AuthorizationState, DependencyState, TaskOrigin};
 use orgbot_proto::task::{BlockReason, Priority, Task, TaskState, TaskTransition};
 use orgbot_proto::{
@@ -68,6 +70,9 @@ pub struct Engine {
     seq: Seq,
     /// Consecutive failed turns per bot, reset by any success.
     error_streak: BTreeMap<AgentId, u32>,
+    /// Every question put to the operator and every answer given, so the room
+    /// can tell what it has already been told.
+    decisions: DecisionLog,
 }
 
 impl Engine {
@@ -109,6 +114,17 @@ impl Engine {
                 }
                 Event::TaskCreated { task } => {
                     engine.tasks.insert(task.id, *task.clone());
+                }
+                Event::DecisionAsked { decision } => {
+                    engine.decisions.decisions.push(*decision.clone());
+                }
+                Event::DecisionAnswered { decision, answer } => {
+                    engine.decisions.answer(*decision, answer.clone());
+                }
+                Event::TaskAuthorized { task, .. } => {
+                    if let Some(record) = engine.tasks.get_mut(task) {
+                        record.authorization = AuthorizationState::Authorized;
+                    }
                 }
                 Event::TaskTransitioned {
                     task,
@@ -222,6 +238,7 @@ impl Engine {
             log: Vec::new(),
             seq: Seq::ZERO,
             error_streak: BTreeMap::new(),
+            decisions: DecisionLog::default(),
         };
         let (id, name, goal) = (
             engine.room.id,
@@ -282,6 +299,11 @@ impl Engine {
     }
 
     /// Every task on the board.
+    /// Every question this room has put to the operator, and every answer.
+    pub const fn decisions(&self) -> &DecisionLog {
+        &self.decisions
+    }
+
     /// What a person should see instead of the raw board.
     ///
     /// Objectives, progress and the decisions only they can make. The full
@@ -729,6 +751,10 @@ impl Engine {
                 authorization,
             } => self.set_authorization(task, authorization),
 
+            Command::AnswerDecision { decision, answer } => {
+                self.answer_decision(decision, answer)
+            }
+
             Command::RecordTurn { agent } => self.record_turn(agent),
             Command::ReportError { agent, task, error } => self.report_error(agent, task, error),
             Command::Tick { now } => self.tick(now),
@@ -951,13 +977,49 @@ impl Engine {
     ) -> Result<Vec<EventEnvelope>> {
         // An operator gate must name a decision only a person can make.
         // Refusing here is what stops the room routing its own gaps upward.
-        if let AuthorizationState::AwaitingOperator { because, .. } = &authorization {
+        if let AuthorizationState::AwaitingOperator { because, options } = &authorization {
             orgbot_proto::graph::validate_escalation(because).map_err(|e| {
                 EngineError::NotReady {
                     task,
                     reason: e.to_string(),
                 }
             })?;
+
+            // Has this already been asked? A room that puts the same question
+            // twice is the single most tiring thing about running one.
+            let mut decision = Decision::ask(self.room.id, because.clone());
+            decision.options = options.clone();
+            decision.task = Some(task);
+            let raised = decision.clone();
+            match self.decisions.ask(decision) {
+                Settled::Asked(_) => {
+                    let record = self
+                        .tasks
+                        .get_mut(&task)
+                        .ok_or(EngineError::UnknownTask { task })?;
+                    record.authorization = authorization;
+                    record.updated_at = Timestamp::now();
+                    return Ok(vec![self.emit(Event::DecisionAsked {
+                        decision: Box::new(raised),
+                    })]);
+                }
+                // Already answered: apply it rather than asking again.
+                Settled::Already(prior) => {
+                    let record = self
+                        .tasks
+                        .get_mut(&task)
+                        .ok_or(EngineError::UnknownTask { task })?;
+                    record.authorization = AuthorizationState::Authorized;
+                    record.updated_at = Timestamp::now();
+                    return Ok(vec![self.emit(Event::TaskAuthorized {
+                        task,
+                        decision: prior.id,
+                    })]);
+                }
+                // Already waiting on the same question; leave the one prompt
+                // standing rather than raising a second.
+                Settled::AlreadyAsked(_) => {}
+            }
         }
         let record = self
             .tasks
@@ -966,6 +1028,62 @@ impl Engine {
         record.authorization = authorization;
         record.updated_at = Timestamp::now();
         Ok(Vec::new())
+    }
+
+    /// Record the operator's answer, and release whatever it unblocks.
+    ///
+    /// One answer clears every task that was waiting on that question, which is
+    /// the point of holding decisions separately from tasks: the person answers
+    /// once, not once per card.
+    fn answer_decision(
+        &mut self,
+        decision: DecisionId,
+        answer: Answer,
+    ) -> Result<Vec<EventEnvelope>> {
+        if !self.decisions.answer(decision, answer.clone()) {
+            return Err(EngineError::NotReady {
+                task: TaskId::new(),
+                reason: "that decision is not waiting for an answer".into(),
+            });
+        }
+        let Some(settled) = self
+            .decisions
+            .decisions
+            .iter()
+            .find(|d| d.id == decision)
+            .cloned()
+        else {
+            return Ok(Vec::new());
+        };
+
+        let mut events = vec![self.emit(Event::DecisionAnswered {
+            decision,
+            answer: answer.clone(),
+        })];
+
+        // Release every task held by this exact question.
+        let held: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| match &task.authorization {
+                AuthorizationState::AwaitingOperator { because, .. } => {
+                    let mut probe = Decision::ask(self.room.id, because.clone());
+                    probe.envelope = settled.envelope.clone();
+                    probe.fingerprint() == settled.fingerprint()
+                }
+                _ => false,
+            })
+            .map(|task| task.id)
+            .collect();
+
+        for task in held {
+            if let Some(record) = self.tasks.get_mut(&task) {
+                record.authorization = AuthorizationState::Authorized;
+                record.updated_at = Timestamp::now();
+            }
+            events.push(self.emit(Event::TaskAuthorized { task, decision }));
+        }
+        Ok(events)
     }
 
     fn claim_task(&mut self, task: TaskId, by: AgentId) -> Result<Vec<EventEnvelope>> {

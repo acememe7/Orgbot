@@ -22,6 +22,7 @@
 pub mod agent;
 pub mod artifact;
 pub mod chat;
+pub mod decision;
 pub mod event;
 pub mod graph;
 pub mod handoff;
@@ -36,7 +37,9 @@ pub use artifact::{Artifact, ArtifactBody};
 pub use chat::{Audience, Author, ChatMessage, MessageIntent};
 pub use event::{Event, EventEnvelope, Seq};
 pub use handoff::{Handoff, HandoffKind, HandoffState, HandoffTransition, Recipient};
-pub use ids::{AgentId, ArtifactId, EventId, HandoffId, MessageId, ReviewId, RoomId, TaskId};
+pub use ids::{
+    AgentId, ArtifactId, DecisionId, EventId, HandoffId, MessageId, ReviewId, RoomId, TaskId,
+};
 pub use review::{Finding, Review, Severity, Verdict};
 pub use room::{Room, RoomPhase, RoomSpec};
 pub use task::{BlockReason, Priority, Task, TaskState, TaskTransition};

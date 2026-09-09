@@ -103,6 +103,7 @@ typed_id!(MessageId, "msg");
 typed_id!(EventId, "ev");
 typed_id!(ArtifactId, "art");
 typed_id!(ReviewId, "rev");
+typed_id!(DecisionId, "dec");
 
 #[cfg(test)]
 mod tests {

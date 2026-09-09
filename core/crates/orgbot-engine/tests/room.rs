@@ -1530,3 +1530,177 @@ fn a_retired_task_cannot_be_revived() {
     let err = f.reject(Command::ClaimTask { task, by: worker });
     assert!(matches!(err, EngineError::Transition(_)), "got {err:?}");
 }
+
+// ------------------------------------------------------- operator decisions
+//
+// A run kept putting the same question to the same person: the room had
+// approved "same VPS, confined Docker" once, and every rebuild inside that
+// boundary came back for approval again. These cover the engine side of asking
+// once.
+
+use orgbot_proto::decision::Answer;
+
+impl Fixture {
+    fn gate(&mut self, task: TaskId, because: &str) -> Vec<EventEnvelope> {
+        self.apply(Command::SetAuthorization {
+            task,
+            authorization: AuthorizationState::AwaitingOperator {
+                because: because.into(),
+                options: vec!["Approve".into(), "Decline".into()],
+            },
+        })
+    }
+
+    fn approve(&mut self, decision: orgbot_proto::DecisionId) {
+        self.apply(Command::AnswerDecision {
+            decision,
+            answer: Answer {
+                chosen: "Approve".into(),
+                note: String::new(),
+                at: Timestamp::now(),
+            },
+        });
+    }
+}
+
+fn asked_decision(events: &[EventEnvelope]) -> orgbot_proto::DecisionId {
+    events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::DecisionAsked { decision } => Some(decision.id),
+            _ => None,
+        })
+        .expect("a decision_asked event")
+}
+
+#[test]
+fn asking_the_operator_raises_exactly_one_question() {
+    let mut f = fixture();
+    let task = f.open_task("provision the VPS", None);
+    let events = f.gate(task, "it provisions paid infrastructure");
+
+    assert_eq!(f.engine.decisions().pending().count(), 1);
+    assert!(f.engine.task(task).unwrap().needs_operator());
+    let _ = asked_decision(&events);
+}
+
+/// The behaviour the run most needed: the same question, asked again, does not
+/// reach the person a second time.
+#[test]
+fn the_same_question_is_not_put_twice() {
+    let mut f = fixture();
+    let first = f.open_task("rebuild the container", None);
+    let second = f.open_task("rebuild it again", None);
+
+    f.gate(first, "this rebuilds on the approved VPS");
+    f.gate(second, "This rebuilds on the approved VPS.");
+
+    assert_eq!(
+        f.engine.decisions().pending().count(),
+        1,
+        "one prompt, however many tasks hit it"
+    );
+}
+
+/// Answering once clears every task waiting on that question.
+#[test]
+fn one_answer_releases_everything_it_unblocks() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let first = f.open_task("rebuild the container", None);
+    let second = f.open_task("rebuild the sidecar", None);
+
+    let events = f.gate(first, "this rebuilds on the approved VPS");
+    let decision = asked_decision(&events);
+    f.gate(second, "this rebuilds on the approved VPS");
+
+    assert!(f.engine.task(first).unwrap().needs_operator());
+    assert!(f.engine.task(second).unwrap().needs_operator());
+
+    f.approve(decision);
+
+    assert!(!f.engine.task(first).unwrap().needs_operator());
+    assert!(
+        !f.engine.task(second).unwrap().needs_operator(),
+        "the person answered the question, not the card"
+    );
+    assert!(f.engine.claimable_by(worker).contains(&first));
+    assert!(f.engine.claimable_by(worker).contains(&second));
+    assert_eq!(f.engine.decisions().pending().count(), 0);
+}
+
+/// Once answered, the same question asked again is applied, not re-raised.
+#[test]
+fn a_settled_question_applies_itself_to_later_work() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let first = f.open_task("rebuild the container", None);
+    let decision = asked_decision(&f.gate(first, "this rebuilds on the approved VPS"));
+    f.approve(decision);
+
+    // Much later, another bot hits the same gate.
+    let later = f.open_task("rebuild it once more", None);
+    f.gate(later, "this rebuilds on the approved VPS");
+
+    assert_eq!(
+        f.engine.decisions().pending().count(),
+        0,
+        "nobody should be asked again"
+    );
+    assert!(!f.engine.task(later).unwrap().needs_operator());
+    assert!(f.engine.claimable_by(worker).contains(&later));
+}
+
+/// A different question still gets through.
+#[test]
+fn a_genuinely_new_question_still_reaches_the_operator() {
+    let mut f = fixture();
+    let first = f.open_task("rebuild the container", None);
+    let decision = asked_decision(&f.gate(first, "this rebuilds on the approved VPS"));
+    f.approve(decision);
+
+    let other = f.open_task("delete the database", None);
+    f.gate(other, "this destroys production data");
+
+    assert_eq!(f.engine.decisions().pending().count(), 1);
+    assert!(f.engine.task(other).unwrap().needs_operator());
+}
+
+#[test]
+fn answering_something_already_settled_is_refused() {
+    let mut f = fixture();
+    let task = f.open_task("provision the VPS", None);
+    let decision = asked_decision(&f.gate(task, "it provisions paid infrastructure"));
+    f.approve(decision);
+
+    let err = f.reject(Command::AnswerDecision {
+        decision,
+        answer: Answer {
+            chosen: "Decline".into(),
+            note: String::new(),
+            at: Timestamp::now(),
+        },
+    });
+    assert!(matches!(err, EngineError::NotReady { .. }), "got {err:?}");
+}
+
+/// The room is rebuilt from its own log, so what it has already asked has to
+/// survive a replay — otherwise a restarted room starts pestering again.
+#[test]
+fn decisions_survive_a_replay_of_the_log() {
+    let mut f = fixture();
+    let task = f.open_task("provision the VPS", None);
+    let decision = asked_decision(&f.gate(task, "it provisions paid infrastructure"));
+    f.approve(decision);
+
+    let replayed = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec())
+        .expect("the log should replay");
+
+    assert_eq!(replayed.decisions().pending().count(), 0);
+    assert_eq!(
+        replayed.decisions().decisions.len(),
+        1,
+        "the question is remembered"
+    );
+    assert!(!replayed.task(task).unwrap().needs_operator());
+}
