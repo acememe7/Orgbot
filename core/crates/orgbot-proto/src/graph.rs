@@ -223,6 +223,18 @@ pub enum DependencyState {
     /// Nothing outstanding.
     #[default]
     Satisfied,
+    /// Waiting on something that would help but does not strictly block.
+    ///
+    /// Work can start; it may have to be revisited when the upstream lands.
+    /// Distinguished from a hard wait so a room with spare capacity can make
+    /// a start rather than sitting still, and so the board can say which kind
+    /// of waiting it is.
+    Conditional {
+        /// What would help.
+        on: TaskId,
+        /// Why it would help.
+        reason: String,
+    },
     /// Waiting on another task, named so the board can say what and who.
     Waiting {
         /// The task being waited on. One upstream blocker is referenced by
@@ -241,13 +253,18 @@ impl DependencyState {
     pub const fn waiting_on(&self) -> Option<TaskId> {
         match self {
             Self::Satisfied => None,
-            Self::Waiting { on, .. } => Some(*on),
+            Self::Conditional { on, .. } | Self::Waiting { on, .. } => Some(*on),
         }
     }
 
     /// Whether every dependency has landed.
     pub const fn is_satisfied(&self) -> bool {
         matches!(self, Self::Satisfied)
+    }
+
+    /// Whether work may start despite what is outstanding.
+    pub const fn permits_a_start(&self) -> bool {
+        matches!(self, Self::Satisfied | Self::Conditional { .. })
     }
 }
 
@@ -408,6 +425,17 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
 pub enum Readiness {
     /// Every gate is satisfied. Claimable.
     ReadyNow,
+    /// Claimable, but something outstanding may mean revisiting it.
+    ///
+    /// Kept apart from `ReadyNow` so a coordinator with a choice takes the
+    /// unconditional work first, and so a person reading the board can tell
+    /// which starts are provisional.
+    ConditionallyReady {
+        /// What is still outstanding.
+        on: TaskId,
+        /// Why it may need revisiting.
+        reason: String,
+    },
     /// Still a draft; not offered to bots yet.
     NotYetOpen,
     /// Someone already holds it.
@@ -424,6 +452,15 @@ pub enum Readiness {
         /// Who owns clearing it, when known.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner: Option<AgentId>,
+    },
+    /// Sent back from review and being fixed.
+    ///
+    /// Its own reading because it is the most common thing a busy room is
+    /// doing, and "in progress" hides whether work is advancing or going back
+    /// over ground.
+    ReviewRemediation {
+        /// Which round of rework this is.
+        round: u32,
     },
     /// Stopped on something the room resolves itself — remediation, evidence,
     /// recovery, a retry. Explicitly not a reason to notify anyone.
@@ -456,7 +493,7 @@ pub enum Readiness {
 impl Readiness {
     /// Whether a bot may claim this task now.
     pub const fn is_claimable(&self) -> bool {
-        matches!(self, Self::ReadyNow)
+        matches!(self, Self::ReadyNow | Self::ConditionallyReady { .. })
     }
 
     /// Whether a person has to do something.
@@ -472,7 +509,9 @@ impl Readiness {
         matches!(
             self,
             Self::ReadyNow
+                | Self::ConditionallyReady { .. }
                 | Self::Underway { .. }
+                | Self::ReviewRemediation { .. }
                 | Self::WaitingDependency { .. }
                 | Self::BlockedInternal { .. }
         )
@@ -482,6 +521,8 @@ impl Readiness {
     pub const fn label(&self) -> &'static str {
         match self {
             Self::ReadyNow => "Ready",
+            Self::ConditionallyReady { .. } => "Ready (provisional)",
+            Self::ReviewRemediation { .. } => "Rework",
             Self::NotYetOpen => "Draft",
             Self::Underway { .. } => "In progress",
             Self::WaitingDependency { .. } => "Waiting",
@@ -500,6 +541,14 @@ impl Readiness {
     pub fn summary(&self) -> String {
         match self {
             Self::ReadyNow => "Ready to start. No action needed from you.".into(),
+            Self::ConditionallyReady { reason, .. } => format!(
+                "Can start now, though {reason} may mean revisiting it. \
+                 No action needed from you."
+            ),
+            Self::ReviewRemediation { round } => format!(
+                "Being reworked after review (round {round}). \
+                 No action needed from you."
+            ),
             Self::NotYetOpen => "Still a draft. No action needed from you.".into(),
             Self::Underway { .. } => "Being worked on. No action needed from you.".into(),
             Self::WaitingDependency { reason, .. } => {

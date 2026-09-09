@@ -359,6 +359,14 @@ pub struct Task {
     pub stood_in: bool,
     /// Deliverables produced so far.
     pub artifacts: Vec<ArtifactId>,
+    /// Exact artifacts this work depends on.
+    ///
+    /// Named by id rather than described in chat, so "the schema Savage
+    /// wrote" cannot quietly come to mean a later, different schema. A
+    /// superseded input is a reason to look again, not something to discover
+    /// after the fact.
+    #[serde(default)]
+    pub requires_artifacts: Vec<ArtifactId>,
     /// How many times the task has come back from inspection.
     pub revision: u32,
     /// Rework budget. Once `revision` exceeds this, the engine fails the task
@@ -392,6 +400,7 @@ impl Task {
             lease_expires_at: None,
             stood_in: false,
             artifacts: Vec::new(),
+            requires_artifacts: Vec::new(),
             revision: 0,
             max_revisions: DEFAULT_MAX_REVISIONS,
             created_at: now,
@@ -485,12 +494,27 @@ impl Task {
 
         // 4. Whatever the workflow state says last.
         if let Some(by) = self.assignee {
+            // Rework reads differently from first-pass work: "in progress"
+            // hides whether a task is advancing or going back over ground.
+            if self.state == TaskState::InProgress && self.revision > 0 {
+                return Readiness::ReviewRemediation {
+                    round: self.revision,
+                };
+            }
             if self.state != TaskState::Ready {
                 return Readiness::Underway { by };
             }
         }
         match self.state {
-            TaskState::Ready => Readiness::ReadyNow,
+            TaskState::Ready => match &self.dependency {
+                // Something outstanding that does not strictly block: work can
+                // start, and the board should say the start is provisional.
+                DependencyState::Conditional { on, reason } => Readiness::ConditionallyReady {
+                    on: *on,
+                    reason: reason.clone(),
+                },
+                _ => Readiness::ReadyNow,
+            },
             TaskState::Blocked => Readiness::BlockedInternal {
                 reason: self
                     .blocked_on

@@ -604,6 +604,12 @@ impl Engine {
         self.tasks.get_mut(&id)
     }
 
+    /// Mutable access to one artifact, for callers restoring a room from
+    /// storage or recording a correction.
+    pub fn artifact_mut(&mut self, id: ArtifactId) -> Option<&mut Artifact> {
+        self.artifacts.get_mut(&id)
+    }
+
     /// Every invariant this room breaks, if any.
     ///
     /// An empty result means it is coherent. Anything returned is a bug

@@ -2331,3 +2331,139 @@ fn the_room_stays_consistent_through_all_of_it() {
         "a room built only through commands must never break its own rules"
     );
 }
+
+// --------------------------------------------- the rest of the lifecycle
+//
+// Two readings the board could not previously make, plus the scoping and
+// authority properties the doc asks for.
+
+/// "In progress" hides whether work is advancing or going back over ground.
+#[test]
+fn rework_reads_differently_from_first_pass_work() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("write the notes", worker);
+
+    assert!(matches!(
+        f.engine.task(task).unwrap().readiness(),
+        Readiness::Underway { .. }
+    ));
+
+    f.reject_with(task, worker, "the parser drops commas", "parse.rs");
+
+    match f.engine.task(task).unwrap().readiness() {
+        Readiness::ReviewRemediation { round } => assert_eq!(round, 1),
+        other => panic!("expected rework, got {other:?}"),
+    }
+    // Still the room's own work, and still progressing.
+    assert!(f.engine.task(task).unwrap().readiness().is_progressing());
+    assert!(!f.engine.task(task).unwrap().needs_operator());
+}
+
+/// Something outstanding that does not strictly block should not stop work.
+#[test]
+fn a_soft_dependency_lets_work_start_and_says_it_is_provisional() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("draft the notes", None);
+    let upstream = TaskId::new();
+
+    f.engine.task_mut(task).unwrap().dependency = DependencyState::Conditional {
+        on: upstream,
+        reason: "the final numbers".into(),
+    };
+
+    let readiness = f.engine.task(task).unwrap().readiness();
+    assert!(readiness.is_claimable(), "work can start");
+    assert!(matches!(readiness, Readiness::ConditionallyReady { .. }));
+    assert!(
+        readiness.summary().contains("may mean revisiting"),
+        "and the board says the start is provisional: {}",
+        readiness.summary()
+    );
+    assert!(f.engine.claimable_by(worker).contains(&task));
+}
+
+/// An exact input that has been replaced is a reason to look again.
+#[test]
+fn work_built_on_a_replaced_input_is_flagged() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let source = f.start_task("write the schema", worker);
+    let original = f.add_artifact(source, worker);
+    let corrected = f.add_artifact(source, worker);
+
+    let dependent = f.open_task("build on the schema", None);
+    f.engine.task_mut(dependent).unwrap().requires_artifacts = vec![original];
+    assert_eq!(f.engine.inconsistencies(), vec![]);
+
+    // The input is corrected; the work built on it is now suspect.
+    f.engine.artifact_mut(original).unwrap().superseded_by = Some(corrected);
+
+    let found = f.engine.inconsistencies();
+    assert!(
+        found.iter().any(|v| v.rule == "input-is-current"),
+        "got {found:?}"
+    );
+}
+
+/// Everything a room owns is scoped to it.
+#[test]
+fn a_rooms_work_carries_its_own_identity() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let room = f.engine.room_id();
+    let task = f.start_task("write the notes", worker);
+    let artifact = f.add_artifact(task, worker);
+    let gate = f.open_task("provision the VPS", None);
+    f.gate(gate, "it provisions paid infrastructure");
+
+    assert_eq!(f.engine.task(task).unwrap().room, room);
+    assert_eq!(f.engine.artifact(artifact).unwrap().room, Some(room));
+    assert!(f
+        .engine
+        .decisions()
+        .decisions
+        .iter()
+        .all(|decision| decision.room == room));
+}
+
+/// A rule in the room's state beats anything said in chat.
+#[test]
+fn a_policy_hold_outranks_conversation() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("deploy it", None);
+
+    f.apply(Command::SetAuthorization {
+        task,
+        authorization: AuthorizationState::HeldByPolicy {
+            policy: "no-deploys-on-friday".into(),
+            reason: "the freeze is in force".into(),
+        },
+    });
+
+    // Anyone may say anything; the board does not care.
+    f.apply(Command::PostMessage {
+        message: Box::new(ChatMessage {
+            id: orgbot_proto::MessageId::new(),
+            room: f.engine.room_id(),
+            author: orgbot_proto::chat::Author::Human {
+                name: "someone".into(),
+            },
+            audience: orgbot_proto::chat::Audience::Everyone,
+            intent: MessageIntent::Say,
+            body: "go ahead and deploy it anyway".into(),
+            task: Some(task),
+            handoff: None,
+            reply_to: None,
+            attachments: vec![],
+            files: vec![],
+            sent_at: Timestamp::now(),
+        }),
+    });
+
+    assert!(!f.engine.claimable_by(worker).contains(&task));
+    let err = f.reject(Command::ClaimTask { task, by: worker });
+    assert!(matches!(err, EngineError::NotReady { .. }), "got {err:?}");
+}

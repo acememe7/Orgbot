@@ -493,6 +493,11 @@ fn card_for(objective: &Task, records: &[&Task]) -> ObjectiveCard {
 fn blocking_line(readiness: &Readiness) -> Option<String> {
     match readiness {
         Readiness::ReadyNow | Readiness::Underway { .. } | Readiness::NotYetOpen => None,
+        // A provisional start is not a blocker: work is happening.
+        Readiness::ConditionallyReady { .. } => None,
+        Readiness::ReviewRemediation { round } => {
+            Some(format!("rework after review (round {round})"))
+        }
         Readiness::WaitingDependency { reason, .. } => Some(format!("waiting on {reason}")),
         Readiness::BlockedInternal { reason } => Some(reason.clone()),
         Readiness::HeldByPolicy { policy, .. } => Some(format!("held by the {policy} rule")),

@@ -50,6 +50,7 @@ pub fn check(engine: &Engine) -> Vec<Violation> {
         replacement_links_agree(engine, task, &mut found);
         reviewed_work_has_something_to_review(engine, task, &mut found);
         a_lease_belongs_to_a_holder(task, &mut found);
+        required_inputs_are_current(engine, task, &mut found);
     }
     dependencies_resolve(engine, &mut found);
     found
@@ -170,6 +171,35 @@ fn a_lease_belongs_to_a_holder(task: &Task, found: &mut Vec<Violation>) {
             task: task.id,
             detail: "it holds a lease with nobody assigned".into(),
         });
+    }
+}
+
+/// Work must not be built on an input that has been replaced.
+///
+/// Naming an exact artifact is what stops "the schema Savage wrote" quietly
+/// meaning a later, different schema. That only helps if something notices
+/// when the named one is superseded.
+fn required_inputs_are_current(engine: &Engine, task: &Task, found: &mut Vec<Violation>) {
+    if task.state.is_terminal() {
+        return;
+    }
+    for input in &task.requires_artifacts {
+        match engine.artifact(*input) {
+            None => found.push(Violation {
+                rule: "input-exists",
+                task: task.id,
+                detail: format!("it requires {input}, which is not in this room"),
+            }),
+            Some(artifact) if !artifact.is_current() => found.push(Violation {
+                rule: "input-is-current",
+                task: task.id,
+                detail: format!(
+                    "it is built on `{}`, which has since been replaced",
+                    artifact.name
+                ),
+            }),
+            Some(_) => {}
+        }
     }
 }
 

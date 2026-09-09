@@ -241,6 +241,13 @@ pub struct Artifact {
     /// What review made of it, once anyone has looked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disposition: Option<String>,
+    /// The claim this artifact exists to support, if it is evidence.
+    ///
+    /// Evidence is a thing you attach, not a job someone does. Recording the
+    /// claim here means a reviewer can find the proof for an assertion without
+    /// a task having been raised to represent it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_for: Option<String>,
 }
 
 /// One part of a split artifact, with what is needed to know it is intact.
@@ -324,12 +331,18 @@ impl Artifact {
             continues: None,
             authority_bearing: false,
             disposition: None,
+            evidence_for: None,
         }
     }
 
     /// The content's digest, for provenance and completeness checks.
     pub fn digest(&self) -> String {
         self.body.digest()
+    }
+
+    /// Whether this artifact is proof of something rather than a deliverable.
+    pub const fn is_evidence(&self) -> bool {
+        self.evidence_for.is_some()
     }
 
     /// Whether this artifact still stands as the current version.
