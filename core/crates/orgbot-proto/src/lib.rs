@@ -22,6 +22,7 @@
 pub mod agent;
 pub mod artifact;
 pub mod chat;
+pub mod convergence;
 pub mod decision;
 pub mod event;
 pub mod graph;

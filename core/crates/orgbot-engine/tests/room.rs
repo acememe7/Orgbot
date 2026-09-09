@@ -1987,3 +1987,125 @@ fn an_unaccepted_handoff_frees_the_sender_when_it_expires() {
         "the sender must be released, not left inert waiting on a dead offer"
     );
 }
+
+// ------------------------------------------------- review that gets somewhere
+//
+// A run produced cycles that each found one small thing, sent the work back,
+// and found another next time — twenty fences where one choke point was
+// needed, with nothing noticing the same problem had been reported four times.
+
+use orgbot_proto::convergence::Convergence;
+use orgbot_proto::review::Severity;
+
+impl Fixture {
+    /// Reject `task` with one blocking finding, then resubmit it.
+    fn reject_with(&mut self, task: TaskId, worker: AgentId, summary: &str, locus: &str) {
+        self.apply(Command::SubmitForReview {
+            task,
+            by: worker,
+            artifacts: vec![],
+        });
+        self.apply(Command::RecordReview {
+            task,
+            inspector: self.inspector,
+            findings: vec![Finding {
+                severity: Severity::Major,
+                summary: summary.into(),
+                locus: Some(locus.into()),
+                suggestion: None,
+            }],
+            summary: "needs work".into(),
+            criteria_met: vec![],
+            criteria_failed: vec![],
+        });
+    }
+}
+
+/// The same invariant failing over and over should stop producing patches.
+#[test]
+fn a_recurring_invariant_is_reported_as_structural() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("fix the handler", worker);
+    // A generous budget so the rework cap does not end this first.
+    f.engine.set_max_revisions(task, 10);
+
+    for wording in [
+        "stale async mutation",
+        "async mutation is stale",
+        "mutation stale in the async path",
+    ] {
+        f.reject_with(task, worker, wording, "reducer");
+    }
+
+    let verdict = f.engine.convergence(task);
+    assert!(
+        matches!(verdict, Convergence::Structural { .. }),
+        "three cycles on one invariant is a pattern, got {verdict:?}"
+    );
+    assert!(verdict.needs_escalation());
+
+    // And the room was told, in the room, without anyone being asked.
+    let said = f
+        .engine
+        .transcript()
+        .iter()
+        .any(|m| m.body.contains("Stop patching the symptom"));
+    assert!(said, "the recommendation should reach the room");
+    assert_eq!(
+        f.engine.decisions().pending().count(),
+        0,
+        "going round in circles is the room's problem, not a question"
+    );
+}
+
+/// One small finding per cycle turns a single pass into five.
+#[test]
+fn a_drip_fed_review_is_called_out() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("write the notes", worker);
+    f.engine.set_max_revisions(task, 10);
+
+    f.reject_with(task, worker, "the parser drops commas", "parse.rs");
+    f.reject_with(task, worker, "the writer emits tabs", "write.rs");
+
+    let said = f
+        .engine
+        .transcript()
+        .iter()
+        .any(|m| m.body.contains("full set of blocking findings"));
+    assert!(said, "a second one-finding cycle should be called out");
+}
+
+/// A first review finding one thing is perfectly normal.
+#[test]
+fn a_first_review_is_not_accused_of_drip_feeding() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("write the notes", worker);
+
+    f.reject_with(task, worker, "the parser drops commas", "parse.rs");
+
+    let said = f
+        .engine
+        .transcript()
+        .iter()
+        .any(|m| m.body.contains("full set of blocking findings"));
+    assert!(!said);
+}
+
+/// Rework loops without asking anyone whether to continue.
+#[test]
+fn rejection_sends_work_back_without_involving_a_person() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("write the notes", worker);
+
+    f.reject_with(task, worker, "the parser drops commas", "parse.rs");
+
+    assert_eq!(f.state(task), TaskState::InProgress, "back with its owner");
+    assert_eq!(f.engine.task(task).unwrap().assignee, Some(worker));
+    assert_eq!(f.engine.decisions().pending().count(), 0);
+    assert!(!f.engine.task(task).unwrap().needs_operator());
+}

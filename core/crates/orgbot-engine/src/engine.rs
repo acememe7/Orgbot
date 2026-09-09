@@ -17,6 +17,7 @@ use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope, Seq};
 use orgbot_proto::handoff::{Handoff, HandoffKind, HandoffState, HandoffTransition, Recipient};
 use orgbot_proto::review::{Finding, Review, Verdict};
 use orgbot_proto::room::{Room, RoomPhase, RoomSpec};
+use orgbot_proto::convergence::{self, Convergence};
 use orgbot_proto::decision::{Answer, Decision, DecisionLog, Settled};
 use orgbot_proto::roles::{Eligibility, RoleTable};
 use orgbot_proto::ids::DecisionId;
@@ -428,6 +429,36 @@ impl Engine {
                 .then(a.id.cmp(&b.id))
         });
         open.into_iter().map(|(t, _)| t.id).collect()
+    }
+
+    /// Set how many times a task may come back from inspection.
+    ///
+    /// A real knob rather than a fixed number: hard work legitimately needs
+    /// more rounds than the default allows, and the alternative — failing the
+    /// task — throws away everything done so far.
+    pub fn set_max_revisions(&mut self, task: TaskId, budget: u32) {
+        if let Some(record) = self.tasks.get_mut(&task) {
+            record.max_revisions = budget;
+        }
+    }
+
+    /// Every review of `task`, oldest first, as blocking-finding sets.
+    pub fn review_cycles(&self, task: TaskId) -> Vec<Vec<Finding>> {
+        self.reviews
+            .iter()
+            .filter(|review| review.task == task)
+            .map(|review| review.findings.clone())
+            .collect()
+    }
+
+    /// Whether review of `task` is getting anywhere.
+    ///
+    /// Answered from the review history rather than from a model's impression
+    /// of how it is going: the same invariant failing repeatedly, or a set
+    /// that never shrinks, are both things the room should act on itself
+    /// rather than send round again.
+    pub fn convergence(&self, task: TaskId) -> Convergence {
+        convergence::assess(&self.review_cycles(task))
     }
 
     /// A bot that could review `task`, chosen so nobody has to be asked.
@@ -1572,6 +1603,7 @@ impl Engine {
             .first()
             .map(|f| f.summary.clone())
             .unwrap_or_else(|| review.summary.clone());
+        let partial = convergence::looks_partial(&review.findings, self.review_cycles(task).len());
         self.reviews.push(review.clone());
 
         let mut events = vec![self.emit(Event::ReviewRecorded {
@@ -1584,7 +1616,15 @@ impl Engine {
                 TaskTransition::Approve { by: inspector },
                 Some(inspector),
             )?,
-            Verdict::RequestChanges => self.request_changes(task, inspector, reason)?,
+            Verdict::RequestChanges => {
+                let mut sent_back = self.request_changes(task, inspector, reason)?;
+                // Rework loops on its own from here: the owner remediates, the
+                // reviewer rechecks, and it continues without anyone being
+                // asked whether to carry on. What the room *does* need is to
+                // notice when going round again is the wrong move.
+                sent_back.extend(self.report_convergence(task, partial));
+                sent_back
+            }
             Verdict::Reject => self.transition(
                 task,
                 TaskTransition::Fail {
@@ -1594,6 +1634,54 @@ impl Engine {
             )?,
         });
         Ok(events)
+    }
+
+    /// Say something when review has stopped being worth repeating.
+    ///
+    /// Posted into the room rather than raised to a person: a review going
+    /// round in circles is the room's problem to solve, and the message says
+    /// what to do about it. A partial-looking review is called out in the same
+    /// place, because one small finding per cycle turns a single pass into
+    /// five, each costing a turn from two bots.
+    fn report_convergence(&mut self, task: TaskId, partial: bool) -> Vec<EventEnvelope> {
+        let verdict = self.convergence(task);
+        let mut notes: Vec<String> = Vec::new();
+        if let Some(advice) = verdict.recommendation() {
+            notes.push(advice);
+        }
+        if partial {
+            notes.push(
+                "This review reported a single blocking finding on work that had                  already been sent back. Return the full set of blocking findings                  you can see in one pass; each extra cycle costs two bots a turn."
+                    .into(),
+            );
+        }
+        if notes.is_empty() {
+            return Vec::new();
+        }
+
+        let title = self
+            .tasks
+            .get(&task)
+            .map_or_else(String::new, |t| t.title.clone());
+        let room = self.room.id;
+        let message = ChatMessage {
+            id: orgbot_proto::MessageId::new(),
+            room,
+            author: orgbot_proto::chat::Author::System,
+            audience: orgbot_proto::chat::Audience::Everyone,
+            intent: orgbot_proto::chat::MessageIntent::Status,
+            body: format!("Review of \"{title}\": {}", notes.join(" ")),
+            task: Some(task),
+            handoff: None,
+            reply_to: None,
+            attachments: vec![],
+            files: vec![],
+            sent_at: Timestamp::now(),
+        };
+        self.apply(Command::PostMessage {
+            message: Box::new(message),
+        })
+        .unwrap_or_default()
     }
 
     /// Send work back for rework, failing the task if its budget is spent.
