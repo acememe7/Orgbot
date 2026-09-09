@@ -28,6 +28,7 @@ pub mod graph;
 pub mod handoff;
 pub mod ids;
 pub mod review;
+pub mod roles;
 pub mod room;
 pub mod task;
 pub mod time;

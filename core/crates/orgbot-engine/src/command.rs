@@ -245,6 +245,23 @@ impl Command {
     ///
     /// Lifecycle and housekeeping commands are exempt — otherwise a paused
     /// room could never be resumed and a closing room could never drain.
+    /// The task this command acts on, when it acts on one.
+    ///
+    /// Used as a heartbeat: a bot doing anything to its task is a bot that has
+    /// not stopped, and its claim should not lapse underneath it.
+    pub const fn task(&self) -> Option<TaskId> {
+        match self {
+            Self::ClaimTask { task, .. }
+            | Self::StartTask { task, .. }
+            | Self::BlockTask { task, .. }
+            | Self::UnblockTask { task }
+            | Self::SubmitForReview { task, .. }
+            | Self::AddArtifact { task, .. }
+            | Self::RecordReview { task, .. } => Some(*task),
+            _ => None,
+        }
+    }
+
     pub const fn requires_running_room(&self) -> bool {
         !matches!(
             self,

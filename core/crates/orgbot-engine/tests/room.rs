@@ -1748,3 +1748,242 @@ fn a_saved_room_round_trips() {
     assert_eq!(restored.decisions().pending().count(), 0);
     assert!(!restored.task(task).unwrap().needs_operator());
 }
+
+// ------------------------------------------- roles, leases and delegation
+//
+// A real room stalled with work role-locked to a busy bot while others that
+// could plainly have done it were not eligible, and with claims held forever
+// by bots that had stopped. These cover both.
+
+use orgbot_proto::roles::{RoleSpec, RoleTable};
+use orgbot_proto::task::DEFAULT_LEASE_MILLIS;
+
+#[test]
+fn a_stand_in_can_take_role_locked_work_when_the_holder_is_busy() {
+    let mut f = fixture();
+    let (worker, inspector) = (f.worker, f.inspector);
+    f.engine.set_roles(RoleTable::new(vec![
+        RoleSpec::new("writer").falling_back_to(["reviewer"])
+    ]));
+
+    let locked = f.open_task("write the notes", Some("writer"));
+
+    // The reviewer does not hold `writer`, but the room says it may stand in.
+    assert!(f.engine.claimable_by(inspector).contains(&locked));
+    f.apply(Command::ClaimTask {
+        task: locked,
+        by: inspector,
+    });
+    assert!(
+        f.engine.task(locked).unwrap().stood_in,
+        "standing in is recorded, so a roster that never fits is visible"
+    );
+
+    // And the actual role holder is still preferred where both could take it.
+    let another = f.open_task("write more", Some("writer"));
+    assert_eq!(f.engine.claimable_by(worker).first(), Some(&another));
+}
+
+#[test]
+fn a_bot_with_no_path_to_the_role_still_cannot_claim() {
+    let mut f = fixture();
+    let inspector = f.inspector;
+    let locked = f.open_task("write the notes", Some("writer"));
+
+    assert!(!f.engine.claimable_by(inspector).contains(&locked));
+    let err = f.reject(Command::ClaimTask {
+        task: locked,
+        by: inspector,
+    });
+    assert!(matches!(err, EngineError::RoleMismatch { .. }), "got {err:?}");
+}
+
+/// Work can ask for a capability rather than a named role.
+#[test]
+fn work_can_require_a_capability() {
+    let mut f = fixture();
+    let inspector = f.inspector;
+    f.engine.set_roles(RoleTable::new(vec![
+        RoleSpec::new("reviewer").able_to(["review", "audit"])
+    ]));
+
+    let audit = f.open_task("audit the output", Some("audit"));
+    assert!(f.engine.claimable_by(inspector).contains(&audit));
+}
+
+/// A bot that stops holding up its end must not park the work forever.
+#[test]
+fn a_lapsed_claim_returns_the_work_to_the_pool() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("write the notes", None);
+
+    f.apply(Command::ClaimTask { task, by: worker });
+    assert_eq!(f.state(task), TaskState::Claimed);
+    assert!(f.engine.task(task).unwrap().lease_expires_at.is_some());
+
+    // Long enough later that the holder has plainly stopped.
+    let later = Timestamp::now().plus_millis(DEFAULT_LEASE_MILLIS + 1_000);
+    f.apply(Command::Tick { now: later });
+
+    assert_eq!(f.state(task), TaskState::Ready, "it is claimable again");
+    assert_eq!(f.engine.task(task).unwrap().assignee, None);
+    assert!(f.engine.claimable_by(worker).contains(&task));
+}
+
+/// A bot working steadily never loses its claim.
+#[test]
+fn working_on_a_task_holds_its_claim() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("write the notes", None);
+    f.apply(Command::ClaimTask { task, by: worker });
+
+    let before = f.engine.task(task).unwrap().lease_expires_at;
+    f.apply(Command::StartTask { task, by: worker });
+    let after = f.engine.task(task).unwrap().lease_expires_at;
+
+    assert!(after >= before, "acting on the task renews the lease");
+    // And a sweep now leaves it alone.
+    f.apply(Command::Tick {
+        now: Timestamp::now(),
+    });
+    assert_eq!(f.state(task), TaskState::InProgress);
+}
+
+/// Delivered work holding an old lease is finished, not abandoned.
+#[test]
+fn a_finished_task_is_not_reclaimed() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("write the notes", None);
+    f.deliver(task, worker);
+
+    f.apply(Command::Tick {
+        now: Timestamp::now().plus_millis(DEFAULT_LEASE_MILLIS * 10),
+    });
+    assert_eq!(f.state(task), TaskState::Submitted);
+}
+
+/// Nobody should be asked to pick a reviewer when one is available.
+#[test]
+fn a_reviewer_is_chosen_without_asking_anyone() {
+    let mut f = fixture();
+    let (worker, inspector) = (f.worker, f.inspector);
+    let task = f.start_task("write the notes", worker);
+
+    assert_eq!(
+        f.engine.reviewer_for(task),
+        Some(inspector),
+        "the eligible independent bot should be found automatically"
+    );
+}
+
+/// Independence is encoded, not left to convention.
+#[test]
+fn the_bot_that_did_the_work_is_never_its_reviewer() {
+    let mut f = fixture();
+    let inspector = f.inspector;
+    // The inspector does the work itself.
+    let task = f.open_task("write the notes", None);
+    f.apply(Command::ClaimTask {
+        task,
+        by: inspector,
+    });
+
+    assert_ne!(f.engine.reviewer_for(task), Some(inspector));
+}
+
+/// Review must not queue behind one loaded inspector while others are free.
+#[test]
+fn review_goes_to_the_least_busy_eligible_bot() {
+    let mut f = fixture();
+    let (worker, inspector) = (f.worker, f.inspector);
+
+    // Give the inspector two open tasks so it is the busiest.
+    for i in 0..2 {
+        let busywork = f.open_task(&format!("inspector work {i}"), None);
+        f.apply(Command::ClaimTask {
+            task: busywork,
+            by: inspector,
+        });
+    }
+    // A second bot that can also review.
+    let spare = AgentSpec::new("qa2", "Second Inspector", provider())
+        .with_roles(["reviewer"])
+        .with_autonomy(Autonomy::inspector());
+    let spare_id = spare.id;
+    f.apply(Command::JoinAgent {
+        spec: Box::new(spare),
+    });
+
+    let task = f.start_task("write the notes", worker);
+    assert_eq!(
+        f.engine.reviewer_for(task),
+        Some(spare_id),
+        "the free inspector should take it"
+    );
+}
+
+#[test]
+fn idle_bots_are_reported_so_work_can_be_spread() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.open_task("write the notes", None);
+    f.apply(Command::ClaimTask { task, by: worker });
+
+    let idle = f.engine.idle_agents();
+    assert!(idle.contains(&worker2), "an unoccupied bot is idle");
+    assert!(!idle.contains(&worker), "one holding work is not");
+    assert_eq!(f.engine.workload(worker), 1);
+    assert_eq!(f.engine.workload(worker2), 0);
+}
+
+/// A room that declares no roles behaves exactly as it did before.
+#[test]
+fn a_room_without_a_role_table_matches_by_name() {
+    let mut f = fixture();
+    let (worker, inspector) = (f.worker, f.inspector);
+    let locked = f.open_task("write the notes", Some("writer"));
+
+    assert!(f.engine.claimable_by(worker).contains(&locked));
+    assert!(!f.engine.claimable_by(inspector).contains(&locked));
+}
+
+/// A delegation nobody accepts must not leave the sender waiting forever.
+#[test]
+fn an_unaccepted_handoff_frees_the_sender_when_it_expires() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("write the notes", worker);
+
+    let events = f.apply(Command::OfferHandoff {
+        task,
+        from: worker,
+        to: Recipient::Role {
+            role: "nobody-holds-this".into(),
+        },
+        kind: HandoffKind::Assist,
+        brief: "please help".into(),
+        expects: vec![],
+        context: vec![],
+        blocks_sender: Some(true),
+        timeout_ms: Some(1_000),
+    });
+    let handoff = offered_handoff(&events);
+    assert_eq!(f.state(task), TaskState::Blocked, "an assist blocks the sender");
+
+    f.apply(Command::Tick {
+        now: Timestamp::now().plus_millis(5_000),
+    });
+
+    assert_eq!(
+        f.engine.handoff(handoff).unwrap().state,
+        HandoffState::Expired
+    );
+    assert_ne!(
+        f.state(task),
+        TaskState::Blocked,
+        "the sender must be released, not left inert waiting on a dead offer"
+    );
+}

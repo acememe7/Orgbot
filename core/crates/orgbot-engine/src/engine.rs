@@ -18,9 +18,10 @@ use orgbot_proto::handoff::{Handoff, HandoffKind, HandoffState, HandoffTransitio
 use orgbot_proto::review::{Finding, Review, Verdict};
 use orgbot_proto::room::{Room, RoomPhase, RoomSpec};
 use orgbot_proto::decision::{Answer, Decision, DecisionLog, Settled};
+use orgbot_proto::roles::{Eligibility, RoleTable};
 use orgbot_proto::ids::DecisionId;
 use orgbot_proto::graph::{AuthorizationState, DependencyState, TaskOrigin};
-use orgbot_proto::task::{BlockReason, Priority, Task, TaskState, TaskTransition};
+use orgbot_proto::task::{DEFAULT_LEASE_MILLIS, BlockReason, Priority, Task, TaskState, TaskTransition};
 use orgbot_proto::{
     AgentId, AgentSpec, ArtifactId, ChatMessage, HandoffId, RoomId, TaskId, Timestamp,
 };
@@ -77,6 +78,13 @@ pub struct Engine {
     /// room saved before decisions existed has none, and must still load.
     #[serde(default)]
     decisions: DecisionLog,
+    /// What each role can do, and who may stand in for it.
+    ///
+    /// Held here rather than on the room spec because this is where
+    /// eligibility is decided, and because a room that declares nothing must
+    /// keep matching roles by name exactly as it always did.
+    #[serde(default)]
+    roles: RoleTable,
 }
 
 impl Engine {
@@ -243,6 +251,7 @@ impl Engine {
             seq: Seq::ZERO,
             error_streak: BTreeMap::new(),
             decisions: DecisionLog::default(),
+            roles: RoleTable::default(),
         };
         let (id, name, goal) = (
             engine.room.id,
@@ -303,6 +312,25 @@ impl Engine {
     }
 
     /// Every task on the board.
+    /// Declare what each role can do and who may stand in for it.
+    pub fn set_roles(&mut self, roles: RoleTable) {
+        self.roles = roles;
+    }
+
+    /// The room's role table.
+    pub const fn roles(&self) -> &RoleTable {
+        &self.roles
+    }
+
+    /// How well `agent` matches work requiring `required`.
+    pub fn eligibility(&self, agent: AgentId, required: Option<&str>) -> Eligibility {
+        self.specs
+            .get(&agent)
+            .map_or(Eligibility::No, |spec| {
+                self.roles.eligibility(&spec.roles, required)
+            })
+    }
+
     /// Every question this room has put to the operator, and every answer.
     pub const fn decisions(&self) -> &DecisionLog {
         &self.decisions
@@ -381,19 +409,82 @@ impl Engine {
         // Every gate is resolved before ranking, not after. Ranking first and
         // validating later is what let superseded and dependency-blocked work
         // be offered as ready.
-        let mut open: Vec<&Task> = self
+        let mut open: Vec<(&Task, Eligibility)> = self
             .tasks
             .values()
             .filter(|t| t.readiness().is_claimable())
-            .filter(|t| spec.can_take(t.required_role.as_deref()))
+            .filter_map(|t| {
+                let fit = self.roles.eligibility(&spec.roles, t.required_role.as_deref());
+                fit.is_eligible().then_some((t, fit))
+            })
             .collect();
-        open.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
+        // A bot's own work first, then work it can stand in for. Standing in
+        // is a relief valve for a role-locked board, not the normal path.
+        open.sort_by(|(a, a_fit), (b, b_fit)| {
+            b_fit
+                .cmp(a_fit)
+                .then(b.priority.cmp(&a.priority))
                 .then(a.created_at.cmp(&b.created_at))
                 .then(a.id.cmp(&b.id))
         });
-        open.into_iter().map(|t| t.id).collect()
+        open.into_iter().map(|(t, _)| t.id).collect()
+    }
+
+    /// A bot that could review `task`, chosen so nobody has to be asked.
+    ///
+    /// Independence first: a bot cannot inspect its own work, and neither can
+    /// one that stood in on it. Then the least busy eligible bot, so review
+    /// does not queue behind one overloaded inspector while others sit idle.
+    /// Returns `None` only when no independent reviewer exists at all — which
+    /// is the one case genuinely worth putting to a person.
+    pub fn reviewer_for(&self, task: TaskId) -> Option<AgentId> {
+        let record = self.tasks.get(&task)?;
+        let mut candidates: Vec<(AgentId, u32)> = self
+            .specs
+            .values()
+            .filter(|spec| spec.autonomy.may_inspect)
+            // Independence, encoded rather than left to convention.
+            .filter(|spec| Some(spec.id) != record.assignee)
+            .filter(|spec| {
+                self.roles
+                    .eligibility(&spec.roles, record.required_role.as_deref())
+                    .is_eligible()
+                    || self.roles.eligibility(&spec.roles, Some("review")).is_eligible()
+                    || spec.roles.iter().any(|role| role == "reviewer")
+            })
+            .filter(|spec| self.status(spec.id) != AgentStatus::Offline)
+            .map(|spec| (spec.id, self.workload(spec.id)))
+            .collect();
+
+        // Least loaded first, then by id so the choice is stable across runs.
+        candidates.sort_by(|(a_id, a_load), (b_id, b_load)| {
+            a_load.cmp(b_load).then(a_id.cmp(b_id))
+        });
+        candidates.first().map(|(id, _)| *id)
+    }
+
+    /// How much live work a bot is holding.
+    ///
+    /// The basis for spreading work: a room with idle bots and queued work is
+    /// a scheduling failure, not a capacity problem.
+    pub fn workload(&self, agent: AgentId) -> u32 {
+        self.tasks
+            .values()
+            .filter(|task| task.assignee == Some(agent) && !task.state.is_terminal())
+            .count() as u32
+    }
+
+    /// Bots with nothing in hand, least loaded first.
+    pub fn idle_agents(&self) -> Vec<AgentId> {
+        let mut idle: Vec<AgentId> = self
+            .specs
+            .values()
+            .filter(|spec| self.status(spec.id) != AgentStatus::Offline)
+            .filter(|spec| self.workload(spec.id) == 0)
+            .map(|spec| spec.id)
+            .collect();
+        idle.sort();
+        idle
     }
 
     /// Handoffs `agent` could accept right now.
@@ -607,6 +698,8 @@ impl Engine {
                 phase: self.room.phase,
             });
         }
+        // Which task, if any, this command is a sign of life on.
+        let touched = command.task();
         let outcome = match command {
             Command::JoinAgent { spec } => self.join_agent(*spec),
             Command::LeaveAgent { agent, reason } => self.leave_agent(agent, reason),
@@ -768,6 +861,12 @@ impl Engine {
         // eligible the moment its upstream lands, with no coordinator
         // needed to notice and announce it.
         if outcome.is_ok() {
+            // Acting on a task is the heartbeat that holds its lease. A bot
+            // working steadily never has its claim reclaimed; one that has
+            // stopped does.
+            if let Some(task) = touched {
+                self.renew_lease(task);
+            }
             self.recompute_dependencies();
         }
         outcome
@@ -1093,7 +1192,10 @@ impl Engine {
     fn claim_task(&mut self, task: TaskId, by: AgentId) -> Result<Vec<EventEnvelope>> {
         let spec = self.require_agent(by)?.clone();
         let record = self.require_task(task)?;
-        if !spec.can_take(record.required_role.as_deref()) {
+        let fit = self
+            .roles
+            .eligibility(&spec.roles, record.required_role.as_deref());
+        if !fit.is_eligible() {
             return Err(EngineError::RoleMismatch {
                 task,
                 agent: by,
@@ -1107,7 +1209,16 @@ impl Engine {
         if let Some(reason) = graph_refusal(record) {
             return Err(EngineError::NotReady { task, reason });
         }
-        self.transition(task, TaskTransition::Claim { by }, Some(by))
+        let events = self.transition(task, TaskTransition::Claim { by }, Some(by))?;
+        if let Some(record) = self.tasks.get_mut(&task) {
+            // A claim is a lease, not a deed. Without one, a bot that crashes
+            // holds the work for the rest of the run and the board says only
+            // that it is assigned.
+            record.lease_expires_at =
+                Some(Timestamp::now().plus_millis(DEFAULT_LEASE_MILLIS));
+            record.stood_in = fit.is_stand_in();
+        }
+        Ok(events)
     }
 
     fn start_task(&mut self, task: TaskId, by: AgentId) -> Result<Vec<EventEnvelope>> {
@@ -1578,10 +1689,63 @@ impl Engine {
 
         let mut events = Vec::new();
         for handoff in expired {
+            // Expiring is not enough on its own: the sender is still waiting,
+            // and a handoff nobody accepted leaves the work inert. Returning
+            // the task to the pool is what makes the timeout a reroute rather
+            // than a dead end.
             events.extend(self.drive_handoff(handoff, HandoffTransition::Expire)?);
         }
+        events.extend(self.reclaim_stale_leases(now)?);
         events.extend(self.sweep_deadlocks());
         Ok(events)
+    }
+
+    /// Return work whose holder has gone quiet to the pool.
+    ///
+    /// A bot that crashes, is removed, or stops mid-task would otherwise hold
+    /// its claim for the rest of the run, with the board showing only that the
+    /// task is assigned. The task keeps its history; it simply becomes
+    /// claimable again.
+    fn reclaim_stale_leases(&mut self, now: Timestamp) -> Result<Vec<EventEnvelope>> {
+        let stale: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| task.lease_expired_at(now))
+            .map(|task| task.id)
+            .collect();
+
+        let mut events = Vec::new();
+        for task in stale {
+            let held_by = self
+                .tasks
+                .get(&task)
+                .and_then(|t| t.assignee)
+                .map(|a| a.short())
+                .unwrap_or_default();
+            events.extend(self.transition(
+                task,
+                TaskTransition::Release {
+                    reason: format!(
+                        "the claim lapsed; {held_by} stopped reporting progress"
+                    ),
+                },
+                None,
+            )?);
+            if let Some(record) = self.tasks.get_mut(&task) {
+                record.lease_expires_at = None;
+            }
+        }
+        Ok(events)
+    }
+
+    /// Extend the holder's lease. Called whenever a bot acts on its task.
+    fn renew_lease(&mut self, task: TaskId) {
+        if let Some(record) = self.tasks.get_mut(&task) {
+            if record.assignee.is_some() && !record.state.is_terminal() {
+                record.lease_expires_at =
+                    Some(Timestamp::now().plus_millis(DEFAULT_LEASE_MILLIS));
+            }
+        }
     }
 
     /// Break every cycle currently in the wait-for graph.

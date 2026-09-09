@@ -344,6 +344,19 @@ pub struct Task {
     /// approval, security clearance and engineering progress move separately.
     #[serde(default)]
     pub authorization: AuthorizationState,
+    /// When this task's claim lapses if the holder does not report progress.
+    ///
+    /// A bot that crashes, is removed, or simply stops mid-task would
+    /// otherwise hold its claim forever, and the work would sit assigned and
+    /// untouched with nothing on the board saying so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at: Option<Timestamp>,
+    /// Whether the holder is standing in for the role the work asked for.
+    ///
+    /// Worth recording: a room where most work is done by stand-ins is a room
+    /// whose roster does not match the work it was given.
+    #[serde(default)]
+    pub stood_in: bool,
     /// Deliverables produced so far.
     pub artifacts: Vec<ArtifactId>,
     /// How many times the task has come back from inspection.
@@ -376,6 +389,8 @@ impl Task {
             lineage: Lineage::default(),
             dependency: DependencyState::Satisfied,
             authorization: AuthorizationState::Authorized,
+            lease_expires_at: None,
+            stood_in: false,
             artifacts: Vec::new(),
             revision: 0,
             max_revisions: DEFAULT_MAX_REVISIONS,
@@ -498,7 +513,25 @@ impl Task {
     pub fn needs_operator(&self) -> bool {
         self.readiness().needs_operator()
     }
+
+    /// Whether the holder's claim has lapsed by `now`.
+    ///
+    /// Only assigned, non-terminal work can go stale: a delivered task holding
+    /// an old lease is finished, not abandoned.
+    pub fn lease_expired_at(&self, now: Timestamp) -> bool {
+        !self.state.is_terminal()
+            && self.assignee.is_some()
+            && self
+                .lease_expires_at
+                .is_some_and(|expiry| now >= expiry)
+    }
 }
+
+/// How long a claim holds without the holder reporting progress.
+///
+/// Long enough that a slow model turn does not lose its work, short enough
+/// that a crashed bot does not park a task for the rest of the run.
+pub const DEFAULT_LEASE_MILLIS: i64 = 15 * 60 * 1_000;
 
 /// Describe a blocker in words a person can read.
 fn describe_block(reason: &BlockReason) -> String {
