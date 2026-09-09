@@ -1723,9 +1723,8 @@ fn a_room_saved_before_this_version_still_loads() {
     // Strip everything a room saved by an older build would not have had.
     let mut older = saved.clone();
     let fields = older.as_object_mut().expect("an object");
-    for added_since in ["decisions"] {
-        fields.remove(added_since);
-    }
+    // Anything added to the engine since; extend this as fields are added.
+    fields.remove("decisions");
 
     let restored: Engine =
         serde_json::from_value(older).expect("an older save must still open");

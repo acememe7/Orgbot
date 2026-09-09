@@ -182,23 +182,22 @@ fn leo_room() -> Room {
 
     // The chain that made eleven future tasks look ready at once.
     let mut previous = objectives[0];
-    for step in 1..OBJECTIVES {
-        let next = room.create(
+    for (step, objective) in objectives.iter().enumerate().skip(1) {
+        previous = room.create(
             &format!("C{step}: chained work {step}"),
-            TaskOrigin::under(TaskKind::Subtask, objectives[step]),
+            TaskOrigin::under(TaskKind::Subtask, *objective),
             vec![previous],
         );
-        previous = next;
     }
 
     // Work replaced partway through, as the real run did repeatedly.
     let abandoned = room.create(
-        &format!("IR-0: an early approach"),
+        "IR-0: an early approach",
         TaskOrigin::under(TaskKind::Subtask, objectives[0]),
         vec![],
     );
     let canonical = room.create(
-        &format!("IR-1: the approach that replaced it"),
+        "IR-1: the approach that replaced it",
         TaskOrigin::under(TaskKind::Subtask, objectives[0]),
         vec![],
     );
