@@ -50,6 +50,15 @@ pub enum Control {
         /// Where to send it.
         reply: oneshot::Sender<Vec<EventEnvelope>>,
     },
+    /// The operator answers a question the room asked.
+    AnswerDecision {
+        /// The question being answered.
+        decision: orgbot_proto::ids::DecisionId,
+        /// What they chose.
+        chosen: String,
+        /// Anything they added.
+        note: String,
+    },
     /// A human speaks into the chat.
     HumanMessage {
         files: Vec<String>,
@@ -101,7 +110,10 @@ impl SessionHandle {
 
     pub fn try_send(&self, control: Control) -> bool {
         let interrupts = matches!(control, Control::Pause { .. } | Control::Stop);
-        let input = matches!(control, Control::HumanMessage { .. } | Control::Answer { .. });
+        let input = matches!(
+            control,
+            Control::HumanMessage { .. } | Control::Answer { .. } | Control::AnswerDecision { .. }
+        );
         // Queue and cancel under the same lock: the session must not replace
         // this token between accepting the input and receiving its signal.
         let input_interrupt = self.input_interrupt.lock().unwrap();
@@ -533,7 +545,10 @@ impl RoomSession {
 
     /// Act on one control message.
     fn handle(&mut self, control: Control) -> ControlFlow {
-        if matches!(control, Control::HumanMessage { .. } | Control::Answer { .. }) {
+        if matches!(
+            control,
+            Control::HumanMessage { .. } | Control::Answer { .. } | Control::AnswerDecision { .. }
+        ) {
             let mut token = self.input_interrupt.lock().unwrap();
             *token = CancellationToken::new();
             self.orchestrator.attach_input_interrupt(token.clone());
@@ -613,6 +628,57 @@ impl RoomSession {
             }
             Control::Answer { task, answer } => {
                 self.answer_waiting_task(task, answer);
+                self.broadcast_new_events();
+            }
+            Control::AnswerDecision {
+                decision,
+                chosen,
+                note,
+            } => {
+                let decided = if note.trim().is_empty() {
+                    format!("Decision: {chosen}.")
+                } else {
+                    format!("Decision: {chosen}. {}", note.trim())
+                };
+                // A refused answer is not worth stopping the room for: the
+                // question stays open and the person can try again.
+                let _ = self
+                    .orchestrator
+                    .engine_mut()
+                    .apply(Command::AnswerDecision {
+                        decision,
+                        answer: orgbot_proto::decision::Answer {
+                            chosen,
+                            note,
+                            at: orgbot_proto::Timestamp::now(),
+                        },
+                    });
+                // Put the answer in the transcript too. The board already
+                // knows, but a bot reading back over the room should see the
+                // decision where it was made, not have to infer it from a
+                // task quietly becoming claimable.
+                let room = self.orchestrator.engine().room_id();
+                let _ = self
+                    .orchestrator
+                    .engine_mut()
+                    .apply(Command::PostMessage {
+                        message: Box::new(ChatMessage {
+                            id: orgbot_proto::MessageId::new(),
+                            room,
+                            author: Author::Human {
+                                name: "operator".into(),
+                            },
+                            audience: Audience::Everyone,
+                            intent: MessageIntent::Answer,
+                            body: decided,
+                            task: None,
+                            handoff: None,
+                            reply_to: None,
+                            attachments: vec![],
+                            files: vec![],
+                            sent_at: Timestamp::now(),
+                        }),
+                    });
                 self.broadcast_new_events();
             }
             Control::Stop => return ControlFlow::Stop(RunOutcome::Idle),

@@ -266,6 +266,19 @@ async fn dispatch(session: &SessionHandle, message: ClientMessage) -> bool {
         ClientMessage::AnswerBot { task, answer } => {
             session.send(Control::Answer { task, answer }).await
         }
+        ClientMessage::AnswerDecision {
+            decision,
+            chosen,
+            note,
+        } => {
+            session
+                .send(Control::AnswerDecision {
+                    decision,
+                    chosen,
+                    note,
+                })
+                .await
+        }
         ClientMessage::Pause { reason } => session.send(Control::Pause { reason }).await,
         ClientMessage::Resume => session.send(Control::Resume).await,
     }

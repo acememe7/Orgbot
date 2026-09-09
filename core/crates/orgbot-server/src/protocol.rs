@@ -10,6 +10,7 @@
 //! layer.
 
 use orgbot_engine::digest::RoomDigest;
+use orgbot_proto::ids::DecisionId;
 use orgbot_proto::event::{EventEnvelope, Seq};
 use orgbot_proto::room::RoomPhase;
 use orgbot_proto::{AgentId, AgentStatus, Room, Task, TaskId};
@@ -59,6 +60,19 @@ pub enum ClientMessage {
         task: TaskId,
         /// The answer.
         answer: String,
+    },
+    /// Answer a question the room put to the operator.
+    ///
+    /// Addressed to the decision rather than to a task, because one answer
+    /// releases every task that was waiting on that same question.
+    AnswerDecision {
+        /// The question being answered.
+        decision: DecisionId,
+        /// The option chosen.
+        chosen: String,
+        /// Anything the person wants to add.
+        #[serde(default)]
+        note: String,
     },
     /// Pause the room.
     Pause {

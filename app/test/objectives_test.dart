@@ -32,6 +32,10 @@ class _Silent implements RoomClient {
   @override
   void answerBot(String taskId, String answer) {}
   @override
+  void answerDecision(String decision, String chosen, {String note = ''}) =>
+      answered.add((decision: decision, chosen: chosen));
+  final answered = <({String decision, String chosen})>[];
+  @override
   void pause({String reason = ''}) {}
   @override
   void resume() {}
@@ -82,6 +86,7 @@ Map<String, Object?> digestJson({
       'needs_you': [
         for (var i = 0; i < needsYou; i++)
           {
+            'id': 'dec_${i + 1}',
             'task': 'task_$i',
             'title': 'provision the VPS',
             'because': 'it provisions paid infrastructure',
@@ -256,6 +261,36 @@ void main() {
       final store = storeWith();
       await tester.pumpWidget(wrap(store));
       expect(find.text('Nothing on the board yet'), findsOneWidget);
+    });
+  });
+
+  _answerTests();
+}
+
+// ------------------------------------------------------- answering a decision
+
+void _answerTests() {
+  group('answering', () {
+    testWidgets('one tap answers the question, not the card', (tester) async {
+      final client = _Silent();
+      final store = RoomStore(client);
+      store.restore([
+        {'type': 'digest', 'digest': digestJson(needsYou: 1)}
+      ]);
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(body: ObjectivesPane(store: store)),
+      ));
+
+      await tester.tap(find.text('Approve'));
+      await tester.pump();
+
+      expect(client.answered, hasLength(1));
+      expect(client.answered.single.chosen, 'Approve');
+      expect(
+        client.answered.single.decision,
+        'dec_1',
+        reason: 'the answer is addressed to the question, not to a task',
+      );
     });
   });
 }

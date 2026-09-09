@@ -42,6 +42,12 @@ abstract class RoomLink {
   /// Answer a bot that asked a question.
   void answerBot(String task, String answer);
 
+  /// Answer a question the room put to you.
+  ///
+  /// Addressed to the decision, not to a task: one answer releases every task
+  /// that was waiting on that same question.
+  void answerDecision(String decision, String chosen, {String note = ''});
+
   /// Pause the room.
   void pause({String reason});
 
@@ -213,6 +219,16 @@ class RoomClient implements RoomLink {
     send({'type': 'answer_bot', 'task': taskId, 'answer': answer});
   }
 
+  @override
+  void answerDecision(String decision, String chosen, {String note = ''}) {
+    send({
+      'type': 'answer_decision',
+      'decision': decision,
+      'chosen': chosen,
+      'note': note,
+    });
+  }
+
   /// Pause the room.
   @override
   void pause({String reason = 'paused from the app'}) {
@@ -290,6 +306,15 @@ class LocalRoomClient implements RoomLink {
   @override
   void answerBot(String task, String answer) =>
       send({'type': 'answer_bot', 'task': task, 'answer': answer});
+
+  @override
+  void answerDecision(String decision, String chosen, {String note = ''}) =>
+      send({
+        'type': 'answer_decision',
+        'decision': decision,
+        'chosen': chosen,
+        'note': note,
+      });
 
   @override
   void pause({String reason = ''}) => send({'type': 'pause', 'reason': reason});

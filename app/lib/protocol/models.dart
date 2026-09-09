@@ -477,11 +477,16 @@ class ObjectiveCard {
 /// A decision waiting on a person, with everything needed to answer it.
 class PendingDecision {
   const PendingDecision({
+    required this.id,
     required this.task,
     required this.title,
     required this.because,
     required this.options,
   });
+
+  /// The question itself. An answer is addressed to this, not to a task —
+  /// one answer releases every task the same question was holding.
+  final String id;
 
   /// The task that cannot proceed.
   final String task;
@@ -496,6 +501,7 @@ class PendingDecision {
   final List<String> options;
 
   factory PendingDecision.fromJson(Map<String, Object?> json) => PendingDecision(
+        id: json['id'] as String? ?? '',
         task: json['task'] as String? ?? '',
         title: json['title'] as String? ?? '',
         because: json['because'] as String? ?? '',

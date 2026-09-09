@@ -112,6 +112,10 @@ class RoomStore extends ChangeNotifier {
   /// Objectives, progress, and the decisions only you can make.
   RoomDigest get digest => _digest;
 
+  /// Answer a question the room asked. Releases every task it was holding.
+  void answerDecision(String decision, String chosen, {String note = ''}) =>
+      _client.answerDecision(decision, chosen, note: note);
+
   /// Messages typed here but not yet confirmed by the engine.
   ///
   /// A bot turn can run for a minute, and the room applies a message between

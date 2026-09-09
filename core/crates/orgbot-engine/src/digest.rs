@@ -26,8 +26,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use orgbot_proto::decision::DecisionLog;
 use orgbot_proto::graph::Readiness;
-use orgbot_proto::ids::{AgentId, TaskId};
+use orgbot_proto::ids::{AgentId, DecisionId, TaskId};
 use orgbot_proto::task::{Task, TaskState};
 
 /// Counts a person can act on, in the order they matter.
@@ -102,6 +103,10 @@ pub struct ObjectiveCard {
 /// A decision waiting on a person, with everything needed to answer it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDecision {
+    /// The question itself. What an answer is addressed to — one answer
+    /// releases every task held by the same question, so answering a *task*
+    /// would be answering the wrong thing.
+    pub id: DecisionId,
     /// The task that cannot proceed.
     pub task: TaskId,
     /// What that task is.
@@ -202,7 +207,10 @@ impl RoomDigest {
 /// Takes an iterator rather than the engine so it can be tested on a handful
 /// of tasks without standing a room up, and so the same computation can serve
 /// a snapshot as easily as a live room.
-pub fn digest<'a>(tasks: impl Iterator<Item = &'a Task>) -> RoomDigest {
+pub fn digest<'a>(
+    tasks: impl Iterator<Item = &'a Task>,
+    decisions: &DecisionLog,
+) -> RoomDigest {
     let tasks: Vec<&Task> = tasks.collect();
     let by_id: HashMap<TaskId, &Task> = tasks.iter().map(|t| (t.id, *t)).collect();
 
@@ -237,9 +245,38 @@ pub fn digest<'a>(tasks: impl Iterator<Item = &'a Task>) -> RoomDigest {
         )
     });
 
+    // Taken from the decision log rather than by scanning tasks: the log is
+    // what a question *is*, it carries the id an answer is addressed to, and
+    // it already collapses the same question asked by several tasks into one.
+    let needs_you: Vec<PendingDecision> = decisions
+        .pending()
+        .map(|decision| {
+            let held = decision.task.and_then(|id| by_id.get(&id));
+            PendingDecision {
+                id: decision.id,
+                task: decision.task.unwrap_or_else(|| {
+                    held.map_or_else(TaskId::new, |task| task.id)
+                }),
+                title: held.map_or_else(
+                    || "a decision for you".to_string(),
+                    |task| task.title.clone(),
+                ),
+                because: decision.because.clone(),
+                options: decision.options.clone(),
+                objective: held.and_then(|task| task.lineage.root_objective),
+            }
+        })
+        .collect();
+
     let live: Vec<&&Task> = tasks.iter().filter(|task| !is_closed(task)).collect();
+
+    // Outcomes that still stand, delivered ones included. Counting only the
+    // live ones would put the delivered count outside the total it is shown
+    // against — "65/32 objectives done" — because finishing an objective
+    // removes it from the live set.
+    let standing: Vec<&&Task> = roots.iter().filter(|task| counts_toward(task)).collect();
     let counts = BoardCounts {
-        objectives: objectives.len() as u32,
+        objectives: standing.len() as u32,
         active: objectives
             .iter()
             .filter(|c| !c.owners.is_empty() && !c.needs_operator)
@@ -248,28 +285,13 @@ pub fn digest<'a>(tasks: impl Iterator<Item = &'a Task>) -> RoomDigest {
             .iter()
             .filter(|c| c.blocker.is_some() && !c.needs_operator)
             .count() as u32,
-        needs_you: objectives.iter().filter(|c| c.needs_operator).count() as u32,
-        delivered: roots
+        needs_you: needs_you.len() as u32,
+        delivered: standing
             .iter()
             .filter(|t| t.state == TaskState::Submitted)
             .count() as u32,
         raw_records: live.len() as u32,
     };
-
-    let needs_you = tasks
-        .iter()
-        .filter(|task| !is_closed(task))
-        .filter_map(|task| match task.readiness() {
-            Readiness::BlockedOperator { because, options } => Some(PendingDecision {
-                task: task.id,
-                title: task.title.clone(),
-                because,
-                options,
-                objective: task.lineage.root_objective,
-            }),
-            _ => None,
-        })
-        .collect();
 
     let supporting = live.iter().filter(|t| t.kind.is_supporting()).count() as u32;
     let outcomes = counts.objectives.max(1) as f32;
@@ -483,6 +505,7 @@ fn chain_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orgbot_proto::decision::DecisionLog;
     use orgbot_proto::graph::{AuthorizationState, DependencyState, Lineage, TaskKind};
     use orgbot_proto::ids::RoomId;
 
@@ -521,7 +544,7 @@ mod tests {
             all.push(under(room, &format!("review {i}"), TaskKind::Review, a.id));
         }
 
-        let view = digest(all.iter());
+        let view = digest(all.iter(), &DecisionLog::default());
         assert_eq!(view.counts.objectives, 2, "two outcomes, not eighteen");
         assert_eq!(view.counts.raw_records, 18, "every record is still tracked");
         assert_eq!(view.counts.needs_you, 0);
@@ -541,7 +564,7 @@ mod tests {
 
         let mut all = vec![goal.clone()];
         all.extend(work.clone());
-        let before = digest(all.iter()).objectives[0].progress;
+        let before = digest(all.iter(), &DecisionLog::default()).objectives[0].progress;
         assert_eq!(before, Progress { done: 2, total: 4 });
 
         // Ten reviews and remediations later, the same amount is done.
@@ -553,7 +576,7 @@ mod tests {
             };
             all.push(under(room, &format!("cycle {i}"), kind, goal.id));
         }
-        let after = digest(all.iter()).objectives[0].progress;
+        let after = digest(all.iter(), &DecisionLog::default()).objectives[0].progress;
         assert_eq!(after, before, "supporting work does not move the goalposts");
         assert_eq!(after.label(), "2 / 4 stages complete");
     }
@@ -580,10 +603,26 @@ mod tests {
             owner: None,
         };
 
-        let view = digest([goal, waiting, internal, blocked].iter());
-        assert_eq!(view.needs_you.len(), 1);
+        // The inbox is the decision log: a question is a record with an id an
+        // answer can be addressed to, not a flag on a task.
+        let mut log = DecisionLog::default();
+        let mut question = orgbot_proto::decision::Decision::ask(
+            room,
+            "it provisions paid infrastructure",
+        );
+        question.options = vec!["Approve".into(), "Decline".into()];
+        question.task = Some(waiting.id);
+        log.decisions.push(question);
+
+        let view = digest([goal, waiting, internal, blocked].iter(), &log);
+        assert_eq!(
+            view.needs_you.len(),
+            1,
+            "the security hold and the dependency wait are the room's own work"
+        );
         assert_eq!(view.needs_you[0].because, "it provisions paid infrastructure");
         assert_eq!(view.needs_you[0].options.len(), 2);
+        assert_eq!(view.needs_you[0].title, "provision the VPS");
         assert_eq!(view.counts.needs_you, 1);
     }
 
@@ -601,7 +640,7 @@ mod tests {
             material: false,
         };
 
-        let view = digest([goal, working, remediating].iter());
+        let view = digest([goal, working, remediating].iter(), &DecisionLog::default());
         assert_eq!(view.counts.needs_you, 0);
         assert!(view.needs_you.is_empty());
         let summary = view.summary("Leo room repair");
@@ -626,7 +665,7 @@ mod tests {
             owner: Some(bot),
         };
 
-        let view = digest([goal, working, waiting].iter());
+        let view = digest([goal, working, waiting].iter(), &DecisionLog::default());
         let card = &view.objectives[0];
         assert_eq!(card.owners, vec![bot]);
         assert_eq!(
@@ -647,7 +686,7 @@ mod tests {
         replaced.state = TaskState::Superseded;
         replaced.lineage.superseded_by = Some(live.id);
 
-        let view = digest([goal, live, replaced].iter());
+        let view = digest([goal, live, replaced].iter(), &DecisionLog::default());
         assert_eq!(view.counts.raw_records, 2, "the replaced record is not live");
         assert_eq!(view.health.closed_as_duplicate, 1, "but it is still counted");
         assert_eq!(view.objectives[0].records.len(), 1);
@@ -666,7 +705,7 @@ mod tests {
         let mut side = objective(room, "update the docs");
         side.depends_on = vec![a.id];
 
-        let view = digest([a.clone(), b.clone(), c.clone(), side].iter());
+        let view = digest([a.clone(), b.clone(), c.clone(), side].iter(), &DecisionLog::default());
         assert_eq!(view.critical_path, vec![a.id, b.id, c.id]);
     }
 
@@ -679,7 +718,7 @@ mod tests {
         a.depends_on = vec![b.id];
         b.depends_on = vec![a.id];
 
-        let view = digest([a, b].iter());
+        let view = digest([a, b].iter(), &DecisionLog::default());
         assert!(view.critical_path.len() <= 2);
     }
 
@@ -693,7 +732,7 @@ mod tests {
             all.push(under(room, &format!("review {i}"), TaskKind::Review, goal.id));
         }
 
-        let view = digest(all.iter());
+        let view = digest(all.iter(), &DecisionLog::default());
         assert!(view.health.coordination_expansion);
         assert!(view.health.inflation_ratio > Health::EXPANSION_THRESHOLD);
         assert_eq!(view.health.supporting_records, 12);
@@ -708,7 +747,7 @@ mod tests {
             under(room, "implement", TaskKind::Subtask, goal.id),
             under(room, "review", TaskKind::Review, goal.id),
         ];
-        let view = digest(all.iter());
+        let view = digest(all.iter(), &DecisionLog::default());
         assert!(!view.health.coordination_expansion);
     }
 
@@ -722,9 +761,10 @@ mod tests {
         let mut second = Task::draft(room, "ship them", "do it");
         second.state = TaskState::Submitted;
 
-        let view = digest([first, second].iter());
-        assert_eq!(view.counts.objectives, 1, "the delivered one has closed");
-        assert_eq!(view.counts.delivered, 1);
+        let view = digest([first, second].iter(), &DecisionLog::default());
+        assert_eq!(view.counts.objectives, 2, "both outcomes count");
+        assert_eq!(view.counts.delivered, 1, "one of the two is finished");
+        assert_eq!(view.objectives.len(), 1, "only the open one is a card");
         assert_eq!(view.counts.needs_you, 0);
     }
 
@@ -745,7 +785,7 @@ mod tests {
             owner: None,
         };
 
-        let view = digest([done, goal, waiting].iter());
+        let view = digest([done, goal, waiting].iter(), &DecisionLog::default());
         let summary = view.summary("Leo room repair");
         assert!(summary.starts_with("Leo room repair"));
         assert!(summary.contains("objectives complete"), "got:\n{summary}");
@@ -754,6 +794,74 @@ mod tests {
             summary.contains("B3-C source recovery"),
             "the current blocker should be named:\n{summary}"
         );
+    }
+
+    /// The count shown as `delivered/objectives` has to be a fraction of one
+    /// whole. Counting only live outcomes put the numerator outside the
+    /// denominator, and a real room reported "65/32 objectives done".
+    #[test]
+    fn delivered_objectives_stay_inside_the_total() {
+        let room = room();
+        let mut all: Vec<Task> = Vec::new();
+        for i in 0..5 {
+            let mut goal = objective(room, &format!("objective {i}"));
+            if i < 3 {
+                goal.state = TaskState::Submitted;
+            }
+            all.push(goal);
+        }
+
+        let view = digest(all.iter(), &DecisionLog::default());
+        assert_eq!(view.counts.objectives, 5, "finished outcomes still count");
+        assert_eq!(view.counts.delivered, 3);
+        assert!(
+            view.counts.delivered <= view.counts.objectives,
+            "{}/{} is not a fraction of one whole",
+            view.counts.delivered,
+            view.counts.objectives
+        );
+        // Only the unfinished ones are cards to act on.
+        assert_eq!(view.objectives.len(), 2);
+    }
+
+    /// Finishing work moves the fraction up rather than shrinking the total.
+    #[test]
+    fn delivering_an_objective_advances_the_headline() {
+        let room = room();
+        let mut first = objective(room, "first");
+        let second = objective(room, "second");
+
+        let before = digest([first.clone(), second.clone()].iter(), &DecisionLog::default()).counts;
+        assert_eq!((before.delivered, before.objectives), (0, 2));
+
+        first.state = TaskState::Submitted;
+        let after = digest([first, second].iter(), &DecisionLog::default()).counts;
+        assert_eq!(
+            (after.delivered, after.objectives),
+            (1, 2),
+            "the denominator must hold still while the numerator moves"
+        );
+    }
+
+    /// Replaced and retired outcomes leave the total entirely: an objective
+    /// abandoned as irrelevant should not make the room look unfinished.
+    #[test]
+    fn a_retired_objective_leaves_the_total() {
+        let room = room();
+        let done = {
+            let mut task = objective(room, "delivered");
+            task.state = TaskState::Submitted;
+            task
+        };
+        let retired = {
+            let mut task = objective(room, "abandoned");
+            task.state = TaskState::Retired;
+            task
+        };
+
+        let view = digest([done, retired].iter(), &DecisionLog::default());
+        assert_eq!(view.counts.objectives, 1);
+        assert_eq!(view.counts.delivered, 1, "1/1, not 1/2");
     }
 
     #[test]

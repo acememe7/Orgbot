@@ -35,6 +35,9 @@ class FakeClient implements RoomClient {
   void answerBot(String t, String a) =>
       sent.add({'type': 'answer_bot', 'task': t, 'answer': a});
   @override
+  void answerDecision(String decision, String chosen, {String note = ''}) {}
+
+  @override
   void pause({String reason = ''}) {}
   @override
   void resume() {}

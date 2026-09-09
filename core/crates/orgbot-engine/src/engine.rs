@@ -72,6 +72,10 @@ pub struct Engine {
     error_streak: BTreeMap<AgentId, u32>,
     /// Every question put to the operator and every answer given, so the room
     /// can tell what it has already been told.
+    ///
+    /// Defaulted, because this struct is what a saved room is written as: a
+    /// room saved before decisions existed has none, and must still load.
+    #[serde(default)]
     decisions: DecisionLog,
 }
 
@@ -310,7 +314,7 @@ impl Engine {
     /// graph stays available through [`Engine::tasks`] for the bots, which
     /// need all of it.
     pub fn digest(&self) -> crate::digest::RoomDigest {
-        crate::digest::digest(self.tasks())
+        crate::digest::digest(self.tasks(), &self.decisions)
     }
 
     pub fn tasks(&self) -> impl Iterator<Item = &Task> {

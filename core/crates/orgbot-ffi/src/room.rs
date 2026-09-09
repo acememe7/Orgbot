@@ -245,6 +245,15 @@ impl Room {
                 files,
             },
             ClientMessage::AnswerBot { task, answer } => Control::Answer { task, answer },
+            ClientMessage::AnswerDecision {
+                decision,
+                chosen,
+                note,
+            } => Control::AnswerDecision {
+                decision,
+                chosen,
+                note,
+            },
             ClientMessage::Pause { reason } => Control::Pause { reason },
             ClientMessage::Resume => Control::Resume,
             ClientMessage::Resync | ClientMessage::Hello { .. } => {

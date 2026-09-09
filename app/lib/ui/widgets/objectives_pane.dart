@@ -56,7 +56,7 @@ class ObjectivesPane extends StatelessWidget {
             _Headline(counts: digest.counts),
             if (digest.needsYou.isNotEmpty) ...[
               const SizedBox(height: 16),
-              _NeedsYou(decisions: digest.needsYou),
+              _NeedsYou(decisions: digest.needsYou, store: store),
             ],
             const SizedBox(height: 18),
             Text(
@@ -191,9 +191,10 @@ class _Count extends StatelessWidget {
 
 /// The operator's inbox: only things a person must actually answer.
 class _NeedsYou extends StatelessWidget {
-  const _NeedsYou({required this.decisions});
+  const _NeedsYou({required this.decisions, required this.store});
 
   final List<PendingDecision> decisions;
+  final RoomStore store;
 
   @override
   Widget build(BuildContext context) {
@@ -243,7 +244,10 @@ class _NeedsYou extends StatelessWidget {
                 children: [
                   for (final option in decision.options)
                     OutlinedButton(
-                      onPressed: null,
+                      // One tap answers the question, not the card: every
+                      // task the question was holding is released together.
+                      onPressed: () =>
+                          store.answerDecision(decision.id, option),
                       style: OutlinedButton.styleFrom(
                         visualDensity: VisualDensity.compact,
                       ),
@@ -251,13 +255,14 @@ class _NeedsYou extends StatelessWidget {
                     ),
                 ],
               ),
-              const SizedBox(height: 2),
-              Text(
-                'Answer in chat for now.',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: scheme.onSurfaceVariant,
+            ] else ...[
+              const SizedBox(height: 9),
+              OutlinedButton(
+                onPressed: () => store.answerDecision(decision.id, 'Approve'),
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
                 ),
+                child: const Text('Approve'),
               ),
             ],
           ],

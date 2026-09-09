@@ -1704,3 +1704,47 @@ fn decisions_survive_a_replay_of_the_log() {
     );
     assert!(!replayed.task(task).unwrap().needs_operator());
 }
+
+/// A room saved before an upgrade must still open.
+///
+/// This is not hypothetical: adding the decision log to the engine without a
+/// default made every existing saved room fail to restore with "missing field
+/// `decisions`". The file survived, but the room would not open. Any field
+/// added to the engine from here has to clear this test.
+#[test]
+fn a_room_saved_before_this_version_still_loads() {
+    let mut f = fixture();
+    let task = f.open_task("some earlier work", None);
+    f.apply(Command::ClaimTask { task, by: f.worker });
+
+    let saved = serde_json::to_value(&f.engine).expect("the engine serialises");
+
+    // Strip everything a room saved by an older build would not have had.
+    let mut older = saved.clone();
+    let fields = older.as_object_mut().expect("an object");
+    for added_since in ["decisions"] {
+        fields.remove(added_since);
+    }
+
+    let restored: Engine =
+        serde_json::from_value(older).expect("an older save must still open");
+    assert_eq!(restored.tasks().count(), 1);
+    assert_eq!(restored.decisions().decisions.len(), 0);
+    assert!(restored.task(task).is_some());
+}
+
+/// And a room saved by *this* build round-trips unchanged.
+#[test]
+fn a_saved_room_round_trips() {
+    let mut f = fixture();
+    let task = f.open_task("provision the VPS", None);
+    let decision = asked_decision(&f.gate(task, "it provisions paid infrastructure"));
+    f.approve(decision);
+
+    let saved = serde_json::to_string(&f.engine).expect("serialises");
+    let restored: Engine = serde_json::from_str(&saved).expect("deserialises");
+
+    assert_eq!(restored.decisions().decisions.len(), 1);
+    assert_eq!(restored.decisions().pending().count(), 0);
+    assert!(!restored.task(task).unwrap().needs_operator());
+}
