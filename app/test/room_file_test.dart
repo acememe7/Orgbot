@@ -21,6 +21,7 @@ RoomDef room({List<String> tasks = const []}) => RoomDef(
 );
 
 void main() {
+  _roleTableTests();
   test(
     'Android rooms have no hidden time cutoff; CLI defaults are independent',
     () {
@@ -306,6 +307,65 @@ void main() {
         canRunClis: false,
       );
       expect(file.toml, isNot(contains('tok-codex')));
+    });
+  });
+}
+
+// ------------------------------------------------------------- the role table
+//
+// Without one the engine matches roles by name exactly, and work sits stranded
+// whenever the single bot holding a role is busy — which is how a sixteen-bot
+// room ended up with nine bots free and nothing moving.
+
+void _roleTableTests() {
+  group('the role table', () {
+    test('roles the room holds are declared with their stand-ins', () {
+      final file = buildRoomFile(room(), [
+        BotDef(name: 'alice', provider: ProviderKind.scripted, role: 'ops'),
+        BotDef(name: 'bob', provider: ProviderKind.scripted, role: 'engineer'),
+        BotDef(name: 'carol', provider: ProviderKind.scripted, role: 'backend'),
+      ]);
+
+      expect(file.toml, contains('[[roles]]'));
+      expect(file.toml, contains('name = "ops"'));
+      expect(file.toml, contains('capabilities = ["infra", "deploy"]'));
+      expect(
+        file.toml,
+        contains('fallbacks = ["backend", "engineer"]'),
+        reason: 'ops work should be coverable when its one holder is busy',
+      );
+    });
+
+    /// Pointing at a role nobody holds does nothing but clutter the file.
+    test('stand-ins nobody holds are left out', () {
+      final file = buildRoomFile(room(), [
+        BotDef(name: 'alice', provider: ProviderKind.scripted, role: 'ops'),
+      ]);
+
+      expect(file.toml, contains('name = "ops"'));
+      expect(
+        file.toml,
+        isNot(contains('fallbacks')),
+        reason: 'neither backend nor engineer is in this room',
+      );
+    });
+
+    /// The one substitution not worth the throughput.
+    test('security is declared with no stand-in', () {
+      final file = buildRoomFile(room(), [
+        BotDef(name: 'alice', provider: ProviderKind.scripted, role: 'security'),
+        BotDef(name: 'bob', provider: ProviderKind.scripted, role: 'engineer'),
+      ]);
+
+      final section = file.toml.split('[[roles]]').firstWhere(
+            (part) => part.contains('name = "security"'),
+          );
+      expect(section, contains('capabilities'));
+      expect(
+        section,
+        isNot(contains('fallbacks')),
+        reason: 'a bot without the expertise must not sign off on security',
+      );
     });
   });
 }

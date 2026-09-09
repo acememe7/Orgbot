@@ -150,3 +150,86 @@ async fn an_open_room_still_answers_a_silent_client() {
     );
     let _ = std::fs::remove_file(path);
 }
+
+// ------------------------------------------------------------- the role table
+//
+// Declaring roles in the room file is what makes the fallback machinery do
+// anything: an engine with no table matches names exactly, which is how a
+// sixteen-bot room ended up with nine bots free and work stranded on the one
+// busy holder of a role.
+
+const ROOM_WITH_ROLES: &str = r#"
+[room]
+name = "staffed"
+goal = "get the work done"
+
+[[bots]]
+handle = "ops1"
+roles = ["ops"]
+[bots.provider]
+kind = "scripted"
+script = "ok"
+
+[[bots]]
+handle = "eng1"
+roles = ["engineer"]
+[bots.provider]
+kind = "scripted"
+script = "ok"
+
+[[roles]]
+name = "ops"
+capabilities = ["infra", "deploy"]
+fallbacks = ["engineer"]
+
+[[tasks]]
+title = "provision the broker"
+brief = "ops work"
+required_role = "ops"
+"#;
+
+#[test]
+fn a_room_file_can_declare_who_covers_for_whom() {
+    let path = std::env::temp_dir().join(format!("orgbot-roles-{}.toml", stamp()));
+    std::fs::write(&path, ROOM_WITH_ROLES).unwrap();
+
+    let resolved = orgbot_server::config::RoomConfig::load(&path)
+        .expect("the file should parse")
+        .resolve()
+        .expect("and resolve");
+
+    let table = &resolved.roles;
+    let ops_holder = vec!["ops".to_string()];
+    let engineer = vec!["engineer".to_string()];
+
+    assert_eq!(
+        table.eligibility(&ops_holder, Some("ops")),
+        orgbot_proto::roles::Eligibility::Exact
+    );
+    assert_eq!(
+        table.eligibility(&engineer, Some("ops")),
+        orgbot_proto::roles::Eligibility::Fallback,
+        "an engineer may stand in for ops work"
+    );
+    assert_eq!(
+        table.eligibility(&engineer, Some("infra")),
+        orgbot_proto::roles::Eligibility::No,
+        "and capabilities do not leak the other way"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+/// A room that declares nothing keeps the behaviour it always had.
+#[test]
+fn a_room_file_without_roles_matches_by_name() {
+    let path = std::env::temp_dir().join(format!("orgbot-noroles-{}.toml", stamp()));
+    std::fs::write(&path, ROOM).unwrap();
+
+    let resolved = orgbot_server::config::RoomConfig::load(&path)
+        .expect("parse")
+        .resolve()
+        .expect("resolve");
+
+    assert_eq!(resolved.roles, orgbot_proto::roles::RoleTable::default());
+    let _ = std::fs::remove_file(path);
+}

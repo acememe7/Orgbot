@@ -84,6 +84,18 @@ class RoleDef {
 
   final RolePowers powers;
 
+  /// What holders of this role can do. Work may ask for a capability rather
+  /// than a job title, which is often what it actually needs.
+  final List<String> capabilities;
+
+  /// Roles that may take this one's work when every holder is busy.
+  ///
+  /// Named explicitly rather than inferred from shared capabilities: two roles
+  /// doing similar things does not make them interchangeable, and guessing
+  /// that they are puts work with the wrong bot. An exact holder always wins,
+  /// so this only fires when the room would otherwise sit still.
+  final List<String> fallbacks;
+
   const RoleDef({
     required this.key,
     required this.label,
@@ -92,6 +104,8 @@ class RoleDef {
     required this.group,
     required this.icon,
     this.powers = const RolePowers(),
+    this.capabilities = const [],
+    this.fallbacks = const [],
   });
 }
 
@@ -109,6 +123,8 @@ class Roles {
       group: RoleGroup.leadership,
       icon: 'hub_outlined',
       powers: RolePowers(mayCreateTasks: true, maySubmit: true),
+      capabilities: ['plan', 'deliver'],
+      fallbacks: ['product_manager'],
     ),
     RoleDef(
       key: 'product_manager',
@@ -119,6 +135,8 @@ class Roles {
       group: RoleGroup.leadership,
       icon: 'flag_outlined',
       powers: RolePowers(mayCreateTasks: true),
+      capabilities: ['plan'],
+      fallbacks: ['coordinator'],
     ),
     RoleDef(
       key: 'architect',
@@ -130,6 +148,8 @@ class Roles {
       group: RoleGroup.leadership,
       icon: 'architecture_outlined',
       powers: RolePowers(mayCreateTasks: true),
+      capabilities: ['design', 'review', 'write'],
+      fallbacks: ['engineer'],
     ),
 
     // ---- building ----
@@ -141,6 +161,8 @@ class Roles {
           'an artifact, not as chat.',
       group: RoleGroup.building,
       icon: 'code',
+      capabilities: ['build', 'fix', 'test'],
+      fallbacks: ['backend', 'frontend', 'architect'],
     ),
     RoleDef(
       key: 'frontend',
@@ -150,6 +172,8 @@ class Roles {
           'and how it feels to use, not only that it renders.',
       group: RoleGroup.building,
       icon: 'web_outlined',
+      capabilities: ['build', 'ui'],
+      fallbacks: ['engineer', 'designer'],
     ),
     RoleDef(
       key: 'backend',
@@ -159,6 +183,8 @@ class Roles {
           'failure modes and what happens under load.',
       group: RoleGroup.building,
       icon: 'dns_outlined',
+      capabilities: ['build', 'data', 'infra'],
+      fallbacks: ['engineer'],
     ),
     RoleDef(
       key: 'designer',
@@ -168,6 +194,8 @@ class Roles {
           'layout, hierarchy, states, and what the user should feel.',
       group: RoleGroup.building,
       icon: 'brush_outlined',
+      capabilities: ['ui', 'design'],
+      fallbacks: ['frontend'],
     ),
     RoleDef(
       key: 'writer',
@@ -177,6 +205,8 @@ class Roles {
           'anything that does not earn its place.',
       group: RoleGroup.building,
       icon: 'edit_outlined',
+      capabilities: ['write', 'document'],
+      fallbacks: ['editor', 'documenter'],
     ),
     RoleDef(
       key: 'data',
@@ -186,6 +216,8 @@ class Roles {
           'plainly how confident the answer is.',
       group: RoleGroup.building,
       icon: 'query_stats',
+      capabilities: ['data', 'analyse'],
+      fallbacks: ['analyst', 'backend'],
     ),
 
     // ---- quality: may inspect, never submits its own verdict onward ----
@@ -199,6 +231,8 @@ class Roles {
       group: RoleGroup.quality,
       icon: 'rate_review_outlined',
       powers: RolePowers(mayInspect: true),
+      capabilities: ['review', 'audit'],
+      fallbacks: ['architect', 'qa'],
     ),
     RoleDef(
       key: 'qa',
@@ -209,6 +243,8 @@ class Roles {
       group: RoleGroup.quality,
       icon: 'bug_report_outlined',
       powers: RolePowers(mayInspect: true),
+      capabilities: ['test', 'review'],
+      fallbacks: ['engineer', 'reviewer'],
     ),
     RoleDef(
       key: 'security',
@@ -219,6 +255,7 @@ class Roles {
       group: RoleGroup.quality,
       icon: 'shield_outlined',
       powers: RolePowers(mayInspect: true),
+      capabilities: ['audit', 'review'],
     ),
     RoleDef(
       key: 'editor',
@@ -229,6 +266,8 @@ class Roles {
       group: RoleGroup.quality,
       icon: 'spellcheck',
       powers: RolePowers(mayInspect: true),
+      capabilities: ['write', 'document'],
+      fallbacks: ['writer', 'documenter'],
     ),
 
     // ---- knowledge ----
@@ -240,6 +279,8 @@ class Roles {
           'you verified from what you inferred.',
       group: RoleGroup.knowledge,
       icon: 'travel_explore_outlined',
+      capabilities: ['investigate', 'gather'],
+      fallbacks: ['analyst', 'generalist', 'product_manager'],
     ),
     RoleDef(
       key: 'analyst',
@@ -249,6 +290,8 @@ class Roles {
           'the reasoning, not just the conclusion.',
       group: RoleGroup.knowledge,
       icon: 'insights_outlined',
+      capabilities: ['analyse', 'investigate'],
+      fallbacks: ['researcher', 'data'],
     ),
     RoleDef(
       key: 'documenter',
@@ -258,6 +301,8 @@ class Roles {
           'that are surprising.',
       group: RoleGroup.knowledge,
       icon: 'menu_book_outlined',
+      capabilities: ['document', 'write'],
+      fallbacks: ['writer', 'editor'],
     ),
 
     // ---- operations ----
@@ -269,6 +314,8 @@ class Roles {
           'what happens when it goes wrong at 3am.',
       group: RoleGroup.operations,
       icon: 'settings_suggest_outlined',
+      capabilities: ['infra', 'deploy'],
+      fallbacks: ['backend', 'engineer'],
     ),
     RoleDef(
       key: 'support',
@@ -278,6 +325,8 @@ class Roles {
           'confusing, undocumented, or likely to generate complaints.',
       group: RoleGroup.operations,
       icon: 'support_agent_outlined',
+      capabilities: ['investigate'],
+      fallbacks: ['generalist'],
     ),
     RoleDef(
       key: 'generalist',
@@ -286,6 +335,7 @@ class Roles {
       brief: 'You take on whatever the room needs next.',
       group: RoleGroup.operations,
       icon: 'all_inclusive',
+      capabilities: ['build', 'write', 'investigate'],
     ),
   ];
 

@@ -208,6 +208,35 @@ RoomFile buildRoomFile(
     buffer.writeln();
   }
 
+  // What each role can do and who may cover for it. Emitted for the roles
+  // this room's bots actually hold, so the file stays about this room rather
+  // than carrying the whole catalogue.
+  //
+  // Without this the engine matches roles by name exactly, and work sits
+  // stranded whenever the one bot holding a role is busy — which is how a
+  // sixteen-bot room ended up with nine bots free and nothing moving.
+  final held = <String>{
+    for (final bot in bots) Roles.byKey(bot.role).key,
+  };
+  for (final key in held) {
+    final role = Roles.byKey(key);
+    if (role.capabilities.isEmpty && role.fallbacks.isEmpty) continue;
+    // Only name stand-ins that are actually in this room; pointing at a role
+    // nobody holds is noise in the file and does nothing.
+    final present = role.fallbacks.where(held.contains).toList();
+    buffer
+      ..writeln('[[roles]]')
+      ..writeln('name = ' + _s(role.key));
+    if (role.capabilities.isNotEmpty) {
+      buffer.writeln(
+          'capabilities = [' + role.capabilities.map(_s).join(', ') + ']');
+    }
+    if (present.isNotEmpty) {
+      buffer.writeln('fallbacks = [' + present.map(_s).join(', ') + ']');
+    }
+    buffer.writeln();
+  }
+
   for (final task in room.tasks.where((t) => t.trim().isNotEmpty)) {
     buffer
       ..writeln('[[tasks]]')

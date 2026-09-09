@@ -203,6 +203,7 @@ impl RoomSession {
             None => None,
         };
         let restored = saved.is_some();
+        let roles = resolved.roles.clone();
         let mut orchestrator = if let Some(saved) = saved {
             Orchestrator::restore(
                 saved,
@@ -228,6 +229,11 @@ impl RoomSession {
                 .map_err(|e| anyhow::anyhow!("starting the room: {e}"))?;
             orchestrator
         };
+
+        // Applied to restored rooms too: the roles a room declares are current
+        // configuration, not history, and a saved room should pick up a table
+        // added since it was written.
+        orchestrator.engine_mut().set_roles(roles);
 
         if let Some(parent) = state_path.as_ref().and_then(|path| path.parent()) {
             orchestrator.attach_attachments(parent.join("attachments"));

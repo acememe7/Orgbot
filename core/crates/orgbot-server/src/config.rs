@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use orgbot_proto::roles::{RoleSpec, RoleTable};
 use orgbot_proto::agent::{AgentPolicy, Autonomy, CliKind, ProviderRef};
 use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
 use orgbot_proto::task::Priority;
@@ -54,6 +55,14 @@ pub struct RoomConfig {
     /// and plan its own; one without needs its work laid out here.
     #[serde(default)]
     pub tasks: Vec<TaskSection>,
+    /// What each role can do, and who may stand in for it when its holders
+    /// are all busy.
+    ///
+    /// Optional. A room that declares nothing matches roles by name exactly,
+    /// which is what every room did before this existed — and which leaves
+    /// work stranded when the one bot holding a role is occupied.
+    #[serde(default)]
+    pub roles: Vec<RoleSpec>,
 }
 
 /// The `[room]` section.
@@ -377,6 +386,8 @@ pub struct ResolvedRoom {
     pub state_path: Option<std::path::PathBuf>,
     /// The room spec.
     pub spec: RoomSpec,
+    /// What each role can do and who may cover for it.
+    pub roles: RoleTable,
     /// The seated bots.
     pub bots: Vec<ResolvedBot>,
     /// The seed board.
@@ -475,6 +486,7 @@ impl RoomConfig {
         };
 
         Ok(ResolvedRoom {
+            roles: RoleTable::new(self.roles.clone()),
             spec,
             bots,
             tasks,
