@@ -350,8 +350,28 @@ void _roleTableTests() {
       );
     });
 
-    /// The one substitution not worth the throughput.
-    test('security is declared with no stand-in', () {
+    /// The widest substitution in the catalogue, and a deliberate one.
+    test('security can be covered by a reviewer or an architect', () {
+      final file = buildRoomFile(room(), [
+        BotDef(name: 'alice', provider: ProviderKind.scripted, role: 'security'),
+        BotDef(name: 'bob', provider: ProviderKind.scripted, role: 'reviewer'),
+        BotDef(name: 'carol', provider: ProviderKind.scripted, role: 'architect'),
+      ]);
+
+      final section = file.toml.split('[[roles]]').firstWhere(
+            (part) => part.contains('name = "security"'),
+          );
+      expect(section, contains('capabilities = ["audit", "review"]'));
+      expect(
+        section,
+        contains('fallbacks = ["reviewer", "architect"]'),
+        reason: 'reviewer first — it is the only other role carrying `audit`',
+      );
+    });
+
+    /// A room with no reviewer or architect still leaves security to its own
+    /// holder rather than naming stand-ins that are not there.
+    test('security stand-ins are only named when the room has them', () {
       final file = buildRoomFile(room(), [
         BotDef(name: 'alice', provider: ProviderKind.scripted, role: 'security'),
         BotDef(name: 'bob', provider: ProviderKind.scripted, role: 'engineer'),
@@ -360,12 +380,7 @@ void _roleTableTests() {
       final section = file.toml.split('[[roles]]').firstWhere(
             (part) => part.contains('name = "security"'),
           );
-      expect(section, contains('capabilities'));
-      expect(
-        section,
-        isNot(contains('fallbacks')),
-        reason: 'a bot without the expertise must not sign off on security',
-      );
+      expect(section, isNot(contains('fallbacks')));
     });
   });
 }

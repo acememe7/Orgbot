@@ -256,6 +256,16 @@ class Roles {
       icon: 'shield_outlined',
       powers: RolePowers(mayInspect: true),
       capabilities: ['audit', 'review'],
+      // Reviewer first: it is the only other role that carries `audit`, so it
+      // is the nearest thing to a security reviewer this catalogue has.
+      // Architect second, for the design-level questions.
+      //
+      // This is a wider substitution than the others and was an explicit
+      // operator decision rather than a default, because a stand-in's
+      // judgement is weakest exactly here. Work done this way is marked
+      // `stood_in`, so how much security review was covered rather than done
+      // by a security reviewer is visible afterwards instead of assumed.
+      fallbacks: ['reviewer', 'architect'],
     ),
     RoleDef(
       key: 'editor',
