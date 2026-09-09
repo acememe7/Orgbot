@@ -41,8 +41,8 @@ class RoomScreen extends StatelessWidget {
           body: store.connection == LinkState.connecting && store.room == null
               ? const Center(child: CircularProgressIndicator())
               : wide
-                  ? _wideLayout()
-                  : _narrowLayout(),
+              ? _wideLayout()
+              : _narrowLayout(),
         );
       },
     );
@@ -56,7 +56,10 @@ class RoomScreen extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(room?.name ?? 'Connecting…', style: const TextStyle(fontSize: 18)),
+          Text(
+            room?.name ?? 'Connecting…',
+            style: const TextStyle(fontSize: 18),
+          ),
           if (room != null)
             Text(
               room.goal,
@@ -72,8 +75,12 @@ class RoomScreen extends StatelessWidget {
           const SizedBox(width: 8),
           _PhaseChip(phase: room.phase),
           IconButton(
-            tooltip: store.isPaused ? 'Resume' : 'Pause',
-            icon: Icon(store.isPaused ? Icons.play_arrow : Icons.pause),
+            tooltip: store.isCompleted
+                ? 'Continue'
+                : store.isPaused
+                ? 'Resume'
+                : 'Pause',
+            icon: Icon(store.canResume ? Icons.play_arrow : Icons.pause),
             onPressed: room.phase.isFinished ? null : store.togglePause,
           ),
         ],
@@ -88,7 +95,9 @@ class RoomScreen extends StatelessWidget {
       children: [
         SizedBox(width: 260, child: RosterPane(store: store)),
         const VerticalDivider(width: 1),
-        Expanded(child: ChatPane(store: store, displayName: displayName)),
+        Expanded(
+          child: ChatPane(store: store, displayName: displayName),
+        ),
         const VerticalDivider(width: 1),
         SizedBox(width: 340, child: BoardPane(store: store)),
       ],

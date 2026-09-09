@@ -5,6 +5,10 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'dart:io';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../protocol/models.dart';
 import '../state/room_store.dart';
@@ -16,7 +20,14 @@ import 'brand.dart';
 /// chat space". Each bot gets a row: its status, the task it holds, and the
 /// last thing it actually did.
 class ActivityRail extends StatelessWidget {
-  const ActivityRail({super.key, required this.store});
+  const ActivityRail({
+    super.key,
+    required this.store,
+    this.showBoard = false,
+    this.canAnswer = true,
+  });
+
+  final bool showBoard, canAnswer;
 
   final RoomStore store;
 
@@ -25,16 +36,26 @@ class ActivityRail extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final activity = store.activity;
     return Container(
-      color: scheme.surfaceContainerLow,
+      color: scheme.surface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _header(context, activity.length),
           Expanded(
             child: ListView.builder(
-              padding: const EdgeInsets.fromLTRB(10, 10, 10, 16),
-              itemCount: activity.length,
-              itemBuilder: (context, i) => _BotRow(entry: activity[i]),
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+              itemCount: activity.length + (showBoard ? 2 : 1),
+              itemBuilder: (context, i) {
+                if (showBoard && i == 0) {
+                  return BoardStrip(
+                    store: store,
+                    canAnswer: canAnswer,
+                    embedded: true,
+                  );
+                }
+                final row = i - (showBoard ? 2 : 1);
+                if (row < 0) return _header(context, activity.length);
+                return _BotRow(entry: activity[row]);
+              },
             ),
           ),
           _footer(context),
@@ -52,13 +73,21 @@ class ActivityRail extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Icon(Icons.insights_outlined, size: 17, color: scheme.onSurfaceVariant),
+          Icon(
+            Icons.insights_outlined,
+            size: 17,
+            color: scheme.onSurfaceVariant,
+          ),
           const SizedBox(width: 9),
-          const Text('Activity',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+          const Text(
+            'Activity',
+            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+          ),
           const Spacer(),
-          Text('$count',
-              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+          Text(
+            '$count',
+            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+          ),
         ],
       ),
     );
@@ -79,16 +108,26 @@ class ActivityRail extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            spacing: 16,
+            runSpacing: 4,
             children: [
-              Text('$done of ${tasks.length} delivered',
-                  style: const TextStyle(
-                      fontSize: 12, fontWeight: FontWeight.w600)),
-              const Spacer(),
+              Text(
+                '$done of ${tasks.length} delivered',
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
               if (active > 0)
-                Text('$active in flight',
-                    style: TextStyle(
-                        fontSize: 11, color: scheme.onSurfaceVariant)),
+                Text(
+                  '$active in flight',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
             ],
           ),
           const SizedBox(height: 8),
@@ -114,21 +153,16 @@ class _BotRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final (color, label) =
-        _status(entry.agent.status, entry.streaming, entry.lastError != null);
+    final (color, label) = entry.streaming && entry.retryStatus != null
+        ? (Colors.amber, entry.retryStatus!)
+        : _status(entry.agent.status, entry.streaming, entry.lastError != null);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          // A working bot is outlined so the eye finds it immediately.
-          color: entry.streaming || entry.agent.status == AgentStatus.working
-              ? color.withValues(alpha: 0.5)
-              : scheme.outlineVariant,
-        ),
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(18),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -141,17 +175,29 @@ class _BotRow extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('@${entry.agent.handle}',
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w700, fontSize: 13)),
+                    Text(
+                      '@${entry.agent.handle}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
                     if (entry.agent.roles.isNotEmpty)
-                      Text(entry.agent.roles.join(', '),
-                          style: TextStyle(
-                              fontSize: 11, color: scheme.onSurfaceVariant)),
+                      Text(
+                        entry.agent.roles
+                            .map((r) => r.replaceAll('_', ' '))
+                            .join(', '),
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
                   ],
                 ),
               ),
-              StatusPill(color: color, label: label),
+              Flexible(
+                child: StatusPill(color: color, label: label),
+              ),
             ],
           ),
           if (entry.taskTitle != null) ...[
@@ -159,20 +205,30 @@ class _BotRow extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(Icons.subdirectory_arrow_right,
-                    size: 13, color: scheme.onSurfaceVariant),
+                Icon(
+                  Icons.subdirectory_arrow_right,
+                  size: 13,
+                  color: scheme.onSurfaceVariant,
+                ),
                 const SizedBox(width: 6),
                 Expanded(
-                  child: Text(entry.taskTitle!,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 12)),
+                  child: Text(
+                    entry.taskTitle!,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12),
+                  ),
                 ),
               ],
             ),
           ],
           if (entry.lastError != null) ...[
             const SizedBox(height: 9),
+            Text(
+              'Previous turn failed${_ago(entry.lastErrorAt)}',
+              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 4),
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(8),
@@ -184,33 +240,74 @@ class _BotRow extends StatelessWidget {
                 entry.errorStreak > 1
                     ? '${entry.lastError} (${entry.errorStreak} in a row)'
                     : entry.lastError!,
-                maxLines: 4,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                    fontSize: 10.5,
-                    height: 1.35,
-                    color: scheme.onErrorContainer),
+                  fontSize: 10.5,
+                  height: 1.35,
+                  color: scheme.onErrorContainer,
+                ),
               ),
             ),
           ],
-          if (entry.lastAction != null) ...[
+          if (entry.lastError != null)
+            TextButton(
+              onPressed: () => showModalBottomSheet<void>(
+                context: context,
+                isScrollControlled: true,
+                showDragHandle: true,
+                builder: (context) => SafeArea(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '@${entry.agent.handle} · Error details',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          const SizedBox(height: 12),
+                          SelectableText(entry.lastError!),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              child: const Text('View error details'),
+            ),
+          if (entry.lastAction != null &&
+              !entry.lastAction!.startsWith('turn failed:')) ...[
             const SizedBox(height: 8),
             Text(
               entry.lastAction! + _ago(entry.lastActionAt),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                  fontSize: 11, height: 1.3, color: scheme.onSurfaceVariant),
+                fontSize: 11,
+                height: 1.3,
+                color: scheme.onSurfaceVariant,
+              ),
             ),
           ],
-          if (entry.tasksSubmitted + entry.reviewsGiven + entry.handoffsSent > 0) ...[
+          if (entry.tasksSubmitted + entry.reviewsGiven + entry.handoffsSent >
+              0) ...[
             const SizedBox(height: 8),
             Wrap(
               spacing: 12,
               children: [
                 if (entry.tasksSubmitted > 0)
-                  _Tally(icon: Icons.check_circle_outline, n: entry.tasksSubmitted),
+                  _Tally(
+                    icon: Icons.check_circle_outline,
+                    n: entry.tasksSubmitted,
+                  ),
                 if (entry.reviewsGiven > 0)
-                  _Tally(icon: Icons.rate_review_outlined, n: entry.reviewsGiven),
+                  _Tally(
+                    icon: Icons.rate_review_outlined,
+                    n: entry.reviewsGiven,
+                  ),
                 if (entry.handoffsSent > 0)
                   _Tally(icon: Icons.swap_horiz, n: entry.handoffsSent),
               ],
@@ -222,11 +319,12 @@ class _BotRow extends StatelessWidget {
   }
 
   static (Color, String) _status(
-      AgentStatus status, bool streaming, bool failing) {
-    // A backend that will not start outranks anything else: a bot that cannot
-    // take a turn must never read as "ready".
-    if (failing) return (Colors.red, 'failing');
+    AgentStatus status,
+    bool streaming,
+    bool failing,
+  ) {
     if (streaming) return (Colors.lightBlue, 'thinking');
+    if (failing) return (Colors.red, 'last turn failed');
     switch (status) {
       case AgentStatus.working:
         return (Colors.blue, 'working');
@@ -264,84 +362,358 @@ class _Tally extends StatelessWidget {
       children: [
         Icon(icon, size: 12, color: scheme.onSurfaceVariant),
         const SizedBox(width: 3),
-        Text('$n',
-            style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
+        Text(
+          '$n',
+          style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+        ),
       ],
     );
   }
 }
 
 /// The room transcript.
-class Transcript extends StatelessWidget {
-  const Transcript({super.key, required this.store, required this.controller});
+class Transcript extends StatefulWidget {
+  const Transcript({
+    super.key,
+    required this.store,
+    required this.controller,
+    this.attachmentRoot,
+    this.onOpenAttachment,
+  });
 
   final RoomStore store;
   final ScrollController controller;
+  final String? attachmentRoot;
+  final void Function(ChatFile)? onOpenAttachment;
+
+  @override
+  State<Transcript> createState() => _TranscriptState();
+}
+
+class _TranscriptState extends State<Transcript>
+    with AutomaticKeepAliveClientMixin {
+  final _center = UniqueKey();
+  String? _boundary;
+  List<ChatMessage> _messages = [];
+  bool _following = true;
+  bool _interacting = false;
+  bool _scheduled = false;
+
+  @override
+  bool get wantKeepAlive => true;
+
+  // A fixed boundary lets Flutter grow history upwards and arrivals downwards.
+  // Appending never renumbers the mounted history or changes its scroll origin.
+  @override
+  void initState() {
+    super.initState();
+    final messages = widget.store.messages;
+    final confirmed = messages.where((m) => !widget.store.isPending(m));
+    if (confirmed.isNotEmpty) _boundary = confirmed.last.id;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted &&
+          _following &&
+          !_interacting &&
+          widget.controller.hasClients) {
+        _latest();
+      }
+    });
+  }
+
+  void _refresh() {
+    if (_scheduled) return;
+    _scheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scheduled = false;
+      if (!mounted) return;
+      setState(() {});
+    });
+  }
+
+  void _hold() {
+    _interacting = true;
+    _following = false;
+    _refresh();
+  }
+
+  bool _scroll(ScrollNotification notice) {
+    if (notice.depth != 0) return false;
+    if (notice is ScrollStartNotification) _hold();
+    if (notice is ScrollEndNotification) {
+      _interacting = false;
+      _following = notice.metrics.extentAfter <= 24;
+      _refresh();
+    }
+    return false;
+  }
+
+  void _latest() {
+    setState(() {
+      _interacting = false;
+      _following = true;
+    });
+    // No queued animations: dragging can always take over immediately.
+    widget.controller.jumpTo(widget.controller.position.maxScrollExtent);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final failing = store.failing;
-    final messages = store.messages;
-    if (messages.isEmpty && failing.isEmpty) {
-      return const EmptyState(
-        icon: Icons.forum_outlined,
-        title: 'The room is quiet',
-        message: 'The bots are getting started. Anything you say goes to all '
-            'of them — watch the activity panel to see what they are doing.',
-      );
-    }
-    if (failing.isNotEmpty) {
-      return Column(
-        children: [
-          _FailureBanner(failing: failing),
-          Expanded(child: _list(context, store, messages)),
-        ],
-      );
-    }
-    return _list(context, store, messages);
-  }
+    super.build(context);
+    final store = widget.store;
+    // Retain the last complete transcript while a reconnect replays its journal.
+    if (!store.isReplaying || _messages.isEmpty) _messages = store.messages;
+    final messages = _messages;
+    final boundary = messages.indexWhere((m) => m.id == _boundary);
+    final split = boundary + 1;
+    final composing = store.activity.where((a) => a.streaming).toList();
+    final scheme = Theme.of(context).colorScheme;
+    final indices = {
+      for (var i = 0; i < messages.length; i++) messages[i].id: i,
+    };
 
-  Widget _list(
-      BuildContext context, RoomStore store, List<ChatMessage> messages) {
-    // SelectionArea rather than a SelectableText per bubble: it selects across
-    // the whole conversation, and avoids EditableText, which never settles
-    // inside a widget test.
-    //
-    // A bot turn can run for a minute, so showing who is composing turns that
-    // wait from "nothing is happening" into "something is happening".
-    final composing = store.activity
-        .where((entry) => entry.streaming)
-        .map((entry) => entry.agent.handle)
-        .toList();
-    return SelectionArea(
-      child: ListView.builder(
-        controller: controller,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        itemCount: messages.length + (composing.isEmpty ? 0 : 1),
-        itemBuilder: (context, i) {
-          if (i >= messages.length) return _Typing(handles: composing);
+    SliverChildBuilderDelegate children(
+      int count,
+      int Function(int) index,
+      int? Function(int) childIndex,
+    ) {
+      return SliverChildBuilderDelegate(
+        (context, i) {
+          final message = messages[index(i)];
           return _Bubble(
-            message: messages[i],
+            key: ValueKey(message.id),
+            message: message,
             store: store,
-            pending: store.isPending(messages[i]),
+            pending: store.isPending(message),
+            attachmentRoot: widget.attachmentRoot,
+            onOpenAttachment: widget.onOpenAttachment,
           );
         },
-      ),
+        childCount: count,
+        findChildIndexCallback: (key) {
+          final i = indices[(key as ValueKey<String>).value];
+          return i == null ? null : childIndex(i);
+        },
+      );
+    }
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Listener(
+            onPointerDown: (_) => _hold(),
+            onPointerUp: (_) {
+              _interacting = false;
+              if (!widget.controller.position.isScrollingNotifier.value) {
+                _following = widget.controller.position.extentAfter <= 24;
+                _refresh();
+              }
+            },
+            onPointerCancel: (_) => _interacting = false,
+            onPointerSignal: (_) => _hold(),
+            child: NotificationListener<ScrollNotification>(
+              onNotification: _scroll,
+              child: ScrollConfiguration(
+                behavior: ScrollConfiguration.of(
+                  context,
+                ).copyWith(scrollbars: false),
+                child: Scrollbar(
+                  interactive: true,
+                  controller: widget.controller,
+                  child: SelectionArea(
+                    child: CustomScrollView(
+                      controller: widget.controller,
+                      center: _center,
+                      anchor: 1,
+                      physics: _TranscriptPhysics(
+                        follow: () => _following && !_interacting,
+                      ),
+                      slivers: [
+                        SliverPadding(
+                          padding: const EdgeInsets.symmetric(horizontal: 20),
+                          sliver: _AnchoredSliverList(
+                            hold: () => !_following,
+                            delegate: children(
+                              split,
+                              (i) => split - 1 - i,
+                              (i) => i < split ? split - 1 - i : null,
+                            ),
+                          ),
+                        ),
+                        SliverPadding(
+                          key: _center,
+                          padding: const EdgeInsets.symmetric(horizontal: 20),
+                          sliver: _AnchoredSliverList(
+                            hold: () => !_following,
+                            delegate: children(
+                              messages.length - split,
+                              (i) => split + i,
+                              (i) => i >= split ? i - split : null,
+                            ),
+                          ),
+                        ),
+                        const SliverToBoxAdapter(child: SizedBox(height: 48)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        if (messages.isEmpty && composing.isEmpty && store.failing.isEmpty)
+          const Positioned.fill(
+            child: IgnorePointer(
+              child: EmptyState(
+                icon: Icons.forum_outlined,
+                title: 'Your room is ready',
+                message:
+                    'Send a message or tag a teammate with @. Conversations are saved here.',
+              ),
+            ),
+          ),
+        if (store.failing.isNotEmpty)
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: _FailureBanner(failing: store.failing),
+          ),
+        if (composing.isNotEmpty && _following)
+          Positioned(
+            left: 20,
+            right: 20,
+            bottom: 0,
+            child: ColoredBox(
+              color: scheme.surface,
+              child: _Typing(
+                handles: composing.map((a) => a.agent.handle).toList(),
+                status: composing.length == 1
+                    ? composing.single.retryStatus
+                    : null,
+              ),
+            ),
+          ),
+        if (!_following)
+          Positioned(
+            bottom: 12,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: FilledButton.tonalIcon(
+                onPressed: _latest,
+                icon: const Icon(Icons.arrow_downward, size: 16),
+                label: const Text('Jump to latest'),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
 
+// Keep the first visible message fixed when a mounted neighbor changes height.
+// Native slivers still own virtualization, measurement and gesture physics;
+// their scrollOffsetCorrection applies this adjustment before the frame paints.
+class _AnchoredSliverList extends SliverList {
+  const _AnchoredSliverList({required super.delegate, required this.hold});
+  final bool Function() hold;
+  @override
+  RenderSliverList createRenderObject(BuildContext context) =>
+      _AnchoredListRender(
+        childManager: context as SliverMultiBoxAdaptorElement,
+        hold: hold,
+      );
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _AnchoredListRender renderObject,
+  ) {
+    renderObject.hold = hold;
+  }
+}
+
+class _AnchoredListRender extends RenderSliverList {
+  _AnchoredListRender({required super.childManager, required this.hold});
+  bool Function() hold;
+  @override
+  void performLayout() {
+    RenderBox? anchor;
+    double? before;
+    final reverse = constraints.growthDirection == GrowthDirection.reverse;
+    if (hold()) {
+      final start = constraints.scrollOffset;
+      final end = start + constraints.remainingPaintExtent;
+      for (var child = firstChild; child != null; child = childAfter(child)) {
+        final offset = childScrollOffset(child);
+        if (offset == null || !child.hasSize) continue;
+        if (anchor == null &&
+            offset < end &&
+            offset + child.size.height > start) {
+          anchor = child;
+          before = offset + (reverse ? child.size.height : 0);
+        }
+        if (offset >= start && offset < end) {
+          if (!reverse || offset + child.size.height <= end) {
+            anchor = child;
+            before = offset + (reverse ? child.size.height : 0);
+            if (!reverse) break;
+          }
+        }
+      }
+    }
+    super.performLayout();
+    if (anchor == null ||
+        anchor.parent != this ||
+        geometry?.scrollOffsetCorrection != null) {
+      return;
+    }
+    final offset = childScrollOffset(anchor);
+    if (offset == null) return;
+    final delta = offset + (reverse ? anchor.size.height : 0) - before!;
+    if (delta.abs() > 0.01) {
+      geometry = SliverGeometry(scrollOffsetCorrection: delta);
+    }
+  }
+}
+
+// Apply following during layout, before painting, including resized markdown
+// and keyboard changes. User input disables it before the next layout pass.
+class _TranscriptPhysics extends ScrollPhysics {
+  const _TranscriptPhysics({required this.follow, super.parent});
+  final bool Function() follow;
+
+  @override
+  _TranscriptPhysics applyTo(ScrollPhysics? ancestor) =>
+      _TranscriptPhysics(follow: follow, parent: buildParent(ancestor));
+
+  @override
+  double adjustPositionForNewDimensions({
+    required ScrollMetrics oldPosition,
+    required ScrollMetrics newPosition,
+    required bool isScrolling,
+    required double velocity,
+  }) => follow()
+      ? newPosition.maxScrollExtent
+      : super.adjustPositionForNewDimensions(
+          oldPosition: oldPosition,
+          newPosition: newPosition,
+          isScrolling: isScrolling,
+          velocity: velocity,
+        );
+}
+
 /// Shown while one or more bots are composing a reply.
 class _Typing extends StatelessWidget {
-  const _Typing({required this.handles});
+  const _Typing({required this.handles, this.status});
 
   final List<String> handles;
+  final String? status;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final who = handles.length == 1
-        ? '@${handles.first} is thinking'
+        ? '@${handles.first} ${status ?? 'is thinking'}'
         : '${handles.length} bots are thinking';
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -353,14 +725,19 @@ class _Typing extends StatelessWidget {
             width: 13,
             height: 13,
             child: CircularProgressIndicator(
-                strokeWidth: 2, color: scheme.onSurfaceVariant),
+              strokeWidth: 2,
+              color: scheme.onSurfaceVariant,
+            ),
           ),
           const SizedBox(width: 9),
-          Text(who,
-              style: TextStyle(
-                  fontSize: 12,
-                  fontStyle: FontStyle.italic,
-                  color: scheme.onSurfaceVariant)),
+          Expanded(
+            child: Text(
+              who,
+              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
         ],
       ),
     );
@@ -369,9 +746,12 @@ class _Typing extends StatelessWidget {
 
 class _Bubble extends StatelessWidget {
   const _Bubble({
+    super.key,
     required this.message,
     required this.store,
     this.pending = false,
+    this.attachmentRoot,
+    this.onOpenAttachment,
   });
 
   final ChatMessage message;
@@ -379,6 +759,8 @@ class _Bubble extends StatelessWidget {
 
   /// Sent, but the room has not confirmed it yet.
   final bool pending;
+  final String? attachmentRoot;
+  final void Function(ChatFile)? onOpenAttachment;
 
   @override
   Widget build(BuildContext context) {
@@ -389,66 +771,158 @@ class _Bubble extends StatelessWidget {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 7),
         child: Center(
-          child: Text(message.body,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                  fontSize: 11,
-                  fontStyle: FontStyle.italic,
-                  color: scheme.onSurfaceVariant)),
+          child: Text(
+            message.body,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 11,
+              fontStyle: FontStyle.italic,
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
         ),
       );
     }
 
     final isHuman = author.isHuman;
-    final name = isHuman ? (author.name ?? 'you') : store.handleFor(author.agentId);
-    final color = isHuman ? scheme.primary : handleColor(name);
+    final name = isHuman
+        ? (author.name ?? 'you')
+        : store.handleFor(author.agentId);
+    final color = isHuman
+        ? scheme.primary
+        : handleColor(
+            name,
+            dark: Theme.of(context).brightness == Brightness.dark,
+          );
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
+    final time = message.sentAt.dateTime.toLocal();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 20),
+      padding: isHuman
+          ? const EdgeInsets.all(14)
+          : const EdgeInsets.symmetric(vertical: 12),
+      decoration: BoxDecoration(
+        color: isHuman ? scheme.surfaceContainerLow : null,
+        borderRadius: BorderRadius.circular(16),
+        border: isHuman
+            ? Border.all(color: scheme.outlineVariant.withValues(alpha: 0.6))
+            : null,
+      ),
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (isHuman)
-            CircleAvatar(
-              radius: 15,
-              backgroundColor: color.withValues(alpha: 0.18),
-              child: Icon(Icons.person, size: 16, color: color),
-            )
-          else
-            BotAvatar(handle: name, radius: 15),
-          const SizedBox(width: 11),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Text(isHuman ? name : '@$name',
-                        style: TextStyle(
-                            fontWeight: FontWeight.w700,
-                            fontSize: 12.5,
-                            color: color)),
-                    if (pending) ...[
-                      const SizedBox(width: 6),
-                      Icon(Icons.schedule,
-                          size: 11, color: scheme.onSurfaceVariant),
-                    ] else if (message.intent == 'ask') ...[
-                      const SizedBox(width: 6),
-                      Icon(Icons.help_outline,
-                          size: 12, color: scheme.onSurfaceVariant),
-                    ],
-                  ],
+          Row(
+            children: [
+              if (isHuman)
+                Icon(Icons.person_outline, size: 19, color: color)
+              else
+                BotAvatar(handle: name, radius: 12),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  isHuman ? name : '@$name',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                    color: color,
+                  ),
                 ),
-                const SizedBox(height: 3),
-                Opacity(
-                  opacity: pending ? 0.55 : 1,
-                  child: Text(message.body,
-                      style: const TextStyle(fontSize: 14, height: 1.4)),
+              ),
+              const SizedBox(width: 8),
+              if (pending)
+                Text(
+                  'Pending',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                )
+              else if (message.sentAt.millis > 0)
+                Text(
+                  '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ),
-              ],
-            ),
+            ],
           ),
+          const SizedBox(height: 10),
+          Opacity(
+            opacity: pending ? 0.7 : 1,
+            child: MessageText(text: message.body),
+          ),
+          for (final file in message.files)
+            AttachmentTile(
+              file: file,
+              root: attachmentRoot,
+              onOpen: onOpenAttachment == null
+                  ? null
+                  : () => onOpenAttachment!(file),
+            ),
         ],
+      ),
+    );
+  }
+}
+
+/// Shared rendering for messages and saved reports. Images never load implicitly.
+class MessageText extends StatelessWidget {
+  final String text;
+  const MessageText({super.key, required this.text});
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return MarkdownBody(
+      data: text,
+      softLineBreak: true,
+      imageBuilder: (uri, title, alt) =>
+          Text(alt?.isNotEmpty == true ? alt! : 'Image attachment'),
+      onTapLink: (_, href, _) async {
+        final uri = href == null ? null : Uri.tryParse(href);
+        if (uri == null || !['https', 'http'].contains(uri.scheme)) return;
+        try {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+        } catch (_) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Could not open this link.')),
+            );
+          }
+        }
+      },
+      styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
+        p: TextStyle(fontSize: 15, height: 1.55, color: scheme.onSurface),
+        h1: TextStyle(
+          fontSize: 21,
+          height: 1.4,
+          fontWeight: FontWeight.w600,
+          color: scheme.onSurface,
+        ),
+        h2: TextStyle(
+          fontSize: 18,
+          height: 1.4,
+          fontWeight: FontWeight.w600,
+          color: scheme.onSurface,
+        ),
+        h3: TextStyle(
+          fontSize: 16,
+          height: 1.4,
+          fontWeight: FontWeight.w600,
+          color: scheme.onSurface,
+        ),
+        code: TextStyle(
+          fontFamily: 'monospace',
+          fontSize: 13,
+          color: scheme.onSurface,
+        ),
+        codeblockDecoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        blockSpacing: 12,
       ),
     );
   }
@@ -456,16 +930,56 @@ class _Bubble extends StatelessWidget {
 
 /// A compact board across the top of the chat.
 class BoardStrip extends StatelessWidget {
-  const BoardStrip({super.key, required this.store});
+  const BoardStrip({
+    super.key,
+    required this.store,
+    this.canAnswer = true,
+    this.embedded = false,
+  });
+
+  final bool embedded;
 
   final RoomStore store;
+  final bool canAnswer;
+
+  Future<void> _answer(BuildContext context, Task task) async {
+    var reply = '';
+    final answer = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Reply to the team'),
+        content: TextField(
+          autofocus: true,
+          minLines: 2,
+          maxLines: 5,
+          decoration: const InputDecoration(
+            hintText: 'What has changed, or how should they proceed?',
+          ),
+          onChanged: (value) => reply = value,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (reply.trim().isNotEmpty) Navigator.pop(context, reply.trim());
+            },
+            child: const Text('Send reply'),
+          ),
+        ],
+      ),
+    );
+    if (answer != null) store.answer(task.id, answer);
+  }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final tasks = store.tasks;
     return Container(
-      constraints: const BoxConstraints(maxHeight: 210),
+      constraints: embedded ? null : const BoxConstraints(maxHeight: 210),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerLow,
         border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
@@ -473,12 +987,23 @@ class BoardStrip extends StatelessWidget {
       child: tasks.isEmpty
           ? Padding(
               padding: const EdgeInsets.all(16),
-              child: Text('The board is empty.',
-                  style: TextStyle(color: scheme.onSurfaceVariant)),
+              child: Text(
+                'The board is empty.',
+                style: TextStyle(color: scheme.onSurfaceVariant),
+              ),
             )
           : ListView(
+              physics: embedded ? const NeverScrollableScrollPhysics() : null,
+              shrinkWrap: true,
               padding: const EdgeInsets.all(12),
               children: [
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 18, top: 4),
+                  child: Text(
+                    'Tasks · ${tasks.length}',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
                 for (final task in tasks)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 8),
@@ -486,21 +1011,58 @@ class BoardStrip extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         StatusPill(
-                            color: taskColor(task.state), label: task.state.label),
+                          color: taskColor(task.state),
+                          label: task.state.label,
+                        ),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(task.title,
-                                  style: const TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w600)),
+                              Text(
+                                task.title,
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
                               if (task.assignee != null)
-                                Text('@' + store.handleFor(task.assignee),
+                                Text(
+                                  '@' + store.handleFor(task.assignee),
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: scheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              for (final reason in task.blockReasons)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 6),
+                                  child: Text(
+                                    (reason['prompt'] ??
+                                            reason['description'] ??
+                                            reason['detail'] ??
+                                            reason['kind'] ??
+                                            'Waiting for input')
+                                        .toString(),
                                     style: TextStyle(
-                                        fontSize: 11,
-                                        color: scheme.onSurfaceVariant)),
+                                      fontSize: 12,
+                                      color: scheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ),
+                              if (task.blockReasons.any(
+                                (r) => r['kind'] == 'awaiting_human',
+                              ))
+                                TextButton(
+                                  onPressed: canAnswer
+                                      ? () => _answer(context, task)
+                                      : null,
+                                  child: Text(
+                                    canAnswer
+                                        ? 'Reply to unblock'
+                                        : 'Open the room to reply',
+                                  ),
+                                ),
                             ],
                           ),
                         ),
@@ -537,45 +1099,181 @@ Color taskColor(TaskState state) {
 
 /// The message input.
 class Composer extends StatelessWidget {
-  const Composer({super.key, required this.controller, required this.onSend});
+  const Composer({
+    super.key,
+    required this.controller,
+    required this.onSend,
+    this.mentions = const [],
+    this.attachments = const [],
+    this.attachmentRoot,
+    this.onAttach,
+    this.onRemoveAttachment,
+    this.onOpenAttachment,
+    this.busy = false,
+    this.busyLabel = 'Preparing attachments…',
+  });
 
   final TextEditingController controller;
   final VoidCallback onSend;
+  final List<String> mentions;
+  final List<ChatFile> attachments;
+  final String? attachmentRoot;
+  final VoidCallback? onAttach;
+  final void Function(ChatFile)? onRemoveAttachment, onOpenAttachment;
+  final bool busy;
+  final String busyLabel;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+      padding: const EdgeInsets.all(6),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: TextField(
-              controller: controller,
-              minLines: 1,
-              maxLines: 5,
-              textInputAction: TextInputAction.send,
-              onSubmitted: (_) => onSend(),
-              decoration: InputDecoration(
-                hintText: 'Message the room…',
-                filled: true,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(24),
-                  borderSide: BorderSide.none,
-                ),
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
+          if (attachments.isNotEmpty)
+            SizedBox(
+              height: MediaQuery.textScalerOf(context).scale(76) + 36,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: [
+                  for (final file in attachments)
+                    AttachmentTile(
+                      file: file,
+                      root: attachmentRoot,
+                      onOpen: onOpenAttachment == null
+                          ? null
+                          : () => onOpenAttachment!(file),
+                      onRemove: busy || onRemoveAttachment == null
+                          ? null
+                          : () => onRemoveAttachment!(file),
+                    ),
+                ],
               ),
             ),
-          ),
-          const SizedBox(width: 9),
-          FilledButton(
-            onPressed: onSend,
-            style: FilledButton.styleFrom(
-              shape: const CircleBorder(),
-              padding: const EdgeInsets.all(15),
+          if (busy)
+            Padding(
+              padding: EdgeInsets.all(8),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      busyLabel,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
             ),
-            child: const Icon(Icons.arrow_upward, size: 19),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              if (onAttach != null || mentions.isNotEmpty)
+                PopupMenuButton<String>(
+                  tooltip: 'Add to message',
+                  enabled: !busy,
+                  icon: const Icon(Icons.add_rounded, size: 24),
+                  itemBuilder: (_) => [
+                    if (onAttach != null)
+                      const PopupMenuItem(
+                        value: 'file',
+                        child: Row(
+                          children: [
+                            Icon(Icons.attach_file, size: 18),
+                            SizedBox(width: 12),
+                            Text('Attach files'),
+                          ],
+                        ),
+                      ),
+                    if (onAttach != null && mentions.isNotEmpty)
+                      const PopupMenuDivider(),
+                    if (mentions.isNotEmpty)
+                      const PopupMenuItem(value: '@all', child: Text('@all')),
+                    for (final handle in mentions)
+                      PopupMenuItem(value: '@$handle', child: Text('@$handle')),
+                  ],
+                  onSelected: (value) {
+                    if (value == 'file') {
+                      onAttach?.call();
+                      return;
+                    }
+                    final selection = controller.selection;
+                    final start = selection.isValid
+                        ? selection.start
+                        : controller.text.length;
+                    final end = selection.isValid ? selection.end : start;
+                    final tag =
+                        '${start > 0 && !RegExp(r'\s').hasMatch(controller.text[start - 1]) ? ' ' : ''}$value ';
+                    controller.value = TextEditingValue(
+                      text: controller.text.replaceRange(start, end, tag),
+                      selection: TextSelection.collapsed(
+                        offset: start + tag.length,
+                      ),
+                    );
+                  },
+                ),
+              Expanded(
+                child: TextField(
+                  controller: controller,
+                  enabled: !busy,
+                  minLines: 1,
+                  maxLines: 5,
+                  style: const TextStyle(fontSize: 14, height: 1.5),
+                  textInputAction: TextInputAction.send,
+                  onSubmitted: (_) {
+                    if (!busy &&
+                        (controller.text.trim().isNotEmpty ||
+                            attachments.isNotEmpty)) {
+                      onSend();
+                    }
+                  },
+                  decoration: const InputDecoration(
+                    hintText: 'Message the room…',
+                    filled: false,
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    disabledBorder: InputBorder.none,
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 12,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              ValueListenableBuilder<TextEditingValue>(
+                valueListenable: controller,
+                builder: (context, value, _) => Tooltip(
+                  message: 'Send message',
+                  child: FilledButton(
+                    onPressed:
+                        busy ||
+                            (value.text.trim().isEmpty && attachments.isEmpty)
+                        ? null
+                        : onSend,
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(44, 44),
+                      shape: const CircleBorder(),
+                      padding: const EdgeInsets.all(12),
+                    ),
+                    child: const Icon(Icons.arrow_upward_rounded, size: 20),
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -583,7 +1281,117 @@ class Composer extends StatelessWidget {
   }
 }
 
-/// Says why a room is doing nothing.
+class AttachmentTile extends StatelessWidget {
+  const AttachmentTile({
+    super.key,
+    required this.file,
+    this.root,
+    this.onOpen,
+    this.onRemove,
+  });
+  final ChatFile file;
+  final String? root;
+  final VoidCallback? onOpen, onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final preview =
+        root != null &&
+        file.images > 0 &&
+        RegExp(r'^att_[a-f0-9]{32}$').hasMatch(file.id);
+    final size = file.bytes < 1024 * 1024
+        ? '${(file.bytes / 1024).ceil()} KB'
+        : '${(file.bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    return Container(
+      width: 264,
+      margin: const EdgeInsets.only(right: 8, top: 6, bottom: 6),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHigh,
+        border: Border.all(color: scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Tooltip(
+        message: '${file.name}\n${file.note}',
+        child: InkWell(
+          onTap: onOpen,
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Row(
+              children: [
+                if (preview)
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: Image.file(
+                      File('$root/${file.id}/image-0.jpg'),
+                      width: 48,
+                      height: 64,
+                      fit: BoxFit.cover,
+                      cacheWidth: 128,
+                      errorBuilder: (_, _, _) =>
+                          const Icon(Icons.image_outlined, size: 32),
+                    ),
+                  )
+                else
+                  Icon(
+                    file.images > 0
+                        ? Icons.image_outlined
+                        : Icons.description_outlined,
+                    size: 32,
+                    color: scheme.primary,
+                  ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        file.name,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      Text(
+                        size,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                      if (file.note.isNotEmpty)
+                        Text(
+                          file.note,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                if (onRemove != null)
+                  IconButton(
+                    tooltip: 'Remove ${file.name}',
+                    onPressed: onRemove,
+                    icon: const Icon(Icons.close, size: 18),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Shows an unsuccessful turn without presenting an active retry as failed.
 ///
 /// Every bot failing to take a turn used to be indistinguishable from every
 /// bot having nothing to do. The most common cause is a backend that will not
@@ -598,41 +1406,59 @@ class _FailureBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final worst = failing.first;
-    return Container(
-      width: double.infinity,
-      color: scheme.errorContainer,
-      padding: const EdgeInsets.fromLTRB(16, 11, 16, 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+    return Material(
+      color: scheme.surfaceContainerLow,
+      child: InkWell(
+        onTap: () => showModalBottomSheet<void>(
+          context: context,
+          showDragHandle: true,
+          isScrollControlled: true,
+          builder: (_) => SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final entry in failing) ...[
+                    Text(
+                      '@${entry.agent.handle}',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    SelectableText(
+                      '${entry.lastError ?? 'The backend did not respond'}${_BotRow._ago(entry.lastErrorAt)}',
+                    ),
+                    const SizedBox(height: 20),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          child: Row(
             children: [
-              Icon(Icons.error_outline, size: 16, color: scheme.onErrorContainer),
-              const SizedBox(width: 8),
+              Icon(Icons.error_outline, size: 17, color: scheme.error),
+              const SizedBox(width: 9),
               Expanded(
                 child: Text(
                   failing.length == 1
-                      ? '@${worst.agent.handle} cannot take a turn'
-                      : '${failing.length} bots cannot take a turn',
+                      ? '@${worst.agent.handle} — previous turn failed'
+                      : '${failing.length} bots have previous turn failures',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w700,
-                    color: scheme.onErrorContainer,
+                    fontSize: 12,
+                    color: scheme.onSurfaceVariant,
                   ),
                 ),
               ),
+              const Icon(Icons.chevron_right, size: 18),
             ],
           ),
-          const SizedBox(height: 5),
-          Text(
-            worst.lastError ?? 'the backend did not respond',
-            maxLines: 3,
-            style: TextStyle(
-                fontSize: 11.5,
-                height: 1.35,
-                color: scheme.onErrorContainer.withValues(alpha: 0.9)),
-          ),
-        ],
+        ),
       ),
     );
   }

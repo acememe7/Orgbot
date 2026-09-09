@@ -64,6 +64,8 @@ abstract class RoomLink {
 /// A live connection to one room.
 class RoomClient implements RoomLink {
   RoomClient();
+  bool _closed = false;
+  Completer<void>? _admitted;
 
   WebSocketChannel? _channel;
   StreamSubscription<Object?>? _subscription;
@@ -97,15 +99,29 @@ class RoomClient implements RoomLink {
   /// because a URL ends up in logs, history and crash reports.
   @override
   Future<void> connect(String url, {String? token}) async {
+    if (_closed) return;
     await _teardown();
     _setState(LinkState.connecting);
     try {
-      final channel = WebSocketChannel.connect(Uri.parse(url));
+      final uri = Uri.parse(url);
+      if (uri.scheme != 'wss' &&
+          !(uri.scheme == 'ws' &&
+              ['127.0.0.1', '::1', 'localhost'].contains(uri.host))) {
+        throw const FormatException('Remote room connections require wss://.');
+      }
+      final channel = WebSocketChannel.connect(uri);
       _channel = channel;
       // `ready` throws if the handshake fails, which lets us report a clean
       // error state instead of a silent dead socket.
-      await channel.ready;
-      _setState(LinkState.connected);
+      await channel.ready.timeout(const Duration(seconds: 10));
+      if (_closed) {
+        await channel.sink.close();
+        return;
+      }
+      final admitted = Completer<void>();
+      _admitted = admitted;
+      // Attach an error handler before listening; refusal can arrive immediately.
+      final admission = admitted.future.timeout(const Duration(seconds: 15));
       send({
         'type': 'hello',
         'wire_version': wireVersion,
@@ -114,12 +130,30 @@ class RoomClient implements RoomLink {
 
       _subscription = channel.stream.listen(
         _onFrame,
-        onError: (Object error) => _setState(LinkState.error),
-        onDone: () => _setState(LinkState.closed),
+        onError: (Object error) {
+          if (!admitted.isCompleted) {
+            admitted.completeError(StateError('Room connection failed.'));
+          }
+          _setState(LinkState.error);
+        },
+        onDone: () {
+          if (!admitted.isCompleted) {
+            admitted.completeError(
+              StateError('Room closed before authentication.'),
+            );
+          }
+          _setState(LinkState.closed);
+        },
         cancelOnError: false,
       );
-    } catch (_) {
+      await admission;
+      if (!_closed) _setState(LinkState.connected);
+    } catch (error) {
+      if (!_messages.isClosed) {
+        _messages.add({'type': 'error', 'message': error.toString()});
+      }
       _setState(LinkState.error);
+      await _teardown();
     }
   }
 
@@ -128,7 +162,23 @@ class RoomClient implements RoomLink {
     try {
       final decoded = jsonDecode(frame);
       if (decoded is Map) {
-        _messages.add(decoded.cast<String, Object?>());
+        final admitted = _admitted;
+        if (decoded['type'] == 'snapshot' &&
+            admitted != null &&
+            !admitted.isCompleted) {
+          if (decoded['wire_version'] == wireVersion) {
+            admitted.complete();
+          } else {
+            admitted.completeError(StateError('Incompatible room protocol.'));
+          }
+        } else if (decoded['type'] == 'closed' &&
+            admitted != null &&
+            !admitted.isCompleted) {
+          admitted.completeError(
+            StateError(decoded['reason'] as String? ?? 'Room access refused.'),
+          );
+        }
+        if (!_messages.isClosed) _messages.add(decoded.cast<String, Object?>());
       }
     } catch (_) {
       // A malformed frame is dropped rather than killing the stream.
@@ -187,6 +237,7 @@ class RoomClient implements RoomLink {
   /// Close the connection and release resources.
   @override
   Future<void> close() async {
+    _closed = true;
     await _teardown();
     _setState(LinkState.disconnected);
     await _messages.close();
@@ -200,6 +251,8 @@ class RoomClient implements RoomLink {
 /// carry, so everything above this — the store, the widgets — cannot tell which
 /// transport it got. That is the point: one room implementation, two ways in.
 class LocalRoomClient implements RoomLink {
+  final void Function(Map<String, Object?>)? onSend;
+  LocalRoomClient({this.onSend});
   final _messages = StreamController<Map<String, Object?>>.broadcast();
   final _state = StreamController<LinkState>.broadcast();
 
@@ -222,25 +275,30 @@ class LocalRoomClient implements RoomLink {
   LinkState get current => LinkState.connected;
 
   @override
-  void send(Map<String, Object?> message) => sent.add(message);
+  void send(Map<String, Object?> message) {
+    if (onSend != null) {
+      onSend!(message);
+    } else {
+      sent.add(message);
+    }
+  }
 
   @override
   void sendMessage(String author, String body, {String? taskId}) =>
-      sent.add({'type': 'send_message', 'author': author, 'body': body});
+      send({'type': 'send_message', 'author': author, 'body': body});
 
   @override
   void answerBot(String task, String answer) =>
-      sent.add({'type': 'answer', 'task': task, 'answer': answer});
+      send({'type': 'answer_bot', 'task': task, 'answer': answer});
 
   @override
-  void pause({String reason = ''}) =>
-      sent.add({'type': 'pause', 'reason': reason});
+  void pause({String reason = ''}) => send({'type': 'pause', 'reason': reason});
 
   @override
-  void resume() => sent.add({'type': 'resume'});
+  void resume() => send({'type': 'resume'});
 
   @override
-  void resync() => sent.add({'type': 'resync'});
+  void resync() => send({'type': 'resync'});
 
   /// Nothing to connect to; the engine is already running here, so there is
   /// no network for a token to protect.

@@ -27,36 +27,53 @@ void main() {
     );
     final room2 = RoomDef.fromJson(room.toJson());
     expect(room2.name, 'notes');
-    expect(room2.bots.single.botId, bot.id,
-        reason: 'a slot names the bot; the role travels with the bot itself');
+    expect(
+      room2.bots.single.botId,
+      bot.id,
+      reason: 'a slot names the bot; the role travels with the bot itself',
+    );
   });
 
   test('the library persists bots and rooms through a memory saver', () async {
     final saver = MemorySaver();
     final lib = Library(saver: saver);
     await lib.load();
-    lib.addBot(BotDef(name: 'QA', handle: 'qa', persona: 'checks',
-        provider: ProviderKind.scripted));
-    lib.addRoom(RoomDef(name: 'r', goal: 'g', bots: [
-      RoomSlot(lib.bots.first.id),
-    ]));
+    lib.userName = 'Alex';
+    lib.userProfile = 'I own the product. Ask before choosing a target market.';
+    lib.addBot(
+      BotDef(
+        name: 'QA',
+        handle: 'qa',
+        persona: 'checks',
+        provider: ProviderKind.scripted,
+      ),
+    );
+    lib.addRoom(
+      RoomDef(name: 'r', goal: 'g', bots: [RoomSlot(lib.bots.first.id)]),
+    );
     await Future<void>.delayed(Duration.zero); // let persist() settle
 
     final reloaded = Library(saver: saver);
     await reloaded.load();
     expect(reloaded.bots.single.name, 'QA');
+    expect(reloaded.userName, 'Alex');
+    expect(reloaded.userProfile, contains('target market'));
     expect(reloaded.rooms.single.bots.single.botId, reloaded.bots.single.id);
   });
 
-  test('removing a bot drops it and the rooms that used it', () async {
-    final lib = Library(saver: MemorySaver());
-    await lib.load();
-    final bot = lib.addBot(BotDef(name: 'W'));
-    lib.addRoom(RoomDef(name: 'r', bots: [RoomSlot(bot.id)]));
-    lib.removeBot(bot.id);
-    expect(lib.bots, isEmpty);
-    expect(lib.rooms, isEmpty);
-  });
+  test(
+    'removing a bot preserves its rooms and removes only the seat',
+    () async {
+      final lib = Library(saver: MemorySaver());
+      await lib.load();
+      final bot = lib.addBot(BotDef(name: 'W'));
+      lib.addRoom(RoomDef(name: 'r', bots: [RoomSlot(bot.id)]));
+      lib.removeBot(bot.id);
+      expect(lib.bots, isEmpty);
+      expect(lib.rooms.single.name, 'r');
+      expect(lib.rooms.single.bots, isEmpty);
+    },
+  );
 
   test('seeding a task puts it on the board in ready state', () {
     final engine = Engine(name: 'r', goal: 'g');

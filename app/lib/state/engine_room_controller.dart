@@ -8,10 +8,15 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
+import '../workspace/workspace.dart';
+import '../workspace/attachments.dart';
+import '../protocol/models.dart' show ChatFile;
 
 import 'package:flutter/foundation.dart';
 
 import 'dart:io';
+import 'dart:isolate';
 
 import '../engine/core_server.dart';
 import '../engine/embedded_engine.dart';
@@ -22,9 +27,19 @@ import '../orgbot/model_catalog.dart';
 import '../orgbot/room_check.dart';
 import '../orgbot/room_file.dart';
 import 'room_store.dart';
+import 'room_archive.dart';
+import 'background_rooms.dart';
 
 /// How far along starting a room is.
-enum RoomLaunch { idle, generating, starting, connecting, running, failed, closed }
+enum RoomLaunch {
+  idle,
+  generating,
+  starting,
+  connecting,
+  running,
+  failed,
+  closed,
+}
 
 /// Starts a room on the engine and keeps the UI informed while it happens.
 class EngineRoomController extends ChangeNotifier {
@@ -53,6 +68,42 @@ class EngineRoomController extends ChangeNotifier {
   EmbeddedEngine? _embedded;
   int _embeddedRoom = 0;
   Timer? _pump;
+  Timer? _renewalTimer;
+  Future<void>? _refreshingCredentials;
+  Map<String, String> _providerEnvironment = {};
+  WorkspaceConnection? workspace;
+  bool _disposed = false;
+  int _generation = 0;
+  TrustHost? trustHost;
+  bool _controlBusy = false;
+  final _workspaceCalls = <int, WorkspaceConnection>{};
+  RoomArchive? _archive;
+  StreamSubscription<Map<String, Object?>>? _archiveSubscription;
+  bool? _backgroundActive;
+  Future<void> _backgroundWriting = Future.value();
+  String draft = '';
+
+  Future<void> _background(bool active) {
+    if (_backgroundActive == active) return _backgroundWriting;
+    _backgroundActive = active;
+    return _backgroundWriting = _backgroundWriting
+        .catchError((Object _) {})
+        .then((_) => BackgroundRooms.update(room.id, active));
+  }
+
+  void _changed() {
+    if (_disposed) return;
+    final active = isRunning && _store?.isActive == true;
+    unawaited(
+      _background(active).catchError((Object _) {
+        error =
+            'Background execution is unavailable. Open the app and resume the room.';
+        _client?.pause(reason: 'Background execution unavailable');
+        if (!_disposed) notifyListeners();
+      }),
+    );
+    notifyListeners();
+  }
 
   /// Whether a room here runs in-process.
   ///
@@ -78,26 +129,45 @@ class EngineRoomController extends ChangeNotifier {
       case RoomLaunch.connecting:
         return 'Connecting…';
       case RoomLaunch.running:
-        return 'Running';
+        return _store?.runStateLabel ?? 'Running';
       case RoomLaunch.failed:
         return error ?? 'Failed to start';
       case RoomLaunch.closed:
-        return 'Closed';
+        return 'Saved';
     }
   }
 
   void _to(RoomLaunch next) {
     phase = next;
-    notifyListeners();
+    if (!_disposed) notifyListeners();
   }
 
   /// Generate the room file, start the engine, and connect to it.
   Future<void> start() async {
-    if (phase != RoomLaunch.idle && phase != RoomLaunch.failed) return;
+    if (_disposed) return;
+    if (![
+      RoomLaunch.idle,
+      RoomLaunch.failed,
+      RoomLaunch.closed,
+    ].contains(phase)) {
+      return;
+    }
+    final generation = ++_generation;
     error = null;
     _to(RoomLaunch.generating);
 
     try {
+      final savedState = await RoomArchive.stateFile(room.id);
+      final restoring = await savedState.exists();
+      if (_store == null && restoring) {
+        final preview = LocalRoomClient();
+        _client = preview;
+        _store = RoomStore(preview)
+          ..restore(await RoomArchive.savedFrames(room.id));
+        _store!.addListener(_changed);
+        if (!_disposed) notifyListeners();
+      }
+      await _background(true);
       final bots = room.bots
           .map((slot) => library.botById(slot.botId))
           .whereType<BotDef>()
@@ -112,24 +182,81 @@ class EngineRoomController extends ChangeNotifier {
 
       // Subscription tokens last hours, so renew before the room starts
       // rather than letting a bot fail its first turn on a stale one.
-      await _renewSignIns(bots);
-
-      final file = buildRoomFile(room, bots,
-          credentials: ModelCatalog.credentials);
-      skipped = file.skipped;
-      if (file.toml.contains('[[bots]]') == false) {
-        throw EngineStartError(skipped.isEmpty
-            ? 'No usable bots in this room.'
-            : 'No usable bots: ${skipped.join('; ')}');
+      if (runsInProcess) await _renewSignIns(bots);
+      if (_disposed || generation != _generation) return;
+      if (runsInProcess) {
+        // Older editors displayed the first catalog entry but saved an empty id.
+        // Repair only that missing selection; explicit model choices stay intact.
+        for (final bot in bots.where(
+          (b) => b.provider.signsInOnDevice && b.model.trim().isEmpty,
+        )) {
+          final models = await ModelCatalog.load(bot.provider);
+          if (models.source != ModelSource.live || models.options.isEmpty) {
+            throw EngineStartError(
+              'Choose a model for @${bot.handle.isEmpty ? bot.name : bot.handle} in Edit bot. ${models.problem ?? 'The provider model list is unavailable.'}',
+            );
+          }
+          bot.model = models.options.first.id;
+        }
+        final connection = WorkspaceConnection(room.workspace.copy(), room.id);
+        workspace = connection;
+        if (!restoring) await connection.connect(trust: trustHost);
+        if (_disposed || generation != _generation) {
+          await connection.close();
+          return;
+        }
+        if (!restoring) {
+          room.workspace.fingerprint = connection.config.fingerprint;
+        }
+        await library.save();
       }
 
+      final file = buildRoomFile(
+        room,
+        bots,
+        credentials: ModelCatalog.credentials,
+        workspace: workspace == null
+            ? null
+            : {
+                ...workspace!.description,
+                if (restoring)
+                  'root': room.workspace.path.isNotEmpty
+                      ? room.workspace.path
+                      : '${await WorkspaceConnection.phoneBase()}/${room.id}',
+              },
+        userName: library.userName,
+        userProfile: library.userProfile,
+        statePath: savedState.path,
+      );
+      skipped = file.skipped;
+      if (file.toml.contains('[[bots]]') == false) {
+        throw EngineStartError(
+          skipped.isEmpty
+              ? 'No usable bots in this room.'
+              : 'No usable bots: ${skipped.join('; ')}',
+        );
+      }
+
+      _archive = await RoomArchive.open(room.id, (message) {
+        error = message;
+        if (!_disposed) notifyListeners();
+      });
+      if (_disposed || generation != _generation) {
+        await _archive?.close();
+        return;
+      }
       _to(RoomLaunch.starting);
       if (runsInProcess) {
         await _startEmbedded(file);
       } else {
         await _startSubprocess(file);
       }
+      if (_disposed || generation != _generation) {
+        await _teardown();
+        return;
+      }
       _to(RoomLaunch.running);
+      _changed();
     } catch (e) {
       error = e.toString();
       await _teardown();
@@ -139,18 +266,19 @@ class EngineRoomController extends ChangeNotifier {
 
   /// Refresh any sign-in this room needs that is close to expiry.
   ///
-  /// A failure here is deliberately not fatal: the bot that needed it is
-  /// reported as skipped when the room file is built, which says which
-  /// provider to sign in to again, and the rest of the room still runs.
+  /// Keep transient failures explicit, without deleting the saved sign-in.
   Future<void> _renewSignIns(List<BotDef> bots) async {
     final credentials = ModelCatalog.credentials;
     if (credentials == null) return;
+    await credentials.load();
     for (final provider in bots.map((b) => b.provider).toSet()) {
       if (!credentials.isSignedIn(provider)) continue;
       try {
         await credentials.freshToken(provider);
       } catch (_) {
-        // Left to the room file to report as a skipped bot.
+        throw EngineStartError(
+          'Could not refresh ${provider.label}. Check the connection and retry.',
+        );
       }
     }
   }
@@ -158,16 +286,26 @@ class EngineRoomController extends ChangeNotifier {
   /// Run the room as a child process and talk to it over a socket.
   Future<void> _startSubprocess(RoomFile file) async {
     final server = await startRoom(file);
+    if (_disposed) {
+      await server.stop();
+      return;
+    }
     _server = server;
 
     _to(RoomLaunch.connecting);
     final client = RoomClient();
+    await _client?.close();
+    _store?.removeListener(_changed);
+    _store?.dispose();
     _client = client;
+    _archiveSubscription = client.messages.listen(
+      (message) => _archive?.append([message]),
+    );
     final store = RoomStore(client);
     _store = store;
-    store.addListener(notifyListeners);
+    store.addListener(_changed);
 
-    await client.connect(server.url);
+    await client.connect(server.url, token: server.token);
     if (client.current == LinkState.error) {
       throw EngineStartError('Connected to the engine but the socket failed.');
     }
@@ -177,19 +315,43 @@ class EngineRoomController extends ChangeNotifier {
   Future<void> _startEmbedded(RoomFile file) async {
     final engine = EmbeddedEngine.load();
     _embedded = engine;
-    _embeddedRoom = engine.openRoom(file.toml, file.environment);
+    _providerEnvironment = Map.of(file.environment);
+    _embeddedRoom = await _openEmbeddedRoom(file.toml, file.environment);
+    if (_disposed) {
+      engine.closeRoom(_embeddedRoom);
+      _embeddedRoom = 0;
+      return;
+    }
 
     _to(RoomLaunch.connecting);
     // The store is fed the same wire messages the socket would carry, so
     // nothing above it knows which transport it got.
-    final client = LocalRoomClient();
+    final client = LocalRoomClient(
+      onSend: (message) {
+        if (_embeddedRoom == 0) return;
+        if (!engine.control(_embeddedRoom, message)) {
+          error = 'Engine control was not accepted. Try again.';
+          if (!_disposed) notifyListeners();
+        } else if (message['type'] == 'pause') {
+          unawaited(workspace?.close());
+        }
+      },
+    );
+    await _client?.close();
+    _store?.removeListener(_changed);
+    _store?.dispose();
     _client = client;
+    _archiveSubscription = client.messages.listen(
+      (message) => _archive?.append([message]),
+    );
     final store = RoomStore(client);
     _store = store;
-    store.addListener(notifyListeners);
+    store.addListener(_changed);
 
     final snapshot = engine.snapshot(_embeddedRoom);
     if (snapshot != null) client.deliver(snapshot);
+    // Includes the saved transcript and board on a restored native room.
+    engine.control(_embeddedRoom, {'type': 'resync'});
 
     // Poll rather than call back: a callback from a Rust worker thread has to
     // be marshalled to this isolate, and getting that wrong is a crash.
@@ -197,55 +359,289 @@ class EngineRoomController extends ChangeNotifier {
       final room = _embeddedRoom;
       if (room == 0) return;
       for (final message in engine.poll(room)) {
-        client.deliver(message);
+        if (message['type'] == 'workspace_call') {
+          unawaited(_executeWorkspace(message));
+        } else if (message['type'] == 'workspace_cancel') {
+          unawaited(_workspaceCalls[message['id']]?.cancelOperation());
+        } else {
+          client.deliver(message);
+        }
       }
     });
+    _renewalTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (_store?.isActive != true) return;
+      unawaited(
+        _refreshProviderCredentials().catchError((Object e) {
+          error = e.toString();
+          _client?.pause(reason: 'Sign-in needs attention');
+          if (!_disposed) notifyListeners();
+        }),
+      );
+    });
+  }
+
+  Future<void> _refreshProviderCredentials() async {
+    if (_refreshingCredentials != null) return _refreshingCredentials;
+    final future = _updateProviderCredentials();
+    _refreshingCredentials = future;
+    try {
+      await future;
+    } finally {
+      _refreshingCredentials = null;
+    }
+  }
+
+  Future<void> _updateProviderCredentials() async {
+    final credentials = ModelCatalog.credentials;
+    final handle = _embeddedRoom;
+    if (credentials == null || handle == 0) return;
+    final environment = Map<String, String>.of(_providerEnvironment);
+    for (final provider in ProviderKind.values.where(
+      (p) => p.signsInOnDevice,
+    )) {
+      final key = credentialEnvVar(provider);
+      if (!environment.containsKey(key)) continue;
+      final token = await credentials.freshToken(provider);
+      if (token == null) {
+        throw EngineStartError(
+          'Sign in to ${provider.label} again from Accounts, then resume this room.',
+        );
+      }
+      environment[key] = token;
+    }
+    if (_disposed ||
+        handle != _embeddedRoom ||
+        mapEquals(environment, _providerEnvironment)) {
+      return;
+    }
+    if (_embedded?.control(handle, {
+          'type': 'update_credentials',
+          'environment': environment,
+        }) !=
+        true) {
+      throw EngineStartError(
+        'Could not update the room sign-in. Stop and reopen this saved room.',
+      );
+    }
+    _providerEnvironment = environment;
+  }
+
+  Future<void> _executeWorkspace(Map<String, Object?> message) async {
+    final handle = _embeddedRoom;
+    _store?.noteWorkspace(
+      message['agent'] as String,
+      message['name'] as String,
+    );
+    final elapsed = Stopwatch()..start();
+    Object? result;
+    var failed = false;
+    try {
+      final connection = workspace;
+      if (connection == null) throw StateError('No computer is connected.');
+      _workspaceCalls[message['id'] as int] = connection;
+      if (message['name'] == 'workspace_import_attachment') {
+        final id = (message['arguments'] as Map)['id'];
+        final files = _store!.messages
+            .expand((m) => m.files)
+            .where((f) => f.id == id);
+        if (files.isEmpty) {
+          throw StateError(
+            'Only files already sent to this room can be imported.',
+          );
+        }
+        final file = files.first;
+        result = await connection.importAttachment(
+          await RoomAttachments(room.id).original(file.id),
+          file.name,
+        );
+      } else {
+        result = await connection.execute(
+          message['name'] as String,
+          (message['arguments'] as Map).cast<String, Object?>(),
+        );
+      }
+      if (result is Map &&
+          result['exit_code'] != null &&
+          result['exit_code'] != 0) {
+        failed = true;
+      }
+    } catch (e) {
+      result = e.toString();
+      failed = true;
+    }
+    _workspaceCalls.remove(message['id']);
+    _archive?.append([
+      {
+        'type': 'workspace_activity',
+        'at': DateTime.now().millisecondsSinceEpoch,
+        'agent': message['agent'], 'name': message['name'],
+        'failed': failed, 'connected': workspace?.connected == true,
+        'elapsed_ms': elapsed.elapsedMilliseconds,
+        // Arguments, command output and credentials are deliberately excluded.
+      },
+    ]);
+    if (!_disposed && handle != 0 && handle == _embeddedRoom) {
+      _embedded?.control(handle, {
+        'type': 'workspace_result',
+        'id': message['id'],
+        'content': result is String ? result : jsonEncode(result),
+        'is_error': failed,
+      });
+      notifyListeners();
+    }
   }
 
   /// Say something to the room.
   ///
-  /// Shown straight away rather than waiting for the room to echo it back: a
-  /// bot turn can run for a minute and messages are applied between turns, so
-  /// the round trip is long enough to look like the app lost what you typed.
-  void say(String author, String text) {
+  /// Shown immediately, then confirmed by the room's saved transcript. New
+  /// input interrupts API waits; an active workspace operation finishes first.
+  Future<bool> say(
+    String author,
+    String text, {
+    List<ChatFile> files = const [],
+  }) async {
     final body = text.trim();
-    if (body.isEmpty) return;
-    _store?.addPending(author, body);
+    if (body.isEmpty || !isRunning || _controlBusy) return false;
+    if (_store?.isCompleted == true) {
+      _controlBusy = true;
+      try {
+        await _prepareResume();
+      } catch (e) {
+        await _background(false);
+        error = 'Could not continue: $e';
+        if (!_disposed) notifyListeners();
+        return false;
+      } finally {
+        _controlBusy = false;
+      }
+    }
+    if (_disposed || !isRunning) return false;
     final embedded = _embedded;
     if (embedded != null && _embeddedRoom != 0) {
-      embedded.say(_embeddedRoom, author, body);
+      if (!embedded.control(_embeddedRoom, {
+        'type': 'send_message',
+        'author': author,
+        'body': body,
+        'files': files.map((f) => f.id).toList(),
+      })) {
+        return false;
+      }
     } else {
-      _client?.sendMessage(author, body);
+      _client?.send({
+        'type': 'send_message',
+        'author': author,
+        'body': body,
+        if (files.isNotEmpty) 'files': files.map((f) => f.id).toList(),
+      });
     }
+    _store?.addPending(author, body, files: files);
     notifyListeners();
+    return true;
   }
 
   /// Pause or resume, depending on where the room is.
-  void togglePause() {
+  Future<void> reconnectWorkspace() async {
+    if (_controlBusy || _disposed || _workspaceCalls.isNotEmpty) return;
+    _controlBusy = true;
+    try {
+      await workspace?.close();
+      final connection = WorkspaceConnection(room.workspace.copy(), room.id);
+      workspace = connection;
+      await connection.connect(trust: trustHost);
+      if (_disposed) {
+        await connection.close();
+        return;
+      }
+      error = null;
+    } catch (e) {
+      error = 'Reconnect failed: $e';
+    } finally {
+      _controlBusy = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  Future<void> _prepareResume() async {
+    await _background(true);
+    if (!runsInProcess) return;
+    await _refreshProviderCredentials();
+    if (workspace?.connected == true) return;
+    await workspace?.close();
+    final connection = WorkspaceConnection(room.workspace.copy(), room.id);
+    workspace = connection;
+    await connection.connect(trust: trustHost);
+    if (_disposed) {
+      await connection.close();
+      throw StateError('Room closed before continuing.');
+    }
+  }
+
+  Future<void> togglePause() async {
     final store = _store;
-    if (store == null) return;
-    store.togglePause();
+    if (store == null || _controlBusy || _disposed) return;
+    _controlBusy = true;
+    try {
+      if (store.canResume) await _prepareResume();
+      error = null;
+      store.togglePause();
+    } catch (e) {
+      await _background(false);
+      error = 'Reconnect failed: $e';
+      if (!_disposed) notifyListeners();
+    } finally {
+      _controlBusy = false;
+    }
   }
 
   Future<void> _teardown() async {
+    _renewalTimer?.cancel();
+    _renewalTimer = null;
+    _providerEnvironment = {};
     _pump?.cancel();
     _pump = null;
+    await workspace?.close();
+    workspace = null;
     final embedded = _embedded;
     if (embedded != null && _embeddedRoom != 0) {
       embedded.closeRoom(_embeddedRoom);
       _embeddedRoom = 0;
     }
     _embedded = null;
-    _store?.removeListener(notifyListeners);
+    _store?.removeListener(_changed);
+    await _archiveSubscription?.cancel();
+    _archiveSubscription = null;
+    await _archive?.close();
+    _archive = null;
     await _client?.close();
     _client = null;
     await _server?.stop();
     _server = null;
+    await _background(false);
+  }
+
+  /// Stop explicitly; navigation only detaches the screen.
+  Future<void> stop() async {
+    if (isRunning && _store?.isActive == true) {
+      _client?.pause(reason: 'Stopped by the owner');
+      for (var i = 0; i < 40 && _store?.isActive == true; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    }
+    ++_generation;
+    await _teardown();
+    _to(RoomLaunch.closed);
   }
 
   @override
-  Future<void> dispose() async {
-    await _teardown();
+  void dispose() {
+    _disposed = true;
+    ++_generation;
+    _store?.removeListener(_changed);
+    unawaited(_teardown().whenComplete(() => _store?.dispose()));
     super.dispose();
   }
 }
+
+// Only strings cross this boundary. Reading a large saved room stays off the UI.
+Future<int> _openEmbeddedRoom(String toml, Map<String, String> environment) =>
+    Isolate.run(() => EmbeddedEngine.load().openRoom(toml, environment));

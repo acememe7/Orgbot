@@ -7,6 +7,8 @@
 /// client converges on identical state.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../net/room_client.dart';
@@ -33,6 +35,7 @@ class BotActivity {
 
   /// True while a model turn is streaming, so the UI can show it thinking.
   bool streaming = false;
+  String? retryStatus;
 
   /// The most recent failure from this bot's backend, if it is failing.
   ///
@@ -40,6 +43,9 @@ class BotActivity {
   /// with nothing to do — which is how a room where every turn failed to
   /// spawn appeared as ten bots sitting quietly at "ready".
   String? lastError;
+
+  /// The original event time, retained when reopening saved history.
+  DateTime? lastErrorAt;
 
   /// How many turns in a row have failed.
   int errorStreak = 0;
@@ -53,14 +59,32 @@ class BotActivity {
 /// Observable room state.
 class RoomStore extends ChangeNotifier {
   RoomStore(this._client) {
-    _client.messages.listen(_onMessage);
-    _client.connectionState.listen((state) {
+    _messagesSub = _client.messages.listen(_onMessage);
+    _connectionSub = _client.connectionState.listen((state) {
       _connection = state;
       notifyListeners();
     });
   }
 
   final RoomLink _client;
+  late final StreamSubscription<Map<String, Object?>> _messagesSub;
+  late final StreamSubscription<LinkState> _connectionSub;
+
+  void restore(Iterable<Map<String, Object?>> frames) {
+    for (final frame in frames) {
+      _onMessage(frame);
+    }
+  }
+
+  @override
+  void dispose() {
+    _messagesSub.cancel();
+    _connectionSub.cancel();
+    super.dispose();
+  }
+
+  String? lastError;
+  String? _closedReason;
 
   LinkState _connection = LinkState.disconnected;
   LinkState get connection => _connection;
@@ -69,10 +93,24 @@ class RoomStore extends ChangeNotifier {
   Room? get room => _room;
 
   final Map<String, Agent> _agents = {};
+  int _snapshotHead = 0;
+  final Map<String, int> _snapshotErrors = {};
   final Map<String, Task> _tasks = {};
   final Map<String, Handoff> _handoffs = {};
   final List<ChatMessage> _messages = [];
+  final Map<String, Map<String, Object?>> _artifacts = {};
+  List<Map<String, Object?>> get artifacts => _artifacts.values.toList();
   final Map<String, BotActivity> _activity = {};
+
+  /// The board as a person should see it, computed by the engine.
+  ///
+  /// Never derived here: it folds every task through the same rules the
+  /// scheduler claims work by, and a second implementation in the UI would be
+  /// a second set of answers.
+  RoomDigest _digest = const RoomDigest.empty();
+
+  /// Objectives, progress, and the decisions only you can make.
+  RoomDigest get digest => _digest;
 
   /// Messages typed here but not yet confirmed by the engine.
   ///
@@ -87,6 +125,9 @@ class RoomStore extends ChangeNotifier {
   /// client attached is lost. The live subscription is taken first, so a few
   /// events arrive twice; this drops the repeats rather than showing them.
   int _appliedTo = 0;
+
+  /// A reconnect snapshot is followed by its journal, sometimes over many frames.
+  bool get isReplaying => _appliedTo < _snapshotHead;
 
   /// The roster, in a stable order (coordinators first, then by handle).
   List<Agent> get agents {
@@ -106,7 +147,9 @@ class RoomStore extends ChangeNotifier {
     final list = _tasks.values.toList();
     int rank(TaskState s) {
       if (s == TaskState.inProgress || s == TaskState.claimed) return 0;
-      if (s == TaskState.blocked || s == TaskState.inReview || s == TaskState.approved) {
+      if (s == TaskState.blocked ||
+          s == TaskState.inReview ||
+          s == TaskState.approved) {
         return 1;
       }
       if (s == TaskState.ready || s == TaskState.draft) return 2;
@@ -130,38 +173,53 @@ class RoomStore extends ChangeNotifier {
       _pending.any((candidate) => identical(candidate, message));
 
   /// Show something you just said, before the room has echoed it back.
-  void addPending(String author, String body) {
+  void addPending(
+    String author,
+    String body, {
+    List<ChatFile> files = const [],
+  }) {
     final text = body.trim();
     if (text.isEmpty) return;
-    _pending.add(ChatMessage(
-      id: 'pending_${DateTime.now().microsecondsSinceEpoch}',
-      author: Author(kind: 'human', name: author),
-      body: text,
-      intent: 'ask',
-      taskId: null,
-      sentAt: Timestamp(DateTime.now().millisecondsSinceEpoch),
-    ));
+    _pending.add(
+      ChatMessage(
+        id: 'pending_${DateTime.now().microsecondsSinceEpoch}',
+        author: Author(kind: 'human', name: author),
+        body: text,
+        intent: 'ask',
+        taskId: null,
+        sentAt: Timestamp(DateTime.now().millisecondsSinceEpoch),
+        files: files,
+      ),
+    );
     notifyListeners();
   }
 
   /// Drop a pending message once the room has confirmed the same text.
   void _confirmPending(ChatMessage arrived) {
     if (!arrived.author.isHuman) return;
-    final index = _pending.indexWhere((candidate) =>
-        candidate.body == arrived.body &&
-        candidate.author.name == arrived.author.name);
+    final index = _pending.indexWhere(
+      (candidate) =>
+          candidate.body == arrived.body &&
+          candidate.author.name == arrived.author.name &&
+          listEquals(
+            candidate.files.map((f) => f.id).toList(),
+            arrived.files.map((f) => f.id).toList(),
+          ),
+    );
     if (index >= 0) _pending.removeAt(index);
   }
 
   /// Bots whose backend is currently failing, with the reason.
   ///
   /// A room where nothing happens should say why rather than looking idle.
-  List<BotActivity> get failing =>
-      activity.where((entry) => entry.lastError != null).toList();
+  List<BotActivity> get failing => activity
+      .where((entry) => entry.lastError != null && !entry.streaming)
+      .toList();
 
   /// What each bot is doing, in roster order.
-  List<BotActivity> get activity =>
-      agents.map((a) => _activity.putIfAbsent(a.id, () => BotActivity(a))).toList();
+  List<BotActivity> get activity => agents
+      .map((a) => _activity.putIfAbsent(a.id, () => BotActivity(a)))
+      .toList();
 
   /// Note something a bot did, for the activity panel.
   void _note(String? agentId, String action) {
@@ -173,9 +231,18 @@ class RoomStore extends ChangeNotifier {
     entry.lastActionAt = DateTime.now();
   }
 
+  void noteWorkspace(String agent, String tool) {
+    _note(
+      agent,
+      "${tool.replaceAll('workspace_', '').replaceAll('_', ' ')} on working computer",
+    );
+    notifyListeners();
+  }
+
   /// Pending handoffs, for a status strip.
-  List<Handoff> get openHandoffs =>
-      _handoffs.values.where((h) => h.state == 'offered' || h.state == 'accepted').toList();
+  List<Handoff> get openHandoffs => _handoffs.values
+      .where((h) => h.state == 'offered' || h.state == 'accepted')
+      .toList();
 
   /// Look up a bot's handle by id, for rendering authors and assignees.
   String handleFor(String? agentId) {
@@ -195,6 +262,11 @@ class RoomStore extends ChangeNotifier {
     switch (message['type'] as String?) {
       case 'snapshot':
         _applySnapshot(message);
+      case 'digest':
+        // Replaced wholesale: a fold over every task cannot be patched from
+        // one event.
+        _applyDigest((message['digest'] as Map?)?.cast<String, Object?>());
+        notifyListeners();
       case 'event':
         _applyEvent((message['envelope'] as Map?)?.cast<String, Object?>());
       case 'phase':
@@ -205,34 +277,70 @@ class RoomStore extends ChangeNotifier {
         // is actively thinking, which the activity panel shows.
         final agentId = message['agent'] as String?;
         if (agentId != null && _agents.containsKey(agentId)) {
+          // A delayed stream completion can arrive after the durable idle event.
+          // It must clear the indicator, never start another "thinking" state.
+          final streamEvent = message['event'] as Map?;
+          if (streamEvent?['type'] == 'done') {
+            _activity[agentId]?.streaming = false;
+            _activity[agentId]?.retryStatus = null;
+            notifyListeners();
+            return;
+          }
           // Exactly one bot holds a turn at a time, so a delta from this one
           // means every other is no longer composing. Without clearing them
           // the flags accumulate and the room claims nine bots are thinking.
           for (final entry in _activity.entries) {
             entry.value.streaming = entry.key == agentId;
+            entry.value.retryStatus = null;
           }
-          _activity
-              .putIfAbsent(agentId, () => BotActivity(_agents[agentId]!))
-              .streaming = true;
+          final activity = _activity.putIfAbsent(
+            agentId,
+            () => BotActivity(_agents[agentId]!),
+          );
+          activity.streaming = true;
+          if (streamEvent?['type'] == 'retry') {
+            activity.retryStatus =
+                'Reconnecting (${streamEvent?['attempt']}/${streamEvent?['max_retries']})';
+          }
           notifyListeners();
         }
       case 'closed':
-        _room?.phase = RoomPhase.completed;
+        _closedReason = message['reason'] as String?;
+        _room?.phase = _limitReached || _closedReason == 'the room was paused'
+            ? RoomPhase.paused
+            : RoomPhase.completed;
         notifyListeners();
       case 'error':
         // A lag notice: ask for a fresh snapshot to catch back up.
-        _client.resync();
+        lastError = message['message'] as String?;
+        notifyListeners();
     }
   }
 
+  /// Take a new digest. Does not notify: a snapshot applies this partway
+  /// through and must not rebuild the UI over half-applied state.
+  void _applyDigest(Map<String, Object?>? digest) {
+    if (digest == null) return;
+    _digest = RoomDigest.fromJson(digest);
+  }
+
   void _applySnapshot(Map<String, Object?> snapshot) {
+    _applyDigest((snapshot['digest'] as Map?)?.cast<String, Object?>());
     final roomJson = (snapshot['room'] as Map?)?.cast<String, Object?>();
     if (roomJson != null) _room = Room.fromJson(roomJson);
 
+    _closedReason = null;
+    _appliedTo = 0;
+    _snapshotHead = (snapshot['head'] as num?)?.toInt() ?? 0;
+    _snapshotErrors.clear();
+    _activity.clear();
     _agents.clear();
     for (final entry in (snapshot['roster'] as List? ?? const [])) {
       final agent = Agent.fromJson((entry as Map).cast<String, Object?>());
       _agents[agent.id] = agent;
+      if (entry['error_streak'] is num) {
+        _snapshotErrors[agent.id] = (entry['error_streak'] as num).toInt();
+      }
     }
 
     _tasks.clear();
@@ -243,6 +351,7 @@ class RoomStore extends ChangeNotifier {
     // A fresh snapshot replaces everything; the transcript is rebuilt from the
     // event tail that follows.
     _messages.clear();
+    _artifacts.clear();
     _handoffs.clear();
     notifyListeners();
   }
@@ -270,7 +379,16 @@ class RoomStore extends ChangeNotifier {
           final message = ChatMessage.fromJson(json);
           _confirmPending(message);
           _messages.add(message);
+          final activity = _activity[message.author.agentId];
+          if (activity != null) {
+            activity.lastError = null;
+            activity.lastErrorAt = null;
+            activity.errorStreak = 0;
+          }
         }
+      case 'artifact_added':
+        final artifact = (event['artifact'] as Map?)?.cast<String, Object?>();
+        if (artifact != null) _artifacts[artifact['id'] as String] = artifact;
       case 'task_created':
         final json = (event['task'] as Map?)?.cast<String, Object?>();
         if (json != null) {
@@ -280,6 +398,9 @@ class RoomStore extends ChangeNotifier {
       case 'task_transitioned':
         _applyTaskTransition(event);
       case 'agent_status_changed':
+        // The snapshot is newer than its replayed journal. A formerly faulted
+        // bot may now have a repaired model and be ready to run.
+        if (seq <= _snapshotHead) break;
         final id = event['agent'] as String?;
         final agent = id == null ? null : _agents[id];
         if (agent != null) {
@@ -299,7 +420,9 @@ class RoomStore extends ChangeNotifier {
       case 'handoff_transitioned':
         final id = event['handoff'] as String?;
         final handoff = id == null ? null : _handoffs[id];
-        if (handoff != null) handoff.state = event['to'] as String? ?? handoff.state;
+        if (handoff != null) {
+          handoff.state = event['to'] as String? ?? handoff.state;
+        }
       case 'review_recorded':
         final review = (event['review'] as Map?)?.cast<String, Object?>();
         final inspector = review?['inspector'] as String?;
@@ -310,19 +433,28 @@ class RoomStore extends ChangeNotifier {
         }
       case 'agent_errored':
         final agentId = event['agent'] as String?;
+        if (seq <= _snapshotHead && _snapshotErrors[agentId] == 0) break;
         final agent = agentId == null ? null : _agents[agentId];
         if (agent != null && agentId != null) {
-          final entry =
-              _activity.putIfAbsent(agentId, () => BotActivity(agent));
+          final entry = _activity.putIfAbsent(
+            agentId,
+            () => BotActivity(agent),
+          );
           entry.lastError = event['error'] as String? ?? 'the turn failed';
+          final at = (envelope['at'] as num?)?.toInt();
+          entry.lastErrorAt = at == null
+              ? null
+              : DateTime.fromMillisecondsSinceEpoch(at);
           for (final other in _activity.values) {
             other.streaming = false;
           }
           entry.errorStreak = (event['attempt'] as num?)?.toInt() ?? 1;
           entry.streaming = false;
           _note(agentId, 'turn failed: ${entry.lastError}');
+          entry.lastActionAt = entry.lastErrorAt;
         }
       case 'room_closed':
+        _closedReason = event['reason'] as String?;
         _room?.phase = RoomPhase.completed;
       case 'agent_joined':
         final spec = (event['spec'] as Map?)?.cast<String, Object?>();
@@ -334,7 +466,7 @@ class RoomStore extends ChangeNotifier {
             roles: (spec['roles'] as List?)?.cast<String>() ?? const [],
             status: AgentStatus.idle,
           );
-          _agents[agent.id] = agent;
+          _agents.putIfAbsent(agent.id, () => agent);
         }
     }
 
@@ -380,6 +512,19 @@ class RoomStore extends ChangeNotifier {
     // Ownership and blockers are derived from the transition kind.
     final transition = (event['transition'] as Map?)?.cast<String, Object?>();
     final kind = transition?['transition'] as String?;
+    if (kind == 'block') {
+      final reason = transition?['reason'];
+      if (reason is Map &&
+          !task.blockReasons.any((r) => mapEquals(r, reason))) {
+        task.blockReasons = [
+          ...task.blockReasons,
+          reason.cast<String, Object?>(),
+        ];
+      }
+      task.blockedCount = task.blockReasons.length;
+    } else if (task.state != TaskState.blocked) {
+      task.blockReasons = [];
+    }
     if (kind == 'claim') {
       task.assignee = transition?['by'] as String?;
     } else if (kind == 'release' || kind == 'reopen') {
@@ -394,6 +539,10 @@ class RoomStore extends ChangeNotifier {
 
   // ---- outbound actions ----------------------------------------------------
 
+  void answer(String task, String body) {
+    if (body.trim().isNotEmpty) _client.answerBot(task, body.trim());
+  }
+
   /// Post a human message.
   void send(String author, String body) {
     if (body.trim().isEmpty) return;
@@ -402,7 +551,7 @@ class RoomStore extends ChangeNotifier {
 
   /// Pause or resume, depending on the current phase.
   void togglePause() {
-    if (_room?.phase == RoomPhase.paused) {
+    if (canResume) {
       _client.resume();
     } else {
       _client.pause();
@@ -410,5 +559,26 @@ class RoomStore extends ChangeNotifier {
   }
 
   /// Whether the room is paused.
+  bool get isActive => _room?.phase == RoomPhase.running;
   bool get isPaused => _room?.phase == RoomPhase.paused;
+  bool get isCompleted => _room?.phase == RoomPhase.completed;
+  bool get canResume => isPaused || isCompleted;
+  bool get _limitReached =>
+      _closedReason == 'the room ran out of time' ||
+      _closedReason == 'the room spent its turn budget';
+
+  /// Older checkpoints called exhausted budgets completed; don't claim success.
+  String get runStateLabel {
+    if (isActive) return 'Active';
+    if (isCompleted && _limitReached) {
+      return _closedReason == 'the room ran out of time'
+          ? 'Time limit reached'
+          : 'Turn limit reached';
+    }
+    return isCompleted
+        ? 'Completed'
+        : isPaused
+        ? 'Paused'
+        : 'Saved';
+  }
 }

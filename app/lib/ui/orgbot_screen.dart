@@ -4,6 +4,13 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'polish.dart';
+import '../orgbot/credentials.dart';
+import 'sign_in_screen.dart';
+import 'connect_screen.dart';
+import '../workspace/workspace.dart';
+import '../workspace/workspace_screen.dart';
 
 import '../engine/agent_cli.dart';
 import '../orgbot/library.dart';
@@ -11,13 +18,14 @@ import '../orgbot/models.dart';
 import '../orgbot/model_catalog.dart';
 import 'brand.dart';
 import 'engine_room_screen.dart';
+import 'room_history_screen.dart';
 import 'role_icons.dart';
 import '../orgbot/roles.dart';
-import '../orgbot/room_check.dart';
 
 class OrgBotScreen extends StatefulWidget {
   final Library library;
-  const OrgBotScreen({super.key, required this.library});
+  final Credentials? credentials;
+  const OrgBotScreen({super.key, required this.library, this.credentials});
 
   @override
   State<OrgBotScreen> createState() => _OrgBotScreenState();
@@ -25,6 +33,34 @@ class OrgBotScreen extends StatefulWidget {
 
 class _OrgBotScreenState extends State<OrgBotScreen> {
   int _tab = 0;
+  final _pages = PageController();
+  final _search = List.generate(2, (_) => TextEditingController());
+  @override
+  void dispose() {
+    _pages.dispose();
+    for (final search in _search) {
+      search.dispose();
+    }
+    super.dispose();
+  }
+
+  void _selectTab(int index) {
+    if (_tab == index) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    HapticFeedback.selectionClick();
+    setState(() {
+      _tab = index;
+    });
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _pages.jumpToPage(index);
+    } else {
+      _pages.animateToPage(
+        index,
+        duration: motionDuration(context, 360),
+        curve: Curves.easeOutCubic,
+      );
+    }
+  }
 
   @override
   void initState() {
@@ -34,146 +70,378 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final credentials = widget.credentials ?? ModelCatalog.credentials;
     return ListenableBuilder(
-      listenable: widget.library,
+      listenable: Listenable.merge([widget.library, ?credentials]),
       builder: (context, _) {
         final lib = widget.library;
+        final scheme = Theme.of(context).colorScheme;
         return Scaffold(
           appBar: AppBar(
-            titleSpacing: 12,
-            title: Row(
-              children: [
-                const BrandMark(size: 28),
-                const SizedBox(width: 10),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('OrgBot', style: TextStyle(fontSize: 17)),
-                    Text(
-                      _tab == 0 ? 'Your bots' : 'Your rooms',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
+            toolbarHeight: 62,
+            titleSpacing: 24,
+            title: Text(
+              'ORGBOT',
+              style: TextStyle(
+                fontSize: 12,
+                letterSpacing: 2.2,
+                fontWeight: FontWeight.w600,
+                color: scheme.onSurfaceVariant,
+              ),
             ),
             actions: [
               IconButton(
-                icon: const Icon(Icons.add),
-                tooltip: _tab == 0 ? 'New bot' : 'New room',
-                onPressed: _tab == 0 ? _newBot : _newRoom,
+                tooltip: 'Your profile',
+                onPressed: lib.loaded ? _profile : null,
+                icon: CircleAvatar(
+                  radius: 17,
+                  backgroundColor: scheme.surfaceContainerHighest,
+                  child: Text(
+                    lib.userName.trim().isEmpty
+                        ? 'Y'
+                        : lib.userName.trim().characters.first.toUpperCase(),
+                    style: TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: scheme.onSurface,
+                    ),
+                  ),
+                ),
               ),
+              PopupMenuButton<String>(
+                tooltip: 'More',
+                icon: const Icon(Icons.more_horiz, size: 22),
+                onSelected: (_) => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const ConnectScreen()),
+                ),
+                itemBuilder: (_) => [
+                  const PopupMenuItem(
+                    value: 'hosted',
+                    child: Text('Join a hosted room'),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 12),
             ],
           ),
-          bottomNavigationBar: NavigationBar(
-            selectedIndex: _tab,
-            onDestinationSelected: (i) => setState(() => _tab = i),
-            destinations: const [
-              NavigationDestination(
-                  icon: Icon(Icons.smart_toy_outlined),
-                  selectedIcon: Icon(Icons.smart_toy),
-                  label: 'Bots'),
-              NavigationDestination(
-                  icon: Icon(Icons.forum_outlined),
-                  selectedIcon: Icon(Icons.forum),
-                  label: 'Rooms'),
-            ],
+          bottomNavigationBar: WorkspaceNavigation(
+            selected: _tab,
+            onSelected: _selectTab,
           ),
-          body: _tab == 0 ? _botsList(lib) : _roomsList(lib),
+          body: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 900),
+              child: Column(
+                children: [
+                  if (lib.error != null)
+                    MaterialBanner(
+                      content: Text(lib.error!),
+                      actions: [
+                        TextButton(
+                          onPressed: lib.loaded ? lib.save : lib.load,
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  Expanded(
+                    child: PageView(
+                      controller: _pages,
+                      physics: const NeverScrollableScrollPhysics(),
+                      children: [
+                        for (var i = 0; i < 3; i++)
+                          RetainedPage(
+                            child: TickerMode(
+                              enabled: _tab == i,
+                              child: Column(
+                                children: [
+                                  _pageHeader(i, lib),
+                                  Expanded(
+                                    child: !lib.loaded
+                                        ? const Center(
+                                            child: CircularProgressIndicator(),
+                                          )
+                                        : switch (i) {
+                                            0 => _roomsList(lib),
+                                            1 => _botsList(lib),
+                                            _ =>
+                                              credentials == null
+                                                  ? const Center(
+                                                      child: Text(
+                                                        'Accounts are unavailable.',
+                                                      ),
+                                                    )
+                                                  : SignInScreen(
+                                                      credentials: credentials,
+                                                      embedded: true,
+                                                    ),
+                                          },
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         );
       },
     );
   }
 
+  Widget _pageHeader(int page, Library lib) {
+    final scheme = Theme.of(context).colorScheme;
+    final title = ['Rooms', 'Team', 'Accounts'][page];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 10, 24, 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: Theme.of(context).textTheme.headlineLarge,
+                ),
+              ),
+              if (page < 2)
+                IconButton.filled(
+                  tooltip: page == 0 ? 'New room' : 'New bot',
+                  onPressed: !lib.loaded
+                      ? null
+                      : page == 0
+                      ? _newRoom
+                      : _newBot,
+                  style: IconButton.styleFrom(minimumSize: const Size(46, 46)),
+                  icon: const Icon(Icons.add_rounded, size: 24),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            switch (page) {
+              0 =>
+                '${lib.rooms.length} ${lib.rooms.length == 1 ? 'room' : 'rooms'} · ${lib.bots.length} ${lib.bots.length == 1 ? 'teammate' : 'teammates'}',
+              1 => '${lib.bots.length} teammates, each with a role.',
+              _ => 'Subscriptions and API access, saved on this device.',
+            },
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.4,
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+          if (page < 2) ...[
+            const SizedBox(height: 22),
+            TextField(
+              key: ValueKey('search-$page'),
+              controller: _search[page],
+              onChanged: (_) => setState(() {}),
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: page == 0 ? 'Find a room' : 'Name, role or model',
+                prefixIcon: Icon(
+                  Icons.search_rounded,
+                  size: 20,
+                  color: scheme.onSurfaceVariant,
+                ),
+                suffixIcon: _search[page].text.isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: 'Clear search',
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () => setState(_search[page].clear),
+                      ),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
+                fillColor: scheme.surfaceContainerLow,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   // ---- bots ----
+  Future<void> _profile() async {
+    final name = TextEditingController(text: widget.library.userName);
+    final profile = TextEditingController(text: widget.library.userProfile);
+    final route = DialogRoute<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Your profile'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: name,
+                maxLength: 80,
+                decoration: const InputDecoration(
+                  labelText: 'What should the bots call you?',
+                ),
+              ),
+              TextField(
+                controller: profile,
+                maxLength: 2000,
+                minLines: 3,
+                maxLines: 6,
+                decoration: const InputDecoration(
+                  labelText: 'About you and how you work',
+                  helperText: 'Shared with the bots in rooms you start.',
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              if (name.text.trim().isEmpty) return;
+              widget.library.userName = name.text.trim();
+              widget.library.userProfile = profile.text.trim();
+              await widget.library.save();
+              if (context.mounted && widget.library.error == null) {
+                Navigator.pop(context);
+              }
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    await Navigator.of(context).push(route);
+    await route.completed;
+    name.dispose();
+    profile.dispose();
+  }
+
   Widget _botsList(Library lib) {
     if (lib.bots.isEmpty) {
       return EmptyState(
-        icon: Icons.smart_toy_outlined,
-        title: 'No bots yet',
-        message: 'A bot is a model with a name, a persona, and a job. '
-            'Create a few, then put them in a room together.',
+        icon: Icons.people_outline,
+        title: 'Build your team',
+        message: 'Give a bot a name, choose its model and define its role.',
         actionLabel: 'Create a bot',
         onAction: _newBot,
       );
     }
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-      itemCount: lib.bots.length,
+    final credentials = widget.credentials ?? ModelCatalog.credentials;
+    final query = _search[1].text.trim().toLowerCase();
+    final bots = lib.bots
+        .where(
+          (b) => '${b.name} ${b.handle} ${b.roleDef.label} ${b.model}'
+              .toLowerCase()
+              .contains(query),
+        )
+        .toList();
+    if (bots.isEmpty) {
+      return const EmptyState(
+        icon: Icons.search,
+        title: 'No matching teammates',
+        message: 'Try a name, role or model.',
+      );
+    }
+    final scheme = Theme.of(context).colorScheme;
+    return ListView.separated(
+      key: const PageStorageKey('team-list'),
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+      itemCount: bots.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 10),
       itemBuilder: (context, i) {
-        final b = lib.bots[i];
+        final b = bots[i];
         final handle = b.handle.isEmpty ? b.name : b.handle;
-        final scheme = Theme.of(context).colorScheme;
-        final needsKey = b.needsKey && b.apiKey.isEmpty;
-        return Card(
-          margin: const EdgeInsets.only(bottom: 10),
-          elevation: 0,
-          color: scheme.surfaceContainerHighest,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-            side: BorderSide(color: scheme.outlineVariant),
-          ),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(14),
-            onTap: () => _botDialog(b),
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      BotAvatar(handle: handle),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('@' + handle,
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w700, fontSize: 15)),
-                            const SizedBox(height: 2),
-                            Text(
-                              b.provider.label +
-                                  ' · ' +
-                                  ModelCatalog.labelFor(b.provider, b.model),
-                              style: TextStyle(
-                                  fontSize: 12, color: scheme.onSurfaceVariant),
-                            ),
-                          ],
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: 'Delete',
-                        icon: const Icon(Icons.delete_outline),
-                        onPressed: () => lib.removeBot(b.id),
-                      ),
-                    ],
-                  ),
-                  if (b.persona.isNotEmpty) ...[
-                    const SizedBox(height: 10),
+        final needsKey =
+            b.needsKey && credentials?.isSignedIn(b.provider) != true;
+        return PressSurface(
+          key: ValueKey(b.id),
+          padding: const EdgeInsets.all(16),
+          onTap: () => _botDialog(b),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              BotAvatar(handle: handle, radius: 23),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                     Text(
-                      b.persona,
+                      b.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: -0.4,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '@$handle · ${b.roleDef.label}',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.5,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      needsKey
+                          ? 'Add a ${b.provider.label} key in Accounts'
+                          : ModelCatalog.labelFor(b.provider, b.model),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: needsKey ? scheme.error : scheme.secondary,
+                      ),
                     ),
                   ],
-                  if (needsKey) ...[
-                    const SizedBox(height: 10),
-                    const StatusPill(
-                      color: Colors.orange,
-                      label: 'Needs an API key',
-                      icon: Icons.key_off_outlined,
-                    ),
-                  ],
-                ],
+                ),
               ),
-            ),
+              SizedBox(
+                width: 44,
+                child: PopupMenuButton<String>(
+                  tooltip: 'Bot options',
+                  padding: EdgeInsets.zero,
+                  icon: Icon(
+                    Icons.more_horiz,
+                    size: 20,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                  onSelected: (value) {
+                    if (value == 'edit') {
+                      _botDialog(b);
+                    } else {
+                      lib.removeBot(b.id);
+                    }
+                  },
+                  itemBuilder: (_) => [
+                    const PopupMenuItem(value: 'edit', child: Text('Edit bot')),
+                    const PopupMenuItem(
+                      value: 'delete',
+                      child: Text('Remove bot'),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
         );
       },
@@ -183,15 +451,19 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
   void _newBot() => _botDialog(null);
 
   Future<void> _botDialog(BotDef? existing) async {
-    await showDialog<void>(
+    await showEditor<void>(
       context: context,
       builder: (context) => _BotEditor(
         existing: existing,
-        onSave: (bot) {
+        onSave: (bot) async {
           if (existing == null) {
             widget.library.addBot(bot);
           } else {
             widget.library.updateBot(bot);
+          }
+          await widget.library.save();
+          if (widget.library.error != null) {
+            throw StateError(widget.library.error!);
           }
         },
       ),
@@ -201,34 +473,235 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
   // ---- rooms ----
   Widget _roomsList(Library lib) {
     if (lib.rooms.isEmpty) {
-      return const Center(
-          child: Text('No rooms yet. Tap + to open a group chat of your bots.'));
+      return EmptyState(
+        icon: Icons.forum_outlined,
+        title: 'A place for your next idea',
+        message:
+            'Bring your team, choose a workspace, and start a conversation.',
+        actionLabel: 'Create a room',
+        onAction: _newRoom,
+      );
     }
-    return ListView.builder(
-      itemCount: lib.rooms.length,
+    final query = _search[0].text.trim().toLowerCase();
+    final rooms = lib.rooms
+        .where(
+          (r) => '${r.name} ${r.goal} ${r.workspace.path}'
+              .toLowerCase()
+              .contains(query),
+        )
+        .toList();
+    if (rooms.isEmpty) {
+      return const EmptyState(
+        icon: Icons.search,
+        title: 'No matching rooms',
+        message: 'Try another name or workspace.',
+      );
+    }
+    final scheme = Theme.of(context).colorScheme;
+    return ListView.separated(
+      key: const PageStorageKey('room-list'),
+      itemCount: rooms.length,
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+      separatorBuilder: (_, _) => const SizedBox(height: 14),
       itemBuilder: (context, i) {
-        final r = lib.rooms[i];
-        return Card(
-          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          child: ListTile(
-            title: Text(r.name),
-            subtitle: Text('Goal: ' +
-                r.goal +
-                '\n' +
-                r.bots.length.toString() +
-                ' bots' +
-                (r.tasks.isNotEmpty ? ' · ' + r.tasks.length.toString() + ' tasks' : '')),
-            isThreeLine: true,
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                FilledButton(
-                    onPressed: () => _runRoom(r), child: const Text('Start')),
-                IconButton(
-                    icon: const Icon(Icons.delete_outline),
-                    onPressed: () => lib.removeRoom(r.id)),
+        final room = rooms[i];
+        final session = lib.sessions[room.id];
+        final active =
+            session?.isRunning == true && session?.store?.isActive == true;
+        final state = active
+            ? 'Running'
+            : session?.store?.runStateLabel ?? 'Saved';
+        final messages = session?.store?.messages;
+        final preview = messages?.isNotEmpty == true
+            ? messages!.last.body.replaceAll('\n', ' ')
+            : room.goal;
+        final folder = canRunAgentClis ? room.path : room.workspace.path;
+        final members = [
+          for (final slot in room.bots)
+            ...lib.bots.where((b) => b.id == slot.botId),
+        ].take(4).toList();
+        final menu = PopupMenuButton<String>(
+          tooltip: 'Room options',
+          onSelected: (action) async {
+            if (action == 'edit') _roomDialog(room);
+            if (action == 'stop') await lib.stopRoom(room.id);
+            if (action == 'history' && context.mounted) {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) =>
+                      RoomHistoryScreen(roomId: room.id, roomName: room.name),
+                ),
+              );
+            }
+            if (action == 'files' && context.mounted) {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => WorkspaceFilesScreen(
+                    config: room.workspace,
+                    roomId: room.id,
+                  ),
+                ),
+              );
+            }
+            if (action == 'delete') lib.removeRoom(room.id);
+          },
+          itemBuilder: (_) => [
+            const PopupMenuItem(value: 'edit', child: Text('Room settings')),
+            if (session != null)
+              const PopupMenuItem(value: 'stop', child: Text('Stop and save')),
+            if (!canRunAgentClis)
+              const PopupMenuItem(
+                value: 'files',
+                child: Text('Working folder'),
+              ),
+            const PopupMenuItem(value: 'history', child: Text('Saved history')),
+            const PopupMenuItem(value: 'delete', child: Text('Remove room')),
+          ],
+        );
+        return PressSurface(
+          key: ValueKey(room.id),
+          onTap: () => _runRoom(room),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    room.workspace.isRemote
+                        ? Icons.terminal_rounded
+                        : Icons.chat_bubble_outline_rounded,
+                    size: 18,
+                    color: scheme.tertiary,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      room.workspace.isRemote
+                          ? 'REMOTE WORKSPACE'
+                          : canRunAgentClis
+                          ? 'THIS COMPUTER'
+                          : 'PHONE WORKSPACE',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 9,
+                        letterSpacing: 1.1,
+                        fontWeight: FontWeight.w500,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  if (active)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 5),
+                      child: Icon(
+                        Icons.circle,
+                        size: 5,
+                        color: scheme.tertiary,
+                      ),
+                    ),
+                  Text(
+                    state,
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: active ? scheme.tertiary : scheme.onSurfaceVariant,
+                    ),
+                  ),
+                  SizedBox(width: 44, height: 44, child: menu),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                room.name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 22,
+                  height: 1.25,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: -0.7,
+                ),
+              ),
+              if (preview.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(
+                  preview,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    height: 1.6,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
               ],
-            ),
+              const SizedBox(height: 20),
+              Divider(color: scheme.outlineVariant.withValues(alpha: 0.5)),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  if (members.isNotEmpty) ...[
+                    SizedBox(
+                      width: 26 + (members.length - 1) * 16,
+                      height: 26,
+                      child: Stack(
+                        children: [
+                          for (var i = 0; i < members.length; i++)
+                            Positioned(
+                              left: i * 16,
+                              top: 0,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: scheme.surfaceContainerLow,
+                                    width: 2,
+                                  ),
+                                ),
+                                child: BotAvatar(
+                                  handle: members[i].handle,
+                                  radius: 11,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  Text(
+                    '${room.bots.length}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Icon(
+                    Icons.folder_outlined,
+                    size: 14,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 5),
+                  Expanded(
+                    child: Text(
+                      folder.isEmpty
+                          ? (canRunAgentClis ? 'This computer' : 'This phone')
+                          : folder,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.right,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         );
       },
@@ -237,97 +710,201 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
 
   void _newRoom() => _roomDialog();
 
-  Future<void> _roomDialog() async {
-    final name = TextEditingController();
-    final goal = TextEditingController(text: 'Write and ship the release notes.');
-    final path = TextEditingController();
-    final selected = <String, String>{}; // botId -> role
+  Future<void> _roomDialog([RoomDef? existing]) async {
+    final id = existing?.id ?? genId('room');
+    final name = TextEditingController(text: existing?.name);
+    final goal = TextEditingController(text: existing?.goal ?? '');
+    final path = TextEditingController(text: existing?.path);
+    var workspace = existing?.workspace.copy() ?? WorkspaceConfig();
+    final selected = <String, String>{
+      for (final slot in existing?.bots ?? <RoomSlot>[]) slot.botId: '',
+    }; // botId -> role
 
-    await showDialog<void>(
+    final route = DialogRoute<void>(
       context: context,
       builder: (context) => StatefulBuilder(
-        builder: (context, setLocal) => AlertDialog(
-          title: const Text('New room — a group chat'),
+        builder: (context, setLocal) => _editor(
+          context,
+          title: Text(existing == null ? 'New room' : 'Edit room'),
           content: SizedBox(
             width: 460,
             child: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  TextField(controller: name, decoration: const InputDecoration(labelText: 'Room name')),
-                  TextField(controller: goal, maxLines: 3, decoration: const InputDecoration(labelText: 'Goal / task')),
-                  TextField(controller: path, decoration: const InputDecoration(labelText: 'Project path (desktop)')),
-                  const Divider(),
-                  Text('Who is in the room',
-                      style: Theme.of(context).textTheme.titleSmall),
-                  Builder(builder: (context) {
-                    final chosen = widget.library.bots
-                        .where((b) => selected.containsKey(b.id))
-                        .toList();
-                    final issues = checkRoom(
-                        RoomDef(
-                            name: name.text,
-                            goal: goal.text,
-                            tasks: [goal.text.trim()]
-                                .where((t) => t.isNotEmpty)
-                                .toList()),
-                        chosen);
-                    if (issues.isEmpty) return const SizedBox.shrink();
-                    return _RoomIssues(issues: issues);
-                  }),
-                  // Each bot brings its own role, set where the bot is
-                  // defined — the same reviewer reviews in every room.
-                  for (final b in widget.library.bots)
-                    CheckboxListTile(
-                      dense: true,
-                      value: selected.containsKey(b.id),
-                      secondary: Icon(roleIcon(b.roleDef.icon), size: 20),
-                      title: Text('@' + (b.handle.isEmpty ? b.name : b.handle)),
-                      subtitle: Text(
-                          b.roleDef.label + ' · ' + b.provider.label),
-                      onChanged: (v) => setLocal(() {
-                        if (v == true) {
-                          selected[b.id] = b.role;
-                        } else {
-                          selected.remove(b.id);
-                        }
-                      }),
-                    ),
+                  FormSection(
+                    title: 'Brief',
+                    children: [
+                      TextField(
+                        controller: name,
+                        decoration: const InputDecoration(
+                          labelText: 'Room name',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: goal,
+                        maxLines: 3,
+                        decoration: const InputDecoration(labelText: 'Goal'),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                  ),
+                  FormSection(
+                    title: 'Workspace',
+                    children: [
+                      if (canRunAgentClis)
+                        TextField(
+                          controller: path,
+                          decoration: const InputDecoration(
+                            labelText: 'Project path (system CLIs)',
+                          ),
+                        )
+                      else
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(
+                            workspace.isRemote
+                                ? Icons.dns_outlined
+                                : Icons.phone_android,
+                          ),
+                          title: Text(workspace.label),
+                          subtitle: Text(
+                            workspace.isRemote
+                                ? workspace.path
+                                : 'Phone workspace',
+                          ),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () async {
+                            final selected =
+                                await Navigator.push<WorkspaceConfig>(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => WorkspaceScreen(
+                                      config: workspace,
+                                      roomId: id,
+                                      onSave: existing == null
+                                          ? null
+                                          : (config) async {
+                                              await widget.library.stopRoom(
+                                                existing.id,
+                                              );
+                                              existing.workspace = config
+                                                  .copy();
+                                              await widget.library.save();
+                                              if (widget.library.error !=
+                                                  null) {
+                                                throw StateError(
+                                                  widget.library.error!,
+                                                );
+                                              }
+                                            },
+                                    ),
+                                  ),
+                                );
+                            if (selected != null && context.mounted) {
+                              setLocal(() => workspace = selected);
+                            }
+                          },
+                        ),
+                    ],
+                  ),
+                  FormSection(
+                    title: 'Team',
+                    children: [
+                      // Each bot brings its own role, set where the bot is
+                      // defined — the same reviewer reviews in every room.
+                      for (final b in widget.library.bots)
+                        CheckboxListTile(
+                          dense: true,
+                          value: selected.containsKey(b.id),
+                          secondary: BotAvatar(
+                            handle: b.handle.isEmpty ? b.name : b.handle,
+                            radius: 18,
+                          ),
+                          title: Text(
+                            '@' + (b.handle.isEmpty ? b.name : b.handle),
+                          ),
+                          subtitle: Text(
+                            b.roleDef.label + ' · ' + b.provider.label,
+                          ),
+                          onChanged: (v) => setLocal(() {
+                            if (v == true) {
+                              selected[b.id] = b.role;
+                            } else {
+                              selected.remove(b.id);
+                            }
+                          }),
+                        ),
+                    ],
+                  ),
                 ],
               ),
             ),
           ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
             FilledButton(
-                onPressed: () {
-                  if (name.text.trim().isEmpty) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Give the room a name')));
-                    return;
-                  }
-                  final room = RoomDef(
-                    name: name.text.trim(),
-                    goal: goal.text.trim(),
-                    path: path.text.trim(),
-                    tasks: [goal.text.trim()].where((t) => t.isNotEmpty).toList(),
-                    bots: selected.keys.map(RoomSlot.new).toList(),
+              onPressed: () async {
+                if (name.text.trim().isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Give the room a name')),
                   );
+                  return;
+                }
+                if (selected.isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Choose at least one bot')),
+                  );
+                  return;
+                }
+                final room = RoomDef(
+                  id: id,
+                  workspace: workspace,
+                  memory: existing?.memory ?? '',
+                  name: name.text.trim(),
+                  goal: goal.text.trim(),
+                  path: path.text.trim(),
+                  tasks: [goal.text.trim()].where((t) => t.isNotEmpty).toList(),
+                  bots: selected.keys.map(RoomSlot.new).toList(),
+                );
+                if (existing == null) {
                   widget.library.addRoom(room);
+                } else {
+                  await widget.library.stopRoom(existing.id);
+                  final index = widget.library.rooms.indexWhere(
+                    (r) => r.id == existing.id,
+                  );
+                  if (index >= 0) widget.library.rooms[index] = room;
+                  widget.library.save();
+                }
+                await widget.library.save();
+                if (context.mounted && widget.library.error == null) {
                   Navigator.pop(context);
-                },
-                child: const Text('Create')),
+                }
+              },
+              child: Text(existing == null ? 'Create' : 'Save'),
+            ),
           ],
         ),
       ),
     );
+    await Navigator.push(context, route);
+    await route.completed;
+    name.dispose();
+    goal.dispose();
+    path.dispose();
   }
 
   void _runRoom(RoomDef room) {
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => EngineRoomScreen(room: room, library: widget.library),
-    ));
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => EngineRoomScreen(room: room, library: widget.library),
+      ),
+    );
   }
 }
 
@@ -338,7 +915,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
 /// arrives after the dialog is already on screen.
 class _BotEditor extends StatefulWidget {
   final BotDef? existing;
-  final void Function(BotDef) onSave;
+  final Future<void> Function(BotDef) onSave;
   const _BotEditor({required this.existing, required this.onSave});
 
   @override
@@ -357,6 +934,8 @@ class _BotEditorState extends State<_BotEditor> {
   RolePowers? _powers;
   String _model = '';
   bool _custom = false;
+  bool _saving = false;
+  bool _replaceKey = false;
 
   ModelList? _models;
   bool _loadingModels = false;
@@ -372,7 +951,9 @@ class _BotEditorState extends State<_BotEditor> {
     _handle = TextEditingController(text: b?.handle ?? '');
     _persona = TextEditingController(text: b?.persona ?? '');
     _key = TextEditingController(text: b?.apiKey ?? '');
-    _provider = b?.provider ?? ProviderKind.anthropic;
+    _provider =
+        b?.provider ??
+        (canRunAgentClis ? ProviderKind.anthropic : ProviderKind.codex);
     _role = b?.role ?? Roles.defaultKey;
     _powers = b?.powers;
     _model = b?.model ?? '';
@@ -389,16 +970,27 @@ class _BotEditorState extends State<_BotEditor> {
     super.dispose();
   }
 
-  Future<void> _loadModels() async {
+  Future<void> _loadModels({bool refresh = false}) async {
+    final provider = _provider;
     setState(() {
       _loadingModels = true;
       _models = null;
     });
-    final list = await ModelCatalog.load(_provider, apiKey: _key.text.trim());
-    if (!mounted) return;
+    final list = await ModelCatalog.load(
+      provider,
+      apiKey: _key.text.trim(),
+      refresh: refresh,
+    );
+    if (!mounted || provider != _provider) return;
     setState(() {
       _models = list;
       _loadingModels = false;
+      if (!_custom &&
+          _model.isEmpty &&
+          list.options.isNotEmpty &&
+          !list.options.any((o) => o.id.isEmpty)) {
+        _model = list.options.first.id;
+      }
       // An id that the provider does not offer is a custom one; keep it and
       // open on Custom rather than silently switching the bot's model.
       if (_model.isNotEmpty && !list.options.any((o) => o.id == _model)) {
@@ -411,6 +1003,9 @@ class _BotEditorState extends State<_BotEditor> {
   void _changeProvider(ProviderKind next) {
     setState(() {
       _provider = next;
+      // Credentials belong to one provider; never send a previous key elsewhere.
+      _key.clear();
+      _replaceKey = false;
       // Model ids do not carry across providers.
       _model = ModelCatalog.defaultFor(next);
       _custom = false;
@@ -424,14 +1019,9 @@ class _BotEditorState extends State<_BotEditor> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return AlertDialog(
-      title: Row(
-        children: [
-          const BrandMark(size: 24),
-          const SizedBox(width: 10),
-          Text(widget.existing == null ? 'New bot' : 'Edit bot'),
-        ],
-      ),
+    return _editor(
+      context,
+      title: Text(widget.existing == null ? 'New bot' : 'Edit bot'),
       content: SizedBox(
         width: 430,
         child: SingleChildScrollView(
@@ -439,67 +1029,137 @@ class _BotEditorState extends State<_BotEditor> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(
-                controller: _name,
-                textCapitalization: TextCapitalization.words,
-                decoration: const InputDecoration(
-                    labelText: 'Name', hintText: 'Iris'),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: _handle,
-                decoration: const InputDecoration(
-                  labelText: 'Handle',
-                  prefixText: '@',
-                  hintText: 'iris',
-                  helperText: 'How the other bots address it',
+              ListenableBuilder(
+                listenable: Listenable.merge([_name, _handle]),
+                builder: (context, _) => Padding(
+                  padding: const EdgeInsets.fromLTRB(4, 8, 4, 28),
+                  child: Row(
+                    children: [
+                      BotAvatar(
+                        handle: _handle.text.isEmpty
+                            ? _name.text
+                            : _handle.text,
+                        radius: 28,
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _name.text.trim().isEmpty
+                                  ? 'Your next teammate'
+                                  : _name.text,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.titleLarge,
+                            ),
+                            const SizedBox(height: 5),
+                            Text(
+                              'Set their role, model and instructions.',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: scheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: _persona,
-                maxLines: 3,
-                decoration: const InputDecoration(
-                  labelText: 'Persona',
-                  hintText: 'You write concise, accurate technical prose.',
-                  alignLabelWithHint: true,
-                ),
+              FormSection(
+                title: 'Identity',
+                children: [
+                  TextField(
+                    controller: _name,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: const InputDecoration(
+                      labelText: 'Name',
+                      hintText: 'Iris',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _handle,
+                    decoration: const InputDecoration(
+                      labelText: 'Handle',
+                      prefixText: '@',
+                      hintText: 'iris',
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 18),
-              Text('Job', style: Theme.of(context).textTheme.labelLarge),
-              const SizedBox(height: 8),
-              _rolePicker(scheme),
-              const SizedBox(height: 18),
-              Text('Brain', style: Theme.of(context).textTheme.labelLarge),
-              const SizedBox(height: 8),
-              DropdownButtonFormField<ProviderKind>(
-                initialValue: _provider,
-                decoration: const InputDecoration(
-                    labelText: 'Provider', border: OutlineInputBorder()),
-                items: ProviderKind.values
-                    // Anthropic has no device-code sign-in, so off a computer
-                    // it would be an option that can never work.
-                    .where((k) =>
-                        k.cli == null || canRunAgentClis || k.signsInOnDevice)
-                    .map((k) => DropdownMenuItem(value: k, child: Text(k.label)))
-                    .toList(),
-                onChanged: (v) => _changeProvider(v ?? _provider),
+              FormSection(
+                title: 'Role & permissions',
+                children: [_rolePicker(scheme)],
               ),
-              const SizedBox(height: 10),
-              _authRow(scheme),
-              if (_provider != ProviderKind.scripted) ...[
-                const SizedBox(height: 10),
-                _modelField(scheme),
-              ],
+              FormSection(
+                title: 'Model & account',
+                children: [
+                  DropdownButtonFormField<ProviderKind>(
+                    initialValue: _provider,
+                    isExpanded: true,
+                    decoration: const InputDecoration(labelText: 'Provider'),
+                    items: ProviderKind.values
+                        // Anthropic has no device-code sign-in, so off a computer
+                        // it would be an option that can never work.
+                        .where(
+                          (k) =>
+                              k.cli == null ||
+                              canRunAgentClis ||
+                              k.signsInOnDevice,
+                        )
+                        .map(
+                          (k) => DropdownMenuItem(
+                            value: k,
+                            child: Text(
+                              k.label,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (v) => _changeProvider(v ?? _provider),
+                  ),
+                  const SizedBox(height: 10),
+                  _authRow(scheme),
+                  if (_provider != ProviderKind.scripted) ...[
+                    const SizedBox(height: 10),
+                    _modelField(scheme),
+                  ],
+                ],
+              ),
+              FormSection(
+                title: 'Instructions',
+                children: [
+                  TextField(
+                    controller: _persona,
+                    minLines: 3,
+                    maxLines: 6,
+                    decoration: const InputDecoration(
+                      hintText: 'How should this teammate approach their work?',
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
       ),
       actions: [
         TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel')),
-        FilledButton(onPressed: _save, child: const Text('Save')),
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _saving ? null : _save,
+          child: Text(_saving ? 'Saving…' : 'Save'),
+        ),
       ],
     );
   }
@@ -513,19 +1173,21 @@ class _BotEditorState extends State<_BotEditor> {
         DropdownButtonFormField<String>(
           initialValue: _role,
           isExpanded: true,
-          decoration: const InputDecoration(
-              labelText: 'Role', border: OutlineInputBorder()),
+          decoration: const InputDecoration(labelText: 'Role'),
           items: [
             for (final group in RoleGroup.values) ...[
               DropdownMenuItem<String>(
                 enabled: false,
                 value: '__group_${group.name}',
-                child: Text(group.label.toUpperCase(),
-                    style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 0.6,
-                        color: scheme.onSurfaceVariant)),
+                child: Text(
+                  group.label.toUpperCase(),
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.6,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
               ),
               for (final r in Roles.inGroup(group))
                 DropdownMenuItem<String>(
@@ -535,7 +1197,8 @@ class _BotEditorState extends State<_BotEditor> {
                       Icon(roleIcon(r.icon), size: 16),
                       const SizedBox(width: 8),
                       Flexible(
-                          child: Text(r.label, overflow: TextOverflow.ellipsis)),
+                        child: Text(r.label, overflow: TextOverflow.ellipsis),
+                      ),
                     ],
                   ),
                 ),
@@ -552,8 +1215,10 @@ class _BotEditorState extends State<_BotEditor> {
           },
         ),
         const SizedBox(height: 6),
-        Text(role.summary,
-            style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
+        Text(
+          role.summary,
+          style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+        ),
         const SizedBox(height: 8),
         _powerChips(scheme, role),
       ],
@@ -574,11 +1239,21 @@ class _BotEditorState extends State<_BotEditor> {
       spacing: 6,
       runSpacing: 4,
       children: [
-        chip('Creates tasks', powers.mayCreateTasks,
-            (v) => powers.copyWith(mayCreateTasks: v)),
-        chip('Inspects work', powers.mayInspect,
-            (v) => powers.copyWith(mayInspect: v)),
-        chip('Delivers', powers.maySubmit, (v) => powers.copyWith(maySubmit: v)),
+        chip(
+          'Creates tasks',
+          powers.mayCreateTasks,
+          (v) => powers.copyWith(mayCreateTasks: v),
+        ),
+        chip(
+          'Inspects work',
+          powers.mayInspect,
+          (v) => powers.copyWith(mayInspect: v),
+        ),
+        chip(
+          'Delivers',
+          powers.maySubmit,
+          (v) => powers.copyWith(maySubmit: v),
+        ),
       ],
     );
   }
@@ -586,17 +1261,37 @@ class _BotEditorState extends State<_BotEditor> {
   /// Sign-in status, or a key field — never both.
   Widget _authRow(ColorScheme scheme) {
     if (_provider.needsApiKey) {
+      final saved = ModelCatalog.credentials?.isSignedIn(_provider) == true;
+      if (saved && _key.text.isEmpty && !_replaceKey) {
+        return Row(
+          children: [
+            const Icon(Icons.check_circle_outline, size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Using your saved ${_provider.label} key',
+                style: const TextStyle(fontSize: 13),
+              ),
+            ),
+            TextButton(
+              onPressed: () => setState(() => _replaceKey = true),
+              child: const Text('Change'),
+            ),
+          ],
+        );
+      }
       return TextField(
         controller: _key,
         obscureText: true,
-        decoration: const InputDecoration(
+        autocorrect: false,
+        enableSuggestions: false,
+        decoration: InputDecoration(
           labelText: 'API key',
-          border: OutlineInputBorder(),
-          helperText: 'Stored on this device only',
+          helperText: 'Saved securely for all your ${_provider.label} bots',
         ),
         // A key unlocks the live model list, so reload once it is entered.
-        onSubmitted: (_) => _loadModels(),
-        onEditingComplete: _loadModels,
+        onSubmitted: (_) => _loadModels(refresh: true),
+        onEditingComplete: () => _loadModels(refresh: true),
       );
     }
     if (_provider == ProviderKind.scripted) {
@@ -611,11 +1306,18 @@ class _BotEditorState extends State<_BotEditor> {
     // no CLIs, because the engine calls the provider's API directly.
     final paired = ModelCatalog.credentials?.forProvider(_provider);
     if (paired != null) {
+      final verified = !_loadingModels && _models?.source == ModelSource.live;
       return StatusPill(
-        color: Colors.green,
-        label: 'Signed in' +
-            (paired.plan != null ? ' — ${paired.plan}' : '') +
-            ' · no API key needed',
+        color: verified ? scheme.tertiary : Colors.orange,
+        label: _models?.source == ModelSource.needsSignIn
+            ? 'Sign in again from Accounts'
+            : !verified
+            ? (_loadingModels
+                  ? 'Checking saved sign-in…'
+                  : 'Sign-in saved · model access unavailable')
+            : 'Signed in' +
+                  (paired.plan != null ? ' — ${paired.plan}' : '') +
+                  ' · no API key needed',
         icon: Icons.verified_user_outlined,
       );
     }
@@ -624,7 +1326,7 @@ class _BotEditorState extends State<_BotEditor> {
     final status = findCli(cli);
     if (status.available) {
       return StatusPill(
-        color: Colors.green,
+        color: scheme.tertiary,
         label: 'Signed in via ${cli.binary} — no API key needed',
         icon: Icons.verified_user_outlined,
       );
@@ -643,11 +1345,11 @@ class _BotEditorState extends State<_BotEditor> {
         Text(
           _provider.signsInOnDevice
               ? 'Open Sign in and approve ${_provider.label} with the account '
-                  'you already pay for. No API key, and nothing to install.'
+                    'you already pay for. No API key, and nothing to install.'
               : '${status.problem}\n'
-                  'Install ${cli.binary} and sign in with it, or bring a '
-                  'sign-in from a machine that has it — run `orgbot pair` '
-                  'there and import it from Sign in.',
+                    'Install ${cli.binary} and sign in with it, or bring a '
+                    'sign-in from a machine that has it — run `orgbot pair` '
+                    'there and import it from Sign in.',
           style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
         ),
       ],
@@ -659,10 +1361,15 @@ class _BotEditorState extends State<_BotEditor> {
       return Row(
         children: [
           const SizedBox(
-              width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+            width: 14,
+            height: 14,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
           const SizedBox(width: 10),
-          Text('Loading models…',
-              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+          Text(
+            'Loading models…',
+            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+          ),
         ],
       );
     }
@@ -674,8 +1381,10 @@ class _BotEditorState extends State<_BotEditor> {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(list.problem ?? 'No models available yet.',
-              style: TextStyle(fontSize: 12, color: Colors.orange)),
+          Text(
+            list.problem ?? 'No models available yet.',
+            style: TextStyle(fontSize: 12, color: Colors.orange),
+          ),
           const SizedBox(height: 6),
           TextButton.icon(
             onPressed: () => setState(() => _custom = true),
@@ -688,24 +1397,40 @@ class _BotEditorState extends State<_BotEditor> {
     final value = _custom
         ? _customValue
         : (list.options.any((o) => o.id == _model)
-            ? _model
-            : (list.options.isEmpty ? _customValue : list.options.first.id));
+              ? _model
+              : (list.options.isEmpty ? _customValue : list.options.first.id));
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         DropdownButtonFormField<String>(
           initialValue: value,
+          key: ValueKey('${_provider.key}:$value'),
           isExpanded: true,
+          itemHeight: null,
+          selectedItemBuilder: (_) => [
+            for (final option in list.options)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  option.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: Text('Custom…'),
+            ),
+          ],
           decoration: InputDecoration(
             labelText: 'Model',
-            border: const OutlineInputBorder(),
             suffixIcon: IconButton(
               tooltip: 'Reload from the provider',
               icon: const Icon(Icons.refresh, size: 18),
               onPressed: () {
                 ModelCatalog.invalidate();
-                _loadModels();
+                _loadModels(refresh: true);
               },
             ),
           ),
@@ -719,9 +1444,13 @@ class _BotEditorState extends State<_BotEditor> {
                   children: [
                     Text(option.label, overflow: TextOverflow.ellipsis),
                     if (option.note.isNotEmpty)
-                      Text(option.note,
-                          style: TextStyle(
-                              fontSize: 11, color: scheme.onSurfaceVariant)),
+                      Text(
+                        option.note,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -743,7 +1472,6 @@ class _BotEditorState extends State<_BotEditor> {
             decoration: const InputDecoration(
               labelText: 'Model id',
               hintText: 'exact id from your provider',
-              border: OutlineInputBorder(),
             ),
           ),
         ],
@@ -751,7 +1479,7 @@ class _BotEditorState extends State<_BotEditor> {
         Text(
           list.source == ModelSource.live
               ? 'Loaded from ${_provider.label}.'
-              : 'Showing built-in defaults — ${list.problem ?? "could not reach the provider"}.',
+              : list.problem ?? 'Could not load the model list. Try again.',
           style: TextStyle(
             fontSize: 11,
             color: list.source == ModelSource.live
@@ -763,85 +1491,105 @@ class _BotEditorState extends State<_BotEditor> {
     );
   }
 
-  void _save() {
-    if (_name.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('Give the bot a name')));
-      return;
-    }
-    if (_custom && _resolvedModel.isEmpty) {
+  Future<void> _save() async {
+    if (_saving) return;
+    if (_provider.needsApiKey &&
+        _key.text.trim().isEmpty &&
+        ModelCatalog.credentials?.isSignedIn(_provider) != true) {
       ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Enter a model id, or pick one above')));
+        SnackBar(
+          content: Text(
+            'Add your ${_provider.label} key in Accounts or enter it here.',
+          ),
+        ),
+      );
       return;
     }
-    widget.onSave(BotDef(
-      id: widget.existing?.id,
-      name: _name.text.trim(),
-      handle: _handle.text.trim(),
-      persona: _persona.text.trim(),
-      provider: _provider,
-      model: _resolvedModel,
-      apiKey: _key.text.trim(),
-      role: _role,
-      powers: _powers,
-    ));
-    Navigator.pop(context);
+    if (_name.text.trim().isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Give the bot a name')));
+      return;
+    }
+    if ((_custom ||
+            _provider == ProviderKind.ollama ||
+            (!canRunAgentClis && _provider != ProviderKind.scripted)) &&
+        _resolvedModel.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Enter a model id, or pick one above')),
+      );
+      return;
+    }
+    setState(() => _saving = true);
+    try {
+      final credentials = ModelCatalog.credentials;
+      if (_provider.needsApiKey &&
+          credentials != null &&
+          _key.text.trim().isNotEmpty) {
+        await credentials.saveApiKey(_provider, _key.text);
+      }
+      await widget.onSave(
+        BotDef(
+          id: widget.existing?.id,
+          name: _name.text.trim(),
+          handle: _handle.text.trim(),
+          persona: _persona.text.trim(),
+          provider: _provider,
+          model: _resolvedModel,
+          apiKey: _provider.needsApiKey && credentials == null
+              ? _key.text.trim()
+              : '',
+          role: _role,
+          powers: _powers,
+        ),
+      );
+      if (mounted) Navigator.pop(context);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Could not save this bot. Your existing settings were kept.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 }
 
-/// Warnings about a room that will not be able to finish its work.
-///
-/// Shown while the roster is being chosen rather than after a run stalls: a
-/// room with no inspector looks perfectly fine until tasks pile up in review.
-class _RoomIssues extends StatelessWidget {
-  const _RoomIssues({required this.issues});
-
-  final List<RoomIssue> issues;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final blocking = hasBlockingIssue(issues);
-    final tone = blocking ? scheme.error : Colors.orange;
-
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 10),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: tone.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: tone.withValues(alpha: 0.35)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(blocking ? Icons.error_outline : Icons.info_outline,
-                  size: 16, color: tone),
-              const SizedBox(width: 8),
-              Text(
-                blocking
-                    ? 'This room cannot finish work yet'
-                    : 'Worth knowing',
-                style: TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w700, color: tone),
-              ),
-            ],
+// Both editors need the whole phone width; desktop keeps a compact dialog.
+Widget _editor(
+  BuildContext context, {
+  required Widget title,
+  required Widget content,
+  required List<Widget> actions,
+}) {
+  if (MediaQuery.sizeOf(context).width >= 600) {
+    return AlertDialog(title: title, content: content, actions: actions);
+  }
+  return Dialog.fullscreen(
+    child: Scaffold(
+      appBar: AppBar(
+        toolbarHeight: 68,
+        title: title,
+        leading: const CloseButton(),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 16),
+            child: actions.last,
           ),
-          for (final issue in issues) ...[
-            const SizedBox(height: 8),
-            Text(issue.summary,
-                style: const TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w600)),
-            Text(issue.fix,
-                style: TextStyle(
-                    fontSize: 11,
-                    height: 1.35,
-                    color: scheme.onSurfaceVariant)),
-          ],
         ],
       ),
-    );
-  }
+      body: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+          child: content,
+        ),
+      ),
+    ),
+  );
 }

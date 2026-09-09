@@ -24,6 +24,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use orgbot_proto::graph::Readiness;
 use orgbot_proto::ids::{AgentId, TaskId};
 use orgbot_proto::task::{Task, TaskState};
@@ -32,7 +34,7 @@ use orgbot_proto::task::{Task, TaskState};
 ///
 /// `raw_records` is last and named as it is on purpose: it is the number that
 /// used to lead, and it belongs in diagnostics.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct BoardCounts {
     /// Independently owned outcomes.
     pub objectives: u32,
@@ -52,7 +54,7 @@ pub struct BoardCounts {
 ///
 /// Counted in work that carries the outcome, never in supporting records.
 /// Splitting a task in two changes this; reviewing it does not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Progress {
     /// Carrying work delivered.
     pub done: u32,
@@ -76,7 +78,7 @@ impl Progress {
 }
 
 /// One outcome, as a person should see it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectiveCard {
     /// The objective itself.
     pub task: TaskId,
@@ -98,7 +100,7 @@ pub struct ObjectiveCard {
 }
 
 /// A decision waiting on a person, with everything needed to answer it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDecision {
     /// The task that cannot proceed.
     pub task: TaskId,
@@ -113,7 +115,7 @@ pub struct PendingDecision {
 }
 
 /// Signals that the room is coordinating more than it is working.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Health {
     /// Live records per objective. Around one is healthy; eight means the
     /// room spent most of its effort describing its own work.
@@ -137,7 +139,7 @@ impl Health {
 }
 
 /// Everything a person needs, and nothing they do not.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoomDigest {
     /// The outcomes, most urgent first.
     pub objectives: Vec<ObjectiveCard>,

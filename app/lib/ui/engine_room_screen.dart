@@ -8,16 +8,22 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
+import 'widgets/objectives_pane.dart';
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../orgbot/library.dart';
 import '../orgbot/models.dart' as defs;
-import '../protocol/models.dart';
 import '../state/engine_room_controller.dart';
+import '../workspace/workspace_screen.dart';
+import '../workspace/attachments.dart';
+import '../protocol/models.dart' show ChatFile;
 import '../orgbot/room_check.dart';
 import '../state/room_store.dart';
 import 'brand.dart';
 import 'room_widgets.dart';
+import 'polish.dart';
 
 /// Runs a saved room on the engine and shows it.
 class EngineRoomScreen extends StatefulWidget {
@@ -25,23 +31,32 @@ class EngineRoomScreen extends StatefulWidget {
     super.key,
     required this.room,
     required this.library,
-    this.displayName = 'you',
+    this.displayName,
   });
 
   final defs.RoomDef room;
   final Library library;
-  final String displayName;
+  final String? displayName;
 
   @override
   State<EngineRoomScreen> createState() => _EngineRoomScreenState();
 }
 
 class _EngineRoomScreenState extends State<EngineRoomScreen> {
+  /// Whether the Work tab is showing every record rather than the
+  /// objectives they roll up into.
+  bool _showAllRecords = false;
+
   late final EngineRoomController _controller;
   final TextEditingController _input = TextEditingController();
   final ScrollController _scroll = ScrollController();
-  bool _showBoard = false;
-  int _seen = 0;
+  late final TextEditingController _memory;
+  bool _savingMemory = false;
+  bool _sending = false;
+  bool _preparingAttachments = false;
+  late final RoomAttachments _attachments;
+  List<ChatFile> _files = [];
+  String? _attachmentRoot;
 
   /// Below this the rail becomes a tab rather than a column.
   static const double _wide = 1000;
@@ -49,41 +64,142 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   @override
   void initState() {
     super.initState();
-    _controller =
-        EngineRoomController(room: widget.room, library: widget.library);
+    _controller = widget.library.session(widget.room);
+    _attachments = RoomAttachments(widget.room.id);
+    if (Platform.isAndroid) {
+      _preparingAttachments = true;
+      _loadAttachments();
+    }
+    _input.text = _controller.draft;
+    _memory = TextEditingController(text: widget.room.memory);
+    _controller.trustHost = (host, type, key) async =>
+        mounted && await trustWorkspaceHost(context, host, type, key);
     _controller.addListener(_onChange);
-    _controller.start();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _controller.start();
+    });
   }
 
   void _onChange() {
     if (mounted) setState(() {});
   }
 
+  Future<void> _loadAttachments() async {
+    try {
+      final root = (await _attachments.directory).path;
+      final files = await _attachments.loadDraft();
+      if (mounted) {
+        setState(() {
+          _attachmentRoot = root;
+          _files = files;
+        });
+      }
+    } catch (e) {
+      _attachmentError(e);
+    } finally {
+      if (mounted) setState(() => _preparingAttachments = false);
+    }
+  }
+
+  void _attachmentError(Object error) {
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+    }
+  }
+
+  Future<void> _pickAttachments() async {
+    setState(() => _preparingAttachments = true);
+    try {
+      final files = [..._files, ...await _attachments.pick()];
+      await _attachments.saveDraft(files);
+      if (mounted) setState(() => _files = files);
+    } catch (e) {
+      _attachmentError(e);
+    } finally {
+      if (mounted) setState(() => _preparingAttachments = false);
+    }
+  }
+
+  Future<void> _removeAttachment(ChatFile file) async {
+    if (_preparingAttachments) return;
+    setState(() => _preparingAttachments = true);
+    final files = _files.where((f) => f.id != file.id).toList();
+    try {
+      await _attachments.saveDraft(files);
+      if (mounted) setState(() => _files = files);
+    } catch (e) {
+      _attachmentError(e);
+    } finally {
+      if (mounted) setState(() => _preparingAttachments = false);
+    }
+  }
+
+  Future<void> _openAttachment(ChatFile file) async {
+    try {
+      await _attachments.open(file);
+    } catch (e) {
+      _attachmentError(e);
+    }
+  }
+
   @override
   void dispose() {
     _controller.removeListener(_onChange);
-    _controller.dispose();
+    _controller.draft = _input.text;
+    _controller.trustHost = null;
     _input.dispose();
+    _memory.dispose();
     _scroll.dispose();
     super.dispose();
   }
 
-  void _send() {
-    final text = _input.text.trim();
+  Future<void> _send() async {
+    if (_preparingAttachments || _sending) return;
+    if (!_controller.isRunning) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Resume the room before sending. Your draft is kept.'),
+        ),
+      );
+      return;
+    }
+    if (_files.length > RoomAttachments.maxFiles) {
+      _attachmentError(
+        'Send up to five files per message. Remove ${_files.length - RoomAttachments.maxFiles} to continue.',
+      );
+      return;
+    }
+    final text = _input.text.trim().isEmpty && _files.isNotEmpty
+        ? 'Please review the attached files.'
+        : _input.text.trim();
     if (text.isEmpty) return;
-    _input.clear();
-    _controller.say(widget.displayName, text);
-  }
-
-  void _follow(int count) {
-    if (count == _seen) return;
-    _seen = count;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
-        _scroll.animateTo(_scroll.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 220), curve: Curves.easeOut);
+    final files = List<ChatFile>.of(_files);
+    setState(() => _sending = true);
+    try {
+      if (!await _controller.say(
+        widget.displayName ?? widget.library.userName,
+        text,
+        files: files,
+      )) {
+        _attachmentError(
+          _controller.error ??
+              'Message was not accepted. Your draft and attachments are kept.',
+        );
+        return;
       }
-    });
+      _controller.draft = '';
+      if (mounted) {
+        _input.clear();
+        setState(() => _files = []);
+      }
+      if (files.isNotEmpty) await _attachments.saveDraft([]);
+    } catch (e) {
+      _attachmentError(e);
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
   }
 
   @override
@@ -93,25 +209,38 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
 
     return Scaffold(
       appBar: _appBar(store),
-      body: switch (_controller.phase) {
-        RoomLaunch.failed => _failure(),
-        RoomLaunch.running when store != null => _room(store, wide),
-        _ => _starting(),
-      },
+      body: store != null
+          ? _room(store, wide)
+          : switch (_controller.phase) {
+              RoomLaunch.failed => _failure(),
+              RoomLaunch.running when store != null => _room(store, wide),
+              _ => _starting(),
+            },
     );
   }
 
   PreferredSizeWidget _appBar(RoomStore? store) {
     final scheme = Theme.of(context).colorScheme;
+    final state = _controller.phase == RoomLaunch.failed
+        ? 'Could not start'
+        : !_controller.isRunning
+        ? 'Saved'
+        : store?.runStateLabel ?? 'Active';
     return AppBar(
-      titleSpacing: 8,
+      titleSpacing: 0,
+      toolbarHeight: 68,
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(widget.room.name, style: const TextStyle(fontSize: 17)),
           Text(
-            widget.room.goal.isEmpty ? _controller.statusLine : widget.room.goal,
+            widget.room.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+          ),
+          Text(
+            '${widget.room.bots.length} ${widget.room.bots.length == 1 ? 'bot' : 'bots'} · $state',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
@@ -119,37 +248,43 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
         ],
       ),
       actions: [
-        if (_controller.isRunning) ...[
-          _phasePill(store),
+        if (store != null)
           IconButton(
-            tooltip: _showBoard ? 'Hide the board' : 'Show the board',
+            tooltip: !_controller.isRunning
+                ? 'Retry'
+                : store.isCompleted
+                ? 'Continue'
+                : store.isPaused
+                ? 'Resume'
+                : 'Pause',
             icon: Icon(
-                _showBoard ? Icons.checklist : Icons.checklist_outlined),
-            onPressed: () => setState(() => _showBoard = !_showBoard),
+              !_controller.isRunning || store.canResume
+                  ? Icons.play_arrow_rounded
+                  : Icons.pause_rounded,
+            ),
+            onPressed: _controller.isRunning
+                ? _controller.togglePause
+                : _controller.start,
           ),
-          IconButton(
-            tooltip: store?.isPaused == true ? 'Resume' : 'Pause',
-            icon: Icon(store?.isPaused == true ? Icons.play_arrow : Icons.pause),
-            onPressed: _controller.togglePause,
-          ),
-        ],
-        const SizedBox(width: 6),
+        PopupMenuButton<String>(
+          tooltip: 'Room actions',
+          onSelected: (value) async {
+            if (value == 'reconnect') await _controller.reconnectWorkspace();
+            if (value == 'stop') {
+              await widget.library.stopRoom(widget.room.id);
+              if (mounted) Navigator.pop(context);
+            }
+          },
+          itemBuilder: (_) => [
+            if (_controller.workspace != null)
+              const PopupMenuItem(
+                value: 'reconnect',
+                child: Text('Reconnect computer'),
+              ),
+            const PopupMenuItem(value: 'stop', child: Text('Stop and save')),
+          ],
+        ),
       ],
-    );
-  }
-
-  Widget _phasePill(RoomStore? store) {
-    final phase = store?.room?.phase ?? RoomPhase.running;
-    final (color, label) = switch (phase) {
-      RoomPhase.running => (Colors.green, 'live'),
-      RoomPhase.paused => (Colors.amber, 'paused'),
-      RoomPhase.completed => (Colors.blueGrey, 'done'),
-      RoomPhase.aborted => (Colors.red, 'stopped'),
-      _ => (Colors.grey, phase.name),
-    };
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
-      child: Center(child: StatusPill(color: color, label: label)),
     );
   }
 
@@ -183,9 +318,12 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
                       child: current > step.$2.index
                           ? Icon(Icons.check, size: 16, color: scheme.primary)
                           : current == step.$2.index
-                              ? const CircularProgressIndicator(strokeWidth: 2)
-                              : Icon(Icons.circle_outlined,
-                                  size: 14, color: scheme.outlineVariant),
+                          ? const CircularProgressIndicator(strokeWidth: 2)
+                          : Icon(
+                              Icons.circle_outlined,
+                              size: 14,
+                              color: scheme.outlineVariant,
+                            ),
                     ),
                     const SizedBox(width: 12),
                     Text(
@@ -217,8 +355,10 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
             children: [
               Icon(Icons.error_outline, size: 44, color: scheme.error),
               const SizedBox(height: 14),
-              Text('The room could not start',
-                  style: Theme.of(context).textTheme.titleMedium),
+              Text(
+                'The room could not start',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
               const SizedBox(height: 10),
               Container(
                 width: double.infinity,
@@ -246,40 +386,224 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   }
 
   Widget _room(RoomStore store, bool wide) {
-    _follow(store.messages.length);
+    final problem = _controller.error ?? store.lastError;
     final chat = Column(
       children: [
-        if (_controller.issues.isNotEmpty) _issuesBanner(),
-        if (_controller.skipped.isNotEmpty) _skippedBanner(),
-        if (_showBoard) BoardStrip(store: store),
-        Expanded(child: Transcript(store: store, controller: _scroll)),
-        const Divider(height: 1),
-        Composer(controller: _input, onSend: _send),
+        if (!_controller.isRunning && _controller.phase != RoomLaunch.failed)
+          const LinearProgressIndicator(minHeight: 2),
+        Expanded(
+          child: Transcript(
+            store: store,
+            controller: _scroll,
+            attachmentRoot: _attachmentRoot,
+            onOpenAttachment: _openAttachment,
+          ),
+        ),
+        Composer(
+          controller: _input,
+          onSend: _send,
+          mentions: [for (final bot in store.agents) bot.handle],
+          attachments: _files,
+          attachmentRoot: _attachmentRoot,
+          onAttach: Platform.isAndroid ? _pickAttachments : null,
+          onRemoveAttachment: _removeAttachment,
+          onOpenAttachment: _openAttachment,
+          busy: _preparingAttachments || _sending,
+          busyLabel: _sending ? 'Sending…' : 'Preparing attachments…',
+        ),
       ],
     );
-
-    if (!wide) {
-      return DefaultTabController(
-        length: 2,
-        child: Column(
-          children: [
-            const TabBar(tabs: [
-              Tab(icon: Icon(Icons.chat_bubble_outline), text: 'Chat'),
-              Tab(icon: Icon(Icons.insights_outlined), text: 'Activity'),
-            ]),
-            Expanded(
-              child: TabBarView(children: [chat, ActivityRail(store: store)]),
-            ),
-          ],
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 1100),
+        child: DefaultTabController(
+          length: 4,
+          animationDuration: motionDuration(context, 320),
+          child: Column(
+            children: [
+              if (problem != null)
+                MaterialBanner(
+                  content: Text(
+                    '${!_controller.isRunning ? 'Showing saved history. ' : ''}$problem',
+                  ),
+                  actions: [
+                    if (!_controller.isRunning)
+                      TextButton(
+                        onPressed: _controller.start,
+                        child: const Text('Retry'),
+                      ),
+                    TextButton(
+                      onPressed: () => setState(() {
+                        _controller.error = null;
+                        store.lastError = null;
+                      }),
+                      child: const Text('Dismiss'),
+                    ),
+                  ],
+                ),
+              const RoomTabs(),
+              Expanded(
+                child: TabBarView(
+                  children: [
+                    chat,
+                    Column(
+                      children: [
+                        if (_controller.issues.isNotEmpty) _issuesBanner(),
+                        if (_controller.skipped.isNotEmpty) _skippedBanner(),
+                        // Outcomes lead. The raw board is still here, one tap
+                        // down: leading with every record is what made a busy
+                        // room unreadable, but hiding it would lose the audit
+                        // trail people need when something looks wrong.
+                        Expanded(
+                          child: _showAllRecords
+                              ? Column(
+                                  children: [
+                                    Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: TextButton.icon(
+                                        onPressed: () => setState(
+                                            () => _showAllRecords = false),
+                                        icon: const Icon(Icons.arrow_back,
+                                            size: 18),
+                                        label: const Text('Back to objectives'),
+                                      ),
+                                    ),
+                                    Expanded(
+                                      child: ActivityRail(
+                                        store: store,
+                                        showBoard: true,
+                                        canAnswer: _controller.isRunning,
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              : ObjectivesPane(
+                                  store: store,
+                                  onShowAllRecords: () => setState(
+                                      () => _showAllRecords = true),
+                                ),
+                        ),
+                      ],
+                    ),
+                    WorkspaceFilesScreen(
+                      config: widget.room.workspace,
+                      roomId: widget.room.id,
+                      embedded: true,
+                    ),
+                    _roomMemory(store),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
-      );
-    }
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      ),
+    );
+  }
+
+  Widget _roomMemory(RoomStore store) {
+    final scheme = Theme.of(context).colorScheme;
+    return ListView(
+      padding: const EdgeInsets.all(20),
       children: [
-        Expanded(child: chat),
-        const VerticalDivider(width: 1),
-        SizedBox(width: 320, child: ActivityRail(store: store)),
+        Text('Room memory', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 6),
+        Text(
+          '${store.messages.length} messages · ${store.tasks.length} tasks · ${store.artifacts.length} artifacts saved with this room.',
+          style: TextStyle(color: scheme.onSurfaceVariant),
+        ),
+        if (widget.room.goal.isNotEmpty) ...[
+          const SizedBox(height: 24),
+          Text('Goal', style: Theme.of(context).textTheme.labelLarge),
+          const SizedBox(height: 6),
+          SelectableText(widget.room.goal),
+        ],
+        const SizedBox(height: 24),
+        TextField(
+          controller: _memory,
+          minLines: 4,
+          maxLines: 10,
+          maxLength: 6000,
+          decoration: const InputDecoration(
+            labelText: 'Pinned notes',
+            alignLabelWithHint: true,
+            hintText:
+                'Decisions, context and preferences the team should retain.',
+          ),
+        ),
+        Align(
+          alignment: Alignment.centerRight,
+          child: FilledButton(
+            onPressed: _savingMemory
+                ? null
+                : () async {
+                    setState(() => _savingMemory = true);
+                    widget.room.memory = _memory.text.trim();
+                    await widget.library.save();
+                    if (mounted) {
+                      setState(() => _savingMemory = false);
+                      if (widget.library.error == null) {
+                        if (_controller.isRunning) {
+                          _controller.say(
+                            widget.library.userName,
+                            'Update the pinned memory for this room: ${widget.room.memory.isEmpty ? '(No pinned notes.)' : widget.room.memory}',
+                          );
+                        }
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Room notes saved')),
+                        );
+                      }
+                    }
+                  },
+            child: Text(_savingMemory ? 'Saving…' : 'Save notes'),
+          ),
+        ),
+        const SizedBox(height: 24),
+        Text('Saved artifacts', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        if (store.artifacts.isEmpty)
+          Text(
+            'Reports and other outputs will appear here.',
+            style: TextStyle(color: scheme.onSurfaceVariant),
+          ),
+        for (final artifact in store.artifacts)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.description_outlined),
+            title: Text(artifact['name'] as String? ?? 'Artifact'),
+            subtitle: Text(
+              '@${store.handleFor(artifact['author'] as String?)}',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () {
+              final body = artifact['body'] as Map? ?? {};
+              final text =
+                  (body['text'] ??
+                          body['diff'] ??
+                          body['url'] ??
+                          body['path'] ??
+                          const JsonEncoder.withIndent(
+                            '  ',
+                          ).convert(body['value']))
+                      .toString();
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => Scaffold(
+                    appBar: AppBar(
+                      title: Text(artifact['name'] as String? ?? 'Artifact'),
+                    ),
+                    body: SelectionArea(
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.all(20),
+                        child: MessageText(text: text),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
       ],
     );
   }
@@ -298,25 +622,36 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
         children: [
           Row(
             children: [
-              Icon(blocking ? Icons.error_outline : Icons.info_outline,
-                  size: 15, color: tone),
+              Icon(
+                blocking ? Icons.error_outline : Icons.info_outline,
+                size: 15,
+                color: tone,
+              ),
               const SizedBox(width: 8),
-              Text(
-                blocking
-                    ? 'This room cannot finish its work'
-                    : 'Worth knowing about this room',
-                style: TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w700, color: tone),
+              Expanded(
+                child: Text(
+                  blocking
+                      ? 'This room cannot finish its work'
+                      : 'Worth knowing about this room',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: tone,
+                  ),
+                ),
               ),
             ],
           ),
           for (final issue in _controller.issues) ...[
             const SizedBox(height: 5),
-            Text('${issue.summary}  ${issue.fix}',
-                style: TextStyle(
-                    fontSize: 11,
-                    height: 1.35,
-                    color: scheme.onSurfaceVariant)),
+            Text(
+              '${issue.summary}  ${issue.fix}',
+              style: TextStyle(
+                fontSize: 11,
+                height: 1.35,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
           ],
         ],
       ),

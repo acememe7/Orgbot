@@ -1,171 +1,156 @@
-/// OrgBot — a group chat of AI bots working a shared task board.
-///
-/// This client connects to a `orgbot serve` WebSocket endpoint, renders the
-/// room's chat, roster, and board live, and lets a person talk to the room.
-library;
-
 import 'package:flutter/material.dart';
-
+import 'ui/polish.dart';
 import 'orgbot/credentials.dart';
 import 'orgbot/library.dart';
 import 'orgbot/model_catalog.dart';
-import 'ui/brand.dart';
-import 'ui/connect_screen.dart';
-import 'ui/sign_in_screen.dart';
+import 'state/background_rooms.dart';
 import 'ui/orgbot_screen.dart';
 
-void main() {
-  runApp(const OrgBotApp());
-}
+void main() => runApp(const OrgBotApp());
 
-
-/// Choose: join a hosted room, or run one entirely on this device.
-class HomeScreen extends StatelessWidget {
-  final Library library;
-  final Credentials credentials;
-  const HomeScreen(
-      {super.key, required this.library, required this.credentials});
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 520),
-            child: ListView(
-              shrinkWrap: true,
-              padding: const EdgeInsets.all(24),
-              children: [
-                const Center(child: BrandMark(size: 84)),
-                const SizedBox(height: 18),
-                Text(
-                  'OrgBot',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context)
-                      .textTheme
-                      .headlineMedium
-                      ?.copyWith(fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  'A group chat of AI bots working a shared task board.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: scheme.onSurfaceVariant, height: 1.4),
-                ),
-                const SizedBox(height: 32),
-                _HomeCard(
-                  icon: Icons.smart_toy_outlined,
-                  title: 'Bots & rooms',
-                  subtitle:
-                      'Build your bots, put them in a room, and talk to them '
-                      'while they work.',
-                  primary: true,
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute(
-                        builder: (_) => OrgBotScreen(library: library)),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                _HomeCard(
-                  icon: Icons.key_outlined,
-                  title: 'Sign in',
-                  subtitle:
-                      'Use the ChatGPT or Grok subscription you already pay '
-                      'for. Approve a code in your browser, and this device '
-                      'has its own sign-in.',
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute(
-                        builder: (_) => SignInScreen(credentials: credentials)),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                _HomeCard(
-                  icon: Icons.wifi_tethering,
-                  title: 'Join a hosted room',
-                  subtitle:
-                      'Connect to a room someone else is running, over WebSocket.',
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute(builder: (_) => const ConnectScreen()),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+ThemeData orgBotTheme(Brightness brightness) {
+  final dark = brightness == Brightness.dark;
+  final scheme = ColorScheme.fromSeed(
+    seedColor: const Color(0xFF65B8AB),
+    brightness: brightness,
+    surface: dark ? const Color(0xFF101214) : const Color(0xFFF5F3EF),
+    primary: dark ? const Color(0xFFDDEAE4) : const Color(0xFF23665B),
+    secondary: dark ? const Color(0xFF98B7D5) : const Color(0xFF416B92),
+    tertiary: dark ? const Color(0xFF85BDAE) : const Color(0xFF276958),
+    onSurface: dark ? const Color(0xFFEDF0EE) : const Color(0xFF202623),
+    onSurfaceVariant: dark ? const Color(0xFF9AA6A3) : const Color(0xFF62706A),
+    onPrimary: dark ? const Color(0xFF172821) : Colors.white,
+    surfaceContainerHighest: dark
+        ? const Color(0xFF282E32)
+        : const Color(0xFFE7ECE9),
+    surfaceContainerLow: dark ? const Color(0xFF1A1E21) : Colors.white,
+    outlineVariant: dark ? const Color(0xFF343B3F) : const Color(0xFFD7DFDA),
+  );
+  return ThemeData(
+    useMaterial3: true,
+    fontFamily: 'Inter',
+    splashFactory: InkSparkle.splashFactory,
+    pageTransitionsTheme: const PageTransitionsTheme(
+      builders: {
+        TargetPlatform.android: WorkspacePageTransitions(),
+        TargetPlatform.iOS: WorkspacePageTransitions(),
+        TargetPlatform.linux: WorkspacePageTransitions(),
+        TargetPlatform.macOS: WorkspacePageTransitions(),
+        TargetPlatform.windows: WorkspacePageTransitions(),
+      },
+    ),
+    colorScheme: scheme,
+    scaffoldBackgroundColor: scheme.surface,
+    appBarTheme: AppBarTheme(
+      backgroundColor: scheme.surface,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      centerTitle: false,
+      titleTextStyle: TextStyle(
+        fontFamily: 'Inter',
+        fontSize: 18,
+        fontWeight: FontWeight.w600,
+        color: scheme.onSurface,
+        letterSpacing: -0.4,
       ),
-    );
-  }
-}
-
-/// One choice on the home screen.
-class _HomeCard extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final bool primary;
-  final VoidCallback onTap;
-
-  const _HomeCard({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-    this.primary = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Material(
-      color: primary ? scheme.primaryContainer : scheme.surfaceContainerHighest,
-      borderRadius: BorderRadius.circular(16),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(16),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(18),
-          child: Row(
-            children: [
-              Icon(icon,
-                  size: 28,
-                  color: primary ? scheme.onPrimaryContainer : scheme.primary),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title,
-                        style: const TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 4),
-                    Text(
-                      subtitle,
-                      style: TextStyle(
-                        fontSize: 13,
-                        height: 1.35,
-                        color: primary
-                            ? scheme.onPrimaryContainer.withValues(alpha: 0.85)
-                            : scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Icon(Icons.chevron_right, color: scheme.onSurfaceVariant),
-            ],
-          ),
-        ),
+    ),
+    dividerTheme: DividerThemeData(
+      color: scheme.outlineVariant,
+      thickness: 0.5,
+      space: 1,
+    ),
+    navigationBarTheme: NavigationBarThemeData(
+      height: 72,
+      backgroundColor: scheme.surface,
+      indicatorColor: scheme.primary.withValues(alpha: 0.12),
+      elevation: 0,
+    ),
+    tabBarTheme: TabBarThemeData(
+      dividerColor: scheme.outlineVariant,
+      dividerHeight: 0.5,
+      indicatorColor: scheme.primary,
+      indicatorSize: TabBarIndicatorSize.label,
+      labelColor: scheme.onSurface,
+      unselectedLabelColor: scheme.onSurfaceVariant,
+      labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+      unselectedLabelStyle: const TextStyle(
+        fontSize: 13,
+        fontWeight: FontWeight.w500,
       ),
-    );
-  }
+    ),
+    inputDecorationTheme: InputDecorationTheme(
+      filled: true,
+      fillColor: scheme.surfaceContainerHighest.withValues(alpha: 0.4),
+      hintStyle: TextStyle(
+        color: scheme.onSurfaceVariant,
+        fontSize: 14,
+        fontWeight: FontWeight.w400,
+      ),
+      labelStyle: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide.none,
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide(color: scheme.tertiary, width: 1.5),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide.none,
+      ),
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(48, 48),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      ),
+    ),
+    bottomSheetTheme: BottomSheetThemeData(
+      backgroundColor: scheme.surface,
+      modalBackgroundColor: scheme.surface,
+      showDragHandle: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+    ),
+    dialogTheme: DialogThemeData(
+      backgroundColor: scheme.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(minimumSize: const Size(48, 44)),
+    ),
+    textTheme: const TextTheme(
+      headlineLarge: TextStyle(
+        fontSize: 34,
+        height: 1.1,
+        fontWeight: FontWeight.w600,
+        letterSpacing: -1.3,
+      ),
+      titleMedium: TextStyle(
+        fontSize: 17,
+        fontWeight: FontWeight.w600,
+        letterSpacing: -0.4,
+      ),
+      labelLarge: TextStyle(
+        fontSize: 12,
+        fontWeight: FontWeight.w500,
+        letterSpacing: 0.3,
+      ),
+      bodyMedium: TextStyle(fontSize: 15, height: 1.5),
+      titleLarge: TextStyle(
+        fontSize: 22,
+        fontWeight: FontWeight.w600,
+        letterSpacing: -0.4,
+      ),
+    ),
+  );
 }
 
-/// The application root.
 class OrgBotApp extends StatefulWidget {
   const OrgBotApp({super.key});
-
   @override
   State<OrgBotApp> createState() => _OrgBotAppState();
 }
@@ -177,34 +162,46 @@ class _OrgBotAppState extends State<OrgBotApp> {
   @override
   void initState() {
     super.initState();
-    // The model catalog consults these before falling back to local CLIs,
-    // which a phone does not have.
     ModelCatalog.credentials = _credentials;
-    _credentials.load();
+    _initialize();
+    BackgroundRooms.channel.setMethodCallHandler((call) async {
+      if (call.method == 'pauseAll') {
+        for (final room in _library.sessions.values.toList()) {
+          if (room.isRunning && room.store?.isPaused == false) {
+            await room.togglePause();
+          }
+        }
+      }
+    });
+  }
+
+  Future<void> _initialize() async {
+    try {
+      await _credentials.load();
+      await _library.load();
+      await _library.shareExistingKeys(_credentials);
+    } catch (_) {
+      _library.reportError(
+        'An account could not be saved. Your existing keys were kept.',
+      );
+    }
   }
 
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'OrgBot',
-      debugShowCheckedModeBanner: false,
-      theme: _theme(Brightness.light),
-      darkTheme: _theme(Brightness.dark),
-      themeMode: ThemeMode.dark,
-      home: HomeScreen(library: _library, credentials: _credentials),
-    );
+  void dispose() {
+    BackgroundRooms.channel.setMethodCallHandler(null);
+    _library.dispose();
+    _credentials.dispose();
+    super.dispose();
   }
 
-  ThemeData _theme(Brightness brightness) {
-    final scheme = ColorScheme.fromSeed(
-      seedColor: const Color(0xFF6D5AE6),
-      brightness: brightness,
-    );
-    return ThemeData(
-      useMaterial3: true,
-      colorScheme: scheme,
-      scaffoldBackgroundColor: scheme.surface,
-      fontFamily: 'sans-serif',
-    );
-  }
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+    title: 'OrgBot',
+    debugShowCheckedModeBanner: false,
+    theme: orgBotTheme(Brightness.light),
+    darkTheme: orgBotTheme(Brightness.dark),
+    themeMode: ThemeMode.system,
+    home: OrgBotScreen(library: _library, credentials: _credentials),
+  );
 }

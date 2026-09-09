@@ -39,6 +39,10 @@ RoomFile buildRoomFile(
   List<BotDef> bots, {
   Credentials? credentials,
   bool? canRunClis,
+  Map<String, Object?>? workspace,
+  String userName = 'You',
+  String userProfile = '',
+  String? statePath,
 }) {
   // A CLI can only run where the binary exists. Everywhere else — a phone,
   // most obviously — the same subscription is reached through its API with
@@ -58,6 +62,22 @@ RoomFile buildRoomFile(
     ..writeln('completion = "all_tasks_terminal"')
     ..writeln();
 
+  if (statePath != null) buffer.writeln('state_path = ${_s(statePath)}\n');
+
+  // Interactive phone rooms keep working until completion or an explicit pause.
+  // Preserve the separate CLI build's defaults and the native turn/error limits.
+  if (!runsClis) buffer.writeln('[room.limits]\nmax_duration_ms = 0\n');
+
+  if (!runsClis && workspace != null) {
+    buffer
+      ..writeln('[workspace]')
+      ..writeln('label = ' + _s(workspace['label'] as String))
+      ..writeln('root = ' + _s(workspace['root'] as String))
+      ..writeln('writable = ${workspace['writable'] == true}')
+      ..writeln('commands = ${workspace['commands'] == true}')
+      ..writeln();
+  }
+
   for (final bot in bots) {
     final handle = bot.handle.isEmpty ? _slug(bot.name) : _slug(bot.handle);
     if (handle.isEmpty) {
@@ -71,7 +91,12 @@ RoomFile buildRoomFile(
       ..writeln('handle = ' + _s(handle))
       ..writeln('display_name = ' + _s(bot.name.isEmpty ? handle : bot.name))
       ..writeln('roles = [' + _s(role.key) + ']')
-      ..writeln('persona = ' + _s(_persona(bot, role)));
+      ..writeln(
+        'persona = ' +
+            _s(
+              '${_persona(bot, role)}\n\nThe human operating this room is ${userName.trim().isEmpty ? 'You' : userName.trim()}. Address them by that name.\n${userProfile.trim().isEmpty ? '' : 'Their self-described profile and preferences:\n${userProfile.trim()}'}\n${room.memory.trim().isEmpty ? '' : 'Pinned room memory from the owner:\n${room.memory.trim()}'}',
+            ),
+      );
 
     // Permissions come from the role, so separation of duties survives the
     // trip into the engine rather than being a UI-only idea.
@@ -85,15 +110,30 @@ RoomFile buildRoomFile(
     final paired = credentials?.forProvider(bot.provider);
     final cli = bot.provider.cli;
     if (cli != null && !runsClis && !bot.provider.signsInOnDevice) {
-      skipped.add('@' + handle + ': ' +
-          bot.provider.label +
-          ' has no sign-in that works without its CLI, so it can only run '
-          'on a computer');
+      skipped.add(
+        '@' +
+            handle +
+            ': ' +
+            bot.provider.label +
+            ' has no sign-in that works without its CLI, so it can only run '
+                'on a computer',
+      );
       _rollbackLastBot(buffer);
       continue;
     } else if (cli != null && !runsClis && paired != null) {
+      if (bot.model.trim().isEmpty) {
+        skipped.add(
+          '@$handle: choose a ${bot.provider.label} model in Edit bot. The account is signed in, but no model is selected.',
+        );
+        _rollbackLastBot(buffer);
+        continue;
+      }
       // API-backed, using the paired subscription token.
-      environment[_envVarFor(bot.provider)] = paired.token;
+      environment[bot.provider == ProviderKind.grok &&
+                  paired.kind == CredentialKind.apiKey
+              ? 'GROK_API_KEY'
+              : credentialEnvVar(bot.provider)] =
+          paired.token;
       buffer
         ..writeln('[bots.provider]')
         ..writeln('kind = ' + _s(_apiKindFor(bot.provider)))
@@ -102,9 +142,13 @@ RoomFile buildRoomFile(
         buffer.writeln('profile = ' + _s(bot.provider.key));
       }
     } else if (cli != null && !runsClis) {
-      skipped.add('@' + handle + ': ' +
-          bot.provider.label +
-          ' is not signed in on this device — open Sign in and approve it');
+      skipped.add(
+        '@' +
+            handle +
+            ': ' +
+            bot.provider.label +
+            ' is not signed in on this device — open Sign in and approve it',
+      );
       _rollbackLastBot(buffer);
       continue;
     } else if (cli != null) {
@@ -118,19 +162,43 @@ RoomFile buildRoomFile(
         // and MCP servers.
         ..writeln('mcp = true')
         ..writeln('policy = "workspace_write"');
-    } else if (bot.provider == ProviderKind.deepseek) {
-      if (bot.apiKey.trim().isEmpty) {
-        skipped.add('@' + handle + ': DeepSeek needs an API key');
+    } else if (bot.provider.needsApiKey) {
+      final key = bot.apiKey.trim().isNotEmpty
+          ? bot.apiKey.trim()
+          : paired?.token.trim() ?? '';
+      if (key.isEmpty) {
+        skipped.add('@$handle: ${bot.provider.label} needs an API key');
         // Undo the partial entry rather than emit an unusable bot.
         _rollbackLastBot(buffer);
         continue;
       }
-      environment['DEEPSEEK_API_KEY'] = bot.apiKey.trim();
-      buffer
-        ..writeln('[bots.provider]')
-        ..writeln('kind = "deepseek"')
-        ..writeln('model = ' +
-            _s(bot.model.isEmpty ? 'deepseek-chat' : bot.model));
+      if (bot.provider == ProviderKind.ollama && bot.model.trim().isEmpty) {
+        skipped.add('@$handle: choose an Ollama Cloud model in Edit bot');
+        _rollbackLastBot(buffer);
+        continue;
+      }
+      final shared = environment[credentialEnvVar(bot.provider)];
+      buffer.writeln('[bots.provider]');
+      if (bot.provider == ProviderKind.deepseek &&
+          (shared == null || shared == key)) {
+        environment['DEEPSEEK_API_KEY'] = key;
+        buffer.writeln('kind = "deepseek"');
+      } else {
+        final profile =
+            bot.provider == ProviderKind.ollama &&
+                (shared == null || shared == key)
+            ? 'ollama'
+            : '${bot.provider.key}_$handle';
+        final prefix = 'ORGBOT_${profile.toUpperCase().replaceAll('-', '_')}';
+        environment['${prefix}_API_KEY'] = key;
+        environment['${prefix}_BASE_URL'] = bot.provider.apiBaseUrl;
+        buffer
+          ..writeln('kind = "openai"')
+          ..writeln('profile = ' + _s(profile));
+      }
+      buffer.writeln(
+        'model = ' + _s(bot.model.isEmpty ? 'deepseek-chat' : bot.model),
+      );
     } else {
       buffer
         ..writeln('[bots.provider]')
@@ -152,7 +220,7 @@ RoomFile buildRoomFile(
 }
 
 /// The environment variable the provider layer reads a credential from.
-String _envVarFor(ProviderKind provider) {
+String credentialEnvVar(ProviderKind provider) {
   switch (provider) {
     case ProviderKind.anthropic:
       // A subscription token is an OAuth token, not an API key, and the
@@ -164,9 +232,11 @@ String _envVarFor(ProviderKind provider) {
       // adapter, so it travels under its own name.
       return 'CODEX_AUTH_TOKEN';
     case ProviderKind.grok:
-      return 'GROK_API_KEY';
+      return 'GROK_AUTH_TOKEN';
     case ProviderKind.deepseek:
       return 'DEEPSEEK_API_KEY';
+    case ProviderKind.ollama:
+      return 'ORGBOT_OLLAMA_API_KEY';
     case ProviderKind.scripted:
       return '';
   }

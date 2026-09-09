@@ -52,26 +52,27 @@ class ProviderCredential {
     this.models = const [],
     this.importedAt,
     this.refreshToken,
-    this.expiresAt,
-  });
+    DateTime? expiresAt,
+  }) : expiresAt = kind == CredentialKind.bearer
+           ? tokenExpiry(token, declared: expiresAt)
+           : expiresAt;
 
   /// Build from a completed device-code sign-in.
   factory ProviderCredential.fromToken(
     ProviderKind provider,
     OAuthToken token, {
     List<ModelOption> models = const [],
-  }) =>
-      ProviderCredential(
-        provider: provider,
-        token: token.accessToken,
-        kind: CredentialKind.bearer,
-        account: token.account,
-        plan: token.plan,
-        models: models,
-        importedAt: DateTime.now(),
-        refreshToken: token.refreshToken,
-        expiresAt: token.expiresAt,
-      );
+  }) => ProviderCredential(
+    provider: provider,
+    token: token.accessToken,
+    kind: CredentialKind.bearer,
+    account: token.account,
+    plan: token.plan,
+    models: models,
+    importedAt: DateTime.now(),
+    refreshToken: token.refreshToken,
+    expiresAt: token.expiresAt,
+  );
 
   /// Which backend this signs in to.
   final ProviderKind provider;
@@ -108,27 +109,25 @@ class ProviderCredential {
   bool get needsRenewal {
     final expiry = expiresAt;
     if (expiry == null) return false;
-    return DateTime.now()
-        .add(const Duration(minutes: 10))
-        .isAfter(expiry);
+    return DateTime.now().add(const Duration(minutes: 2)).isAfter(expiry);
   }
 
   /// Whether this can be renewed at all.
   bool get canRenew => (refreshToken ?? '').isNotEmpty;
 
   Map<String, Object?> toJson() => {
-        'provider': provider.key,
-        'token': token,
-        'kind': kind.wire,
-        'account': account,
-        'plan': plan,
-        'models': [
-          for (final model in models) {'id': model.id, 'label': model.label},
-        ],
-        'imported_at': (importedAt ?? DateTime.now()).millisecondsSinceEpoch,
-        'refresh_token': refreshToken,
-        'expires_at': expiresAt?.millisecondsSinceEpoch,
-      };
+    'provider': provider.key,
+    'token': token,
+    'kind': kind.wire,
+    'account': account,
+    'plan': plan,
+    'models': [
+      for (final model in models) {'id': model.id, 'label': model.label},
+    ],
+    'imported_at': (importedAt ?? DateTime.now()).millisecondsSinceEpoch,
+    'refresh_token': refreshToken,
+    'expires_at': expiresAt?.millisecondsSinceEpoch,
+  };
 
   static ProviderCredential? fromJson(Map<String, Object?> json) {
     final token = json['token'];
@@ -143,20 +142,26 @@ class ProviderCredential {
       plan: json['plan'] as String?,
       models: rawModels is List
           ? rawModels
-              .whereType<Map>()
-              .map((m) => ModelOption(
+                .whereType<Map>()
+                .map(
+                  (m) => ModelOption(
                     (m['id'] ?? '').toString(),
                     (m['label'] ?? m['id'] ?? '').toString(),
-                  ))
-              .where((m) => m.id.isNotEmpty)
-              .toList()
+                  ),
+                )
+                .where((m) => m.id.isNotEmpty)
+                .toList()
           : const [],
       importedAt: json['imported_at'] is num
-          ? DateTime.fromMillisecondsSinceEpoch((json['imported_at'] as num).toInt())
+          ? DateTime.fromMillisecondsSinceEpoch(
+              (json['imported_at'] as num).toInt(),
+            )
           : null,
       refreshToken: json['refresh_token'] as String?,
       expiresAt: json['expires_at'] is num
-          ? DateTime.fromMillisecondsSinceEpoch((json['expires_at'] as num).toInt())
+          ? DateTime.fromMillisecondsSinceEpoch(
+              (json['expires_at'] as num).toInt(),
+            )
           : null,
     );
   }
@@ -183,9 +188,9 @@ class Credentials extends ChangeNotifier {
   // `_prefs` is filled lazily from SharedPreferences.getInstance() when it
   // was not injected, so it cannot be an initializing formal.
   Credentials({SharedPreferences? prefs, FlutterSecureStorage? secure})
-      // ignore: prefer_initializing_formals
-      : _prefs = prefs,
-        _secure = secure ?? const FlutterSecureStorage();
+    // ignore: prefer_initializing_formals
+    : _prefs = prefs,
+      _secure = secure ?? const FlutterSecureStorage();
 
   static const _key = 'orgbot_credentials_v1';
 
@@ -195,6 +200,8 @@ class Credentials extends ChangeNotifier {
   /// Only consulted to rescue what an older build left in the clear.
   SharedPreferences? _prefs;
   final Map<ProviderKind, ProviderCredential> _byProvider = {};
+  Future<void> _writing = Future.value();
+  final Map<ProviderKind, Future<String?>> _renewing = {};
 
   /// Where the most recent bundle came from, for display.
   String? source;
@@ -213,7 +220,9 @@ class Credentials extends ChangeNotifier {
   ///
   /// Reads the keystore first; if nothing is there, rescues anything an
   /// older build left in plaintext preferences and removes it.
-  Future<void> load() async {
+  Future<void>? _loading;
+  Future<void> load() => _loading ??= _load();
+  Future<void> _load() async {
     var raw = await _readSecure();
     var rescued = false;
     if (raw == null || raw.isEmpty) {
@@ -228,12 +237,16 @@ class Credentials extends ChangeNotifier {
       final providers = decoded['providers'];
       if (providers is List) {
         for (final entry in providers.whereType<Map>()) {
-          final credential =
-              ProviderCredential.fromJson(entry.cast<String, Object?>());
+          final credential = ProviderCredential.fromJson(
+            entry.cast<String, Object?>(),
+          );
           if (credential != null) _byProvider[credential.provider] = credential;
         }
       }
-      if (rescued) await _persist();
+      if (rescued) {
+        await _persist();
+        await _prefs?.remove(_key);
+      }
       notifyListeners();
     } catch (_) {
       // Corrupt storage should not stop the app starting; the person can
@@ -257,7 +270,6 @@ class Credentials extends ChangeNotifier {
       final prefs = _prefs ??= await SharedPreferences.getInstance();
       final raw = prefs.getString(_key);
       if (raw == null || raw.isEmpty) return null;
-      await prefs.remove(_key);
       return raw;
     } catch (_) {
       return null;
@@ -278,8 +290,9 @@ class Credentials extends ChangeNotifier {
       decoded = jsonDecode(trimmed);
     } catch (_) {
       throw PairingError(
-          'That is not a pairing bundle. Run `orgbot pair` and paste all of '
-          'its output.');
+        'That is not a pairing bundle. Run `orgbot pair` and paste all of '
+        'its output.',
+      );
     }
     if (decoded is! Map) {
       throw PairingError('That is not a pairing bundle.');
@@ -287,7 +300,8 @@ class Credentials extends ChangeNotifier {
     final version = decoded['version'];
     if (version is num && version > kBundleVersion) {
       throw PairingError(
-          'This bundle was made by a newer OrgBot (v$version). Update the app.');
+        'This bundle was made by a newer OrgBot (v$version). Update the app.',
+      );
     }
     final providers = decoded['providers'];
     if (providers is! List || providers.isEmpty) {
@@ -296,8 +310,9 @@ class Credentials extends ChangeNotifier {
 
     var imported = 0;
     for (final entry in providers.whereType<Map>()) {
-      final credential =
-          ProviderCredential.fromJson(entry.cast<String, Object?>());
+      final credential = ProviderCredential.fromJson(
+        entry.cast<String, Object?>(),
+      );
       if (credential == null) continue;
       _byProvider[credential.provider] = credential;
       imported++;
@@ -326,9 +341,37 @@ class Credentials extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// One encrypted provider key, reused by every bot using that account.
+  Future<void> saveApiKey(ProviderKind provider, String key) async {
+    await load();
+    final value = key.trim();
+    if (!provider.needsApiKey || value.isEmpty) {
+      throw const FormatException('Enter a valid provider API key.');
+    }
+    final previous = _byProvider[provider];
+    _byProvider[provider] = ProviderCredential(
+      provider: provider,
+      token: value,
+      kind: CredentialKind.apiKey,
+    );
+    try {
+      await _persist();
+    } catch (_) {
+      if (previous == null) {
+        _byProvider.remove(provider);
+      } else {
+        _byProvider[provider] = previous;
+      }
+      rethrow;
+    }
+    notifyListeners();
+  }
+
   /// Attach a freshly loaded model list to a sign-in.
   Future<void> setModels(
-      ProviderKind provider, List<ModelOption> models) async {
+    ProviderKind provider,
+    List<ModelOption> models,
+  ) async {
     final existing = _byProvider[provider];
     if (existing == null || models.isEmpty) return;
     _byProvider[provider] = ProviderCredential(
@@ -352,20 +395,56 @@ class Credentials extends ChangeNotifier {
   /// Returns null when this provider is not signed in, or when the sign-in has
   /// lapsed and cannot be renewed — the caller should send the person back to
   /// the sign-in screen rather than starting a room that will fail mid-turn.
-  Future<String?> freshToken(ProviderKind provider, {DeviceAuth? auth}) async {
+  Future<String?> freshToken(
+    ProviderKind provider, {
+    DeviceAuth? auth,
+    bool force = false,
+  }) async {
+    await load();
+    final pending = _renewing[provider];
+    if (pending != null) return pending;
+    final future = _freshToken(provider, auth: auth, force: force);
+    _renewing[provider] = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_renewing[provider], future)) _renewing.remove(provider);
+    }
+  }
+
+  Future<String?> _freshToken(
+    ProviderKind provider, {
+    DeviceAuth? auth,
+    required bool force,
+  }) async {
     final credential = _byProvider[provider];
     if (credential == null) return null;
-    if (!credential.needsRenewal) return credential.token;
-    if (!credential.canRenew) return null;
+    if (credential.kind == CredentialKind.apiKey ||
+        (!force && !credential.needsRenewal)) {
+      return credential.token;
+    }
+    if (!credential.canRenew) {
+      if (force || credential.expiresAt?.isBefore(DateTime.now()) == true) {
+        await forget(provider);
+        return null;
+      }
+      return credential.token;
+    }
     try {
-      final renewed = await (auth ?? DeviceAuth())
-          .refresh(provider, credential.refreshToken!);
+      final renewed = await (auth ?? DeviceAuth()).refresh(
+        provider,
+        credential.refreshToken!,
+      );
+      // A late refresh must not undo an explicit sign-out or a newer sign-in.
+      if (!identical(_byProvider[provider], credential)) {
+        return _byProvider[provider]?.token;
+      }
       await signIn(provider, renewed);
       return renewed.accessToken;
-    } on SignInError {
+    } on SignInRevoked {
       // A refusal here means the sign-in is gone for good; drop it so the UI
       // shows the provider as signed out rather than silently failing rooms.
-      await forget(provider);
+      if (identical(_byProvider[provider], credential)) await forget(provider);
       return null;
     }
   }
@@ -386,11 +465,15 @@ class Credentials extends ChangeNotifier {
   }
 
   Future<void> _persist() async {
+    ModelCatalog.invalidate();
     final encoded = jsonEncode({
       'version': kBundleVersion,
       'source': source,
       'providers': [for (final c in _byProvider.values) c.toJson()],
     });
-    await _secure.write(key: _key, value: encoded);
+    _writing = _writing
+        .catchError((Object _) {})
+        .then((_) => _secure.write(key: _key, value: encoded));
+    await _writing;
   }
 }

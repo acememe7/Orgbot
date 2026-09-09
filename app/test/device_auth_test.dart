@@ -46,12 +46,10 @@ class FakeTransport implements HttpTransport {
 
   @override
   Future<Map<String, Object?>> postJson(
-      String url, Map<String, Object?> body) async {
-    final response = await post(
-      url,
-      headers: const {},
-      body: jsonEncode(body),
-    );
+    String url,
+    Map<String, Object?> body,
+  ) async {
+    final response = await post(url, headers: const {}, body: jsonEncode(body));
     if (response.status != 200) {
       throw SignInError('HTTP ${response.status}');
     }
@@ -60,8 +58,7 @@ class FakeTransport implements HttpTransport {
   }
 }
 
-const _codexStart =
-    'https://auth.openai.com/api/accounts/deviceauth/usercode';
+const _codexStart = 'https://auth.openai.com/api/accounts/deviceauth/usercode';
 const _codexPoll = 'https://auth.openai.com/api/accounts/deviceauth/token';
 const _codexToken = 'https://auth.openai.com/oauth/token';
 const _grokStart = 'https://auth.x.ai/oauth2/device/code';
@@ -69,41 +66,58 @@ const _grokToken = 'https://auth.x.ai/oauth2/token';
 
 /// A JWT whose claims carry an account id and an email.
 /// {"email":"a@b.c","https://api.openai.com/auth":{"chatgpt_account_id":"acct_7"}}
-const _jwt = 'h.'
+const _jwt =
+    'h.'
     'eyJlbWFpbCI6ImFAYi5jIiwiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS9hdXRoIjp7ImNoYXRncHRfYWNjb3VudF9pZCI6ImFjY3RfNyJ9fQ'
     '.s';
 
 DeviceAuth authWith(FakeTransport transport) => DeviceAuth(
-      transport: transport,
-      // Poll immediately; the flows are what is under test, not the waiting.
-      minInterval: Duration.zero,
-      maxInterval: Duration.zero,
-    );
+  transport: transport,
+  // Poll immediately; the flows are what is under test, not the waiting.
+  minInterval: Duration.zero,
+  maxInterval: Duration.zero,
+);
 
 void main() {
   group('Codex', () {
     test('shows a code, then exchanges the approval for a token', () async {
       final transport = FakeTransport({
         _codexStart: [
-          HttpResponse(200,
-              jsonEncode({'device_auth_id': 'da_1', 'user_code': 'UWON-C8ZXH', 'interval': '5'})),
+          HttpResponse(
+            200,
+            jsonEncode({
+              'device_auth_id': 'da_1',
+              'user_code': 'UWON-C8ZXH',
+              'interval': '5',
+            }),
+          ),
         ],
         _codexPoll: [
           // Not approved yet: this endpoint says so with a status, not a body.
           const HttpResponse(403, '{}'),
-          HttpResponse(200,
-              jsonEncode({'authorization_code': 'ac_1', 'code_verifier': 'cv_1'})),
+          HttpResponse(
+            200,
+            jsonEncode({'authorization_code': 'ac_1', 'code_verifier': 'cv_1'}),
+          ),
         ],
         _codexToken: [
-          HttpResponse(200,
-              jsonEncode({'access_token': _jwt, 'refresh_token': 'rt_1', 'expires_in': 3600})),
+          HttpResponse(
+            200,
+            jsonEncode({
+              'access_token': _jwt,
+              'refresh_token': 'rt_1',
+              'expires_in': 3600,
+            }),
+          ),
         ],
       });
 
       final flow = await authWith(transport).start(ProviderKind.codex);
       expect(flow.challenge.userCode, 'UWON-C8ZXH');
-      expect(flow.challenge.verificationUri,
-          'https://auth.openai.com/codex/device');
+      expect(
+        flow.challenge.verificationUri,
+        'https://auth.openai.com/codex/device',
+      );
 
       final token = await flow.token;
       expect(token.accessToken, _jwt);
@@ -115,7 +129,7 @@ void main() {
       final exchange = transport.calls.last;
       expect(exchange.url, _codexToken);
       expect(exchange.body, contains('code_verifier=cv_1'));
-      expect(exchange.body, contains('client_id=' + kCodexClientId));
+      expect(exchange.body, contains('client_id=$kCodexClientId'));
     });
 
     test('a start with no code in it is reported, not left hanging', () async {
@@ -134,21 +148,28 @@ void main() {
       final transport = FakeTransport({
         _grokStart: [
           HttpResponse(
-              200,
-              jsonEncode({
-                'device_code': 'dc_1',
-                'user_code': '9NQC-2Y9T',
-                'verification_uri': 'https://accounts.x.ai/oauth2/device',
-                'verification_uri_complete':
-                    'https://accounts.x.ai/oauth2/device?user_code=9NQC-2Y9T',
-                'expires_in': 1800,
-                'interval': 5,
-              })),
+            200,
+            jsonEncode({
+              'device_code': 'dc_1',
+              'user_code': '9NQC-2Y9T',
+              'verification_uri': 'https://accounts.x.ai/oauth2/device',
+              'verification_uri_complete':
+                  'https://accounts.x.ai/oauth2/device?user_code=9NQC-2Y9T',
+              'expires_in': 1800,
+              'interval': 5,
+            }),
+          ),
         ],
         _grokToken: [
           HttpResponse(400, jsonEncode({'error': 'authorization_pending'})),
-          HttpResponse(200,
-              jsonEncode({'access_token': 'grok_at', 'refresh_token': 'grok_rt', 'expires_in': 21600})),
+          HttpResponse(
+            200,
+            jsonEncode({
+              'access_token': 'grok_at',
+              'refresh_token': 'grok_rt',
+              'expires_in': 21600,
+            }),
+          ),
         ],
       });
 
@@ -162,8 +183,12 @@ void main() {
       expect(token.refreshToken, 'grok_rt');
 
       final poll = transport.calls.last;
-      expect(poll.body,
-          contains('grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code'));
+      expect(
+        poll.body,
+        contains(
+          'grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code',
+        ),
+      );
       expect(poll.body, contains('device_code=dc_1'));
     });
 
@@ -171,13 +196,14 @@ void main() {
       final transport = FakeTransport({
         _grokStart: [
           HttpResponse(
-              200,
-              jsonEncode({
-                'device_code': 'dc_1',
-                'user_code': 'X',
-                'verification_uri': 'https://accounts.x.ai/oauth2/device',
-                'interval': 1,
-              })),
+            200,
+            jsonEncode({
+              'device_code': 'dc_1',
+              'user_code': 'X',
+              'verification_uri': 'https://accounts.x.ai/oauth2/device',
+              'interval': 1,
+            }),
+          ),
         ],
         _grokToken: [
           HttpResponse(400, jsonEncode({'error': 'expired_token'})),
@@ -191,13 +217,14 @@ void main() {
       final transport = FakeTransport({
         _grokStart: [
           HttpResponse(
-              200,
-              jsonEncode({
-                'device_code': 'dc_1',
-                'user_code': 'X',
-                'verification_uri': 'https://accounts.x.ai/oauth2/device',
-                'interval': 1,
-              })),
+            200,
+            jsonEncode({
+              'device_code': 'dc_1',
+              'user_code': 'X',
+              'verification_uri': 'https://accounts.x.ai/oauth2/device',
+              'interval': 1,
+            }),
+          ),
         ],
         _grokToken: [
           HttpResponse(400, jsonEncode({'error': 'access_denied'})),
@@ -211,13 +238,14 @@ void main() {
       final transport = FakeTransport({
         _grokStart: [
           HttpResponse(
-              200,
-              jsonEncode({
-                'device_code': 'dc_1',
-                'user_code': 'X',
-                'verification_uri': 'https://accounts.x.ai/oauth2/device',
-                'interval': 1,
-              })),
+            200,
+            jsonEncode({
+              'device_code': 'dc_1',
+              'user_code': 'X',
+              'verification_uri': 'https://accounts.x.ai/oauth2/device',
+              'interval': 1,
+            }),
+          ),
         ],
         _grokToken: [
           HttpResponse(400, jsonEncode({'error': 'authorization_pending'})),
@@ -230,21 +258,26 @@ void main() {
   });
 
   group('renewal', () {
-    test('a refresh keeps the old refresh token when none comes back',
-        () async {
-      final transport = FakeTransport({
-        _grokToken: [
-          HttpResponse(200,
-              jsonEncode({'access_token': 'new_at', 'expires_in': 21600})),
-        ],
-      });
-      final token =
-          await authWith(transport).refresh(ProviderKind.grok, 'old_rt');
-      expect(token.accessToken, 'new_at');
-      // Servers omit it when it has not rotated; dropping it would strand the
-      // next renewal.
-      expect(token.refreshToken, 'old_rt');
-    });
+    test(
+      'a refresh keeps the old refresh token when none comes back',
+      () async {
+        final transport = FakeTransport({
+          _grokToken: [
+            HttpResponse(
+              200,
+              jsonEncode({'access_token': 'new_at', 'expires_in': 21600}),
+            ),
+          ],
+        });
+        final token = await authWith(
+          transport,
+        ).refresh(ProviderKind.grok, 'old_rt');
+        expect(token.accessToken, 'new_at');
+        // Servers omit it when it has not rotated; dropping it would strand the
+        // next renewal.
+        expect(token.refreshToken, 'old_rt');
+      },
+    );
 
     test('a rejected refresh asks the person to sign in again', () async {
       final transport = FakeTransport({
@@ -280,23 +313,40 @@ void main() {
     /// to a browser to approve it, and while the app is backgrounded Android
     /// takes its network away. That must not end the sign-in.
     test('Codex keeps polling while the app is backgrounded', () async {
-      final transport = FakeTransport({
-        _codexStart: [
-          HttpResponse(200,
-              jsonEncode({'device_auth_id': 'da_1', 'user_code': 'ABC-123', 'interval': 1})),
-        ],
-        _codexPoll: [
-          HttpResponse(200,
-              jsonEncode({'authorization_code': 'ac_1', 'code_verifier': 'cv_1'})),
-        ],
-        _codexToken: [
-          HttpResponse(200, jsonEncode({'access_token': _jwt, 'expires_in': 3600})),
-        ],
-      })
-        // Offline for the whole trip out to the browser and back.
-        ..offlineFor[_codexPoll] = 6;
+      final transport =
+          FakeTransport({
+              _codexStart: [
+                HttpResponse(
+                  200,
+                  jsonEncode({
+                    'device_auth_id': 'da_1',
+                    'user_code': 'ABC-123',
+                    'interval': 1,
+                  }),
+                ),
+              ],
+              _codexPoll: [
+                HttpResponse(
+                  200,
+                  jsonEncode({
+                    'authorization_code': 'ac_1',
+                    'code_verifier': 'cv_1',
+                  }),
+                ),
+              ],
+              _codexToken: [
+                HttpResponse(
+                  200,
+                  jsonEncode({'access_token': _jwt, 'expires_in': 3600}),
+                ),
+              ],
+            })
+            // Offline for the whole trip out to the browser and back.
+            ..offlineFor[_codexPoll] = 6;
 
-      final token = await (await authWith(transport).start(ProviderKind.codex)).token;
+      final token = await (await authWith(
+        transport,
+      ).start(ProviderKind.codex)).token;
       expect(token.accessToken, _jwt);
     });
 
@@ -304,50 +354,78 @@ void main() {
       final transport = FakeTransport({
         _grokStart: [
           HttpResponse(
-              200,
-              jsonEncode({
-                'device_code': 'dc_1',
-                'user_code': 'X',
-                'verification_uri': 'https://accounts.x.ai/oauth2/device',
-                'interval': 1,
-              })),
+            200,
+            jsonEncode({
+              'device_code': 'dc_1',
+              'user_code': 'X',
+              'verification_uri': 'https://accounts.x.ai/oauth2/device',
+              'interval': 1,
+            }),
+          ),
         ],
         _grokToken: [
           HttpResponse(200, jsonEncode({'access_token': 'grok_at'})),
         ],
       })..offlineFor[_grokToken] = 6;
 
-      final token = await (await authWith(transport).start(ProviderKind.grok)).token;
+      final token = await (await authWith(
+        transport,
+      ).start(ProviderKind.grok)).token;
       expect(token.accessToken, 'grok_at');
     });
 
-    test('the token exchange retries rather than losing the approval',
-        () async {
-      final transport = FakeTransport({
-        _codexStart: [
-          HttpResponse(200,
-              jsonEncode({'device_auth_id': 'da_1', 'user_code': 'ABC-123', 'interval': 1})),
-        ],
-        _codexPoll: [
-          HttpResponse(200,
-              jsonEncode({'authorization_code': 'ac_1', 'code_verifier': 'cv_1'})),
-        ],
-        _codexToken: [
-          HttpResponse(200, jsonEncode({'access_token': _jwt, 'expires_in': 3600})),
-        ],
-      })
-        // Coming back from the browser, the first exchange attempts fail.
-        ..offlineFor[_codexToken] = 2;
+    test(
+      'the token exchange retries rather than losing the approval',
+      () async {
+        final transport =
+            FakeTransport({
+                _codexStart: [
+                  HttpResponse(
+                    200,
+                    jsonEncode({
+                      'device_auth_id': 'da_1',
+                      'user_code': 'ABC-123',
+                      'interval': 1,
+                    }),
+                  ),
+                ],
+                _codexPoll: [
+                  HttpResponse(
+                    200,
+                    jsonEncode({
+                      'authorization_code': 'ac_1',
+                      'code_verifier': 'cv_1',
+                    }),
+                  ),
+                ],
+                _codexToken: [
+                  HttpResponse(
+                    200,
+                    jsonEncode({'access_token': _jwt, 'expires_in': 3600}),
+                  ),
+                ],
+              })
+              // Coming back from the browser, the first exchange attempts fail.
+              ..offlineFor[_codexToken] = 2;
 
-      final token = await (await authWith(transport).start(ProviderKind.codex)).token;
-      expect(token.accessToken, _jwt);
-    });
+        final token = await (await authWith(
+          transport,
+        ).start(ProviderKind.codex)).token;
+        expect(token.accessToken, _jwt);
+      },
+    );
 
     test('a network that never comes back is eventually reported', () async {
       final transport = FakeTransport({
         _codexStart: [
-          HttpResponse(200,
-              jsonEncode({'device_auth_id': 'da_1', 'user_code': 'ABC-123', 'interval': 1})),
+          HttpResponse(
+            200,
+            jsonEncode({
+              'device_auth_id': 'da_1',
+              'user_code': 'ABC-123',
+              'interval': 1,
+            }),
+          ),
         ],
       })..offlineFor[_codexPoll] = 1000;
 

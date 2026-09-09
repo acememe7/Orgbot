@@ -74,6 +74,16 @@ set_target_properties(${BINARY_NAME}
 # them to the application.
 include(flutter/generated_plugins.cmake)
 
+# The secure-storage plugin vendors older nlohmann headers. New Clang versions
+# deprecate their literal syntax; keep our own code's warnings as errors.
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-Wno-deprecated-literal-operator" HAS_LITERAL_COMPAT_FLAG)
+if(TARGET flutter_secure_storage_linux_plugin AND HAS_LITERAL_COMPAT_FLAG)
+  target_compile_options(flutter_secure_storage_linux_plugin PRIVATE
+    -Wno-deprecated-literal-operator)
+endif()
+
+
 
 # === Installation ===
 # By default, "installing" just makes a relocatable bundle in the build

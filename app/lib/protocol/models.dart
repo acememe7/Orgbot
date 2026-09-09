@@ -12,7 +12,8 @@ class Timestamp {
 
   final int millis;
 
-  factory Timestamp.fromJson(Object? json) => Timestamp((json as num?)?.toInt() ?? 0);
+  factory Timestamp.fromJson(Object? json) =>
+      Timestamp((json as num?)?.toInt() ?? 0);
 
   DateTime get dateTime => DateTime.fromMillisecondsSinceEpoch(millis);
 }
@@ -71,7 +72,9 @@ enum TaskState {
   }
 
   bool get isTerminal =>
-      this == TaskState.submitted || this == TaskState.failed || this == TaskState.cancelled;
+      this == TaskState.submitted ||
+      this == TaskState.failed ||
+      this == TaskState.cancelled;
 
   bool get isActive =>
       this == TaskState.claimed ||
@@ -159,7 +162,8 @@ enum RoomPhase {
   }
 
   bool get isLive => this == RoomPhase.running;
-  bool get isFinished => this == RoomPhase.completed || this == RoomPhase.aborted;
+  bool get isFinished =>
+      this == RoomPhase.completed || this == RoomPhase.aborted;
 }
 
 /// A bot in the room, with its live status. Mirrors `AgentView`.
@@ -179,12 +183,12 @@ class Agent {
   AgentStatus status;
 
   factory Agent.fromJson(Map<String, Object?> json) => Agent(
-        id: json['id'] as String? ?? '',
-        handle: json['handle'] as String? ?? '?',
-        displayName: json['display_name'] as String? ?? '',
-        roles: (json['roles'] as List?)?.cast<String>() ?? const [],
-        status: AgentStatus.parse(json['status'] as String?),
-      );
+    id: json['id'] as String? ?? '',
+    handle: json['handle'] as String? ?? '?',
+    displayName: json['display_name'] as String? ?? '',
+    roles: (json['roles'] as List?)?.cast<String>() ?? const [],
+    status: AgentStatus.parse(json['status'] as String?),
+  );
 }
 
 /// A task on the board. Mirrors the fields of `Task` the UI needs.
@@ -200,6 +204,7 @@ class Task {
     required this.revision,
     required this.acceptanceCriteria,
     required this.requiredRole,
+    this.blockReasons = const [],
   });
 
   final String id;
@@ -212,20 +217,25 @@ class Task {
   int revision;
   final List<String> acceptanceCriteria;
   final String? requiredRole;
+  List<Map<String, Object?>> blockReasons;
 
   factory Task.fromJson(Map<String, Object?> json) => Task(
-        id: json['id'] as String? ?? '',
-        title: json['title'] as String? ?? '',
-        brief: json['brief'] as String? ?? '',
-        state: TaskState.parse(json['state'] as String?),
-        priority: Priority.parse(json['priority'] as String?),
-        assignee: json['assignee'] as String?,
-        blockedCount: (json['blocked_on'] as List?)?.length ?? 0,
-        revision: (json['revision'] as num?)?.toInt() ?? 0,
-        acceptanceCriteria:
-            (json['acceptance_criteria'] as List?)?.cast<String>() ?? const [],
-        requiredRole: json['required_role'] as String?,
-      );
+    id: json['id'] as String? ?? '',
+    title: json['title'] as String? ?? '',
+    brief: json['brief'] as String? ?? '',
+    state: TaskState.parse(json['state'] as String?),
+    priority: Priority.parse(json['priority'] as String?),
+    assignee: json['assignee'] as String?,
+    blockedCount: (json['blocked_on'] as List?)?.length ?? 0,
+    blockReasons: (json['blocked_on'] as List? ?? const [])
+        .whereType<Map>()
+        .map((r) => r.cast<String, Object?>())
+        .toList(),
+    revision: (json['revision'] as num?)?.toInt() ?? 0,
+    acceptanceCriteria:
+        (json['acceptance_criteria'] as List?)?.cast<String>() ?? const [],
+    requiredRole: json['required_role'] as String?,
+  );
 }
 
 /// Who produced a chat message.
@@ -242,10 +252,10 @@ class Author {
   final String? agentId;
 
   factory Author.fromJson(Map<String, Object?> json) => Author(
-        kind: json['kind'] as String? ?? 'system',
-        name: json['name'] as String?,
-        agentId: json['agent'] as String?,
-      );
+    kind: json['kind'] as String? ?? 'system',
+    name: json['name'] as String?,
+    agentId: json['agent'] as String?,
+  );
 
   bool get isSystem => kind == 'system';
   bool get isHuman => kind == 'human';
@@ -261,6 +271,7 @@ class ChatMessage {
     required this.intent,
     required this.taskId,
     required this.sentAt,
+    this.files = const [],
   });
 
   final String id;
@@ -269,15 +280,55 @@ class ChatMessage {
   final String intent;
   final String? taskId;
   final Timestamp sentAt;
+  final List<ChatFile> files;
 
   factory ChatMessage.fromJson(Map<String, Object?> json) => ChatMessage(
-        id: json['id'] as String? ?? '',
-        author: Author.fromJson((json['author'] as Map?)?.cast<String, Object?>() ?? const {}),
-        body: json['body'] as String? ?? '',
-        intent: json['intent'] as String? ?? 'say',
-        taskId: json['task'] as String?,
-        sentAt: Timestamp.fromJson(json['sent_at']),
-      );
+    id: json['id'] as String? ?? '',
+    author: Author.fromJson(
+      (json['author'] as Map?)?.cast<String, Object?>() ?? const {},
+    ),
+    body: json['body'] as String? ?? '',
+    intent: json['intent'] as String? ?? 'say',
+    taskId: json['task'] as String?,
+    sentAt: Timestamp.fromJson(json['sent_at']),
+    files: [
+      for (final f in json['files'] as List? ?? [])
+        ChatFile.fromJson((f as Map).cast<String, Object?>()),
+    ],
+  );
+}
+
+class ChatFile {
+  const ChatFile({
+    required this.id,
+    required this.name,
+    required this.mimeType,
+    required this.bytes,
+    this.hasText = false,
+    this.images = 0,
+    this.note = '',
+  });
+  final String id, name, mimeType, note;
+  final int bytes, images;
+  final bool hasText;
+  factory ChatFile.fromJson(Map<String, Object?> json) => ChatFile(
+    id: json['id'] as String,
+    name: json['name'] as String,
+    mimeType: json['mime_type'] as String? ?? 'application/octet-stream',
+    bytes: (json['bytes'] as num).toInt(),
+    hasText: json['has_text'] == true,
+    images: (json['images'] as num?)?.toInt() ?? 0,
+    note: json['note'] as String? ?? '',
+  );
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'name': name,
+    'mime_type': mimeType,
+    'bytes': bytes,
+    'has_text': hasText,
+    'images': images,
+    'note': note,
+  };
 }
 
 /// A handoff between bots. Mirrors the fields the UI shows.
@@ -299,13 +350,13 @@ class Handoff {
   final String brief;
 
   factory Handoff.fromJson(Map<String, Object?> json) => Handoff(
-        id: json['id'] as String? ?? '',
-        taskId: json['task'] as String? ?? '',
-        from: json['from'] as String? ?? '',
-        kind: json['kind'] as String? ?? 'assist',
-        state: json['state'] as String? ?? 'offered',
-        brief: json['brief'] as String? ?? '',
-      );
+    id: json['id'] as String? ?? '',
+    taskId: json['task'] as String? ?? '',
+    from: json['from'] as String? ?? '',
+    kind: json['kind'] as String? ?? 'assist',
+    state: json['state'] as String? ?? 'offered',
+    brief: json['brief'] as String? ?? '',
+  );
 }
 
 /// The room record from a snapshot.
@@ -328,7 +379,8 @@ class Room {
 
   factory Room.fromJson(Map<String, Object?> json) {
     final spec = (json['spec'] as Map?)?.cast<String, Object?>() ?? const {};
-    final limits = (spec['limits'] as Map?)?.cast<String, Object?>() ?? const {};
+    final limits =
+        (spec['limits'] as Map?)?.cast<String, Object?>() ?? const {};
     return Room(
       id: json['id'] as String? ?? '',
       name: spec['name'] as String? ?? 'room',
@@ -338,4 +390,237 @@ class Room {
       maxTurns: (limits['max_total_turns'] as num?)?.toInt() ?? 0,
     );
   }
+}
+
+// ---------------------------------------------------------------- the digest
+//
+// What a person should see instead of the raw board: objectives, progress, and
+// the decisions only they can make. Computed by the engine and sent whole —
+// deriving it here would be a second implementation of the scheduling rules,
+// and a second set of answers.
+
+/// How much of an objective is done, counted in work that carries the outcome.
+class Progress {
+  const Progress({required this.done, required this.total});
+
+  /// Carrying work delivered.
+  final int done;
+
+  /// Carrying work in total. Reviews and remediations are excluded, so
+  /// inspecting something never makes the room look less finished.
+  final int total;
+
+  /// Completion as a fraction, or null when there is nothing to count.
+  double? get fraction => total > 0 ? done / total : null;
+
+  /// `7 / 10 stages`, or a plain phrase when nothing is broken down yet.
+  String get label =>
+      total == 0 ? 'not broken down yet' : '$done / $total stages';
+
+  factory Progress.fromJson(Map<String, Object?> json) => Progress(
+        done: (json['done'] as num?)?.toInt() ?? 0,
+        total: (json['total'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// One outcome, as a person should see it.
+class ObjectiveCard {
+  const ObjectiveCard({
+    required this.task,
+    required this.title,
+    required this.progress,
+    required this.status,
+    required this.blocker,
+    required this.owners,
+    required this.needsOperator,
+    required this.records,
+  });
+
+  /// The objective's task id.
+  final String task;
+
+  /// What it is.
+  final String title;
+
+  /// How far along.
+  final Progress progress;
+
+  /// A short state line: "in progress", "internal remediation", "needs you".
+  final String status;
+
+  /// What is holding it up right now, if anything.
+  final String? blocker;
+
+  /// The bots working on it.
+  final List<String> owners;
+
+  /// Whether a person has to do something. Shown on every card, because not
+  /// knowing this is what made the old board exhausting to read.
+  final bool needsOperator;
+
+  /// Every live record beneath it, for the expanded view.
+  final List<String> records;
+
+  factory ObjectiveCard.fromJson(Map<String, Object?> json) => ObjectiveCard(
+        task: json['task'] as String? ?? '',
+        title: json['title'] as String? ?? '',
+        progress: Progress.fromJson(
+            (json['progress'] as Map?)?.cast<String, Object?>() ?? const {}),
+        status: json['status'] as String? ?? '',
+        blocker: json['blocker'] as String?,
+        owners: (json['owners'] as List? ?? const []).cast<String>(),
+        needsOperator: json['needs_operator'] as bool? ?? false,
+        records: (json['records'] as List? ?? const []).cast<String>(),
+      );
+}
+
+/// A decision waiting on a person, with everything needed to answer it.
+class PendingDecision {
+  const PendingDecision({
+    required this.task,
+    required this.title,
+    required this.because,
+    required this.options,
+  });
+
+  /// The task that cannot proceed.
+  final String task;
+
+  /// What that task is.
+  final String title;
+
+  /// Completes "Operator decision required because: ___".
+  final String because;
+
+  /// The answers offered, for a one-tap reply.
+  final List<String> options;
+
+  factory PendingDecision.fromJson(Map<String, Object?> json) => PendingDecision(
+        task: json['task'] as String? ?? '',
+        title: json['title'] as String? ?? '',
+        because: json['because'] as String? ?? '',
+        options: (json['options'] as List? ?? const []).cast<String>(),
+      );
+}
+
+/// The headline numbers, in the order they matter.
+class BoardCounts {
+  const BoardCounts({
+    required this.objectives,
+    required this.active,
+    required this.waitingInternally,
+    required this.needsYou,
+    required this.delivered,
+    required this.rawRecords,
+  });
+
+  final int objectives;
+  final int active;
+  final int waitingInternally;
+  final int needsYou;
+  final int delivered;
+
+  /// Every live record behind those objectives. Diagnostics only — this is the
+  /// number that used to lead, and it told nobody anything.
+  final int rawRecords;
+
+  const BoardCounts.empty()
+      : objectives = 0,
+        active = 0,
+        waitingInternally = 0,
+        needsYou = 0,
+        delivered = 0,
+        rawRecords = 0;
+
+  factory BoardCounts.fromJson(Map<String, Object?> json) => BoardCounts(
+        objectives: (json['objectives'] as num?)?.toInt() ?? 0,
+        active: (json['active'] as num?)?.toInt() ?? 0,
+        waitingInternally: (json['waiting_internally'] as num?)?.toInt() ?? 0,
+        needsYou: (json['needs_you'] as num?)?.toInt() ?? 0,
+        delivered: (json['delivered'] as num?)?.toInt() ?? 0,
+        rawRecords: (json['raw_records'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// Signals that the room is coordinating more than it is working.
+class RoomHealth {
+  const RoomHealth({
+    required this.inflationRatio,
+    required this.supportingRecords,
+    required this.coordinationExpansion,
+  });
+
+  /// Live records per objective.
+  final double inflationRatio;
+
+  /// Records that exist only to support other records.
+  final int supportingRecords;
+
+  /// Whether the record count is outrunning the outcomes.
+  final bool coordinationExpansion;
+
+  const RoomHealth.healthy()
+      : inflationRatio = 0,
+        supportingRecords = 0,
+        coordinationExpansion = false;
+
+  factory RoomHealth.fromJson(Map<String, Object?> json) => RoomHealth(
+        inflationRatio: (json['inflation_ratio'] as num?)?.toDouble() ?? 0,
+        supportingRecords: (json['supporting_records'] as num?)?.toInt() ?? 0,
+        coordinationExpansion:
+            json['coordination_expansion'] as bool? ?? false,
+      );
+}
+
+/// Everything a person needs, and nothing they do not.
+class RoomDigest {
+  const RoomDigest({
+    required this.objectives,
+    required this.counts,
+    required this.needsYou,
+    required this.criticalPath,
+    required this.health,
+  });
+
+  /// The outcomes, most urgent first.
+  final List<ObjectiveCard> objectives;
+
+  /// The headline numbers.
+  final BoardCounts counts;
+
+  /// The operator's inbox. Usually empty.
+  final List<PendingDecision> needsYou;
+
+  /// The chain currently deciding when the room finishes.
+  final List<String> criticalPath;
+
+  /// Whether the room is coordinating more than it is working.
+  final RoomHealth health;
+
+  /// The state before a room has said anything.
+  const RoomDigest.empty()
+      : objectives = const [],
+        counts = const BoardCounts.empty(),
+        needsYou = const [],
+        criticalPath = const [],
+        health = const RoomHealth.healthy();
+
+  /// Whether there is anything to show yet.
+  bool get isEmpty => objectives.isEmpty && needsYou.isEmpty;
+
+  factory RoomDigest.fromJson(Map<String, Object?> json) => RoomDigest(
+        objectives: (json['objectives'] as List? ?? const [])
+            .whereType<Map>()
+            .map((o) => ObjectiveCard.fromJson(o.cast<String, Object?>()))
+            .toList(),
+        counts: BoardCounts.fromJson(
+            (json['counts'] as Map?)?.cast<String, Object?>() ?? const {}),
+        needsYou: (json['needs_you'] as List? ?? const [])
+            .whereType<Map>()
+            .map((d) => PendingDecision.fromJson(d.cast<String, Object?>()))
+            .toList(),
+        criticalPath: (json['critical_path'] as List? ?? const []).cast<String>(),
+        health: RoomHealth.fromJson(
+            (json['health'] as Map?)?.cast<String, Object?>() ?? const {}),
+      );
 }

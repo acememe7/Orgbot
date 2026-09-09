@@ -4,6 +4,7 @@
 library;
 
 import 'dart:math';
+import '../workspace/workspace.dart';
 
 import '../engine/agent_cli.dart';
 import 'roles.dart';
@@ -12,9 +13,10 @@ String genId(String prefix) {
   final rnd = Random.secure();
   return prefix +
       '_' +
-      List.generate(8, (_) => rnd.nextInt(256))
-          .map((b) => b.toRadixString(16).padLeft(2, '0'))
-          .join();
+      List.generate(
+        8,
+        (_) => rnd.nextInt(256),
+      ).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 }
 
 /// Which brain a bot uses.
@@ -27,6 +29,7 @@ enum ProviderKind {
   codex('codex', 'Codex / ChatGPT'),
   grok('grok', 'Grok'),
   deepseek('deepseek', 'DeepSeek'),
+  ollama('ollama', 'Ollama Cloud'),
   scripted('scripted', 'Demo (no model)');
 
   final String key;
@@ -34,11 +37,11 @@ enum ProviderKind {
   const ProviderKind(this.key, this.label);
 
   static ProviderKind fromKey(String key) => values.firstWhere(
-        (k) => k.key == key,
-        // `openai` was the old name for the Codex backend; map it forward so
-        // bots saved before the rename keep working.
-        orElse: () => key == 'openai' ? ProviderKind.codex : ProviderKind.scripted,
-      );
+    (k) => k.key == key,
+    // `openai` was the old name for the Codex backend; map it forward so
+    // bots saved before the rename keep working.
+    orElse: () => key == 'openai' ? ProviderKind.codex : ProviderKind.scripted,
+  );
 
   /// The agent CLI backing this provider, or null when it talks to an API.
   CliKind? get cli {
@@ -50,6 +53,7 @@ enum ProviderKind {
       case ProviderKind.grok:
         return CliKind.grok;
       case ProviderKind.deepseek:
+      case ProviderKind.ollama:
       case ProviderKind.scripted:
         return null;
     }
@@ -59,7 +63,15 @@ enum ProviderKind {
   bool get usesSignIn => cli != null;
 
   /// Whether an API key must be supplied. Only a raw endpoint needs one.
-  bool get needsApiKey => this == ProviderKind.deepseek;
+  bool get needsApiKey =>
+      this == ProviderKind.deepseek || this == ProviderKind.ollama;
+
+  /// API origin; the engine adds /v1/chat/completions.
+  String get apiBaseUrl => switch (this) {
+    ProviderKind.deepseek => 'https://api.deepseek.com',
+    ProviderKind.ollama => 'https://ollama.com',
+    _ => throw StateError('$label does not use a saved API key'),
+  };
 
   /// Whether a device with no agent CLIs can sign in to this itself.
   ///
@@ -96,8 +108,8 @@ class BotDef {
     this.apiKey = '',
     this.role = Roles.defaultKey,
     this.powers,
-  })  : id = id ?? genId('bot'),
-        handle = handle == null || handle.isEmpty ? '' : handle;
+  }) : id = id ?? genId('bot'),
+       handle = handle == null || handle.isEmpty ? '' : handle;
 
   /// Whether this bot still needs a key from the user.
   bool get needsKey => provider.needsApiKey && apiKey.trim().isEmpty;
@@ -110,30 +122,30 @@ class BotDef {
   RoleDef get roleDef => Roles.byKey(role);
 
   Map<String, Object?> toJson() => {
-        'id': id,
-        'name': name,
-        'handle': handle,
-        'persona': persona,
-        'provider': provider.key,
-        'model': model,
-        'apiKey': apiKey,
-        'role': role,
-        'powers': powers?.toJson(),
-      };
+    'id': id,
+    'name': name,
+    'handle': handle,
+    'persona': persona,
+    'provider': provider.key,
+    'model': model,
+    'apiKey': apiKey,
+    'role': role,
+    'powers': powers?.toJson(),
+  };
 
   factory BotDef.fromJson(Map<String, Object?> json) => BotDef(
-        id: json['id'] as String,
-        name: json['name'] as String? ?? '',
-        handle: json['handle'] as String?,
-        persona: json['persona'] as String? ?? '',
-        provider: ProviderKind.fromKey(json['provider'] as String? ?? ''),
-        model: json['model'] as String? ?? '',
-        apiKey: json['apiKey'] as String? ?? '',
-        role: json['role'] as String? ?? Roles.defaultKey,
-        powers: json['powers'] is Map
-            ? RolePowers.fromJson((json['powers'] as Map).cast<String, Object?>())
-            : null,
-      );
+    id: json['id'] as String,
+    name: json['name'] as String? ?? '',
+    handle: json['handle'] as String?,
+    persona: json['persona'] as String? ?? '',
+    provider: ProviderKind.fromKey(json['provider'] as String? ?? ''),
+    model: json['model'] as String? ?? '',
+    apiKey: json['apiKey'] as String? ?? '',
+    role: json['role'] as String? ?? Roles.defaultKey,
+    powers: json['powers'] is Map
+        ? RolePowers.fromJson((json['powers'] as Map).cast<String, Object?>())
+        : null,
+  );
 }
 
 /// A bot seated in a room. The role is no longer here: it belongs to the bot,
@@ -150,7 +162,9 @@ class RoomDef {
   final String id;
   String name;
   String goal;
-  String path; // unused on-device; kept for desktop parity
+  String path; // Desktop CLI working directory.
+  String memory;
+  WorkspaceConfig workspace;
   List<String> tasks;
   List<RoomSlot> bots;
 
@@ -159,29 +173,40 @@ class RoomDef {
     required this.name,
     this.goal = '',
     this.path = '',
+    this.memory = '',
+    WorkspaceConfig? workspace,
     List<String>? tasks,
     List<RoomSlot>? bots,
-  })  : id = id ?? genId('room'),
-        tasks = tasks ?? [],
-        bots = bots ?? [];
+  }) : id = id ?? genId('room'),
+       workspace = workspace ?? WorkspaceConfig(),
+       tasks = tasks ?? [],
+       bots = bots ?? [];
 
   Map<String, Object?> toJson() => {
-        'id': id,
-        'name': name,
-        'goal': goal,
-        'path': path,
-        'tasks': tasks,
-        'bots': bots.map((b) => b.toJson()).toList(),
-      };
+    'id': id,
+    'name': name,
+    'goal': goal,
+    'path': path,
+    'memory': memory,
+    'workspace': workspace.toJson(),
+    'tasks': tasks,
+    'bots': bots.map((b) => b.toJson()).toList(),
+  };
 
   factory RoomDef.fromJson(Map<String, Object?> json) => RoomDef(
-        id: json['id'] as String,
-        name: json['name'] as String? ?? '',
-        goal: json['goal'] as String? ?? '',
-        path: json['path'] as String? ?? '',
-        tasks: (json['tasks'] as List? ?? []).cast<String>(),
-        bots: (json['bots'] as List? ?? [])
-            .map((b) => RoomSlot.fromJson((b as Map).cast<String, Object?>()))
-            .toList(),
-      );
+    id: json['id'] as String,
+    name: json['name'] as String? ?? '',
+    goal: json['goal'] as String? ?? '',
+    path: json['path'] as String? ?? '',
+    memory: json['memory'] as String? ?? '',
+    workspace: json['workspace'] is Map
+        ? WorkspaceConfig.fromJson(
+            (json['workspace'] as Map).cast<String, Object?>(),
+          )
+        : null,
+    tasks: (json['tasks'] as List? ?? []).cast<String>(),
+    bots: (json['bots'] as List? ?? [])
+        .map((b) => RoomSlot.fromJson((b as Map).cast<String, Object?>()))
+        .toList(),
+  );
 }

@@ -491,10 +491,23 @@ impl RoomSession {
         let _ = self.events.send(ServerMessage::Phase {
             phase: self.orchestrator.engine().room().phase,
         });
+        // Whether anything a person's view depends on has moved. Checked
+        // before the events are consumed below.
+        let board_moved = new.iter().any(|e| touches_the_board(&e.event));
+
         for envelope in new {
             self.broadcast_head = self.broadcast_head.max(envelope.seq);
             let _ = self.events.send(ServerMessage::Event {
                 envelope: Box::new(envelope),
+            });
+        }
+
+        // The digest is a fold over every task, so it cannot be patched from
+        // one event. Recomputing and resending it whole is both correct and
+        // cheap next to the task records already on the wire.
+        if board_moved {
+            let _ = self.events.send(ServerMessage::Digest {
+                digest: Box::new(self.orchestrator.engine().digest()),
             });
         }
     }
@@ -731,7 +744,27 @@ fn snapshot_of(orchestrator: &Orchestrator) -> ServerMessage {
         roster,
         tasks: engine.tasks().cloned().collect(),
         head: engine.head(),
+        digest: Box::new(engine.digest()),
     }
+}
+
+/// Whether an event changes what a person sees on the objectives view.
+///
+/// Chat and streaming deltas do not: a room that is only talking has not
+/// changed its board, and resending the digest for every token would drown
+/// the useful updates.
+fn touches_the_board(event: &orgbot_proto::event::Event) -> bool {
+    use orgbot_proto::event::Event;
+    matches!(
+        event,
+        Event::TaskCreated { .. }
+            | Event::TaskTransitioned { .. }
+            | Event::TaskAuthorized { .. }
+            | Event::DecisionAsked { .. }
+            | Event::DecisionAnswered { .. }
+            | Event::ReviewRecorded { .. }
+            | Event::ArtifactAdded { .. }
+    )
 }
 
 /// Tags direct attention; the room transcript remains visible to everyone.

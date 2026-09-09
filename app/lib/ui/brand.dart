@@ -33,34 +33,54 @@ class StatusPill extends StatelessWidget {
   final Color color;
   final String label;
   final IconData? icon;
-  const StatusPill({super.key, required this.color, required this.label, this.icon});
+  const StatusPill({
+    super.key,
+    required this.color,
+    required this.label,
+    this.icon,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final tone = color == Colors.blue || color == Colors.lightBlue
+        ? scheme.secondary
+        : color == Colors.green
+        ? scheme.tertiary
+        : color == Colors.red
+        ? scheme.error
+        : color == Colors.amber && scheme.brightness == Brightness.light
+        ? const Color(0xFF8C6400)
+        : color;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.16),
+        color: tone.withValues(alpha: 0.16),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           if (icon != null) ...[
-            Icon(icon, size: 12, color: color),
+            Icon(icon, size: 12, color: tone),
             const SizedBox(width: 5),
           ] else ...[
             Container(
               width: 7,
               height: 7,
-              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              decoration: BoxDecoration(color: tone, shape: BoxShape.circle),
             ),
             const SizedBox(width: 6),
           ],
-          Text(
-            label,
-            style: TextStyle(
-                fontSize: 11, fontWeight: FontWeight.w600, color: color),
+          Flexible(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: tone,
+              ),
+            ),
           ),
         ],
       ),
@@ -69,17 +89,18 @@ class StatusPill extends StatelessWidget {
 }
 
 /// A stable colour per handle, so a bot reads the same everywhere.
-Color handleColor(String handle) {
+Color handleColor(String handle, {bool dark = true}) {
   const palette = [
-    Color(0xFF5AA9E6),
-    Color(0xFF7FB800),
-    Color(0xFFE6A15A),
-    Color(0xFFE65A9B),
-    Color(0xFF9B5AE6),
-    Color(0xFF2EC4B6),
+    Color(0xFF91ABA0),
+    Color(0xFFA4A6B8),
+    Color(0xFFBDA487),
+    Color(0xFFB59B9D),
+    Color(0xFF94A8BB),
+    Color(0xFFA3AB8D),
   ];
-  if (handle.isEmpty) return palette.first;
-  return palette[handle.hashCode.abs() % palette.length];
+  final color =
+      palette[handle.isEmpty ? 0 : handle.hashCode.abs() % palette.length];
+  return dark ? color : HSLColor.fromColor(color).withLightness(0.33).toColor();
 }
 
 /// An avatar for a bot, coloured by handle.
@@ -90,7 +111,10 @@ class BotAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = handleColor(handle);
+    final color = handleColor(
+      handle,
+      dark: Theme.of(context).brightness == Brightness.dark,
+    );
     final initial = handle.isEmpty ? '?' : handle[0].toUpperCase();
     return CircleAvatar(
       radius: radius,
@@ -130,7 +154,7 @@ class EmptyState extends StatelessWidget {
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 340),
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,

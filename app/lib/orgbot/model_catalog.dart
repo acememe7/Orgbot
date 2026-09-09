@@ -9,7 +9,7 @@
 //   Grok    `grok models`
 //   Claude  the CLI's aliases, which resolve to whatever the subscription
 //           currently provides — more durable than pinning an id
-//   DeepSeek GET /v1/models with the key
+//   DeepSeek / Ollama Cloud GET /v1/models with the key
 //
 // Every lookup falls back to a small built-in list, so the picker still works
 // offline, before a key is entered, or if a CLI changes its output.
@@ -23,6 +23,7 @@ import 'dart:io';
 import '../engine/agent_cli.dart';
 import 'credentials.dart';
 import 'models.dart';
+import 'oauth/device_auth.dart';
 
 /// One selectable model.
 class ModelOption {
@@ -54,6 +55,9 @@ enum ModelSource {
 
   /// Nothing can be listed until a credential is supplied.
   needsKey,
+
+  /// The stored subscription credential was rejected after renewal.
+  needsSignIn,
 }
 
 /// A resolved model list plus how it was obtained.
@@ -75,6 +79,9 @@ class ModelCatalog {
 
   /// Overridable for tests: runs a command and returns its stdout.
   static Future<String> Function(String bin, List<String> args)? runner;
+  static Future<HttpResponse> Function(Uri url, Map<String, String> headers)?
+  httpGet;
+  static DeviceAuth? deviceAuth;
 
   /// Discard cached lists so the next lookup goes back to the source.
   static void invalidate() => _cache.clear();
@@ -84,14 +91,31 @@ class ModelCatalog {
   static Credentials? credentials;
 
   /// The models `kind` offers, from the machine or from a paired sign-in.
-  static Future<ModelList> load(ProviderKind kind, {String apiKey = ''}) async {
+  static Future<ModelList> load(
+    ProviderKind kind, {
+    String apiKey = '',
+    bool refresh = false,
+  }) async {
+    await credentials?.load();
+    if (apiKey.trim().isEmpty && kind.needsApiKey) {
+      apiKey = credentials?.forProvider(kind)?.token ?? '';
+    }
     final cached = _cache[kind];
-    if (cached != null) return cached;
+    final paired = credentials?.forProvider(kind);
+    if (!refresh &&
+        !kind.needsApiKey &&
+        cached?.source == ModelSource.live &&
+        paired?.needsRenewal != true) {
+      return cached!;
+    }
 
     // A paired sign-in carries the model list the desktop's own CLI reported,
     // which is the real list — and the only one available on a phone.
-    final paired = credentials?.forProvider(kind);
-    if (paired != null && paired.models.isNotEmpty) {
+    if (!refresh &&
+        !kind.needsApiKey &&
+        paired != null &&
+        !paired.needsRenewal &&
+        paired.models.isNotEmpty) {
       final list = ModelList(paired.models, ModelSource.live);
       _cache[kind] = list;
       return list;
@@ -103,8 +127,12 @@ class ModelCatalog {
     } catch (e) {
       result = ModelList(fallbackFor(kind), ModelSource.fallback, e.toString());
     }
-    if (result.options.isEmpty && result.source != ModelSource.needsKey) {
-      result = ModelList(fallbackFor(kind), ModelSource.fallback, result.problem);
+    if (result.options.isEmpty && result.source == ModelSource.live) {
+      result = ModelList(
+        fallbackFor(kind),
+        ModelSource.fallback,
+        result.problem,
+      );
     }
     _cache[kind] = result;
     return result;
@@ -113,7 +141,30 @@ class ModelCatalog {
   static Future<ModelList> _loadLive(ProviderKind kind, String apiKey) async {
     // A signed-in subscription can ask the provider directly, which is the
     // only route on a phone and the more current one anywhere.
-    final token = credentials?.forProvider(kind)?.token;
+    final signedIn = credentials?.forProvider(kind) != null;
+    var token = await credentials?.freshToken(kind, auth: deviceAuth);
+    if (signedIn && kind.signsInOnDevice) {
+      for (var attempt = 0; attempt < 2; attempt++) {
+        if (token == null) break;
+        try {
+          return kind == ProviderKind.grok
+              ? await _fromGrokApi(token)
+              : await _fromCodexApi(token);
+        } on _CredentialRejected {
+          if (attempt == 1) break;
+          token = await credentials?.freshToken(
+            kind,
+            auth: deviceAuth,
+            force: true,
+          );
+        }
+      }
+      return const ModelList(
+        [],
+        ModelSource.needsSignIn,
+        'The provider rejected this sign-in after renewal. Sign in again from Accounts.',
+      );
+    }
     switch (kind) {
       case ProviderKind.codex:
         return token == null ? _fromCodexCache() : _fromCodexApi(token);
@@ -122,7 +173,8 @@ class ModelCatalog {
       case ProviderKind.anthropic:
         return ModelList(_claudeAliases, ModelSource.live);
       case ProviderKind.deepseek:
-        return _fromDeepSeekApi(apiKey);
+      case ProviderKind.ollama:
+        return _fromApi(kind, apiKey);
       case ProviderKind.scripted:
         return const ModelList([], ModelSource.live);
     }
@@ -144,18 +196,27 @@ class ModelCatalog {
   static Future<ModelList> _fromCodexCache() async {
     final home = Platform.environment['HOME'] ?? '';
     if (home.isEmpty) {
-      return ModelList(fallbackFor(ProviderKind.codex), ModelSource.fallback,
-          'no HOME to find the Codex cache in');
+      return ModelList(
+        fallbackFor(ProviderKind.codex),
+        ModelSource.fallback,
+        'no HOME to find the Codex cache in',
+      );
     }
     final file = File('$home/.codex/models_cache.json');
     if (!file.existsSync()) {
-      return ModelList(fallbackFor(ProviderKind.codex), ModelSource.fallback,
-          'sign in with `codex` to populate its model list');
+      return ModelList(
+        fallbackFor(ProviderKind.codex),
+        ModelSource.fallback,
+        'sign in with `codex` to populate its model list',
+      );
     }
     final root = jsonDecode(await file.readAsString());
     if (root is! Map || root['models'] is! List) {
-      return ModelList(fallbackFor(ProviderKind.codex), ModelSource.fallback,
-          'the Codex model cache is not in the expected shape');
+      return ModelList(
+        fallbackFor(ProviderKind.codex),
+        ModelSource.fallback,
+        'the Codex model cache is not in the expected shape',
+      );
     }
     final options = <ModelOption>[];
     for (final entry in root['models'] as List) {
@@ -165,13 +226,15 @@ class ModelCatalog {
       // Hidden and internal entries are in the cache but are not choices.
       if (entry['visibility'] == 'hidden') continue;
       final display = entry['display_name'];
-      options.add(ModelOption(
-        slug,
-        display is String && display.isNotEmpty ? display : slug,
-        note: entry['description'] is String
-            ? _firstSentence(entry['description'] as String)
-            : '',
-      ));
+      options.add(
+        ModelOption(
+          slug,
+          display is String && display.isNotEmpty ? display : slug,
+          note: entry['description'] is String
+              ? _firstSentence(entry['description'] as String)
+              : '',
+        ),
+      );
     }
     return ModelList(options, ModelSource.live);
   }
@@ -181,8 +244,11 @@ class ModelCatalog {
   static Future<ModelList> _fromGrokCli() async {
     final status = findCli(CliKind.grok);
     if (!status.available) {
-      return ModelList(fallbackFor(ProviderKind.grok), ModelSource.fallback,
-          status.problem);
+      return ModelList(
+        fallbackFor(ProviderKind.grok),
+        ModelSource.fallback,
+        status.problem,
+      );
     }
     final out = await _run(status.path!, const ['models']);
     final options = <ModelOption>[];
@@ -207,8 +273,10 @@ class ModelCatalog {
   /// Ask the ChatGPT backend what a signed-in subscription may run.
   static Future<ModelList> _fromCodexApi(String token) async {
     final body = await _get(
-      Uri.parse('https://chatgpt.com/backend-api/codex/models'
-          '?client_version=$_codexClientVersion'),
+      Uri.parse(
+        'https://chatgpt.com/backend-api/codex/models'
+        '?client_version=$_codexClientVersion',
+      ),
       {
         'authorization': 'Bearer ' + token,
         'originator': 'codex_cli_rs',
@@ -221,8 +289,11 @@ class ModelCatalog {
     final root = jsonDecode(body as String);
     final models = root is Map ? root['models'] : null;
     if (models is! List) {
-      return ModelList(fallbackFor(ProviderKind.codex), ModelSource.fallback,
-          'unexpected response shape');
+      return ModelList(
+        fallbackFor(ProviderKind.codex),
+        ModelSource.fallback,
+        'unexpected response shape',
+      );
     }
     final options = <ModelOption>[];
     for (final entry in models) {
@@ -231,38 +302,54 @@ class ModelCatalog {
       if (slug is! String || slug.isEmpty) continue;
       if (entry['visibility'] == 'hidden') continue;
       final display = entry['display_name'];
-      options.add(ModelOption(
-        slug,
-        display is String && display.isNotEmpty ? display : slug,
-        note: entry['description'] is String
-            ? _firstSentence(entry['description'] as String)
-            : '',
-      ));
+      options.add(
+        ModelOption(
+          slug,
+          display is String && display.isNotEmpty ? display : slug,
+          note: entry['description'] is String
+              ? _firstSentence(entry['description'] as String)
+              : '',
+        ),
+      );
     }
     return ModelList(options, ModelSource.live);
   }
 
-  /// Ask the xAI API what a signed-in subscription may run. The OAuth token
-  /// the sign-in produced is accepted here exactly like an API key.
+  /// Subscription models come from the same catalog as the Grok CLI.
   static Future<ModelList> _fromGrokApi(String token) async {
+    final subscription =
+        credentials?.forProvider(ProviderKind.grok)?.kind !=
+        CredentialKind.apiKey;
     final body = await _get(
-      Uri.parse('https://api.x.ai/v1/models'),
-      {'authorization': 'Bearer ' + token, 'accept': 'application/json'},
+      Uri.parse(
+        subscription
+            ? 'https://cli-chat-proxy.grok.com/v1/models'
+            : 'https://api.x.ai/v1/models',
+      ),
+      {
+        'authorization': 'Bearer ' + token,
+        'accept': 'application/json',
+        if (subscription) 'X-XAI-Token-Auth': 'xai-grok-cli',
+        if (subscription) 'x-authenticateresponse': 'authenticate-response',
+      },
       ProviderKind.grok,
     );
     if (body is ModelList) return body;
     final root = jsonDecode(body as String);
     final data = root is Map ? root['data'] : null;
     if (data is! List) {
-      return ModelList(fallbackFor(ProviderKind.grok), ModelSource.fallback,
-          'unexpected response shape');
+      return ModelList(
+        fallbackFor(ProviderKind.grok),
+        ModelSource.fallback,
+        'unexpected response shape',
+      );
     }
     final options = <ModelOption>[];
     for (final entry in data) {
       if (entry is! Map) continue;
       final id = entry['id'];
       if (id is! String || id.isEmpty) continue;
-      options.add(ModelOption(id, id));
+      options.add(ModelOption(id, entry['name'] as String? ?? id));
     }
     return ModelList(options, ModelSource.live);
   }
@@ -274,70 +361,104 @@ class ModelCatalog {
     Map<String, String> headers,
     ProviderKind kind,
   ) async {
+    final response = await (httpGet ?? _httpGet)(url, headers);
+    if (response.status == 401 ||
+        (response.status == 403 &&
+            response.body.contains('unauthenticated:bad-credentials'))) {
+      throw const _CredentialRejected();
+    }
+    if (response.status != 200) {
+      return ModelList(
+        fallbackFor(kind),
+        ModelSource.fallback,
+        response.status == 403
+            ? 'The account could not access this model catalog (HTTP 403). Its sign-in is still saved.'
+            : 'The model catalog returned HTTP ${response.status}. Retry when the provider is available.',
+      );
+    }
+    return response.body;
+  }
+
+  static Future<HttpResponse> _httpGet(
+    Uri url,
+    Map<String, String> headers,
+  ) async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
       final request = await client.getUrl(url);
       headers.forEach(request.headers.set);
-      final response =
-          await request.close().timeout(const Duration(seconds: 12));
-      final body = await response.transform(utf8.decoder).join();
-      if (response.statusCode == 401 || response.statusCode == 403) {
-        return ModelList(fallbackFor(kind), ModelSource.fallback,
-            'that sign-in has expired — sign in again');
-      }
-      if (response.statusCode != 200) {
-        return ModelList(fallbackFor(kind), ModelSource.fallback,
-            'the provider returned HTTP ${response.statusCode}');
-      }
-      return body;
+      final response = await request.close().timeout(
+        const Duration(seconds: 12),
+      );
+      final body = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(const Duration(seconds: 12));
+      return HttpResponse(response.statusCode, body);
     } finally {
       client.close(force: true);
     }
   }
 
-  /// DeepSeek is a plain API, so its list comes from the models endpoint.
-  static Future<ModelList> _fromDeepSeekApi(String apiKey) async {
+  /// Saved API accounts share the OpenAI-compatible models endpoint.
+  static Future<ModelList> _fromApi(ProviderKind kind, String apiKey) async {
     if (apiKey.trim().isEmpty) {
       // No key, no list. Showing invented ids here would be the hardcoding
       // this class exists to remove, and would look authoritative while being
       // a guess.
-      return const ModelList([], ModelSource.needsKey,
-          'Enter your API key to load DeepSeek\'s models.');
+      return ModelList(
+        [],
+        ModelSource.needsKey,
+        'Add your ${kind.label} API key in Accounts to load models.',
+      );
     }
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
-      final request =
-          await client.getUrl(Uri.parse('https://api.deepseek.com/v1/models'));
-      request.headers.set('authorization', 'Bearer ' + apiKey.trim());
-      final response = await request.close().timeout(const Duration(seconds: 12));
-      final body = await response.transform(utf8.decoder).join();
-      if (response.statusCode != 200) {
-        return ModelList(fallbackFor(ProviderKind.deepseek),
-            ModelSource.fallback, 'DeepSeek returned HTTP ${response.statusCode}');
-      }
-      final root = jsonDecode(body);
+      final body = await _get(Uri.parse('${kind.apiBaseUrl}/v1/models'), {
+        'authorization': 'Bearer ${apiKey.trim()}',
+        'accept': 'application/json',
+      }, kind);
+      if (body is ModelList) return body;
+      final root = jsonDecode(body as String);
       final data = root is Map ? root['data'] : null;
       if (data is! List) {
-        return ModelList(fallbackFor(ProviderKind.deepseek),
-            ModelSource.fallback, 'unexpected response shape');
+        return ModelList(
+          fallbackFor(kind),
+          ModelSource.fallback,
+          'unexpected response shape',
+        );
       }
       final options = <ModelOption>[];
       for (final entry in data) {
-        if (entry is Map && entry['id'] is String) {
-          options.add(ModelOption(entry['id'] as String, entry['id'] as String));
+        if (entry is Map &&
+            entry['id'] is String &&
+            (entry['id'] as String).trim().isNotEmpty) {
+          options.add(
+            ModelOption(entry['id'] as String, entry['id'] as String),
+          );
         }
       }
-      return ModelList(options, ModelSource.live);
-    } finally {
-      client.close(force: true);
+      return ModelList(
+        options.toSet().toList(),
+        ModelSource.live,
+        options.isEmpty ? 'No models were returned by ${kind.label}.' : null,
+      );
+    } on _CredentialRejected {
+      return ModelList(
+        const [],
+        ModelSource.needsKey,
+        '${kind.label} rejected this API key. Replace it in Accounts.',
+      );
     }
   }
 
   static Future<String> _run(String bin, List<String> args) async {
     final override = runner;
     if (override != null) return override(bin, args);
-    final result = await Process.run(bin, args,
-        environment: const {'NO_COLOR': '1'}).timeout(const Duration(seconds: 20));
+    final result = await Process.run(
+      bin,
+      args,
+      environment: const {'NO_COLOR': '1'},
+    ).timeout(const Duration(seconds: 20));
     return (result.stdout as String?) ?? '';
   }
 
@@ -349,11 +470,12 @@ class ModelCatalog {
       case ProviderKind.anthropic:
         return _claudeAliases;
       case ProviderKind.codex:
-        return const [ModelOption('', 'Subscription default')];
       case ProviderKind.grok:
+        if (Platform.isAndroid || Platform.isIOS) return const [];
         return const [ModelOption('', 'Subscription default')];
       case ProviderKind.deepseek:
-        // Deliberately empty: DeepSeek's list comes from its API, and a guess
+      case ProviderKind.ollama:
+        // Deliberately empty: the list comes from its API, and a guess
         // presented as a list is worse than saying a key is needed.
         return const [];
       case ProviderKind.scripted:
@@ -389,4 +511,8 @@ class ModelCatalog {
     final first = stop > 0 ? text.substring(0, stop) : text;
     return first.length > 60 ? first.substring(0, 60) + '…' : first;
   }
+}
+
+class _CredentialRejected implements Exception {
+  const _CredentialRejected();
 }

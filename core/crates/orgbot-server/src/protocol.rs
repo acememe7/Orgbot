@@ -9,6 +9,7 @@
 //! a client can be a thin renderer over [`orgbot_proto`] without a translation
 //! layer.
 
+use orgbot_engine::digest::RoomDigest;
 use orgbot_proto::event::{EventEnvelope, Seq};
 use orgbot_proto::room::RoomPhase;
 use orgbot_proto::{AgentId, AgentStatus, Room, Task, TaskId};
@@ -91,6 +92,22 @@ pub enum ServerMessage {
         /// The most recent log position, so the client knows where the tail
         /// begins.
         head: Seq,
+        /// The board as a person should see it: objectives, progress, and the
+        /// decisions only they can make.
+        ///
+        /// Computed on the server rather than in each client. It is derived
+        /// from the same scheduling rules the engine claims work by, and a
+        /// second implementation in the UI would be a second set of answers.
+        digest: Box<RoomDigest>,
+    },
+    /// The board changed, so the person-facing view of it did too.
+    ///
+    /// Sent whenever a task moves. Clients replace their copy wholesale rather
+    /// than patching it, because the digest is a fold over every task and a
+    /// partial update cannot be applied correctly.
+    Digest {
+        /// The refreshed view.
+        digest: Box<RoomDigest>,
     },
     /// One durable event from the room's log.
     Event {

@@ -30,6 +30,9 @@ typedef _PollDart = Pointer<Utf8> Function(int);
 typedef _SayNative = Int32 Function(Uint64, Pointer<Utf8>, Pointer<Utf8>);
 typedef _SayDart = int Function(int, Pointer<Utf8>, Pointer<Utf8>);
 
+typedef _ControlNative = Int32 Function(Uint64, Pointer<Utf8>);
+typedef _ControlDart = int Function(int, Pointer<Utf8>);
+
 typedef _HandleNative = Int32 Function(Uint64);
 typedef _HandleDart = int Function(int);
 
@@ -43,7 +46,7 @@ typedef _VersionNative = Uint32 Function();
 typedef _VersionDart = int Function();
 
 /// The ABI this binding is written against.
-const int kExpectedAbi = 1;
+const int kExpectedAbi = 2;
 
 /// Thrown when the engine library cannot be used.
 class EmbeddedEngineError implements Exception {
@@ -56,23 +59,34 @@ class EmbeddedEngineError implements Exception {
 /// The loaded engine library.
 class EmbeddedEngine {
   EmbeddedEngine._(DynamicLibrary lib)
-      : _open = lib.lookupFunction<_OpenNative, _OpenDart>('orgbot_room_open'),
-        _poll = lib.lookupFunction<_PollNative, _PollDart>('orgbot_room_poll'),
-        _snapshot =
-            lib.lookupFunction<_PollNative, _PollDart>('orgbot_room_snapshot'),
-        _say = lib.lookupFunction<_SayNative, _SayDart>('orgbot_room_say'),
-        _pause =
-            lib.lookupFunction<_HandleNative, _HandleDart>('orgbot_room_pause'),
-        _resume = lib
-            .lookupFunction<_HandleNative, _HandleDart>('orgbot_room_resume'),
-        _close =
-            lib.lookupFunction<_CloseNative, _CloseDart>('orgbot_room_close'),
-        _lastError = lib.lookupFunction<Pointer<Utf8> Function(),
-            Pointer<Utf8> Function()>('orgbot_last_error'),
-        _free = lib.lookupFunction<_FreeNative, _FreeDart>('orgbot_string_free'),
-        _abi = lib
-            .lookupFunction<_VersionNative, _VersionDart>('orgbot_abi_version');
+    : _control = lib.lookupFunction<_ControlNative, _ControlDart>(
+        'orgbot_room_control',
+      ),
+      _open = lib.lookupFunction<_OpenNative, _OpenDart>('orgbot_room_open'),
+      _poll = lib.lookupFunction<_PollNative, _PollDart>('orgbot_room_poll'),
+      _snapshot = lib.lookupFunction<_PollNative, _PollDart>(
+        'orgbot_room_snapshot',
+      ),
+      _say = lib.lookupFunction<_SayNative, _SayDart>('orgbot_room_say'),
+      _pause = lib.lookupFunction<_HandleNative, _HandleDart>(
+        'orgbot_room_pause',
+      ),
+      _resume = lib.lookupFunction<_HandleNative, _HandleDart>(
+        'orgbot_room_resume',
+      ),
+      _close = lib.lookupFunction<_CloseNative, _CloseDart>(
+        'orgbot_room_close',
+      ),
+      _lastError = lib
+          .lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>(
+            'orgbot_last_error',
+          ),
+      _free = lib.lookupFunction<_FreeNative, _FreeDart>('orgbot_string_free'),
+      _abi = lib.lookupFunction<_VersionNative, _VersionDart>(
+        'orgbot_abi_version',
+      );
 
+  final _ControlDart _control;
   final _OpenDart _open;
   final _PollDart _poll;
   final _PollDart _snapshot;
@@ -100,7 +114,8 @@ class EmbeddedEngine {
     final abi = engine._abi();
     if (abi != kExpectedAbi) {
       throw EmbeddedEngineError(
-          'the engine library speaks ABI $abi, this app expects $kExpectedAbi');
+        'the engine library speaks ABI $abi, this app expects $kExpectedAbi',
+      );
     }
     _instance = engine;
     return engine;
@@ -127,7 +142,8 @@ class EmbeddedEngine {
       }
     }
     throw EmbeddedEngineError(
-        'could not load the engine library (liborgbot_ffi.so): $lastError');
+      'could not load the engine library (liborgbot_ffi.so): $lastError',
+    );
   }
 
   /// The last error the library recorded, if any.
@@ -144,7 +160,9 @@ class EmbeddedEngine {
   /// `environment` carries credentials as `KEY=value`, so a key or token never
   /// has to be written into the room file.
   int openRoom(String toml, Map<String, String> environment) {
-    final env = environment.entries.map((e) => '${e.key}=${e.value}').join('\n');
+    final env = environment.entries
+        .map((e) => '${e.key}=${e.value}')
+        .join('\n');
     final tomlPtr = toml.toNativeUtf8();
     final envPtr = env.toNativeUtf8();
     try {
@@ -166,6 +184,15 @@ class EmbeddedEngine {
   Map<String, Object?>? snapshot(int handle) {
     final decoded = _decode(_snapshot(handle));
     return decoded;
+  }
+
+  bool control(int handle, Map<String, Object?> message) {
+    final ptr = jsonEncode(message).toNativeUtf8();
+    try {
+      return _control(handle, ptr) == 1;
+    } finally {
+      calloc.free(ptr);
+    }
   }
 
   /// Say something to the room as a person.
@@ -209,6 +236,9 @@ class EmbeddedEngine {
     if (text == null || text.isEmpty) return const [];
     final value = jsonDecode(text);
     if (value is! List) return const [];
-    return value.whereType<Map>().map((m) => m.cast<String, Object?>()).toList();
+    return value
+        .whereType<Map>()
+        .map((m) => m.cast<String, Object?>())
+        .toList();
   }
 }

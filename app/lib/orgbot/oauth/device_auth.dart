@@ -33,6 +33,10 @@ class SignInError implements Exception {
 /// someone is approving the code in their browser this app is in the
 /// background, where Android suspends its network — so a blip here means
 /// "try again in a moment", not "this sign-in failed".
+class SignInRevoked extends SignInError {
+  SignInRevoked(super.message);
+}
+
 class SignInTransportError extends SignInError {
   SignInTransportError(super.message);
 }
@@ -132,8 +136,7 @@ const String _codexDevicePoll =
     'https://auth.openai.com/api/accounts/deviceauth/token';
 const String _codexTokenUrl = 'https://auth.openai.com/oauth/token';
 const String _codexVerifyUrl = 'https://auth.openai.com/codex/device';
-const String _codexRedirectUri =
-    'https://auth.openai.com/deviceauth/callback';
+const String _codexRedirectUri = 'https://auth.openai.com/deviceauth/callback';
 
 /// The Grok CLI's own public OIDC client, likewise unregistered.
 const String kGrokClientId = 'b1a00492-073a-47ea-816f-4c329264a828';
@@ -163,9 +166,9 @@ class DeviceAuth {
     HttpTransport? transport,
     Duration? minInterval,
     Duration? maxInterval,
-  })  : _http = transport ?? const _IoTransport(),
-        _minInterval = minInterval ?? const Duration(seconds: 3),
-        _maxInterval = maxInterval ?? const Duration(seconds: 10);
+  }) : _http = transport ?? const _IoTransport(),
+       _minInterval = minInterval ?? const Duration(seconds: 3),
+       _maxInterval = maxInterval ?? const Duration(seconds: 10);
 
   final HttpTransport _http;
 
@@ -187,19 +190,20 @@ class DeviceAuth {
         return _startGrok();
       default:
         throw SignInError(
-            '${provider.label} does not offer a sign-in this device can use.');
+          '${provider.label} does not offer a sign-in this device can use.',
+        );
     }
   }
 
   // --- Codex -------------------------------------------------------------
 
   Future<DeviceSignIn> _startCodex() async {
-    final started = await _http.postJson(
-      _codexDeviceStart,
-      {'client_id': kCodexClientId},
-    );
+    final started = await _http.postJson(_codexDeviceStart, {
+      'client_id': kCodexClientId,
+    });
     final deviceAuthId = _string(started, 'device_auth_id');
-    final userCode = _string(started, 'user_code') ?? _string(started, 'usercode');
+    final userCode =
+        _string(started, 'user_code') ?? _string(started, 'usercode');
     if (deviceAuthId == null || userCode == null) {
       throw SignInError('ChatGPT did not return a sign-in code. Try again.');
     }
@@ -210,7 +214,12 @@ class DeviceAuth {
     );
 
     final cancelled = Completer<void>();
-    final token = _pollCodex(deviceAuthId, userCode, challenge.interval, cancelled);
+    final token = _pollCodex(
+      deviceAuthId,
+      userCode,
+      challenge.interval,
+      cancelled,
+    );
     return DeviceSignIn(ProviderKind.codex, challenge, token, () {
       if (!cancelled.isCompleted) cancelled.complete();
     });
@@ -254,9 +263,11 @@ class DeviceAuth {
       if (response.status == 403 || response.status == 404) continue;
       if (response.status == 429) continue;
       if (response.status != 200) {
-        throw SignInError('ChatGPT refused the sign-in (HTTP ' +
-            response.status.toString() +
-            ').');
+        throw SignInError(
+          'ChatGPT refused the sign-in (HTTP ' +
+              response.status.toString() +
+              ').',
+        );
       }
       final body = _decode(response.body);
       final code = _string(body, 'authorization_code');
@@ -271,24 +282,28 @@ class DeviceAuth {
     // This runs the instant the person comes back from the browser, so the
     // network may still be waking up. A failed attempt never reached the
     // server, which leaves the one-shot code good for another try.
-    final response = await _withRetry(() => _http.post(
-          _codexTokenUrl,
-          headers: const {
-            'Accept': 'application/json',
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: _form({
-            'grant_type': 'authorization_code',
-            'code': code,
-            'redirect_uri': _codexRedirectUri,
-            'client_id': kCodexClientId,
-            'code_verifier': verifier,
-          }),
-        ));
+    final response = await _withRetry(
+      () => _http.post(
+        _codexTokenUrl,
+        headers: const {
+          'Accept': 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: _form({
+          'grant_type': 'authorization_code',
+          'code': code,
+          'redirect_uri': _codexRedirectUri,
+          'client_id': kCodexClientId,
+          'code_verifier': verifier,
+        }),
+      ),
+    );
     if (response.status != 200) {
-      throw SignInError('ChatGPT would not issue a token (HTTP ' +
-          response.status.toString() +
-          ').');
+      throw SignInError(
+        'ChatGPT would not issue a token (HTTP ' +
+            response.status.toString() +
+            ').',
+      );
     }
     return _tokenFrom(_decode(response.body), plan: 'chatgpt');
   }
@@ -302,9 +317,11 @@ class DeviceAuth {
       body: _form({'client_id': kGrokClientId, 'scope': _grokScopes}),
     );
     if (response.status != 200) {
-      throw SignInError('Grok would not start a sign-in (HTTP ' +
-          response.status.toString() +
-          ').');
+      throw SignInError(
+        'Grok would not start a sign-in (HTTP ' +
+            response.status.toString() +
+            ').',
+      );
     }
     final started = _decode(response.body);
     final deviceCode = _string(started, 'device_code');
@@ -380,9 +397,11 @@ class DeviceAuth {
         case 'access_denied':
           throw SignInError('That sign-in was declined.');
         default:
-          throw SignInError('Grok refused the sign-in (HTTP ' +
-              response.status.toString() +
-              ').');
+          throw SignInError(
+            'Grok refused the sign-in (HTTP ' +
+                response.status.toString() +
+                ').',
+          );
       }
     }
     throw SignInExpired();
@@ -395,10 +414,10 @@ class DeviceAuth {
   /// Both providers expire access tokens within hours, so a device that was
   /// signed in yesterday still needs this before it can run a room.
   Future<OAuthToken> refresh(ProviderKind provider, String refreshToken) async {
-    final url =
-        provider == ProviderKind.grok ? _grokTokenUrl : _codexTokenUrl;
-    final clientId =
-        provider == ProviderKind.grok ? kGrokClientId : kCodexClientId;
+    final url = provider == ProviderKind.grok ? _grokTokenUrl : _codexTokenUrl;
+    final clientId = provider == ProviderKind.grok
+        ? kGrokClientId
+        : kCodexClientId;
     final response = await _http.post(
       url,
       headers: const {
@@ -411,10 +430,17 @@ class DeviceAuth {
         'client_id': clientId,
       }),
     );
-    if (response.status != 200) {
-      throw SignInError('That sign-in has expired. Sign in again.');
+    final body = _decode(response.body);
+    if (response.status == 401 ||
+        (response.status == 400 && body['error'] == 'invalid_grant')) {
+      throw SignInRevoked('That sign-in has expired. Sign in again.');
     }
-    final renewed = _tokenFrom(_decode(response.body), plan: null);
+    if (response.status != 200) {
+      throw SignInTransportError(
+        'Could not refresh sign-in (HTTP ${response.status}). Try again.',
+      );
+    }
+    final renewed = _tokenFrom(body, plan: null);
     // Some servers omit the refresh token when it has not rotated; keeping
     // the old one means the next renewal still works.
     return renewed.refreshToken == null
@@ -448,8 +474,8 @@ class DeviceAuth {
     final seconds = raw is num
         ? raw.toInt()
         : raw is String
-            ? int.tryParse(raw) ?? 5
-            : 5;
+        ? int.tryParse(raw) ?? 5
+        : 5;
     var wanted = Duration(seconds: seconds.clamp(1, 30));
     if (wanted > _maxInterval) wanted = _maxInterval;
     if (wanted < _minInterval) wanted = _minInterval;
@@ -461,16 +487,19 @@ class DeviceAuth {
     if (access == null) {
       throw SignInError('The sign-in came back without a token.');
     }
-    final expiresIn = body['expires_in'];
+    final expiresIn = num.tryParse('${body['expires_in']}');
     final claims = jwtClaims(access);
     final id = _string(body, 'id_token');
     final identity = id == null ? const <String, Object?>{} : jwtClaims(id);
     return OAuthToken(
       accessToken: access,
       refreshToken: _string(body, 'refresh_token'),
-      expiresAt: expiresIn is num
-          ? DateTime.now().add(Duration(seconds: expiresIn.toInt()))
-          : null,
+      expiresAt: tokenExpiry(
+        access,
+        declared: expiresIn != null
+            ? DateTime.now().add(Duration(seconds: expiresIn.toInt()))
+            : null,
+      ),
       account: _string(identity, 'email') ?? _string(claims, 'email'),
       plan: plan,
     );
@@ -492,6 +521,19 @@ Map<String, Object?> jwtClaims(String token) {
   } catch (_) {
     return const {};
   }
+}
+
+/// An expiry hint for renewal, never proof that a token is authenticated.
+DateTime? tokenExpiry(String token, {DateTime? declared}) {
+  final seconds = num.tryParse('${jwtClaims(token)['exp']}');
+  if (seconds == null || !seconds.isFinite || seconds.abs() > 8640000000000) {
+    return declared;
+  }
+  final expiry = DateTime.fromMillisecondsSinceEpoch(
+    (seconds * 1000).toInt(),
+    isUtc: true,
+  );
+  return declared != null && declared.isBefore(expiry) ? declared : expiry;
 }
 
 /// The ChatGPT account a Codex token belongs to, which its backend wants as
@@ -522,8 +564,12 @@ Map<String, Object?> _decode(String body) {
 }
 
 String _form(Map<String, String> fields) => fields.entries
-    .map((e) =>
-        Uri.encodeQueryComponent(e.key) + '=' + Uri.encodeQueryComponent(e.value))
+    .map(
+      (e) =>
+          Uri.encodeQueryComponent(e.key) +
+          '=' +
+          Uri.encodeQueryComponent(e.value),
+    )
     .join('&');
 
 /// One HTTP response, reduced to what these flows need.
@@ -560,29 +606,38 @@ class _IoTransport implements HttpTransport {
     required Map<String, String> headers,
     required String body,
   }) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 20);
     try {
       final request = await client.postUrl(Uri.parse(url));
       headers.forEach(request.headers.set);
       request.write(body);
-      final response = await request.close().timeout(const Duration(seconds: 30));
+      final response = await request.close().timeout(
+        const Duration(seconds: 30),
+      );
       final text = await response.transform(utf8.decoder).join();
       return HttpResponse(response.statusCode, text);
     } on SocketException catch (e) {
       // Say which host failed and why. "No connection" on a device that is
       // plainly online sends someone to check their wifi instead of the
       // actual fault, which has cost real time here.
-      throw SignInTransportError('Could not reach ' +
-          Uri.parse(url).host +
-          ': ' +
-          (e.osError?.message ?? e.message));
+      throw SignInTransportError(
+        'Could not reach ' +
+            Uri.parse(url).host +
+            ': ' +
+            (e.osError?.message ?? e.message),
+      );
     } on HandshakeException catch (e) {
       throw SignInTransportError(
-          'Could not establish a secure connection to ' + Uri.parse(url).host +
-              ': ' + e.message);
+        'Could not establish a secure connection to ' +
+            Uri.parse(url).host +
+            ': ' +
+            e.message,
+      );
     } on TimeoutException {
       throw SignInTransportError(
-          Uri.parse(url).host + ' did not answer in time.');
+        Uri.parse(url).host + ' did not answer in time.',
+      );
     } finally {
       client.close(force: true);
     }
@@ -590,7 +645,9 @@ class _IoTransport implements HttpTransport {
 
   @override
   Future<Map<String, Object?>> postJson(
-      String url, Map<String, Object?> body) async {
+    String url,
+    Map<String, Object?> body,
+  ) async {
     final response = await post(
       url,
       headers: const {
@@ -604,7 +661,10 @@ class _IoTransport implements HttpTransport {
     }
     if (response.status != 200) {
       throw SignInError(
-          'The provider refused the request (HTTP ' + response.status.toString() + ').');
+        'The provider refused the request (HTTP ' +
+            response.status.toString() +
+            ').',
+      );
     }
     return _decode(response.body);
   }

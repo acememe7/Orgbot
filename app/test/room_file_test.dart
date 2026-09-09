@@ -14,13 +14,46 @@ import 'package:orgbot_app/orgbot/roles.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 RoomDef room({List<String> tasks = const []}) => RoomDef(
-      name: 'Release notes',
-      goal: 'Write the 1.3 notes',
-      path: '/tmp/project',
-      tasks: tasks,
-    );
+  name: 'Release notes',
+  goal: 'Write the 1.3 notes',
+  path: '/tmp/project',
+  tasks: tasks,
+);
 
 void main() {
+  test(
+    'Android rooms have no hidden time cutoff; CLI defaults are independent',
+    () {
+      final bot = BotDef(name: 'Demo', provider: ProviderKind.scripted);
+      final android = buildRoomFile(
+        room(),
+        [bot],
+        canRunClis: false,
+        statePath: '/private/state.json',
+      ).toml;
+      expect(android, contains('[room.limits]\nmax_duration_ms = 0'));
+      expect(
+        android.indexOf('state_path'),
+        lessThan(android.indexOf('[room.limits]')),
+      );
+      expect(
+        buildRoomFile(room(), [bot], canRunClis: true).toml,
+        isNot(contains('max_duration_ms')),
+      );
+    },
+  );
+  test('different DeepSeek bot keys stay separate in a room', () {
+    final bots = [
+      BotDef(name: 'one', provider: ProviderKind.deepseek, apiKey: 'key-one'),
+      BotDef(name: 'two', provider: ProviderKind.deepseek, apiKey: 'key-two'),
+    ];
+    final file = buildRoomFile(room(), bots, canRunClis: false);
+    expect(file.environment['DEEPSEEK_API_KEY'], 'key-one');
+    expect(file.environment['ORGBOT_DEEPSEEK_TWO_API_KEY'], 'key-two');
+    expect(file.toml, contains('profile = "deepseek_two"'));
+    expect(file.toml, isNot(contains('key-one')));
+    expect(file.toml, isNot(contains('key-two')));
+  });
   test('a subscription bot becomes a cli_agent with MCP on', () {
     final bot = BotDef(
       name: 'Iris',
@@ -45,25 +78,34 @@ void main() {
       (ProviderKind.codex, 'codex'),
       (ProviderKind.grok, 'grok'),
     ]) {
-      final file = buildRoomFile(
-          room(), [BotDef(name: 'b', handle: 'b', provider: pair.$1)]);
+      final file = buildRoomFile(room(), [
+        BotDef(name: 'b', handle: 'b', provider: pair.$1),
+      ]);
       expect(file.toml, contains('cli = "${pair.$2}"'));
     }
   });
 
   test('the role decides the permissions written into the file', () {
-    final reviewer = buildRoomFile(room(),
-        [BotDef(name: 'q', handle: 'q', role: 'reviewer')]).toml;
+    final reviewer = buildRoomFile(room(), [
+      BotDef(name: 'q', handle: 'q', role: 'reviewer'),
+    ]).toml;
     expect(reviewer, contains('may_inspect = true'));
-    expect(reviewer, contains('may_submit = false'),
-        reason: 'an inspector must not also deliver');
+    expect(
+      reviewer,
+      contains('may_submit = false'),
+      reason: 'an inspector must not also deliver',
+    );
 
-    final lead = buildRoomFile(room(),
-        [BotDef(name: 'l', handle: 'l', role: 'coordinator')]).toml;
+    final lead = buildRoomFile(room(), [
+      BotDef(name: 'l', handle: 'l', role: 'coordinator'),
+    ]).toml;
     expect(lead, contains('may_create_tasks = true'));
     expect(lead, contains('may_submit = true'));
-    expect(lead, contains('may_inspect = false'),
-        reason: 'a coordinator must not sign off on its own plan');
+    expect(
+      lead,
+      contains('may_inspect = false'),
+      reason: 'a coordinator must not sign off on its own plan',
+    );
   });
 
   test('an explicit power override beats the role default', () {
@@ -74,7 +116,11 @@ void main() {
 
   test('the role brief is folded into the persona', () {
     final bot = BotDef(
-        name: 'x', handle: 'x', role: 'qa', persona: 'You are relentless.');
+      name: 'x',
+      handle: 'x',
+      role: 'qa',
+      persona: 'You are relentless.',
+    );
     final toml = buildRoomFile(room(), [bot]).toml;
     expect(toml, contains('You are relentless.'));
     expect(toml, contains('try to break the work'));
@@ -94,29 +140,38 @@ void main() {
   });
 
   test('a DeepSeek bot with no key is skipped with a reason', () {
-    final file = buildRoomFile(
-        room(), [BotDef(name: 'd', handle: 'd', provider: ProviderKind.deepseek)]);
+    final file = buildRoomFile(room(), [
+      BotDef(name: 'd', handle: 'd', provider: ProviderKind.deepseek),
+    ]);
     expect(file.skipped.single, contains('needs an API key'));
-    expect(file.toml, isNot(contains('deepseek')),
-        reason: 'an unusable bot must not be half-written into the file');
+    expect(
+      file.toml,
+      isNot(contains('deepseek')),
+      reason: 'an unusable bot must not be half-written into the file',
+    );
   });
 
-  test('quotes and newlines in a goal are escaped, not left to break the parse', () {
-    final r = RoomDef(name: 'r', goal: 'Ship "v2"\nwith notes');
-    final toml = buildRoomFile(r, [BotDef(name: 'a', handle: 'a')]).toml;
-    expect(toml, contains(r'\"v2\"'));
-    expect(toml, isNot(contains('Ship "v2"\nwith')));
-  });
+  test(
+    'quotes and newlines in a goal are escaped, not left to break the parse',
+    () {
+      final r = RoomDef(name: 'r', goal: 'Ship "v2"\nwith notes');
+      final toml = buildRoomFile(r, [BotDef(name: 'a', handle: 'a')]).toml;
+      expect(toml, contains(r'\"v2\"'));
+      expect(toml, isNot(contains('Ship "v2"\nwith')));
+    },
+  );
 
   test('a name with spaces becomes a usable handle', () {
-    final file =
-        buildRoomFile(room(), [BotDef(name: 'Big Bot Name', handle: '')]);
+    final file = buildRoomFile(room(), [
+      BotDef(name: 'Big Bot Name', handle: ''),
+    ]);
     expect(file.toml, contains('handle = "big-bot-name"'));
   });
 
   test('tasks are written as seed board entries', () {
-    final file = buildRoomFile(room(tasks: ['Draft the notes']),
-        [BotDef(name: 'a', handle: 'a')]);
+    final file = buildRoomFile(room(tasks: ['Draft the notes']), [
+      BotDef(name: 'a', handle: 'a'),
+    ]);
     expect(file.toml, contains('[[tasks]]'));
     expect(file.toml, contains('Draft the notes'));
   });
@@ -129,25 +184,34 @@ void main() {
       // Secrets live in the keystore now, which needs a stand-in under test.
       FlutterSecureStorage.setMockInitialValues({});
       final credentials = Credentials();
-      await credentials.importBundle(jsonEncode({
-        'version': 1,
-        'source': 'test',
-        'providers': [
-          {
-            'provider': provider.key,
-            'token': 'tok-' + provider.key,
-            'kind': 'bearer',
-            'plan': 'pro',
-          }
-        ],
-      }));
+      await credentials.importBundle(
+        jsonEncode({
+          'version': 1,
+          'source': 'test',
+          'providers': [
+            {
+              'provider': provider.key,
+              'token': 'tok-' + provider.key,
+              'kind': 'bearer',
+              'plan': 'pro',
+            },
+          ],
+        }),
+      );
       return credentials;
     }
 
     test('a signed-in Codex bot runs on the API, not a CLI', () async {
       final file = buildRoomFile(
         room(),
-        [BotDef(name: 'a', handle: 'a', provider: ProviderKind.codex, model: 'gpt-5.6-sol')],
+        [
+          BotDef(
+            name: 'a',
+            handle: 'a',
+            provider: ProviderKind.codex,
+            model: 'gpt-5.6-sol',
+          ),
+        ],
         credentials: await signedInTo(ProviderKind.codex),
         canRunClis: false,
       );
@@ -164,33 +228,65 @@ void main() {
     test('a signed-in Grok bot runs on the xAI API', () async {
       final file = buildRoomFile(
         room(),
-        [BotDef(name: 'g', handle: 'g', provider: ProviderKind.grok, model: 'grok-4.6')],
+        [
+          BotDef(
+            name: 'g',
+            handle: 'g',
+            provider: ProviderKind.grok,
+            model: 'grok-4.6',
+          ),
+        ],
         credentials: await signedInTo(ProviderKind.grok),
         canRunClis: false,
       );
       expect(file.toml, contains('profile = "grok"'));
-      expect(file.environment['GROK_API_KEY'], 'tok-grok');
+      expect(file.environment['GROK_AUTH_TOKEN'], 'tok-grok');
+      expect(file.environment.containsKey('GROK_API_KEY'), isFalse);
       expect(file.skipped, isEmpty);
     });
 
-    test('Anthropic is left out, because it has no sign-in that works here',
-        () async {
-      final file = buildRoomFile(
-        room(),
-        [BotDef(name: 'c', handle: 'c', provider: ProviderKind.anthropic)],
-        credentials: await signedInTo(ProviderKind.anthropic),
-        canRunClis: false,
-      );
-      expect(file.toml, isNot(contains('[[bots]]')));
-      expect(file.skipped.single, contains('only run'));
-    });
+    test(
+      'blank mobile models are caught before reaching a signed-in provider',
+      () async {
+        for (final provider in [ProviderKind.codex, ProviderKind.grok]) {
+          final file = buildRoomFile(
+            room(),
+            [BotDef(name: 'a', provider: provider)],
+            credentials: await signedInTo(provider),
+            canRunClis: false,
+          );
+          expect(file.skipped.single, contains('no model is selected'));
+          expect(file.toml, isNot(contains('[[bots]]')));
+        }
+        final file = buildRoomFile(
+          room(),
+          [BotDef(name: 'demo', provider: ProviderKind.scripted)],
+          userName: 'Alex',
+          userProfile: 'Founder. Ask about geography first.',
+        );
+        expect(file.toml, contains('Alex'));
+        expect(file.toml, contains('Ask about geography first.'));
+      },
+    );
+
+    test(
+      'Anthropic is left out, because it has no sign-in that works here',
+      () async {
+        final file = buildRoomFile(
+          room(),
+          [BotDef(name: 'c', handle: 'c', provider: ProviderKind.anthropic)],
+          credentials: await signedInTo(ProviderKind.anthropic),
+          canRunClis: false,
+        );
+        expect(file.toml, isNot(contains('[[bots]]')));
+        expect(file.skipped.single, contains('only run'));
+      },
+    );
 
     test('a provider that is not signed in says to sign in', () async {
-      final file = buildRoomFile(
-        room(),
-        [BotDef(name: 'a', handle: 'a', provider: ProviderKind.codex)],
-        canRunClis: false,
-      );
+      final file = buildRoomFile(room(), [
+        BotDef(name: 'a', handle: 'a', provider: ProviderKind.codex),
+      ], canRunClis: false);
       expect(file.toml, isNot(contains('[[bots]]')));
       expect(file.skipped.single, contains('Sign in'));
     });
@@ -198,7 +294,14 @@ void main() {
     test('a token is never written into the room file itself', () async {
       final file = buildRoomFile(
         room(),
-        [BotDef(name: 'a', handle: 'a', provider: ProviderKind.codex, model: 'm')],
+        [
+          BotDef(
+            name: 'a',
+            handle: 'a',
+            provider: ProviderKind.codex,
+            model: 'm',
+          ),
+        ],
         credentials: await signedInTo(ProviderKind.codex),
         canRunClis: false,
       );

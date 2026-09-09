@@ -32,7 +32,9 @@ class EngineBinary {
 EngineBinary findEngine() {
   if (!(Platform.isLinux || Platform.isMacOS || Platform.isWindows)) {
     return const EngineBinary(
-        null, 'The engine runs on desktop only. On a phone, join a hosted room.');
+      null,
+      'Desktop rooms use this executable. Android rooms use the embedded engine.',
+    );
   }
   final home = Platform.environment['HOME'] ?? '';
   final beside = File(Platform.resolvedExecutable).parent.path;
@@ -59,8 +61,10 @@ EngineBinary findEngine() {
       return EngineBinary(file.absolute.path, null);
     }
   }
-  return const EngineBinary(null,
-      'The orgbot engine was not found. Set ORGBOT_ENGINE to its path, or install it alongside the app.');
+  return const EngineBinary(
+    null,
+    'The orgbot engine was not found. Set ORGBOT_ENGINE to its path, or install it alongside the app.',
+  );
 }
 
 /// A running engine process hosting one room.
@@ -69,6 +73,7 @@ class CoreServer {
 
   /// The WebSocket URL the app should connect to.
   final String url;
+  final String token;
 
   /// The generated room file, kept so it can be shown or removed.
   final File roomFile;
@@ -76,17 +81,28 @@ class CoreServer {
   /// Everything the engine has written to stderr, for diagnosis.
   final StringBuffer diagnostics;
 
-  CoreServer._(this.process, this.url, this.roomFile, this.diagnostics);
+  CoreServer._(
+    this.process,
+    this.url,
+    this.token,
+    this.roomFile,
+    this.diagnostics,
+  );
 
   /// Stop the engine and clean up the generated file.
   Future<void> stop() async {
     process.kill(ProcessSignal.sigterm);
     // Give it a moment to close its socket cleanly before insisting.
-    unawaited(Future<void>.delayed(const Duration(seconds: 2)).then((_) {
-      process.kill(ProcessSignal.sigkill);
-    }));
     try {
-      if (await roomFile.exists()) await roomFile.delete();
+      await process.exitCode.timeout(const Duration(seconds: 2));
+    } on TimeoutException {
+      process.kill(ProcessSignal.sigkill);
+      await process.exitCode;
+    }
+    try {
+      if (await roomFile.parent.exists()) {
+        await roomFile.parent.delete(recursive: true);
+      }
     } catch (_) {
       // A leftover temp file is not worth failing a shutdown over.
     }
@@ -119,6 +135,11 @@ Future<CoreServer> startRoom(RoomFile room, {String? enginePath}) async {
   final port = await _freePort();
   final address = '127.0.0.1:$port';
 
+  final random = Random.secure();
+  final token = List.generate(
+    32,
+    (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+  ).join();
   final process = await Process.start(
     binary.path!,
     ['serve', file.path, '--addr', address],
@@ -126,12 +147,17 @@ Future<CoreServer> startRoom(RoomFile room, {String? enginePath}) async {
       ...Platform.environment,
       ...room.environment,
       'NO_COLOR': '1',
+      'ORGBOT_ROOM_TOKEN': token,
     },
   );
 
   final diagnostics = StringBuffer();
-  process.stderr.transform(const SystemEncoding().decoder).listen(diagnostics.write);
-  process.stdout.transform(const SystemEncoding().decoder).listen(diagnostics.write);
+  process.stderr
+      .transform(const SystemEncoding().decoder)
+      .listen(diagnostics.write);
+  process.stdout
+      .transform(const SystemEncoding().decoder)
+      .listen(diagnostics.write);
 
   // The engine may exit immediately on a bad room file; racing the health
   // check against that turns a silent hang into a readable error.
@@ -141,25 +167,31 @@ Future<CoreServer> startRoom(RoomFile room, {String? enginePath}) async {
   final ready = await _waitForHealth('http://$address/health', () => exited);
   if (!ready) {
     process.kill(ProcessSignal.sigkill);
+    await dir.delete(recursive: true);
     final why = diagnostics.toString().trim();
-    throw EngineStartError(why.isEmpty
-        ? 'the engine did not start listening on $address'
-        : _lastLines(why, 4));
+    throw EngineStartError(
+      why.isEmpty
+          ? 'the engine did not start listening on $address'
+          : _lastLines(why, 4),
+    );
   }
 
-  return CoreServer._(process, 'ws://$address/ws', file, diagnostics);
+  return CoreServer._(process, 'ws://$address/ws', token, file, diagnostics);
 }
 
 /// Poll the engine's health endpoint until it answers or gives up.
 Future<bool> _waitForHealth(String url, bool Function() hasExited) async {
-  final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 400);
+  final client = HttpClient()
+    ..connectionTimeout = const Duration(milliseconds: 400);
   try {
     for (var attempt = 0; attempt < 60; attempt++) {
       if (hasExited()) return false;
       try {
         final request = await client.getUrl(Uri.parse(url));
-        final response = await request.close();
-        await response.drain<void>();
+        final response = await request.close().timeout(
+          const Duration(seconds: 1),
+        );
+        await response.drain<void>().timeout(const Duration(seconds: 1));
         if (response.statusCode == 200) return true;
       } catch (_) {
         // Not listening yet.

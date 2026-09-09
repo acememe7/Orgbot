@@ -4,10 +4,22 @@
          it in the debug and profile manifests, which leaves a release APK
          unable to reach anything. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
     <application
+        android:allowBackup="false"
         android:label="OrgBot"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+        <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.attachments" android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/attachment_paths"/>
+        </provider>
+        <service android:name=".RoomService" android:exported="false" android:stopWithTask="false" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Runs user-started multi-agent collaboration rooms with an on-device engine, provider requests, and interactive SSH workspace operations until the user pauses or the work finishes."/>
+        </service>
         <activity
             android:name=".MainActivity"
             android:exported="true"
