@@ -134,6 +134,10 @@ pub enum Command {
         author: AgentId,
         name: String,
         body: ArtifactBody,
+        /// Whether the content carries authority that cannot be re-derived.
+        /// Such an artifact may only be re-emitted by whoever produced it.
+        #[serde(default)]
+        authority_bearing: bool,
     },
     /// Record an inspection. The verdict is derived from the findings.
     RecordReview {

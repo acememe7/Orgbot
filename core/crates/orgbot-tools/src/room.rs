@@ -148,6 +148,15 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                             &["text", "json", "patch", "url"],
                         ),
                     ),
+                    (
+                        "exact",
+                        schema::boolean(
+                            "Set true when the content carries authority that cannot \
+                             be re-derived — keys, signatures, schemas, protocol \
+                             constants, wire values. Nothing will then try to \
+                             reconstruct it from memory, and only you can re-emit it.",
+                        ),
+                    ),
                 ],
                 &["task", "name", "content"],
             ),
@@ -897,6 +906,7 @@ fn add_artifact(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
         author: actor,
         name: name.clone(),
         body,
+        authority_bearing: input.get("exact").and_then(|v| v.as_bool()).unwrap_or(false),
     }) {
         Ok(events) => {
             let id = events

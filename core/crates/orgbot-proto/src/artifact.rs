@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::ids::{AgentId, ArtifactId, TaskId};
+use crate::ids::{AgentId, ArtifactId, RoomId, TaskId};
 use crate::time::Timestamp;
 
 /// How much of an artifact fits in one handover before it must be split.
@@ -221,6 +221,89 @@ pub struct Artifact {
     /// change under the inspector.
     #[serde(default)]
     pub sealed: bool,
+    /// The room this belongs to, so provenance survives being moved or
+    /// exported away from the engine that produced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<RoomId>,
+    /// The artifact this one continues, when a deliverable was written in
+    /// several passes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues: Option<ArtifactId>,
+    /// Whether the content carries authority that cannot be re-derived:
+    /// cryptographic material, signatures, public keys, schemas, canonical
+    /// registries, protocol constants, wire values.
+    ///
+    /// Marked so nothing tries to reconstruct it from memory. A near-miss on
+    /// prose is a bad sentence; a near-miss on a public key is a system that
+    /// looks like it works and does not.
+    #[serde(default)]
+    pub authority_bearing: bool,
+    /// What review made of it, once anyone has looked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<String>,
+}
+
+/// One part of a split artifact, with what is needed to know it is intact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Part {
+    /// Which part this is, from 1.
+    pub index: u32,
+    /// How many parts there are.
+    pub total: u32,
+    /// Characters in this part.
+    pub chars: usize,
+    /// Digest of this part alone.
+    pub digest: String,
+}
+
+/// The reading order and integrity of a split artifact.
+///
+/// The point is not the structure but the promise: if you have every part
+/// listed here and each one's digest matches, you have the whole document. A
+/// reader with no manifest can only hope it reached the end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Manifest {
+    /// The artifact this describes.
+    pub artifact: ArtifactId,
+    /// Its name.
+    pub name: String,
+    /// Parts in reading order.
+    pub parts: Vec<Part>,
+    /// Characters in the whole document.
+    pub total_chars: usize,
+    /// Digest of the whole document, so the reassembly can be checked.
+    pub digest: String,
+    /// Whether every part is present and accounted for.
+    pub complete: bool,
+}
+
+impl Manifest {
+    /// The manifest as a reader should see it.
+    pub fn render(&self) -> String {
+        let mut out = format!(
+            "MANIFEST {} ({})\n{} parts, {} characters, sha256 {}\n",
+            self.name,
+            self.artifact,
+            self.parts.len(),
+            self.total_chars,
+            &self.digest[..12.min(self.digest.len())],
+        );
+        for part in &self.parts {
+            out.push_str(&format!(
+                "  part {}/{}  {} chars  sha256 {}\n",
+                part.index,
+                part.total,
+                part.chars,
+                &part.digest[..12.min(part.digest.len())],
+            ));
+        }
+        out.push_str(if self.complete {
+            "COMPLETE — reading every part in order gives the whole document."
+        } else {
+            "INCOMPLETE — parts are missing. Do not treat this as the document."
+        });
+        out
+    }
 }
 
 impl Artifact {
@@ -237,6 +320,10 @@ impl Artifact {
             supersedes: None,
             superseded_by: None,
             sealed: false,
+            room: None,
+            continues: None,
+            authority_bearing: false,
+            disposition: None,
         }
     }
 
@@ -248,6 +335,72 @@ impl Artifact {
     /// Whether this artifact still stands as the current version.
     pub const fn is_current(&self) -> bool {
         self.superseded_by.is_none()
+    }
+
+    /// The reading order and integrity of this artifact, split at `limit`.
+    pub fn manifest(&self, limit: usize) -> Manifest {
+        let total = self.body.parts(limit);
+        let parts = (1..=total)
+            .map(|index| {
+                let excerpt = self.body.excerpt(index, limit);
+                let mut hasher = Sha256::new();
+                hasher.update(excerpt.text.as_bytes());
+                Part {
+                    index,
+                    total,
+                    chars: excerpt.text.chars().count(),
+                    digest: format!("{:x}", hasher.finalize()),
+                }
+            })
+            .collect::<Vec<Part>>();
+        let total_chars = parts.iter().map(|part| part.chars).sum();
+        Manifest {
+            artifact: self.id,
+            name: self.name.clone(),
+            parts,
+            // Every part was produced from the content in hand, so this
+            // manifest is complete by construction. A manifest read back from
+            // storage with a part missing is the case this flag exists for.
+            complete: total_chars == self.body.full_text().chars().count(),
+            total_chars,
+            digest: self.digest(),
+        }
+    }
+
+    /// Whether handing this over will take more than one part.
+    ///
+    /// Asked before writing rather than discovered on reading, so a bot can
+    /// decide to split a deliverable itself rather than have it split under it.
+    pub fn needs_splitting(&self, limit: usize) -> bool {
+        self.body.parts(limit) > 1
+    }
+
+    /// What to ask the originating author for when this is lost or truncated.
+    ///
+    /// Addressed to the bot that wrote it, because it is the one that has the
+    /// content. Asking a person for something the room produced is the wrong
+    /// question, and asking any other bot invites a plausible reconstruction
+    /// of something that has to be exact.
+    pub fn recovery_request(&self, limit: usize) -> String {
+        let manifest = self.manifest(limit);
+        let exactness = if self.authority_bearing {
+            "\n\nThis artifact carries authority that cannot be re-derived. Do \
+             not reconstruct it from memory or infer any part of it: re-emit \
+             the exact bytes, or say plainly that you no longer have them."
+        } else {
+            ""
+        };
+        format!(
+            "Re-emit `{}` ({}), which you authored.\n\nUse this format:\n\
+             BEGIN\npart 1\npart 2\n...\nEND\n\n\
+             In reading order, {} part(s), {} characters in total. The whole \
+             document should hash to sha256 {}.{exactness}",
+            self.name,
+            self.id,
+            manifest.parts.len(),
+            manifest.total_chars,
+            &manifest.digest[..12.min(manifest.digest.len())],
+        )
     }
 }
 
@@ -475,5 +628,105 @@ mod completeness_tests {
         assert!(artifact.is_current());
         assert!(!artifact.sealed);
         assert_eq!(artifact.supersedes, None);
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    fn artifact(text: &str) -> Artifact {
+        Artifact::new(
+            TaskId::new(),
+            AgentId::new(),
+            "schema.json",
+            ArtifactBody::Text { text: text.into() },
+        )
+    }
+
+    /// The manifest's promise: every part listed, each digest matching, means
+    /// you have the whole document.
+    #[test]
+    fn a_manifest_lists_every_part_in_reading_order() {
+        // Varied content, so each part genuinely differs. A document of one
+        // repeated character has identical parts, and identical digests for
+        // them is correct rather than a fault.
+        let varied: String = (0..20_000)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        let manifest = artifact(&varied).manifest(PART_CHARS);
+
+        assert_eq!(manifest.parts.len(), 3);
+        assert!(manifest.complete);
+        assert_eq!(manifest.total_chars, 20_000);
+        for (position, part) in manifest.parts.iter().enumerate() {
+            assert_eq!(part.index as usize, position + 1);
+            assert_eq!(part.total, 3);
+            assert_eq!(part.digest.len(), 64);
+        }
+        // The parts hash differently from one another and from the whole.
+        assert_ne!(manifest.parts[0].digest, manifest.parts[1].digest);
+        assert_ne!(manifest.parts[0].digest, manifest.digest);
+    }
+
+    #[test]
+    fn a_manifest_says_plainly_whether_it_is_complete() {
+        let rendered = artifact(&"x".repeat(20_000)).manifest(PART_CHARS).render();
+        assert!(rendered.contains("MANIFEST"));
+        assert!(rendered.contains("part 1/3"));
+        assert!(rendered.contains("COMPLETE"));
+        assert!(!rendered.contains("INCOMPLETE"));
+    }
+
+    /// Asked before writing, so a bot can split a deliverable itself rather
+    /// than have it split under it.
+    #[test]
+    fn splitting_is_predicted_not_discovered() {
+        assert!(!artifact("short").needs_splitting(PART_CHARS));
+        assert!(artifact(&"x".repeat(20_000)).needs_splitting(PART_CHARS));
+    }
+
+    /// The room produced it; the room should be asked for it back.
+    #[test]
+    fn a_recovery_request_is_addressed_to_the_author_with_a_format() {
+        let request = artifact(&"x".repeat(20_000)).recovery_request(PART_CHARS);
+
+        assert!(request.contains("which you authored"));
+        assert!(request.contains("BEGIN"));
+        assert!(request.contains("END"));
+        assert!(request.contains("3 part(s)"));
+        assert!(request.contains("20000 characters"));
+        assert!(request.contains("sha256"), "so the re-emission can be checked");
+    }
+
+    /// A near-miss on prose is a bad sentence. A near-miss on a public key is
+    /// a system that looks like it works and does not.
+    #[test]
+    fn authority_bearing_content_forbids_reconstruction_explicitly() {
+        let mut key = artifact("-----BEGIN PUBLIC KEY-----");
+        key.authority_bearing = true;
+
+        let request = key.recovery_request(PART_CHARS);
+        assert!(request.contains("cannot be re-derived"));
+        assert!(request.contains("Do not reconstruct it from memory"));
+        assert!(request.contains("say plainly that you no longer have them"));
+    }
+
+    #[test]
+    fn ordinary_content_is_not_lectured_about_exactness() {
+        let request = artifact("some prose").recovery_request(PART_CHARS);
+        assert!(!request.contains("cannot be re-derived"));
+    }
+
+    #[test]
+    fn provenance_survives_a_round_trip() {
+        let mut record = artifact("content");
+        record.room = Some(RoomId::new());
+        record.authority_bearing = true;
+        record.continues = Some(ArtifactId::new());
+        record.disposition = Some("approved".into());
+
+        let json = serde_json::to_string(&record).unwrap();
+        assert_eq!(serde_json::from_str::<Artifact>(&json).unwrap(), record);
     }
 }

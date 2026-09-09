@@ -120,6 +120,7 @@ impl Fixture {
             body: ArtifactBody::Text {
                 text: "the release notes".into(),
             },
+            authority_bearing: false,
         });
         added_artifact(&events)
     }
@@ -2108,4 +2109,51 @@ fn rejection_sends_work_back_without_involving_a_person() {
     assert_eq!(f.engine.task(task).unwrap().assignee, Some(worker));
     assert_eq!(f.engine.decisions().pending().count(), 0);
     assert!(!f.engine.task(task).unwrap().needs_operator());
+}
+
+/// Do not ask a person for something the room produced.
+#[test]
+fn a_lost_artifact_is_asked_of_the_bot_that_wrote_it() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("write the schema", worker);
+    let artifact = f.add_artifact(task, worker);
+
+    assert_eq!(f.engine.recovery_owner(artifact), Some(worker));
+    assert_eq!(f.engine.decisions().pending().count(), 0);
+}
+
+/// Content that has to be exact may only be re-emitted by whoever produced it.
+#[test]
+fn authority_bearing_content_cannot_be_replaced_by_another_bot() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.start_task("mint the signing key", worker);
+
+    let events = f.apply(Command::AddArtifact {
+        task,
+        author: worker,
+        name: "public.pem".into(),
+        body: ArtifactBody::Text {
+            text: "-----BEGIN PUBLIC KEY-----".into(),
+        },
+        authority_bearing: true,
+    });
+    let key = added_artifact(&events);
+
+    assert!(f.engine.may_replace(key, worker), "its author may re-emit it");
+    assert!(
+        !f.engine.may_replace(key, worker2),
+        "a second author could only produce something that looks right"
+    );
+}
+
+#[test]
+fn ordinary_work_can_be_corrected_by_anyone() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.start_task("write the notes", worker);
+    let notes = f.add_artifact(task, worker);
+
+    assert!(f.engine.may_replace(notes, worker2));
 }

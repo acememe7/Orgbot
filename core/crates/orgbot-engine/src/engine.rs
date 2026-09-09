@@ -439,6 +439,28 @@ impl Engine {
         open.into_iter().map(|(t, _)| t.id).collect()
     }
 
+    /// Who should be asked to restore a lost or truncated artifact.
+    ///
+    /// The bot that wrote it, because it is the one that has the content.
+    /// Asking a person for something the room produced is the wrong question,
+    /// and asking a different bot invites a plausible reconstruction of
+    /// something that has to be exact.
+    pub fn recovery_owner(&self, artifact: ArtifactId) -> Option<AgentId> {
+        self.artifacts.get(&artifact).map(|record| record.author)
+    }
+
+    /// Whether `agent` may publish a replacement for `artifact`.
+    ///
+    /// Anyone may correct ordinary work. Content carrying authority that
+    /// cannot be re-derived — keys, signatures, schemas, protocol constants —
+    /// may only be re-emitted by whoever produced it, because a second author
+    /// can only produce something that looks right.
+    pub fn may_replace(&self, artifact: ArtifactId, agent: AgentId) -> bool {
+        self.artifacts.get(&artifact).is_none_or(|record| {
+            !record.authority_bearing || record.author == agent
+        })
+    }
+
     /// Live work that looks like the same thing as `title`.
     ///
     /// Asked before a task is created. A board grows fastest when several bots
@@ -886,7 +908,8 @@ impl Engine {
                 author,
                 name,
                 body,
-            } => self.add_artifact(task, author, name, body),
+                authority_bearing,
+            } => self.add_artifact(task, author, name, body, authority_bearing),
             Command::RecordReview {
                 task,
                 inspector,
@@ -1598,11 +1621,14 @@ impl Engine {
         author: AgentId,
         name: String,
         body: ArtifactBody,
+        authority_bearing: bool,
     ) -> Result<Vec<EventEnvelope>> {
         self.require_agent(author)?;
         let revision = self.require_task(task)?.revision;
         let mut artifact = Artifact::new(task, author, name, body);
         artifact.revision = revision;
+        artifact.room = Some(self.room.id);
+        artifact.authority_bearing = authority_bearing;
         let id = artifact.id;
         self.artifacts.insert(id, artifact.clone());
         if let Some(record) = self.tasks.get_mut(&task) {
