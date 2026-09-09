@@ -433,6 +433,7 @@ impl Engine {
         bots.sort_by(|a, b| b.holding.cmp(&a.holding).then(a.handle.cmp(&b.handle)));
 
         crate::digest::Utilization {
+            starved_roles: self.starved_roles(),
             idle: bots.iter().filter(|bot| bot.free).count() as u32,
             unclaimed: self
                 .tasks
@@ -691,6 +692,42 @@ impl Engine {
             .values()
             .filter(|task| task.assignee == Some(agent) && !task.state.is_terminal())
             .count() as u32
+    }
+
+    /// Roles that open work needs and no free bot can cover.
+    ///
+    /// The difference between "the scheduler is not matching bots to work" and
+    /// "nobody who could do this is available" — which look identical from a
+    /// count of idle bots beside a count of open tasks, and have completely
+    /// different answers.
+    pub fn starved_roles(&self) -> Vec<(String, u32)> {
+        let free: Vec<&AgentSpec> = self
+            .specs
+            .values()
+            .filter(|spec| self.status(spec.id).accepts_work() && self.workload(spec.id) == 0)
+            .collect();
+
+        let mut starved: Vec<(String, u32)> = Vec::new();
+        for task in self.tasks.values() {
+            if !task.readiness().is_claimable() {
+                continue;
+            }
+            let Some(role) = task.required_role.as_deref().filter(|r| !r.is_empty()) else {
+                continue;
+            };
+            let covered = free
+                .iter()
+                .any(|spec| self.roles.eligibility(&spec.roles, Some(role)).is_eligible());
+            if covered {
+                continue;
+            }
+            match starved.iter_mut().find(|(name, _)| name == role) {
+                Some((_, count)) => *count += 1,
+                None => starved.push((role.to_string(), 1)),
+            }
+        }
+        starved.sort_by(|(a_role, a), (b_role, b)| b.cmp(a).then(a_role.cmp(b_role)));
+        starved
     }
 
     /// Bots with nothing in hand, least loaded first.

@@ -11,6 +11,7 @@
 //! invalidates the whole thing on every request.
 
 use orgbot_engine::Engine;
+use orgbot_proto::task::Task;
 use orgbot_proto::{AgentId, AgentSpec, Seq, TaskState};
 
 /// Build the stable system prompt for a bot.
@@ -268,9 +269,68 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
         out.push_str(&transcript);
     }
 
-    out.push_str("\nDo the most useful thing you can right now, then stop. ");
-    out.push_str("If there is genuinely nothing to do, say so briefly and take no action.\n");
+    // The closing instruction, last thing read and so the most influential.
+    //
+    // This used to end with "if there is genuinely nothing to do, say so and
+    // take no action" for every bot, every turn — including bots holding
+    // nothing with claimable work sitting in front of them. A room then
+    // accumulates a transcript of "nothing actionable for me", which is a
+    // pattern the next model continues: one real room spent eight hours
+    // talking with four tasks free and the bot that could take them idle.
+    //
+    // So the close now names the bot's actual situation, and only offers the
+    // do-nothing option when doing nothing is genuinely the answer.
+    out.push_str(&closing_instruction(engine, agent, &mine));
     out
+}
+
+/// What to tell a bot to do, given what is actually in front of it.
+fn closing_instruction(engine: &Engine, agent: AgentId, mine: &[&Task]) -> String {
+    let live: Vec<&&Task> = mine.iter().filter(|t| !t.state.is_waiting()).collect();
+    if !live.is_empty() {
+        return "\nYou have work in hand. Continue it, and stop when you have \
+                made a step worth recording.\n"
+            .to_string();
+    }
+
+    let queue = engine.review_queue_for(agent);
+    if !queue.is_empty() {
+        return format!(
+            "\nYou have {} thing(s) waiting on your inspection. Review one now, \
+             reporting every blocking finding you can see in a single pass.\n",
+            queue.len()
+        );
+    }
+
+    let claimable = engine.claimable_by(agent);
+    if !claimable.is_empty() {
+        let named = claimable
+            .iter()
+            .take(3)
+            .filter_map(|id| engine.task(*id))
+            .map(|task| format!("`{}`", task.title))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!(
+            "\nYou are holding nothing and {} task(s) are open to you, including \
+             {named}. Claim one and begin it. Do not reply that there is nothing \
+             to do — there is, and it is listed above. If every one of them is \
+             genuinely blocked by something not on the board, say which task and \
+             what blocks it.\n",
+            claimable.len(),
+        );
+    }
+
+    if !mine.is_empty() {
+        return "\nEverything you hold is waiting on someone else, and there is \
+                nothing open to you. Say briefly what you are waiting for, then \
+                stop.\n"
+            .to_string();
+    }
+
+    "\nDo the most useful thing you can right now, then stop. If there is \
+     genuinely nothing to do, say so briefly and take no action.\n"
+        .to_string()
 }
 
 /// Render chat and state changes a bot has not seen yet.

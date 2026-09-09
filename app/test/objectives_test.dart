@@ -383,8 +383,43 @@ void _viewTests() {
       expect(find.text('@eng1 · working'), findsOneWidget);
       expect(find.text('@eng2 · idle'), findsOneWidget);
       expect(
-        find.textContaining('1 free while 4 piece(s) of work sit unclaimed'),
+        find.textContaining('1 free while work they could take'),
         findsOneWidget,
+      );
+    });
+
+    /// Work nobody free can do is a roster problem, and saying "the scheduler
+    /// is idle" would send someone looking in the wrong place.
+    testWidgets('a starved role is named as a roster problem', (tester) async {
+      final digest = digestJson();
+      digest['utilization'] = {
+        'bots': [
+          {'agent': 'bot_1', 'handle': 'eng1', 'doing': 'idle', 'holding': 0, 'free': true},
+        ],
+        'idle': 1,
+        'unclaimed': 3,
+        'starved_roles': [
+          ['security', 2],
+          ['ops', 1],
+        ],
+      };
+      final store = storeWith([{'type': 'digest', 'digest': digest}]);
+      await tester.pumpWidget(wrap(store));
+
+      await tester.scrollUntilVisible(
+        find.text('Who is doing what'),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(
+        find.textContaining('Nobody free can do 3 of the open task(s)'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('security (2), ops (1)'), findsOneWidget);
+      // And it is not also called a scheduling failure.
+      expect(
+        find.textContaining('free while work they could take'),
+        findsNothing,
       );
     });
 

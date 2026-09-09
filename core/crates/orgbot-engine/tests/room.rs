@@ -2522,3 +2522,87 @@ fn an_accepted_handoff_records_who_took_it() {
     });
     assert_eq!(f.state(task), TaskState::InProgress, "the sender wakes");
 }
+
+// ------------------------------------------- why a room stops doing anything
+//
+// A real room sat with nine bots free and eight tasks open for eight hours.
+// Half the work required roles whose only holder was busy; the other half was
+// open to a bot that kept replying "nothing actionable for me". Two different
+// faults that look identical from a count of idle bots beside open tasks.
+
+/// Work nobody free can do is a roster problem, not a scheduling one.
+#[test]
+fn work_no_free_bot_can_cover_is_named_as_such() {
+    let mut f = fixture();
+    let worker = f.worker;
+
+    // Both writers take something, then more writer work appears.
+    let worker2 = f.worker2;
+    let first = f.open_task("first writing job", Some("writer"));
+    let second = f.open_task("second writing job", Some("writer"));
+    f.apply(Command::ClaimTask { task: first, by: worker });
+    f.apply(Command::ClaimTask {
+        task: second,
+        by: worker2,
+    });
+    f.open_task("third writing job", Some("writer"));
+    f.open_task("fourth writing job", Some("writer"));
+
+    let starved = f.engine.starved_roles();
+    assert_eq!(
+        starved,
+        vec![("writer".to_string(), 2)],
+        "two tasks want a writer and no free bot is one"
+    );
+
+    let utilization = f.engine.utilization();
+    assert!(utilization.idle > 0, "other bots are free");
+    assert!(
+        utilization.is_short_handed(),
+        "the roster is the problem here"
+    );
+    assert!(
+        !utilization.is_wasting_capacity(),
+        "and calling it a scheduling failure would send someone looking in \
+         the wrong place"
+    );
+}
+
+/// Declaring a stand-in turns a roster problem back into available work.
+#[test]
+fn a_fallback_role_relieves_the_starvation() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let first = f.open_task("first writing job", Some("writer"));
+    let second = f.open_task("second writing job", Some("writer"));
+    f.apply(Command::ClaimTask { task: first, by: worker });
+    f.apply(Command::ClaimTask {
+        task: second,
+        by: worker2,
+    });
+    f.open_task("third writing job", Some("writer"));
+
+    assert!(!f.engine.starved_roles().is_empty());
+
+    f.engine.set_roles(RoleTable::new(vec![
+        RoleSpec::new("writer").falling_back_to(["reviewer"])
+    ]));
+
+    assert_eq!(
+        f.engine.starved_roles(),
+        vec![],
+        "the inspector can stand in, so nothing is starved"
+    );
+    assert!(f.engine.utilization().is_wasting_capacity());
+}
+
+/// Genuinely idle bots beside work they could take is a scheduling failure.
+#[test]
+fn free_bots_beside_work_they_can_take_is_wasting_capacity() {
+    let mut f = fixture();
+    f.open_task("anyone could do this", None);
+
+    let utilization = f.engine.utilization();
+    assert!(utilization.is_wasting_capacity());
+    assert!(!utilization.is_short_handed());
+}

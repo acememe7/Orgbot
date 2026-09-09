@@ -613,20 +613,32 @@ class Utilization {
     required this.bots,
     required this.idle,
     required this.unclaimed,
+    this.starvedRoles = const [],
   });
 
   final List<BotState> bots;
   final int idle;
   final int unclaimed;
 
+  /// Roles that open work needs and no free bot can cover, worst first.
+  final List<({String role, int tasks})> starvedRoles;
+
   const Utilization.empty()
       : bots = const [],
         idle = 0,
-        unclaimed = 0;
+        unclaimed = 0,
+        starvedRoles = const [];
 
-  /// Bots free while work sits unclaimed — a scheduling failure that no
-  /// single count reveals.
-  bool get isWastingCapacity => idle > 0 && unclaimed > 0;
+  /// Open work no free bot can cover.
+  int get starvedCount =>
+      starvedRoles.fold(0, (sum, entry) => sum + entry.tasks);
+
+  /// Bots free beside work they could actually take. A scheduling failure.
+  bool get isWastingCapacity => idle > 0 && unclaimed > starvedCount;
+
+  /// Work waiting on a role whose holders are all busy. A roster failure —
+  /// the opposite fix from the one above, so the two must not be conflated.
+  bool get isShortHanded => starvedRoles.isNotEmpty;
 
   factory Utilization.fromJson(Map<String, Object?> json) => Utilization(
         bots: (json['bots'] as List? ?? const [])
@@ -635,6 +647,13 @@ class Utilization {
             .toList(),
         idle: (json['idle'] as num?)?.toInt() ?? 0,
         unclaimed: (json['unclaimed'] as num?)?.toInt() ?? 0,
+        starvedRoles: (json['starved_roles'] as List? ?? const [])
+            .whereType<List>()
+            .map((pair) => (
+                  role: pair.isNotEmpty ? pair[0] as String : '',
+                  tasks: pair.length > 1 ? (pair[1] as num).toInt() : 0,
+                ))
+            .toList(),
       );
 }
 

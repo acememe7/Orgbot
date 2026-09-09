@@ -147,6 +147,12 @@ pub struct Utilization {
     pub idle: u32,
     /// Claimable work nobody has taken.
     pub unclaimed: u32,
+    /// Roles that open work needs and no free bot can cover, worst first.
+    ///
+    /// Without this, "9 free, 8 unclaimed" reads as a scheduling failure when
+    /// it may be a roster one — and those have opposite fixes.
+    #[serde(default)]
+    pub starved_roles: Vec<(String, u32)>,
 }
 
 impl Utilization {
@@ -155,8 +161,22 @@ impl Utilization {
     /// The specific failure worth naming: five bots idle while twenty tasks
     /// show as ready means the scheduler is not matching them, and no count
     /// on its own reveals it.
-    pub const fn is_wasting_capacity(&self) -> bool {
-        self.idle > 0 && self.unclaimed > 0
+    pub fn is_wasting_capacity(&self) -> bool {
+        // Only when a free bot could actually take something. Idle bots beside
+        // work none of them is eligible for is a roster problem, not a
+        // scheduling one, and calling it the wrong name sends someone looking
+        // in the wrong place.
+        self.idle > 0 && self.unclaimed > self.starved_count()
+    }
+
+    /// Open work no free bot can cover.
+    pub fn starved_count(&self) -> u32 {
+        self.starved_roles.iter().map(|(_, count)| count).sum()
+    }
+
+    /// Whether the roster, rather than the scheduler, is the problem.
+    pub fn is_short_handed(&self) -> bool {
+        !self.starved_roles.is_empty()
     }
 }
 

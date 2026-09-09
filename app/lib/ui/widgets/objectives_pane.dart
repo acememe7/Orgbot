@@ -994,13 +994,29 @@ class _UtilizationStrip extends StatelessWidget {
                 ),
             ],
           ),
+          // Two different faults that look identical from the counts alone,
+          // and have opposite fixes. Naming the wrong one sends someone
+          // looking in the wrong place.
+          if (utilization.isShortHanded) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Nobody free can do ${utilization.starvedCount} of the open '
+              'task(s): they need '
+              '${utilization.starvedRoles.map((e) => '${e.role} (${e.tasks})').join(', ')}, '
+              'and every bot holding those roles is busy. Add one, or let '
+              'another role stand in.',
+              style: TextStyle(
+                fontSize: 11.5,
+                height: 1.35,
+                color: Colors.amber,
+              ),
+            ),
+          ],
           if (utilization.isWastingCapacity) ...[
             const SizedBox(height: 10),
             Text(
-              // The specific failure worth naming: bots free while work waits.
-              '${utilization.idle} free while ${utilization.unclaimed} '
-              'piece(s) of work sit unclaimed. The roles those tasks require '
-              'may be too narrow.',
+              '${utilization.idle} free while work they could take sits '
+              'unclaimed.',
               style: TextStyle(
                 fontSize: 11.5,
                 height: 1.35,
