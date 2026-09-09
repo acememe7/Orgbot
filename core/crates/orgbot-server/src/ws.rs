@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use futures::{SinkExt, StreamExt};
 use tokio::sync::broadcast;
 
@@ -49,8 +50,19 @@ impl std::fmt::Debug for AppState {
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| serve_client(socket, state))
+    headers: HeaderMap,
+) -> Response {
+    if let Some(origin) = headers.get("origin") {
+        if !matches!(
+            origin.to_str(),
+            Ok("tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost")
+        ) {
+            return (StatusCode::FORBIDDEN, "web origin is not permitted").into_response();
+        }
+    }
+    ws.max_message_size(256 * 1024)
+        .max_frame_size(256 * 1024)
+        .on_upgrade(move |socket| serve_client(socket, state))
 }
 
 /// Drive one client connection to completion.
@@ -61,54 +73,74 @@ async fn serve_client(socket: WebSocket, state: AppState) {
     // snapshot is the whole room — roster, board, and transcript — so
     // answering an unauthenticated socket would hand all of it over to
     // anyone who can reach the port.
-    let Some(since) = handshake(&mut sender, &mut receiver, state.token.as_deref()).await
-    else {
+    let Some(since) = handshake(&mut sender, &mut receiver, state.token.as_deref()).await else {
         return;
     };
 
-    let subscription = state.session.subscribe();
-    match state.session.snapshot().await {
-        Some(snapshot) => {
-            if send(&mut sender, &snapshot).await.is_err() {
-                return;
+    let mut subscription = state.session.subscribe();
+    let _ = since; // A replacement snapshot always carries a full replay.
+    if replay(&mut sender, &state.session).await.is_err() {
+        return;
+    }
+    loop {
+        tokio::select! {
+            frame = receiver.next() => {
+                let text = match frame {
+                    Some(Ok(Message::Text(text))) => text,
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                    _ => return,
+                };
+                let Ok(message) = serde_json::from_str::<ClientMessage>(&text) else {
+                    let _ = send(&mut sender, &ServerMessage::Error { message: "invalid room message".into() }).await;
+                    continue;
+                };
+                match message {
+                    ClientMessage::Hello { .. } | ClientMessage::Resync => {
+                        if replay(&mut sender, &state.session).await.is_err() { return; }
+                    }
+                    ClientMessage::Ping => {
+                        if send(&mut sender, &ServerMessage::Pong).await.is_err() { return; }
+                    }
+                    message => if !dispatch(&state.session, message).await {
+                        let _ = send(&mut sender, &ServerMessage::Error { message: "room control queue is full or closed".into() }).await;
+                    },
+                }
+            }
+            message = subscription.recv() => match message {
+                Ok(message) => {
+                    let closing = matches!(message, ServerMessage::Closed { .. });
+                    if send(&mut sender, &message).await.is_err() || closing { return; }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if replay(&mut sender, &state.session).await.is_err() { return; }
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
             }
         }
-        None => {
-            let _ = send(
-                &mut sender,
-                &ServerMessage::Closed {
-                    reason: "the room has already finished".into(),
-                },
-            )
-            .await;
-            return;
-        }
     }
+}
 
-    // Replay what already happened.
-    //
-    // The snapshot carries the roster and the board, but the transcript lives
-    // in the event log — so without this a client that attaches after the room
-    // started never sees anything said before it connected, and a message can
-    // simply vanish. The subscription was taken before the snapshot, so a few
-    // events may arrive twice; clients drop anything at or below the highest
-    // sequence they have already applied.
-    for envelope in state.session.backlog(since).await {
-        let event = ServerMessage::Event {
-            envelope: Box::new(envelope),
-        };
-        if send(&mut sender, &event).await.is_err() {
-            return;
-        }
+async fn replay(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    session: &SessionHandle,
+) -> Result<(), axum::Error> {
+    if let Some(snapshot) = session.snapshot().await {
+        send(sender, &snapshot).await?;
     }
-
-    // Pump broadcast events out to this client.
-    let outbound = tokio::spawn(pump_out(sender, subscription));
-    // Read client control in.
-    let inbound = pump_in(&mut receiver, state.session.clone());
-    inbound.await;
-
-    outbound.abort();
+    for envelope in session.backlog(Seq::ZERO).await {
+        send(
+            sender,
+            &ServerMessage::Event {
+                envelope: Box::new(envelope),
+            },
+        )
+        .await?;
+    }
+    // Historical task events may include older phases; finish with the current phase.
+    if let Some(ServerMessage::Snapshot { room, .. }) = session.snapshot().await {
+        send(sender, &ServerMessage::Phase { phase: room.phase }).await?;
+    }
+    Ok(())
 }
 
 /// How long a client has to introduce itself before the room hangs up. Short,
@@ -172,17 +204,14 @@ pub(crate) fn admit(opening: Option<&str>, token: Option<&str>) -> Admission {
         Ok(ClientMessage::Hello {
             since,
             token: Some(offered),
-            ..
+            wire_version: WIRE_VERSION,
         }) if secret_eq(&offered, expected) => Admission::Accept(since),
         _ => Admission::Refuse("that token is not valid for this room"),
     }
 }
 
 /// Tell a client why it is being hung up on, then hang up.
-async fn refuse(
-    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
-    reason: &str,
-) {
+async fn refuse(sender: &mut futures::stream::SplitSink<WebSocket, Message>, reason: &str) {
     let _ = send(
         sender,
         &ServerMessage::Closed {
@@ -210,59 +239,6 @@ fn secret_eq(offered: &str, expected: &str) -> bool {
         == 0
 }
 
-/// Forward broadcast messages to the socket until it closes or the client lags
-/// too far behind.
-async fn pump_out(
-    mut sender: futures::stream::SplitSink<WebSocket, Message>,
-    mut subscription: broadcast::Receiver<ServerMessage>,
-) {
-    loop {
-        match subscription.recv().await {
-            Ok(message) => {
-                let closing = matches!(message, ServerMessage::Closed { .. });
-                if send(&mut sender, &message).await.is_err() {
-                    return;
-                }
-                if closing {
-                    return;
-                }
-            }
-            // The client fell behind the broadcast buffer. Tell it to resync
-            // rather than dropping it — it can request a fresh snapshot.
-            Err(broadcast::error::RecvError::Lagged(_)) => {
-                let notice = ServerMessage::Error {
-                    message: "fell behind; send a resync".into(),
-                };
-                if send(&mut sender, &notice).await.is_err() {
-                    return;
-                }
-            }
-            Err(broadcast::error::RecvError::Closed) => return,
-        }
-    }
-}
-
-/// Read client messages and turn them into room control until the socket ends.
-async fn pump_in(
-    receiver: &mut futures::stream::SplitStream<WebSocket>,
-    session: SessionHandle,
-) {
-    while let Some(Ok(frame)) = receiver.next().await {
-        let text = match frame {
-            Message::Text(text) => text,
-            Message::Close(_) => return,
-            // Pings are handled by axum; ignore binary and pong frames.
-            _ => continue,
-        };
-        let Ok(message) = serde_json::from_str::<ClientMessage>(&text) else {
-            continue;
-        };
-        if !dispatch(&session, message).await {
-            return;
-        }
-    }
-}
-
 /// Apply one client message. Returns `false` once the room has stopped.
 async fn dispatch(session: &SessionHandle, message: ClientMessage) -> bool {
     match message {
@@ -272,9 +248,19 @@ async fn dispatch(session: &SessionHandle, message: ClientMessage) -> bool {
             // connection alive.
             true
         }
-        ClientMessage::SendMessage { author, body, task } => {
+        ClientMessage::SendMessage {
+            author,
+            body,
+            task,
+            files,
+        } => {
             session
-                .send(Control::HumanMessage { author, body, task })
+                .send(Control::HumanMessage {
+                    author,
+                    body,
+                    task,
+                    files,
+                })
                 .await
         }
         ClientMessage::AnswerBot { task, answer } => {
@@ -296,10 +282,8 @@ async fn send(
 
 /// The `GET /` status page: a one-line confirmation the server is up.
 pub async fn status(State(state): State<AppState>) -> String {
-    format!(
-        "orgbot server (wire v{WIRE_VERSION}) hosting room `{}`\nconnect a client to /ws\n",
-        state.room_name
-    )
+    let _ = state;
+    format!("orgbot server (wire v{WIRE_VERSION})\n")
 }
 
 /// The `GET /health` check.
@@ -395,9 +379,17 @@ mod tests {
     #[test]
     fn near_misses_are_not_close_enough() {
         let expected = "s3cret-token-long-enough";
-        for offered in ["s3cret-token-long-enoug", "s3cret-token-long-enough!", "S3CRET-TOKEN-LONG-ENOUGH", ""] {
+        for offered in [
+            "s3cret-token-long-enoug",
+            "s3cret-token-long-enough!",
+            "S3CRET-TOKEN-LONG-ENOUGH",
+            "",
+        ] {
             assert!(
-                matches!(admit(Some(&hello(Some(offered), 0)), Some(expected)), Admission::Refuse(_)),
+                matches!(
+                    admit(Some(&hello(Some(offered), 0)), Some(expected)),
+                    Admission::Refuse(_)
+                ),
                 "{offered:?} should not be admitted"
             );
         }

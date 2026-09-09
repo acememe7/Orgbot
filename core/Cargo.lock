@@ -864,11 +864,13 @@ dependencies = [
 name = "orgbot-ffi"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "orgbot-engine",
  "orgbot-proto",
  "orgbot-providers",
  "orgbot-runtime",
  "orgbot-server",
+ "orgbot-tools",
  "serde",
  "serde_json",
  "tokio",
@@ -890,6 +892,7 @@ name = "orgbot-providers"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "futures",
  "orgbot-proto",
  "reqwest",
@@ -913,6 +916,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

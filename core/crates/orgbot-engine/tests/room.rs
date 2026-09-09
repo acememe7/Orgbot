@@ -743,6 +743,15 @@ fn a_bot_that_keeps_failing_is_faulted_and_gives_its_work_back() {
         "a faulted bot's task returns to the pool"
     );
     assert!(f.engine.task(task).unwrap().assignee.is_none());
+    f.apply(Command::PauseRoom { reason: "retry after reconnecting".into() });
+    let events = f.apply(Command::ResumeRoom);
+    assert_eq!(f.engine.status(worker), orgbot_proto::AgentStatus::Idle);
+    assert_eq!(f.engine.error_streak(worker), 0);
+    assert_eq!(f.state(task), TaskState::Ready);
+    assert!(events.iter().any(|e| matches!(e.event, Event::AgentStatusChanged { agent, to: orgbot_proto::AgentStatus::Idle, .. } if agent == worker)));
+    let restored = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec()).unwrap();
+    assert_eq!(restored.error_streak(worker), 0);
+    f.apply(Command::ClaimTask { task, by: worker });
 }
 
 #[test]
@@ -1033,4 +1042,491 @@ fn a_rejected_command_changes_nothing() {
 
     assert_eq!(f.engine.head(), before, "a refusal must not append events");
     assert_eq!(f.engine.task(task).cloned(), snapshot);
+}
+
+// ------------------------------------------------------- the work graph
+//
+// A sixteen-bot run put ninety-six records on a board where twelve objectives
+// existed, showed eleven future nodes as simultaneously ready, and kept
+// offering work that had already been replaced. These cover the engine side of
+// that: what the scheduler is allowed to offer, and what happens on its own
+// when an upstream task lands.
+
+use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness};
+
+impl Fixture {
+    /// An open task that cannot start until `blockers` are submitted.
+    fn open_task_after(&mut self, title: &str, blockers: Vec<TaskId>) -> TaskId {
+        let events = self.apply(Command::CreateTask {
+            title: title.into(),
+            brief: format!("please do: {title}"),
+            by: Some(self.coordinator),
+            required_role: None,
+            priority: Priority::Normal,
+            acceptance_criteria: vec![],
+            depends_on: blockers,
+            parent: None,
+        });
+        let task = created_task(&events);
+        self.apply(Command::OpenTask { task });
+        task
+    }
+
+    /// Drive a task all the way to delivered.
+    fn deliver(&mut self, task: TaskId, worker: AgentId) {
+        self.apply(Command::ClaimTask { task, by: worker });
+        self.apply(Command::StartTask { task, by: worker });
+        self.apply(Command::SubmitForReview {
+            task,
+            by: worker,
+            artifacts: vec![],
+        });
+        self.apply(Command::RecordReview {
+            task,
+            inspector: self.inspector,
+            findings: vec![],
+            summary: "fine".into(),
+            criteria_met: vec![],
+            criteria_failed: vec![],
+        });
+        self.apply(Command::SubmitTask {
+            task,
+            by: self.coordinator,
+        });
+    }
+
+    fn readiness(&self, task: TaskId) -> Readiness {
+        self.engine.task(task).expect("task exists").readiness()
+    }
+}
+
+/// The headline failure: a chain of future work all advertising itself as
+/// ready at once, because each was an unclaimed record.
+#[test]
+fn a_dependency_chain_offers_only_its_first_link() {
+    let mut f = fixture();
+    let worker = f.worker;
+
+    let c0 = f.open_task("recover the source", None);
+    let c1 = f.open_task_after("rebuild from source", vec![c0]);
+    let c2 = f.open_task_after("re-run the checks", vec![c1]);
+
+    let claimable = f.engine.claimable_by(worker);
+    assert_eq!(
+        claimable,
+        vec![c0],
+        "only the head of the chain is workable; the rest are waiting"
+    );
+    assert!(matches!(
+        f.readiness(c1),
+        Readiness::WaitingDependency { .. }
+    ));
+    assert!(matches!(
+        f.readiness(c2),
+        Readiness::WaitingDependency { .. }
+    ));
+}
+
+/// When upstream lands, downstream becomes eligible on its own — no
+/// coordinator has to notice and announce it.
+#[test]
+fn finishing_upstream_frees_the_next_link_automatically() {
+    let mut f = fixture();
+    let worker = f.worker;
+
+    let first = f.open_task("recover the source", None);
+    let second = f.open_task_after("rebuild from source", vec![first]);
+
+    assert!(matches!(
+        f.readiness(second),
+        Readiness::WaitingDependency { .. }
+    ));
+
+    f.deliver(first, worker);
+
+    assert_eq!(
+        f.readiness(second),
+        Readiness::ReadyNow,
+        "the dependent should free itself the moment its blocker is delivered"
+    );
+    assert!(f.engine.claimable_by(worker).contains(&second));
+}
+
+/// One missing source is one blocker, named identically by everything waiting
+/// on it — not five separate cards saying the same thing.
+#[test]
+fn many_dependents_name_one_shared_blocker() {
+    let mut f = fixture();
+    let recovery = f.open_task("recover the B3-C source", None);
+    let dependents: Vec<TaskId> = (0..5)
+        .map(|i| f.open_task_after(&format!("downstream {i}"), vec![recovery]))
+        .collect();
+
+    let blockers: std::collections::HashSet<TaskId> = dependents
+        .iter()
+        .map(|task| match f.readiness(*task) {
+            Readiness::WaitingDependency { on, .. } => on,
+            other => panic!("expected a wait, got {other:?}"),
+        })
+        .collect();
+
+    assert_eq!(blockers, std::collections::HashSet::from([recovery]));
+    assert!(
+        dependents.iter().all(|t| !f.engine.task(*t).unwrap().needs_operator()),
+        "waiting on the room's own work is never a question for a person"
+    );
+}
+
+/// A waiting task names who is expected to clear it, so nobody has to ask.
+#[test]
+fn a_wait_names_the_bot_who_owns_the_blocker() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let blocker = f.open_task("recover the source", None);
+    let waiting = f.open_task_after("rebuild", vec![blocker]);
+
+    f.apply(Command::ClaimTask {
+        task: blocker,
+        by: worker,
+    });
+
+    match f.readiness(waiting) {
+        Readiness::WaitingDependency { owner, reason, .. } => {
+            assert_eq!(owner, Some(worker));
+            assert_eq!(reason, "recover the source");
+        }
+        other => panic!("expected a wait, got {other:?}"),
+    }
+}
+
+/// Replaced work must leave the scheduler entirely, immediately.
+#[test]
+fn a_superseded_task_is_never_offered_or_claimable() {
+    let mut f = fixture();
+    let worker = f.worker;
+
+    let original = f.open_task("the first attempt", None);
+    let replacement = f.open_task("the canonical task", None);
+
+    f.apply(Command::SupersedeTask {
+        task: original,
+        replacement,
+        reason: "merged into the canonical task".into(),
+    });
+
+    assert!(
+        !f.engine.claimable_by(worker).contains(&original),
+        "replaced work must not be offered"
+    );
+    let err = f.reject(Command::ClaimTask {
+        task: original,
+        by: worker,
+    });
+    assert!(
+        matches!(err, EngineError::NotReady { .. }),
+        "claiming replaced work should be refused, got {err:?}"
+    );
+    assert!(matches!(f.readiness(original), Readiness::Closed { .. }));
+}
+
+/// Dependents of a replaced task should follow to its replacement rather than
+/// waiting forever on a record nobody will finish.
+#[test]
+fn a_dependent_follows_its_blocker_to_the_replacement() {
+    let mut f = fixture();
+    let worker = f.worker;
+
+    let original = f.open_task("the first attempt", None);
+    let dependent = f.open_task_after("downstream work", vec![original]);
+    let replacement = f.open_task("the canonical task", None);
+
+    f.apply(Command::SupersedeTask {
+        task: original,
+        replacement,
+        reason: "merged into the canonical task".into(),
+    });
+
+    match f.readiness(dependent) {
+        Readiness::WaitingDependency { on, .. } => assert_eq!(
+            on, replacement,
+            "the wait should move to whatever now carries the work"
+        ),
+        other => panic!("expected a wait on the replacement, got {other:?}"),
+    }
+
+    f.deliver(replacement, worker);
+    assert_eq!(
+        f.readiness(dependent),
+        Readiness::ReadyNow,
+        "delivering the replacement should free the dependent"
+    );
+}
+
+/// Missing evidence is work for the room. It must not be offered as claimable,
+/// and must not reach the operator.
+#[test]
+fn a_security_hold_pauses_work_without_asking_anyone() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("ship the container", None);
+
+    f.apply(Command::SetAuthorization {
+        task,
+        authorization: AuthorizationState::SecurityHold {
+            finding: "need merged-filesystem classification".into(),
+            material: false,
+        },
+    });
+
+    assert!(!f.engine.claimable_by(worker).contains(&task));
+    assert!(!f.engine.task(task).unwrap().needs_operator());
+    assert!(matches!(
+        f.readiness(task),
+        Readiness::BlockedInternal { .. }
+    ));
+}
+
+/// A genuine operator gate does stop the room, and says why.
+#[test]
+fn an_operator_gate_stops_the_task_and_names_the_decision() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("provision the VPS", None);
+
+    f.apply(Command::SetAuthorization {
+        task,
+        authorization: AuthorizationState::AwaitingOperator {
+            because: "it provisions paid infrastructure".into(),
+            options: vec!["Approve".into(), "Decline".into()],
+        },
+    });
+
+    assert!(!f.engine.claimable_by(worker).contains(&task));
+    assert!(f.engine.task(task).unwrap().needs_operator());
+
+    let err = f.reject(Command::ClaimTask { task, by: worker });
+    match err {
+        EngineError::NotReady { reason, .. } => assert!(
+            reason.contains("paid infrastructure"),
+            "the refusal should carry the decision, got {reason}"
+        ),
+        other => panic!("expected NotReady, got {other:?}"),
+    }
+}
+
+/// The error a bot sees must be written for a bot. The operator-facing copy
+/// reassures the reader that nothing is needed from them, which is precisely
+/// the wrong thing to tell an agent it cannot claim.
+#[test]
+fn a_refusal_tells_the_bot_what_to_do_instead() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let original = f.open_task("the first attempt", None);
+    let replacement = f.open_task("the canonical task", None);
+    f.apply(Command::SupersedeTask {
+        task: original,
+        replacement,
+        reason: "merged into the canonical task".into(),
+    });
+
+    match f.reject(Command::ClaimTask {
+        task: original,
+        by: worker,
+    }) {
+        EngineError::NotReady { reason, .. } => {
+            assert!(reason.contains("work that instead"), "got {reason}");
+            assert!(!reason.contains("No action needed from you"));
+        }
+        other => panic!("expected NotReady, got {other:?}"),
+    }
+}
+
+/// Two bots racing for one task still get the precise state-machine error;
+/// the graph checks must not swallow it into a vaguer one.
+#[test]
+fn the_graph_checks_do_not_mask_a_plain_race() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.open_task("write the release notes", None);
+
+    f.apply(Command::ClaimTask { task, by: worker });
+    let err = f.reject(Command::ClaimTask { task, by: worker2 });
+    assert!(
+        matches!(err, EngineError::Transition(_)),
+        "a taken task is a workflow error, not a graph one; got {err:?}"
+    );
+}
+
+/// A dependency block keeps its own precise error rather than the generic one.
+#[test]
+fn a_dependency_block_keeps_its_specific_error() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let blocker = f.open_task("recover the source", None);
+    let waiting = f.open_task_after("rebuild", vec![blocker]);
+
+    match f.reject(Command::ClaimTask {
+        task: waiting,
+        by: worker,
+    }) {
+        EngineError::DependencyNotMet { blocker: named, .. } => assert_eq!(named, blocker),
+        other => panic!("expected DependencyNotMet, got {other:?}"),
+    }
+}
+
+/// A room written before the graph existed keeps working exactly as it did.
+#[test]
+fn a_plain_task_with_no_graph_state_is_still_ready() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("ordinary work", None);
+
+    let record = f.engine.task(task).expect("task exists");
+    assert_eq!(record.dependency, DependencyState::Satisfied);
+    assert_eq!(record.authorization, AuthorizationState::Authorized);
+    assert_eq!(f.readiness(task), Readiness::ReadyNow);
+    assert!(f.engine.claimable_by(worker).contains(&task));
+}
+
+/// The guard that stops the room routing its own gaps to a person. Every one
+/// of these was a real escalation from a run where the room asked the operator
+/// for something the room itself had lost or simply not done yet.
+#[test]
+fn the_engine_refuses_an_operator_gate_that_is_really_internal_work() {
+    let mut f = fixture();
+    let task = f.open_task("rebuild the manifest", None);
+
+    for because in [
+        "the B3-C source is missing",
+        "the artifact was truncated",
+        "we need to regenerate the manifest",
+        "evidence is required for the security review",
+    ] {
+        let err = f.reject(Command::SetAuthorization {
+            task,
+            authorization: AuthorizationState::AwaitingOperator {
+                because: because.into(),
+                options: vec![],
+            },
+        });
+        assert!(
+            matches!(err, EngineError::NotReady { .. }),
+            "{because:?} should have been kept inside the room, got {err:?}"
+        );
+    }
+
+    // The task is untouched by a refused hold.
+    assert_eq!(f.readiness(task), Readiness::ReadyNow);
+    assert!(!f.engine.task(task).unwrap().needs_operator());
+}
+
+#[test]
+fn the_engine_accepts_a_genuine_operator_gate() {
+    let mut f = fixture();
+    let task = f.open_task("deploy to production", None);
+
+    f.apply(Command::SetAuthorization {
+        task,
+        authorization: AuthorizationState::AwaitingOperator {
+            because: "deploying to production needs your sign-off".into(),
+            options: vec!["Approve".into(), "Defer".into()],
+        },
+    });
+    assert!(f.engine.task(task).unwrap().needs_operator());
+}
+
+/// Lifting a hold puts the task straight back in the queue.
+#[test]
+fn lifting_a_hold_returns_the_task_to_the_queue() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("ship it", None);
+
+    f.apply(Command::SetAuthorization {
+        task,
+        authorization: AuthorizationState::HeldByPolicy {
+            policy: "no-new-machines".into(),
+            reason: "pending the confined-docker check".into(),
+        },
+    });
+    assert!(!f.engine.claimable_by(worker).contains(&task));
+
+    f.apply(Command::SetAuthorization {
+        task,
+        authorization: AuthorizationState::Authorized,
+    });
+    assert!(f.engine.claimable_by(worker).contains(&task));
+}
+
+#[test]
+fn a_supersession_cycle_is_refused() {
+    let mut f = fixture();
+    let first = f.open_task("first", None);
+    let second = f.open_task("second", None);
+
+    f.apply(Command::SupersedeTask {
+        task: first,
+        replacement: second,
+        reason: "merged".into(),
+    });
+    // Pointing the replacement back at what it replaced would make the
+    // scheduler chase its own tail.
+    let err = f.reject(Command::SupersedeTask {
+        task: second,
+        replacement: first,
+        reason: "undo".into(),
+    });
+    assert!(matches!(err, EngineError::NotReady { .. }), "got {err:?}");
+
+    let err = f.reject(Command::SupersedeTask {
+        task: first,
+        replacement: first,
+        reason: "itself".into(),
+    });
+    assert!(matches!(err, EngineError::NotReady { .. }), "got {err:?}");
+}
+
+/// Supersession records both directions, so history reads either way.
+#[test]
+fn supersession_is_recorded_on_both_records() {
+    let mut f = fixture();
+    let original = f.open_task("first attempt", None);
+    let replacement = f.open_task("canonical", None);
+
+    f.apply(Command::SupersedeTask {
+        task: original,
+        replacement,
+        reason: "merged".into(),
+    });
+
+    assert_eq!(
+        f.engine.task(original).unwrap().lineage.superseded_by,
+        Some(replacement)
+    );
+    assert_eq!(
+        f.engine.task(replacement).unwrap().lineage.supersedes,
+        Some(original)
+    );
+    assert_eq!(f.state(original), TaskState::Superseded);
+}
+
+/// Retired work stays retired. An old incident task that keeps coming back is
+/// how a settled decision turns into live work again.
+#[test]
+fn a_retired_task_cannot_be_revived() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("an old incident", None);
+
+    f.apply(Command::RetireTask {
+        task,
+        reason: "no longer relevant".into(),
+    });
+
+    assert_eq!(f.state(task), TaskState::Retired);
+    assert!(!f.engine.claimable_by(worker).contains(&task));
+    assert!(f.engine.task(task).unwrap().state.is_permanent());
+    // Nothing puts it back on the board.
+    let err = f.reject(Command::ClaimTask { task, by: worker });
+    assert!(matches!(err, EngineError::Transition(_)), "got {err:?}");
 }

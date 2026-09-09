@@ -65,7 +65,8 @@ impl SseDecoder {
                 continue;
             }
             if let Some(rest) = line.strip_prefix("data:") {
-                self.pending.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+                self.pending
+                    .push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
             } else if let Some(rest) = line.strip_prefix("event:") {
                 self.event_name = Some(rest.strip_prefix(' ').unwrap_or(rest).to_string());
             }
@@ -99,6 +100,41 @@ impl SseDecoder {
             data: std::mem::take(&mut self.pending).join("\n"),
         })
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn test_response(
+    events: &str,
+    keep_open: bool,
+) -> (reqwest::Response, tokio::sync::oneshot::Sender<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let events = events.to_string();
+    let (release, wait) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            headers.push(socket.read_u8().await.unwrap());
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n",
+            events.len(), events
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+        if keep_open {
+            let _ = wait.await;
+        } else {
+            socket.write_all(b"0\r\n\r\n").await.unwrap();
+        }
+    });
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}"))
+        .send()
+        .await
+        .unwrap();
+    (response, release)
 }
 
 #[cfg(test)]

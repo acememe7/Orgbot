@@ -32,7 +32,9 @@ fn take(ptr: *mut c_char) -> Option<String> {
         return None;
     }
     // SAFETY: the library returned this, and we free it exactly once.
-    let text = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+    let text = unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned();
     unsafe { orgbot_string_free(ptr) };
     Some(text)
 }
@@ -58,7 +60,7 @@ fn collect_until(handle: u64, wanted: &[&str]) -> String {
 
 #[test]
 fn the_abi_is_versioned() {
-    assert_eq!(orgbot_abi_version(), 1);
+    assert_eq!(orgbot_abi_version(), 2);
 }
 
 #[test]
@@ -93,6 +95,20 @@ fn a_room_runs_in_process_and_answers_you() {
         seen.contains("I hear you"),
         "and a bot must answer it; saw: {seen}"
     );
+
+    let before: serde_json::Value =
+        serde_json::from_str(&take(orgbot_room_snapshot(handle)).unwrap()).unwrap();
+    let renewal = c(
+        r#"{"type":"update_credentials","environment":{"GROK_AUTH_TOKEN":"private-renewed-test-token"}}"#,
+    );
+    assert_eq!(unsafe { orgbot_room_control(handle, renewal.as_ptr()) }, 1);
+    let after: serde_json::Value =
+        serde_json::from_str(&take(orgbot_room_snapshot(handle)).unwrap()).unwrap();
+    assert_eq!(before["room"]["id"], after["room"]["id"]);
+    assert_eq!(before["roster"], after["roster"]);
+    assert!(!take(orgbot_room_poll(handle))
+        .unwrap()
+        .contains("private-renewed-test-token"));
 
     orgbot_room_close(handle);
 }
@@ -135,7 +151,7 @@ fn freeing_null_is_harmless() {
 
 /// Credentials arrive out of band so they never sit in a room file.
 #[test]
-fn environment_pairs_are_applied() {
+fn room_credentials_do_not_mutate_the_process_environment() {
     let toml = c(ROOM);
     let env = c("ORGBOT_FFI_TEST_TOKEN=abc123\n");
     // SAFETY: valid strings.
@@ -143,8 +159,34 @@ fn environment_pairs_are_applied() {
     assert_ne!(handle, 0);
     assert_eq!(
         std::env::var("ORGBOT_FFI_TEST_TOKEN").ok().as_deref(),
-        Some("abc123"),
-        "a credential passed in must reach the provider layer"
+        None,
+        "one room must not leak credentials to another through global environment"
     );
+    orgbot_room_close(handle);
+}
+
+#[test]
+fn native_json_controls_pause_resume_and_resync() {
+    let handle = unsafe { orgbot_room_open(c(ROOM).as_ptr(), c("").as_ptr()) };
+    assert_ne!(handle, 0);
+    assert_eq!(
+        unsafe { orgbot_room_control(handle, c(r#"{"type":"pause","reason":"test"}"#).as_ptr()) },
+        1
+    );
+    let seen = collect_until(handle, &[r#""phase":"paused""#]);
+    assert!(seen.contains(r#""phase":"paused""#), "{seen}");
+    assert!(!seen.contains(r#""event":"room_closed""#));
+    assert_eq!(
+        unsafe { orgbot_room_control(handle, c(r#"{"type":"resume"}"#).as_ptr()) },
+        1
+    );
+    let seen = collect_until(handle, &[r#""phase":"running""#]);
+    assert!(seen.contains(r#""phase":"running""#), "{seen}");
+    assert_eq!(
+        unsafe { orgbot_room_control(handle, c(r#"{"type":"resync"}"#).as_ptr()) },
+        1
+    );
+    let seen = collect_until(handle, &[r#""type":"snapshot""#]);
+    assert!(seen.contains(r#""type":"snapshot""#), "{seen}");
     orgbot_room_close(handle);
 }

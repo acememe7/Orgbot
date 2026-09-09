@@ -9,10 +9,21 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageSource {
+    File { path: std::path::PathBuf },
+    Base64 { data: String },
+}
+
 /// One typed piece of a turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
+    Image {
+        media_type: String,
+        source: ImageSource,
+    },
     /// Ordinary prose.
     Text {
         /// The text.
@@ -337,6 +348,8 @@ impl CompletionResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
+    /// An interrupted API response is being retried; partial output is discarded.
+    Retry { attempt: u32, max_retries: u32 },
     /// More prose.
     TextDelta {
         /// The appended text.

@@ -118,13 +118,13 @@ pub fn deepseek() -> Result<Credential> {
 
 /// Resolve a Grok credential.
 ///
-/// `GROK_API_KEY` carries either an xAI API key or the OAuth access token the
-/// Grok CLI holds. `api.x.ai` accepts both as a bearer, so the distinction
-/// does not change the request. The CLI's own sign-in is the fallback, so a
-/// user who has run `grok` does not have to mint a key as well.
+/// API keys use the public API; OAuth sessions use the CLI chat proxy.
 pub fn grok() -> Result<Credential> {
+    if let Some(token) = env_var("GROK_AUTH_TOKEN") {
+        return Ok(Credential::Bearer(token));
+    }
     if let Some(key) = env_var("GROK_API_KEY").or_else(|| env_var("XAI_API_KEY")) {
-        return Ok(Credential::Bearer(key));
+        return Ok(Credential::ApiKey(key));
     }
     if let Some(token) = home_dir().and_then(|h| grok_token_from(&h.join(".grok/auth.json"))) {
         return Ok(Credential::Bearer(token));
@@ -206,12 +206,12 @@ pub fn codex_credential_from(path: &Path) -> Result<Credential> {
         return Ok(Credential::ApiKey(key.to_string()));
     }
 
-    let tokens = parsed.get("tokens").ok_or_else(|| {
-        ProviderError::MissingCredential {
+    let tokens = parsed
+        .get("tokens")
+        .ok_or_else(|| ProviderError::MissingCredential {
             provider: "codex".into(),
             detail: format!("{} has neither OPENAI_API_KEY nor tokens", path.display()),
-        }
-    })?;
+        })?;
     let access_token = tokens
         .get("access_token")
         .and_then(|v| v.as_str())

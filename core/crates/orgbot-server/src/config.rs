@@ -43,6 +43,8 @@ pub enum ConfigError {
 /// The whole room file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomConfig {
+    #[serde(default)]
+    pub workspace: Option<orgbot_runtime::workspace::WorkspaceSpec>,
     /// The room's own settings.
     pub room: RoomSection,
     /// The bots to seat, in introduction order.
@@ -57,6 +59,9 @@ pub struct RoomConfig {
 /// The `[room]` section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomSection {
+    /// Private local checkpoint used by the app; never a workspace/SSH path.
+    #[serde(default)]
+    pub state_path: Option<std::path::PathBuf>,
     /// A short name.
     pub name: String,
     /// The outcome the room exists to produce.
@@ -369,6 +374,7 @@ pub fn expand_home(path: &str) -> String {
 /// A room file, parsed and validated into runnable pieces.
 #[derive(Debug)]
 pub struct ResolvedRoom {
+    pub state_path: Option<std::path::PathBuf>,
     /// The room spec.
     pub spec: RoomSpec,
     /// The seated bots.
@@ -401,6 +407,22 @@ impl RoomConfig {
     /// This is where credentials are resolved, so a missing key surfaces here
     /// as a clear error naming the bot, rather than mid-run.
     pub fn resolve(&self) -> Result<ResolvedRoom, ConfigError> {
+        self.resolve_using(orgbot_providers::build)
+    }
+
+    pub fn resolve_with_environment(
+        &self,
+        environment: &HashMap<String, String>,
+    ) -> Result<ResolvedRoom, ConfigError> {
+        self.resolve_using(|reference| {
+            orgbot_providers::build_with_environment(reference, environment)
+        })
+    }
+
+    fn resolve_using(
+        &self,
+        build: impl Fn(&ProviderRef) -> orgbot_providers::Result<Arc<dyn Provider>>,
+    ) -> Result<ResolvedRoom, ConfigError> {
         if self.bots.is_empty() {
             return Err(ConfigError::Invalid("a room needs at least one bot".into()));
         }
@@ -414,7 +436,7 @@ impl RoomConfig {
                 )));
             }
             let reference = section.provider.to_ref();
-            let provider = orgbot_providers::build(&reference).map_err(|error| {
+            let provider = build(&reference).map_err(|error| {
                 ConfigError::Invalid(format!("bot `{}`: {error}", section.handle))
             })?;
             let spec = AgentSpec {
@@ -452,7 +474,12 @@ impl RoomConfig {
             limits: self.room.limits.clone().unwrap_or_default(),
         };
 
-        Ok(ResolvedRoom { spec, bots, tasks })
+        Ok(ResolvedRoom {
+            spec,
+            bots,
+            tasks,
+            state_path: self.room.state_path.clone(),
+        })
     }
 }
 
@@ -667,7 +694,10 @@ mod home_tests {
     fn a_leading_tilde_is_expanded() {
         let home = std::env::var("HOME").expect("a home directory");
         assert_eq!(expand_home("~"), home);
-        assert_eq!(expand_home("~/projects/High"), format!("{home}/projects/High"));
+        assert_eq!(
+            expand_home("~/projects/High"),
+            format!("{home}/projects/High")
+        );
     }
 
     #[test]

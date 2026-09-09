@@ -50,7 +50,7 @@ impl AnthropicProvider {
     /// Build a provider with an explicit credential.
     pub fn with_credential(credential: Credential) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::provider::http_client(),
             base_url: auth::base_url("anthropic", DEFAULT_BASE_URL),
             credential,
         }
@@ -87,11 +87,7 @@ impl AnthropicProvider {
             );
         }
 
-        let messages: Vec<Value> = request
-            .messages
-            .iter()
-            .filter_map(turn_to_wire)
-            .collect();
+        let messages: Vec<Value> = request.messages.iter().filter_map(turn_to_wire).collect();
         body.insert("messages".into(), json!(messages));
 
         if !request.tools.is_empty() {
@@ -178,6 +174,7 @@ impl Provider for AnthropicProvider {
         request: CompletionRequest,
         sink: Option<mpsc::Sender<StreamEvent>>,
     ) -> Result<CompletionResponse> {
+        let request = crate::provider::prepare_images(request, true).await?;
         let body = self.build_body(&request);
         let response = self
             .request_builder(&request)
@@ -224,6 +221,7 @@ async fn check_status(response: reqwest::Response) -> Result<reqwest::Response> 
         },
         429 => ProviderError::RateLimited {
             provider: "anthropic".into(),
+            message,
             retry_after_secs: retry_after,
         },
         400 | 404 | 422 => ProviderError::BadRequest {
@@ -278,6 +276,13 @@ fn block_to_wire(block: &ContentBlock) -> Option<Value> {
         ContentBlock::Text { text } if text.is_empty() => None,
         ContentBlock::Text { text } => Some(json!({"type": "text", "text": text})),
         ContentBlock::Thinking { .. } => None,
+        ContentBlock::Image {
+            media_type,
+            source: crate::types::ImageSource::Base64 { data },
+        } => Some(json!({
+            "type":"image", "source":{"type":"base64", "media_type":media_type, "data":data}
+        })),
+        ContentBlock::Image { .. } => Some(json!({"type":"text", "text":"[Image was not loaded]"})),
         ContentBlock::ToolUse { id, name, input } => Some(json!({
             "type": "tool_use",
             "id": id,
@@ -362,12 +367,7 @@ fn parse_usage(usage: Option<&Value>) -> Usage {
     let Some(usage) = usage else {
         return Usage::default();
     };
-    let field = |name: &str| {
-        usage
-            .get(name)
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32
-    };
+    let field = |name: &str| usage.get(name).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     Usage {
         input_tokens: field("input_tokens"),
         output_tokens: field("output_tokens"),
@@ -385,19 +385,22 @@ async fn stream_response(
     let mut accumulator = Accumulator::default();
     let mut bytes = response.bytes_stream();
 
-    while let Some(chunk) = bytes.next().await {
+    'stream: while let Some(chunk) = bytes.next().await {
         let chunk = chunk.map_err(|source| ProviderError::Transport {
             provider: "anthropic".into(),
             source,
         })?;
         for event in decoder.push(&chunk) {
             if event.data == "[DONE]" {
-                continue;
+                break 'stream;
             }
             let Ok(value) = serde_json::from_str::<Value>(&event.data) else {
                 continue;
             };
             accumulator.absorb(&value, &sink).await;
+            if value.get("type").and_then(Value::as_str) == Some("message_stop") {
+                break 'stream;
+            }
         }
     }
     if let Some(event) = decoder.finish() {
@@ -406,6 +409,12 @@ async fn stream_response(
         }
     }
 
+    if accumulator.stop_reason.is_none() {
+        return Err(ProviderError::StreamInterrupted {
+            provider: "anthropic".into(),
+            message: "stream ended before a stop reason; incomplete tool calls were not run".into(),
+        });
+    }
     let response = accumulator.finish();
     emit(
         &sink,
@@ -460,7 +469,8 @@ impl Accumulator {
                 };
                 match block.get("type").and_then(|v| v.as_str()) {
                     Some("text") => {
-                        self.blocks.insert(index as usize, PartialBlock::Text(String::new()));
+                        self.blocks
+                            .insert(index as usize, PartialBlock::Text(String::new()));
                     }
                     Some("thinking") => {
                         self.blocks
@@ -509,7 +519,10 @@ impl Accumulator {
                 };
                 match (delta.get("type").and_then(|v| v.as_str()), block) {
                     (Some("text_delta"), PartialBlock::Text(buffer)) => {
-                        let text = delta.get("text").and_then(|v| v.as_str()).unwrap_or_default();
+                        let text = delta
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
                         buffer.push_str(text);
                         emit(sink, StreamEvent::TextDelta { text: text.into() }).await;
                     }
@@ -609,8 +622,7 @@ impl ModelCapabilities {
             "claude-sonnet-4-6",
         ];
         // Only the frontier models route refusals to a fallback model.
-        const FALLBACK_CAPABLE: [&str; 3] =
-            ["claude-fable-5", "claude-mythos-5", "claude-opus-5"];
+        const FALLBACK_CAPABLE: [&str; 3] = ["claude-fable-5", "claude-mythos-5", "claude-opus-5"];
 
         let modern = MODERN.iter().any(|m| model.starts_with(m));
         Self {
@@ -630,6 +642,22 @@ pub const CHEAP_MODEL: &str = "claude-haiku-4-5";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn streams_finish_at_message_stop_and_reject_truncated_tool_turns() {
+        let tool = "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"c1\",\"name\":\"shell\",\"input\":{}}}\n\n";
+        for (terminal, keep_open, succeeds) in [
+            ("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", true, true),
+            ("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}", false, true),
+            ("", false, false),
+        ] {
+            let (http, _release) = crate::sse::test_response(&format!("{tool}{terminal}"), keep_open).await;
+            let result = tokio::time::timeout(std::time::Duration::from_secs(1), stream_response(http, None))
+                .await.expect("a completed turn must not wait for the server to close HTTP");
+            assert_eq!(result.is_ok(), succeeds, "{result:?}");
+            if let Ok(turn) = result { assert_eq!(turn.stop_reason, StopReason::ToolUse); }
+        }
+    }
     use crate::types::{Effort, ToolDef};
 
     fn provider() -> AnthropicProvider {
@@ -701,21 +729,27 @@ mod tests {
     fn refusal_fallbacks_are_enabled_only_on_the_models_that_take_them() {
         let opus = provider().build_body(&request("claude-opus-5"));
         assert_eq!(opus["fallbacks"], "default");
-        assert!(provider().betas(&request("claude-opus-5")).contains(&FALLBACK_BETA));
+        assert!(provider()
+            .betas(&request("claude-opus-5"))
+            .contains(&FALLBACK_BETA));
 
         let sonnet = provider().build_body(&request("claude-sonnet-5"));
         assert!(
             sonnet.get("fallbacks").is_none(),
             "the parameter is rejected on models without server-side fallbacks"
         );
-        assert!(!provider().betas(&request("claude-sonnet-5")).contains(&FALLBACK_BETA));
+        assert!(!provider()
+            .betas(&request("claude-sonnet-5"))
+            .contains(&FALLBACK_BETA));
     }
 
     #[test]
     fn an_oauth_credential_adds_its_beta_flag() {
         let oauth = AnthropicProvider::with_credential(Credential::Bearer("tok".into()));
         assert!(oauth.betas(&request(DEFAULT_MODEL)).contains(&OAUTH_BETA));
-        assert!(!provider().betas(&request(DEFAULT_MODEL)).contains(&OAUTH_BETA));
+        assert!(!provider()
+            .betas(&request(DEFAULT_MODEL))
+            .contains(&OAUTH_BETA));
     }
 
     #[test]
@@ -825,18 +859,25 @@ mod tests {
         assert_eq!(parse_stop_reason("max_tokens"), StopReason::MaxTokens);
         assert_eq!(parse_stop_reason("refusal"), StopReason::Refusal);
         assert_eq!(parse_stop_reason("stop_sequence"), StopReason::StopSequence);
-        assert!(matches!(parse_stop_reason("brand_new"), StopReason::Other(_)));
+        assert!(matches!(
+            parse_stop_reason("brand_new"),
+            StopReason::Other(_)
+        ));
     }
 
     #[test]
     fn an_error_body_yields_its_message() {
-        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad model"}}"#;
+        let body =
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad model"}}"#;
         assert_eq!(extract_error_message(body), "bad model");
     }
 
     #[test]
     fn a_non_json_error_body_is_passed_through_truncated() {
-        assert_eq!(extract_error_message("<html>502</html>"), "<html>502</html>");
+        assert_eq!(
+            extract_error_message("<html>502</html>"),
+            "<html>502</html>"
+        );
     }
 
     // ------------------------------------------------------------- streaming
@@ -930,11 +971,12 @@ mod tests {
                    "delta": {"type": "text_delta", "text": "the answer"}}),
         ])
         .await;
-        assert_eq!(response.text(), "the answer", "thinking is not part of the answer");
-        assert!(matches!(
-            response.content[0],
-            ContentBlock::Thinking { .. }
-        ));
+        assert_eq!(
+            response.text(),
+            "the answer",
+            "thinking is not part of the answer"
+        );
+        assert!(matches!(response.content[0], ContentBlock::Thinking { .. }));
     }
 
     #[tokio::test]

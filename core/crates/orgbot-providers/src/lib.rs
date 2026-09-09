@@ -28,8 +28,8 @@
 pub mod agent_cli;
 pub mod anthropic;
 pub mod auth;
-pub mod error;
 pub mod codex;
+pub mod error;
 pub mod openai;
 pub mod provider;
 pub mod scripted;
@@ -106,3 +106,72 @@ pub fn build(reference: &ProviderRef) -> Result<Arc<dyn Provider>> {
 
 /// The model a bot uses when none is configured.
 pub const DEFAULT_MODEL: &str = anthropic::DEFAULT_MODEL;
+
+/// Build API bots from this room's credentials without mutating the process environment.
+pub fn build_with_environment(
+    reference: &ProviderRef,
+    environment: &std::collections::HashMap<String, String>,
+) -> Result<Arc<dyn Provider>> {
+    let get = |key: &str| {
+        environment
+            .get(key)
+            .filter(|v| !v.trim().is_empty())
+            .cloned()
+            .ok_or_else(|| ProviderError::MissingCredential {
+                provider: key.into(),
+                detail: "sign in on this device before starting the room".into(),
+            })
+    };
+    Ok(match reference {
+        ProviderRef::Anthropic { .. } => Arc::new(AnthropicProvider::with_credential(
+            if let Ok(key) = get("ANTHROPIC_API_KEY") {
+                Credential::ApiKey(key)
+            } else {
+                Credential::Bearer(get("ANTHROPIC_AUTH_TOKEN")?)
+            },
+        )),
+        ProviderRef::DeepSeek { .. } => Arc::new(OpenAiProvider::custom(
+            "deepseek",
+            "https://api.deepseek.com",
+            Credential::ApiKey(get("DEEPSEEK_API_KEY")?),
+        )),
+        ProviderRef::OpenAiCompatible { profile, .. } => match profile.as_str() {
+            "codex" | "chatgpt" => Arc::new(CodexProvider::new(
+                codex::DEFAULT_BASE_URL,
+                Credential::Bearer(get("CODEX_AUTH_TOKEN")?),
+            )),
+            "grok" | "xai" => Arc::new(OpenAiProvider::grok_with_credential(
+                if let Ok(token) = get("GROK_AUTH_TOKEN") {
+                    Credential::Bearer(token)
+                } else {
+                    Credential::ApiKey(get("GROK_API_KEY")?)
+                },
+            )),
+            "openai" => Arc::new(OpenAiProvider::custom(
+                "openai",
+                "https://api.openai.com",
+                Credential::ApiKey(get("OPENAI_API_KEY")?),
+            )),
+            name => {
+                let prefix = format!("ORGBOT_{}", name.to_uppercase().replace('-', "_"));
+                let base = get(&format!("{prefix}_BASE_URL"))?;
+                if !base.starts_with("https://") {
+                    return Err(ProviderError::Unsupported(
+                        "device API endpoints require HTTPS".into(),
+                    ));
+                }
+                Arc::new(OpenAiProvider::custom(
+                    name,
+                    base,
+                    Credential::ApiKey(get(&format!("{prefix}_API_KEY"))?),
+                ))
+            }
+        },
+        ProviderRef::Scripted { script } => Arc::new(ScriptedProvider::always_says(script.clone())),
+        ProviderRef::CliAgent { .. } => {
+            return Err(ProviderError::Unsupported(
+                "device rooms use API models; system CLIs belong to the Linux app".into(),
+            ))
+        }
+    })
+}

@@ -69,17 +69,20 @@ impl OpenAiProvider {
         ))
     }
 
-    /// Grok, through the xAI API, which speaks the OpenAI dialect.
-    ///
-    /// Unlike a ChatGPT sign-in, a Grok subscription token is accepted by the
-    /// published API directly, so this is the same stable surface the API key
-    /// path uses.
+    /// Grok API keys and subscription sessions have separate endpoints.
     pub fn grok() -> Result<Self> {
-        Ok(Self::new(
-            "grok",
-            auth::base_url("grok", "https://api.x.ai"),
-            auth::grok()?,
-        ))
+        let mut provider = Self::grok_with_credential(auth::grok()?);
+        provider.base_url = auth::base_url("grok", &provider.base_url);
+        Ok(provider)
+    }
+
+    pub fn grok_with_credential(credential: Credential) -> Self {
+        let base = if credential.is_oauth() {
+            "https://cli-chat-proxy.grok.com"
+        } else {
+            "https://api.x.ai"
+        };
+        Self::new("grok", base, credential)
     }
 
     /// Any other OpenAI-compatible endpoint.
@@ -91,13 +94,9 @@ impl OpenAiProvider {
         Self::new(name, base_url, credential)
     }
 
-    fn new(
-        name: impl Into<String>,
-        base_url: impl Into<String>,
-        credential: Credential,
-    ) -> Self {
+    fn new(name: impl Into<String>, base_url: impl Into<String>, credential: Credential) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::provider::http_client(),
             name: name.into(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             credential,
@@ -144,7 +143,7 @@ impl OpenAiProvider {
         Value::Object(body)
     }
 
-    fn request_builder(&self) -> reqwest::RequestBuilder {
+    fn request_builder(&self, model: &str) -> reqwest::RequestBuilder {
         let mut builder = self
             .http
             .post(format!("{}/v1/chat/completions", self.base_url))
@@ -153,6 +152,17 @@ impl OpenAiProvider {
                 "authorization",
                 format!("Bearer {}", self.credential.secret()),
             );
+
+        if self.name == "grok" && self.credential.is_oauth() {
+            // Grok CLI's subscription wire contract, including model routing
+            // and the protocol version required by the proxy.
+            builder = builder
+                .header("X-XAI-Token-Auth", "xai-grok-cli")
+                .header("x-authenticateresponse", "authenticate-response")
+                .header("x-grok-model-override", model)
+                .header("x-grok-client-version", "1.0.13")
+                .header("user-agent", "OrgBot");
+        }
 
         // A ChatGPT session is scoped to an account, which the backend expects
         // as its own header alongside the bearer token.
@@ -176,9 +186,10 @@ impl Provider for OpenAiProvider {
         request: CompletionRequest,
         sink: Option<mpsc::Sender<StreamEvent>>,
     ) -> Result<CompletionResponse> {
+        let request = crate::provider::prepare_images(request, self.name != "deepseek").await?;
         let body = self.build_body(&request);
         let response = self
-            .request_builder()
+            .request_builder(&request.model)
             .json(&body)
             .send()
             .await
@@ -228,6 +239,7 @@ async fn check_status(provider: &str, response: reqwest::Response) -> Result<req
         },
         429 => ProviderError::RateLimited {
             provider: provider.into(),
+            message,
             retry_after_secs: retry_after,
         },
         400 | 404 | 422 => ProviderError::BadRequest {
@@ -251,6 +263,7 @@ fn turn_to_wire(turn: &Turn) -> Vec<Value> {
     let mut messages = Vec::new();
     let mut text = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
+    let mut images = Vec::new();
 
     for block in &turn.content {
         match block {
@@ -262,6 +275,15 @@ fn turn_to_wire(turn: &Turn) -> Vec<Value> {
             }
             // Reasoning is not replayed; see the note in the Anthropic adapter.
             ContentBlock::Thinking { .. } => {}
+            ContentBlock::Image {
+                media_type,
+                source: crate::types::ImageSource::Base64 { data },
+            } => {
+                images.push(json!({"type":"image_url", "image_url":{"url":format!("data:{media_type};base64,{data}")}}));
+            }
+            ContentBlock::Image { .. } => {
+                text.push_str("[Image was not loaded]");
+            }
             ContentBlock::ToolUse { id, name, input } => tool_calls.push(json!({
                 "id": id,
                 "type": "function",
@@ -300,6 +322,10 @@ fn turn_to_wire(turn: &Turn) -> Vec<Value> {
             "content": if text.is_empty() { Value::Null } else { json!(text) },
             "tool_calls": tool_calls,
         }));
+    } else if !images.is_empty() {
+        let mut content = vec![json!({"type":"text", "text":text})];
+        content.extend(images);
+        messages.push(json!({"role":role, "content":content}));
     } else if !text.is_empty() {
         messages.push(json!({"role": role, "content": text}));
     }
@@ -370,7 +396,10 @@ pub(crate) fn parse_completion(value: &Value) -> Result<CompletionResponse> {
 
 fn tool_call_from_wire(call: &Value) -> Option<ContentBlock> {
     let function = call.get("function")?;
-    let arguments = function.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+    let arguments = function
+        .get("arguments")
+        .and_then(|v| v.as_str())
+        .unwrap_or("{}");
     Some(ContentBlock::ToolUse {
         id: call.get("id")?.as_str()?.to_string(),
         name: function.get("name")?.as_str()?.to_string(),
@@ -419,14 +448,14 @@ async fn stream_response(
     let mut accumulator = Accumulator::default();
     let mut bytes = response.bytes_stream();
 
-    while let Some(chunk) = bytes.next().await {
+    'stream: while let Some(chunk) = bytes.next().await {
         let chunk = chunk.map_err(|source| ProviderError::Transport {
             provider: provider.into(),
             source,
         })?;
         for event in decoder.push(&chunk) {
             if event.data.trim() == "[DONE]" {
-                continue;
+                break 'stream;
             }
             let Ok(value) = serde_json::from_str::<Value>(&event.data) else {
                 continue;
@@ -442,6 +471,13 @@ async fn stream_response(
         }
     }
 
+    if accumulator.stop_reason.is_none() {
+        return Err(ProviderError::StreamInterrupted {
+            provider: provider.into(),
+            message: "stream ended before a finish reason; incomplete tool calls were not run"
+                .into(),
+        });
+    }
     let response = accumulator.finish();
     emit(
         &sink,
@@ -561,7 +597,9 @@ impl Accumulator {
     fn finish(self) -> CompletionResponse {
         let mut content = Vec::new();
         if !self.thinking.is_empty() {
-            content.push(ContentBlock::Thinking { text: self.thinking });
+            content.push(ContentBlock::Thinking {
+                text: self.thinking,
+            });
         }
         if !self.text.is_empty() {
             content.push(ContentBlock::Text { text: self.text });
@@ -601,12 +639,129 @@ mod tests {
     use super::*;
     use crate::types::ToolDef;
 
+    #[tokio::test]
+    async fn streams_finish_at_done_and_reject_truncated_tool_turns() {
+        let tool = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"shell\",\"arguments\":\"{}\"}}]}}]}\n\n";
+        for (terminal, keep_open, succeeds) in [
+            ("data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\ndata: {\"usage\":{\"completion_tokens\":9}}\n\ndata: [DONE]\n\n", true, true),
+            ("data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}", false, true),
+            ("", false, false),
+        ] {
+            let (http, _release) = crate::sse::test_response(&format!("{tool}{terminal}"), keep_open).await;
+            let result = tokio::time::timeout(std::time::Duration::from_secs(1), stream_response("grok", http, None))
+                .await.expect("a completed turn must not wait for the server to close HTTP");
+            assert_eq!(result.is_ok(), succeeds, "{result:?}");
+            if let Ok(turn) = result {
+                assert_eq!(turn.stop_reason, StopReason::ToolUse);
+                if keep_open { assert_eq!(turn.usage.output_tokens, 9); }
+            }
+        }
+    }
+
+    #[test]
+    fn grok_subscription_routes_the_selected_model_without_changing_api_keys() {
+        let provider = OpenAiProvider::grok_with_credential(Credential::Bearer("session".into()));
+        let request = provider.request_builder("grok-4.6").build().unwrap();
+        assert_eq!(
+            request.url().as_str(),
+            "https://cli-chat-proxy.grok.com/v1/chat/completions"
+        );
+        assert_eq!(request.headers()["x-grok-model-override"], "grok-4.6");
+        assert_eq!(request.headers()["x-grok-client-version"], "1.0.13");
+        assert_eq!(request.headers()["x-xai-token-auth"], "xai-grok-cli");
+        assert_eq!(request.headers()["authorization"], "Bearer session");
+        let api = OpenAiProvider::grok_with_credential(Credential::ApiKey("key".into()));
+        let request = api.request_builder("api-model").build().unwrap();
+        assert_eq!(request.url().host_str(), Some("api.x.ai"));
+        assert!(!request.headers().contains_key("x-grok-model-override"));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_errors_preserve_the_server_reason_and_retry_delay() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for body in [
+            r#"{"error":{"message":"Temporary model capacity limit"}}"#,
+            r#"{"code":"subscription:free-usage-exhausted","error":"Weekly allowance exhausted"}"#,
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                socket.read(&mut request).await.unwrap();
+                socket.write_all(format!(
+                    "HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\nRetry-After: 12\r\nConnection: close\r\n\r\n{body}", body.len()
+                ).as_bytes()).await.unwrap();
+            });
+            let response = reqwest::get(format!("http://{address}")).await.unwrap();
+            let error = check_status("grok", response).await.unwrap_err();
+            let report = crate::error::ErrorReport::from(&error);
+            let expected = if body.contains("capacity") { "Temporary model capacity limit" } else { "subscription:free-usage-exhausted" };
+            assert!(report.message.contains(expected), "{}", report.message);
+            assert!(report.message.contains("retry after 12s"));
+            assert_eq!(report.kind, "rate_limited");
+            assert_eq!(error.retry_after_secs(), Some(12));
+            server.await.unwrap();
+        }
+    }
+
     fn provider() -> OpenAiProvider {
         OpenAiProvider::custom(
             "deepseek",
             "https://api.deepseek.com",
             Credential::ApiKey("sk-test".into()),
         )
+    }
+
+    #[test]
+    fn ollama_cloud_uses_its_own_key_and_the_existing_tool_protocol() {
+        use orgbot_proto::agent::ProviderRef;
+        let reference = ProviderRef::OpenAiCompatible {
+            profile: "ollama".into(),
+            model: "gpt-oss:120b".into(),
+        };
+        let mut environment = std::collections::HashMap::from([
+            ("ORGBOT_OLLAMA_BASE_URL".into(), "https://ollama.com".into()),
+            ("CODEX_AUTH_TOKEN".into(), "unrelated-session".into()),
+        ]);
+        assert!(crate::build_with_environment(&reference, &environment).is_err());
+        environment.insert("ORGBOT_OLLAMA_API_KEY".into(), "ollama-only".into());
+        assert_eq!(
+            crate::build_with_environment(&reference, &environment)
+                .unwrap()
+                .name(),
+            "ollama"
+        );
+        let provider = OpenAiProvider::custom(
+            "ollama",
+            "https://ollama.com",
+            Credential::ApiKey("ollama-only".into()),
+        );
+        let request = CompletionRequest::new(
+            "gpt-oss:120b",
+            "Research",
+            vec![Turn::user("Read the brief")],
+        )
+        .with_tools(vec![ToolDef {
+            name: "workspace_read".into(),
+            description: "Read a file".into(),
+            input_schema: json!({"type":"object"}),
+        }]);
+        let http = provider
+            .request_builder(&request.model)
+            .json(&provider.build_body(&request))
+            .build()
+            .unwrap();
+        assert_eq!(
+            http.url().as_str(),
+            "https://ollama.com/v1/chat/completions"
+        );
+        assert_eq!(http.headers()["authorization"], "Bearer ollama-only");
+        assert!(!http.headers().contains_key("chatgpt-account-id"));
+        let body: Value = serde_json::from_slice(http.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(body["model"], "gpt-oss:120b");
+        assert_eq!(body["tools"][0]["function"]["name"], "workspace_read");
+        assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
     fn request() -> CompletionRequest {
@@ -674,7 +829,10 @@ mod tests {
         }];
         let body = provider().build_body(&request);
         let arguments = &body["messages"][1]["tool_calls"][0]["function"]["arguments"];
-        assert!(arguments.is_string(), "arguments must be a string, got {arguments}");
+        assert!(
+            arguments.is_string(),
+            "arguments must be a string, got {arguments}"
+        );
         assert_eq!(
             serde_json::from_str::<Value>(arguments.as_str().unwrap()).unwrap()["task"],
             "task_1"
@@ -704,7 +862,10 @@ mod tests {
         assert_eq!(messages[1]["tool_call_id"], "call_1");
         assert_eq!(messages[1]["content"], "claimed");
         assert!(
-            messages[2]["content"].as_str().unwrap().starts_with("ERROR:"),
+            messages[2]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("ERROR:"),
             "there is no is_error flag here, so failure has to be in the text"
         );
     }
@@ -811,7 +972,10 @@ mod tests {
                     "function": {"name": "list_tasks", "arguments": "{}"}}]
             }}]
         });
-        assert_eq!(parse_completion(&value).unwrap().stop_reason, StopReason::ToolUse);
+        assert_eq!(
+            parse_completion(&value).unwrap().stop_reason,
+            StopReason::ToolUse
+        );
     }
 
     #[test]

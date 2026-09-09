@@ -12,8 +12,10 @@ description = "A C ABI over the room engine, so a phone can run one in-process."
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+async-trait.workspace = true
 orgbot-proto.workspace = true
 orgbot-engine.workspace = true
+orgbot-tools.workspace = true
 orgbot-runtime.workspace = true
 orgbot-providers.workspace = true
 orgbot-server.workspace = true

@@ -72,7 +72,7 @@ impl CodexProvider {
             other => account_from_token(other.secret()).unwrap_or_default(),
         };
         Self {
-            http: reqwest::Client::new(),
+            http: crate::provider::http_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             credential,
             account_id,
@@ -152,6 +152,7 @@ fn turn_to_items(turn: &Turn) -> Vec<Value> {
     let mut items = Vec::new();
     let mut text = String::new();
     let mut calls: Vec<Value> = Vec::new();
+    let mut images = Vec::new();
 
     for block in &turn.content {
         match block {
@@ -164,6 +165,15 @@ fn turn_to_items(turn: &Turn) -> Vec<Value> {
             // Reasoning is not replayed; the backend re-derives it, and
             // echoing a summary back as prose confuses the next turn.
             ContentBlock::Thinking { .. } => {}
+            ContentBlock::Image {
+                media_type,
+                source: crate::types::ImageSource::Base64 { data },
+            } => {
+                images.push(json!({"type":"input_image", "image_url":format!("data:{media_type};base64,{data}")}));
+            }
+            ContentBlock::Image { .. } => {
+                text.push_str("[Image was not loaded]");
+            }
             ContentBlock::ToolUse { id, name, input } => calls.push(json!({
                 "type": "function_call",
                 "call_id": id,
@@ -187,15 +197,17 @@ fn turn_to_items(turn: &Turn) -> Vec<Value> {
         }
     }
 
-    if !text.is_empty() {
+    if !text.is_empty() || !images.is_empty() {
         let (role, kind) = match turn.role {
             Role::User => ("user", "input_text"),
             Role::Assistant => ("assistant", "output_text"),
         };
+        let mut content = vec![json!({"type": kind, "text": text})];
+        content.extend(images);
         items.push(json!({
             "type": "message",
             "role": role,
-            "content": [{ "type": kind, "text": text }],
+            "content": content,
         }));
     }
     items.extend(calls);
@@ -213,6 +225,7 @@ impl Provider for CodexProvider {
         request: CompletionRequest,
         sink: Option<mpsc::Sender<StreamEvent>>,
     ) -> Result<CompletionResponse> {
+        let request = crate::provider::prepare_images(request, true).await?;
         let body = self.build_body(&request);
         let mut builder = self
             .http
@@ -221,7 +234,10 @@ impl Provider for CodexProvider {
             .header("accept", "text/event-stream")
             // The backend gates on these; without them it refuses the session.
             .header("originator", "codex_cli_rs")
-            .header("user-agent", format!("codex_cli_rs/{CLIENT_VERSION} (OrgBot)"))
+            .header(
+                "user-agent",
+                format!("codex_cli_rs/{CLIENT_VERSION} (OrgBot)"),
+            )
             .header(
                 "authorization",
                 format!("Bearer {}", self.credential.secret()),
@@ -230,14 +246,15 @@ impl Provider for CodexProvider {
             builder = builder.header("chatgpt-account-id", self.account_id.as_str());
         }
 
-        let response = builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|source| ProviderError::Transport {
-                provider: "codex".into(),
-                source,
-            })?;
+        let response =
+            builder
+                .json(&body)
+                .send()
+                .await
+                .map_err(|source| ProviderError::Transport {
+                    provider: "codex".into(),
+                    source,
+                })?;
         let response = check_status(response).await?;
 
         // The endpoint only streams, so a non-streaming caller still reads the
@@ -274,6 +291,7 @@ async fn check_status(response: reqwest::Response) -> Result<reqwest::Response> 
         },
         429 => ProviderError::RateLimited {
             provider: "codex".into(),
+            message,
             retry_after_secs: retry_after,
         },
         400 | 404 | 422 => ProviderError::BadRequest {
@@ -297,7 +315,7 @@ async fn collect_stream(
     let mut state = StreamState::default();
     let mut body = response.bytes_stream();
 
-    while let Some(chunk) = body.next().await {
+    'stream: while let Some(chunk) = body.next().await {
         let chunk = chunk.map_err(|source| ProviderError::Transport {
             provider: "codex".into(),
             source,
@@ -310,7 +328,24 @@ async fn collect_stream(
                 continue;
             };
             state.apply(&value, &sink).await?;
+            if state.completed {
+                break 'stream;
+            }
         }
+    }
+    if !state.completed {
+        if let Some(event) = decoder.finish() {
+            if let Ok(value) = serde_json::from_str::<Value>(&event.data) {
+                state.apply(&value, &sink).await?;
+            }
+        }
+    }
+    if !state.completed {
+        return Err(ProviderError::StreamInterrupted {
+            provider: "codex".into(),
+            message: "stream ended before response.completed; incomplete tool calls were not run"
+                .into(),
+        });
     }
 
     let response = state.finish();
@@ -338,8 +373,15 @@ struct StreamState {
 }
 
 impl StreamState {
-    async fn apply(&mut self, event: &Value, sink: &Option<mpsc::Sender<StreamEvent>>) -> Result<()> {
-        let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
+    async fn apply(
+        &mut self,
+        event: &Value,
+        sink: &Option<mpsc::Sender<StreamEvent>>,
+    ) -> Result<()> {
+        let kind = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         match kind {
             "response.output_text.delta" => {
                 if let Some(delta) = event.get("delta").and_then(Value::as_str) {
@@ -427,12 +469,7 @@ impl StreamState {
 
     fn take_usage(&mut self, usage: Option<&Value>) {
         let Some(usage) = usage else { return };
-        let number = |key: &str| {
-            usage
-                .get(key)
-                .and_then(Value::as_u64)
-                .unwrap_or_default() as u32
-        };
+        let number = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or_default() as u32;
         self.usage = Usage {
             input_tokens: number("input_tokens"),
             output_tokens: number("output_tokens"),
@@ -447,7 +484,9 @@ impl StreamState {
     fn finish(self) -> CompletionResponse {
         let mut content = Vec::new();
         if !self.thinking.is_empty() {
-            content.push(ContentBlock::Thinking { text: self.thinking });
+            content.push(ContentBlock::Thinking {
+                text: self.thinking,
+            });
         }
         if !self.text.is_empty() {
             content.push(ContentBlock::Text { text: self.text });
@@ -521,6 +560,37 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn streams_finish_at_the_terminal_event_and_reject_truncated_tool_turns() {
+        let tool = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"shell\",\"arguments\":\"{}\"}}\n\n";
+        for (terminal, keep_open, succeeds) in [
+            (
+                "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"test\"}}\n\n",
+                true,
+                true,
+            ),
+            (
+                "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"test\"}}",
+                false,
+                true,
+            ),
+            ("", false, false),
+        ] {
+            let (http, _release) =
+                crate::sse::test_response(&format!("{tool}{terminal}"), keep_open).await;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                collect_stream(http, None),
+            )
+            .await
+            .expect("a completed turn must not wait for the server to close HTTP");
+            assert_eq!(result.is_ok(), succeeds, "{result:?}");
+            if let Ok(turn) = result {
+                assert_eq!(turn.stop_reason, StopReason::ToolUse);
+            }
+        }
+    }
+
     fn provider() -> CodexProvider {
         CodexProvider::new(
             DEFAULT_BASE_URL,
@@ -533,11 +603,7 @@ mod tests {
 
     #[test]
     fn a_user_turn_becomes_an_input_message() {
-        let request = CompletionRequest::new(
-            "gpt-5.6-sol",
-            "be brief",
-            vec![Turn::user("hello")],
-        );
+        let request = CompletionRequest::new("gpt-5.6-sol", "be brief", vec![Turn::user("hello")]);
         let body = provider().build_body(&request);
         assert_eq!(body["instructions"], "be brief");
         assert_eq!(body["input"][0]["type"], "message");
@@ -567,8 +633,7 @@ mod tests {
                 is_error: false,
             }],
         };
-        let request =
-            CompletionRequest::new("gpt-5.6-sol", "", vec![assistant, result]);
+        let request = CompletionRequest::new("gpt-5.6-sol", "", vec![assistant, result]);
         let body = provider().build_body(&request);
         assert_eq!(body["input"][0]["type"], "function_call");
         assert_eq!(body["input"][0]["call_id"], "call_1");

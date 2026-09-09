@@ -17,6 +17,7 @@ use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope, Seq};
 use orgbot_proto::handoff::{Handoff, HandoffKind, HandoffState, HandoffTransition, Recipient};
 use orgbot_proto::review::{Finding, Review, Verdict};
 use orgbot_proto::room::{Room, RoomPhase, RoomSpec};
+use orgbot_proto::graph::{AuthorizationState, DependencyState};
 use orgbot_proto::task::{BlockReason, Priority, Task, TaskState, TaskTransition};
 use orgbot_proto::{
     AgentId, AgentSpec, ArtifactId, ChatMessage, HandoffId, RoomId, TaskId, Timestamp,
@@ -26,8 +27,33 @@ use crate::command::Command;
 use crate::deadlock::{self, WaitGraph};
 use crate::error::{EngineError, Result};
 
+/// Why the work graph refuses this task, in words aimed at a bot.
+///
+/// Deliberately not [`orgbot_proto::graph::Readiness::summary`], which is
+/// written for the person watching the room and reassures them that nothing is
+/// needed from them — exactly the wrong thing to tell an agent it cannot claim.
+fn graph_refusal(task: &Task) -> Option<String> {
+    if let Some(replacement) = task.lineage.superseded_by {
+        return Some(format!(
+            "it was superseded by {replacement}; work that instead"
+        ));
+    }
+    match &task.authorization {
+        AuthorizationState::Authorized => None,
+        AuthorizationState::HeldByPolicy { policy, reason } => {
+            Some(format!("the `{policy}` policy holds it: {reason}"))
+        }
+        AuthorizationState::SecurityHold { finding, .. } => {
+            Some(format!("security is holding it: {finding}"))
+        }
+        AuthorizationState::AwaitingOperator { because, .. } => {
+            Some(format!("it needs an operator decision: {because}"))
+        }
+    }
+}
+
 /// A live group chat and everything in it.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Engine {
     room: Room,
     specs: BTreeMap<AgentId, AgentSpec>,
@@ -45,6 +71,141 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Restore older app journals without executing a command or external tool.
+    pub fn from_archive(
+        room: Room,
+        events: Vec<EventEnvelope>,
+    ) -> std::result::Result<Self, String> {
+        let mut engine = Self::new(room.spec.clone());
+        engine.room = room;
+        engine.log.clear();
+        engine.seq = Seq::ZERO;
+        for envelope in events {
+            if envelope.room != engine.room.id || envelope.seq != engine.seq.next() {
+                return Err("Saved room history has a gap or belongs to another room".into());
+            }
+            match &envelope.event {
+                Event::RoomOpened { .. } => {}
+                Event::RoomClosed { .. } => engine.room.phase = RoomPhase::Completed,
+                Event::AgentJoined { spec } => {
+                    engine.handles.insert(spec.handle.clone(), spec.id);
+                    engine.statuses.insert(spec.id, AgentStatus::Idle);
+                    engine.specs.insert(spec.id, *spec.clone());
+                }
+                Event::AgentLeft { agent, .. } => {
+                    engine.statuses.insert(*agent, AgentStatus::Offline);
+                }
+                Event::AgentStatusChanged { agent, from, to } => {
+                    engine.statuses.insert(*agent, *to);
+                    if *from == AgentStatus::Faulted && *to == AgentStatus::Idle {
+                        engine.error_streak.insert(*agent, 0);
+                    }
+                }
+                Event::MessagePosted { message } => {
+                    // Phase notices live in the journal/UI, outside model conversation.
+                    if !matches!(message.author, orgbot_proto::chat::Author::System) {
+                        engine.transcript.push(*message.clone());
+                    }
+                }
+                Event::TaskCreated { task } => {
+                    engine.tasks.insert(task.id, *task.clone());
+                }
+                Event::TaskTransitioned {
+                    task,
+                    transition,
+                    actor,
+                    ..
+                } => {
+                    // Reuse the task projection, discarding its newly emitted envelopes.
+                    engine
+                        .transition(*task, *transition.clone(), *actor)
+                        .map_err(|e| e.to_string())?;
+                }
+                Event::HandoffOffered { handoff } => {
+                    engine.handoffs.insert(handoff.id, *handoff.clone());
+                }
+                Event::HandoffTransitioned {
+                    handoff,
+                    transition,
+                    ..
+                } => {
+                    let record = engine
+                        .handoffs
+                        .get_mut(handoff)
+                        .ok_or("Missing saved handoff")?;
+                    if let HandoffTransition::Accept { by } = **transition {
+                        let roles = &engine
+                            .specs
+                            .get(&by)
+                            .ok_or("Missing saved recipient")?
+                            .roles;
+                        record
+                            .accept_by(by, roles, envelope.at)
+                            .map_err(|e| e.to_string())?;
+                        if record.kind.transfers_ownership() {
+                            engine
+                                .tasks
+                                .get_mut(&record.task)
+                                .ok_or("Missing saved task")?
+                                .assignee = Some(by);
+                        }
+                    } else {
+                        record
+                            .apply(transition, envelope.at)
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                Event::ArtifactAdded { artifact } => {
+                    let task = engine
+                        .tasks
+                        .get_mut(&artifact.task)
+                        .ok_or("Missing artifact task")?;
+                    if !task.artifacts.contains(&artifact.id) {
+                        task.artifacts.push(artifact.id);
+                    }
+                    engine.artifacts.insert(artifact.id, *artifact.clone());
+                }
+                Event::ReviewRecorded { review } => engine.reviews.push(*review.clone()),
+                Event::AgentErrored { agent, attempt, .. } => {
+                    engine.error_streak.insert(*agent, *attempt);
+                }
+                Event::DeadlockDetected { .. } => {}
+            }
+            // The journal remains the original record, including original ids/times.
+            engine.log.truncate((envelope.seq.0 - 1) as usize);
+            engine.seq = envelope.seq;
+            engine.log.push(envelope);
+        }
+        if engine.log.is_empty() {
+            return Err("Saved room history is empty".into());
+        }
+        Ok(engine)
+    }
+
+    /// Rebind current configuration to the saved identity and board.
+    pub fn configure_saved_room(&mut self, spec: RoomSpec) {
+        self.room.spec = spec;
+        self.room.spec.roster = self.specs.keys().copied().collect();
+        // Opening saved work never replays an interrupted external operation.
+        if !self.room.phase.is_finished() {
+            self.room.phase = RoomPhase::Paused;
+        }
+    }
+
+    /// Keep ids stable while applying edited model, persona and permissions.
+    pub fn update_agent(&mut self, spec: AgentSpec) {
+        if self
+            .specs
+            .get(&spec.id)
+            .is_some_and(|old| old.provider != spec.provider)
+        {
+            self.statuses.insert(spec.id, AgentStatus::Idle);
+            self.error_streak.remove(&spec.id);
+        }
+        self.handles.insert(spec.handle.clone(), spec.id);
+        self.specs.insert(spec.id, spec);
+    }
+
     /// Open a new room.
     pub fn new(spec: RoomSpec) -> Self {
         let room = Room::new(spec);
@@ -104,7 +265,15 @@ impl Engine {
 
     /// A bot's availability.
     pub fn status(&self, id: AgentId) -> AgentStatus {
-        self.statuses.get(&id).copied().unwrap_or(AgentStatus::Offline)
+        self.statuses
+            .get(&id)
+            .copied()
+            .unwrap_or(AgentStatus::Offline)
+    }
+
+    /// Current consecutive failures, excluding errors from an older configuration.
+    pub fn error_streak(&self, id: AgentId) -> u32 {
+        self.error_streak.get(&id).copied().unwrap_or(0)
     }
 
     /// A task on the board.
@@ -174,12 +343,14 @@ impl Engine {
         let Some(spec) = self.specs.get(&agent) else {
             return Vec::new();
         };
+        // Every gate is resolved before ranking, not after. Ranking first and
+        // validating later is what let superseded and dependency-blocked work
+        // be offered as ready.
         let mut open: Vec<&Task> = self
             .tasks
             .values()
-            .filter(|t| t.state.is_claimable())
+            .filter(|t| t.readiness().is_claimable())
             .filter(|t| spec.can_take(t.required_role.as_deref()))
-            .filter(|t| self.dependencies_met(t).is_ok())
             .collect();
         open.sort_by(|a, b| {
             b.priority
@@ -246,18 +417,78 @@ impl Engine {
     /// Whether every dependency of `task` has been submitted.
     fn dependencies_met(&self, task: &Task) -> Result<()> {
         for dep in &task.depends_on {
+            let resolved = self.follow_supersession(*dep);
             let met = self
                 .tasks
-                .get(dep)
+                .get(&resolved)
                 .is_some_and(|d| d.state == TaskState::Submitted);
             if !met {
                 return Err(EngineError::DependencyNotMet {
                     task: task.id,
-                    blocker: *dep,
+                    blocker: resolved,
                 });
             }
         }
         Ok(())
+    }
+
+    /// Follow a supersession chain to the task that now carries the work.
+    ///
+    /// Five downstream tasks depending on one replaced upstream should all
+    /// end up pointing at its replacement, so the board shows one blocker
+    /// rather than five stale ones. Bounded, because a corrupt chain must not
+    /// hang the scheduler.
+    fn follow_supersession(&self, start: TaskId) -> TaskId {
+        let mut task = start;
+        for _ in 0..32 {
+            match self.tasks.get(&task).and_then(|t| t.lineage.superseded_by) {
+                Some(next) if next != task => task = next,
+                _ => break,
+            }
+        }
+        task
+    }
+
+    /// Describe `task`'s first unmet dependency, or that it has none.
+    fn dependency_state_of(&self, task: &Task) -> DependencyState {
+        for dep in &task.depends_on {
+            let resolved = self.follow_supersession(*dep);
+            let Some(upstream) = self.tasks.get(&resolved) else {
+                continue;
+            };
+            if upstream.state == TaskState::Submitted {
+                continue;
+            }
+            return DependencyState::Waiting {
+                on: resolved,
+                // The upstream's own title, so the board can say what is being
+                // waited on instead of printing `awaiting_task`.
+                reason: upstream.title.clone(),
+                // Who is expected to clear it, so nobody has to ask.
+                owner: upstream.assignee,
+            };
+        }
+        DependencyState::Satisfied
+    }
+
+    /// Recompute every task's dependency state from the current graph.
+    ///
+    /// Run after anything that changes a task, so downstream work becomes
+    /// eligible the moment its upstream lands rather than waiting for a
+    /// coordinator to notice and say so.
+    fn recompute_dependencies(&mut self) {
+        let updates: Vec<(TaskId, DependencyState)> = self
+            .tasks
+            .values()
+            .map(|task| (task.id, self.dependency_state_of(task)))
+            .collect();
+        for (id, state) in updates {
+            if let Some(task) = self.tasks.get_mut(&id) {
+                if task.dependency != state {
+                    task.dependency = state;
+                }
+            }
+        }
     }
 
     /// The current wait-for graph between tasks.
@@ -313,12 +544,32 @@ impl Engine {
                 phase: self.room.phase,
             });
         }
-        match command {
+        let outcome = match command {
             Command::JoinAgent { spec } => self.join_agent(*spec),
             Command::LeaveAgent { agent, reason } => self.leave_agent(agent, reason),
             Command::StartRoom => self.set_phase(RoomPhase::Running, "started"),
             Command::PauseRoom { reason } => self.set_phase(RoomPhase::Paused, &reason),
-            Command::ResumeRoom => self.set_phase(RoomPhase::Running, "resumed"),
+            Command::ResumeRoom => {
+                // An explicit resume grants another execution budget. The journal
+                // retains the original creation time and previous work.
+                if self.room.is_out_of_time(Timestamp::now()) {
+                    self.room.created_at = Timestamp::now();
+                }
+                if self.room.is_out_of_turns() {
+                    self.room.turns_used = 0;
+                }
+                let mut events = self.set_phase(RoomPhase::Running, "resumed")?;
+                // Resuming is the owner's retry action. Released work stays on
+                // the board; no tool operation or old bot response is replayed.
+                let faulted: Vec<_> = self.statuses.iter()
+                    .filter_map(|(id, status)| (*status == AgentStatus::Faulted).then_some(*id))
+                    .collect();
+                for agent in faulted {
+                    self.error_streak.insert(agent, 0);
+                    events.extend(self.set_status(agent, AgentStatus::Idle));
+                }
+                Ok(events)
+            }
             Command::CloseRoom { reason } => self.close_room(reason),
 
             Command::PostMessage { message } => self.post_message(*message),
@@ -430,14 +681,29 @@ impl Engine {
                 criteria_failed,
             ),
 
-            Command::RecordTurn { agent } => self.record_turn(agent),
-            Command::ReportError {
-                agent,
+            Command::SupersedeTask {
                 task,
-                error,
-            } => self.report_error(agent, task, error),
+                replacement,
+                reason,
+            } => self.supersede_task(task, replacement, reason),
+            Command::RetireTask { task, reason } => self.retire_task(task, reason),
+            Command::SetAuthorization {
+                task,
+                authorization,
+            } => self.set_authorization(task, authorization),
+
+            Command::RecordTurn { agent } => self.record_turn(agent),
+            Command::ReportError { agent, task, error } => self.report_error(agent, task, error),
             Command::Tick { now } => self.tick(now),
+        };
+        // Any command may have moved a task, and a task moving can free
+        // work downstream. Recomputing here means a dependent becomes
+        // eligible the moment its upstream lands, with no coordinator
+        // needed to notice and announce it.
+        if outcome.is_ok() {
+            self.recompute_dependencies();
         }
+        outcome
     }
 
     // ------------------------------------------------------- roster & lifecycle
@@ -525,10 +791,21 @@ impl Engine {
         if let Some(agent) = message.author.agent() {
             self.require_agent(agent)?;
         }
+        // A new human request continues a completed conversation. An explicit
+        // pause or abort still requires the owner to resume it.
+        let mut events = if self.room.phase == RoomPhase::Completed
+            && matches!(message.author, orgbot_proto::chat::Author::Human { .. })
+            && message.intent.expects_reply()
+        {
+            self.apply(Command::ResumeRoom)?
+        } else {
+            vec![]
+        };
         self.transcript.push(message.clone());
-        Ok(vec![self.emit(Event::MessagePosted {
+        events.push(self.emit(Event::MessagePosted {
             message: Box::new(message),
-        })])
+        }));
+        Ok(events)
     }
 
     // ------------------------------------------------------------- task board
@@ -571,6 +848,81 @@ impl Engine {
         })])
     }
 
+    /// Replace one task with another, permanently.
+    ///
+    /// The link is written before the transition so that the moment the state
+    /// says `superseded`, the record already names what replaced it — nothing
+    /// downstream ever sees a replaced task with no replacement to follow.
+    fn supersede_task(
+        &mut self,
+        task: TaskId,
+        replacement: TaskId,
+        reason: String,
+    ) -> Result<Vec<EventEnvelope>> {
+        if task == replacement {
+            return Err(EngineError::NotReady {
+                task,
+                reason: "a task cannot supersede itself".into(),
+            });
+        }
+        if !self.tasks.contains_key(&replacement) {
+            return Err(EngineError::UnknownTask { task: replacement });
+        }
+        // Refuse a cycle: following the replacement must not lead back here.
+        if self.follow_supersession(replacement) == task {
+            return Err(EngineError::NotReady {
+                task,
+                reason: format!("{replacement} is already superseded by it"),
+            });
+        }
+        let record = self
+            .tasks
+            .get_mut(&task)
+            .ok_or(EngineError::UnknownTask { task })?;
+        record.lineage.superseded_by = Some(replacement);
+        if let Some(other) = self.tasks.get_mut(&replacement) {
+            other.lineage.supersedes = Some(task);
+        }
+        self.transition(
+            task,
+            TaskTransition::Supersede {
+                by: replacement,
+                reason,
+            },
+            None,
+        )
+    }
+
+    fn retire_task(&mut self, task: TaskId, reason: String) -> Result<Vec<EventEnvelope>> {
+        self.require_task(task)?;
+        self.transition(task, TaskTransition::Retire { reason }, None)
+    }
+
+    /// Put an authorization hold on a task, or lift one.
+    fn set_authorization(
+        &mut self,
+        task: TaskId,
+        authorization: AuthorizationState,
+    ) -> Result<Vec<EventEnvelope>> {
+        // An operator gate must name a decision only a person can make.
+        // Refusing here is what stops the room routing its own gaps upward.
+        if let AuthorizationState::AwaitingOperator { because, .. } = &authorization {
+            orgbot_proto::graph::validate_escalation(because).map_err(|e| {
+                EngineError::NotReady {
+                    task,
+                    reason: e.to_string(),
+                }
+            })?;
+        }
+        let record = self
+            .tasks
+            .get_mut(&task)
+            .ok_or(EngineError::UnknownTask { task })?;
+        record.authorization = authorization;
+        record.updated_at = Timestamp::now();
+        Ok(Vec::new())
+    }
+
     fn claim_task(&mut self, task: TaskId, by: AgentId) -> Result<Vec<EventEnvelope>> {
         let spec = self.require_agent(by)?.clone();
         let record = self.require_task(task)?;
@@ -581,7 +933,13 @@ impl Engine {
                 required: record.required_role.clone().unwrap_or_default(),
             });
         }
+        // The graph gates are checked here because the state machine cannot
+        // see them; the workflow gate is left to the transition itself, which
+        // gives a precise error for cases like a task someone already holds.
         self.dependencies_met(record)?;
+        if let Some(reason) = graph_refusal(record) {
+            return Err(EngineError::NotReady { task, reason });
+        }
         self.transition(task, TaskTransition::Claim { by }, Some(by))
     }
 
@@ -624,7 +982,11 @@ impl Engine {
                 });
             }
         }
-        self.transition(task, TaskTransition::SubmitForReview { artifacts }, Some(by))
+        self.transition(
+            task,
+            TaskTransition::SubmitForReview { artifacts },
+            Some(by),
+        )
     }
 
     fn submit_task(&mut self, task: TaskId, by: AgentId) -> Result<Vec<EventEnvelope>> {
@@ -654,7 +1016,17 @@ impl Engine {
         timeout_ms: Option<i64>,
     ) -> Result<Vec<EventEnvelope>> {
         let spec = self.require_agent(from)?.clone();
-        self.require_task(task)?;
+        self.require_assignee(task, from)?;
+        let state = self.require_task(task)?.state;
+        if !matches!(
+            state,
+            TaskState::Claimed | TaskState::InProgress | TaskState::Blocked
+        ) {
+            return Err(EngineError::NotPermitted {
+                agent: from,
+                action: "hand off work that is awaiting review or already finished".into(),
+            });
+        }
 
         if let Recipient::Agent { agent } = &to {
             if *agent == from {
@@ -692,7 +1064,12 @@ impl Engine {
         // A blocking handoff parks the sender's task on the spot; otherwise the
         // sender would have to remember to block itself and a forgetful model
         // would busy-wait.
-        if blocks && self.tasks.get(&task).is_some_and(|t| t.state == TaskState::InProgress) {
+        if blocks
+            && self
+                .tasks
+                .get(&task)
+                .is_some_and(|t| t.state == TaskState::InProgress)
+        {
             events.extend(self.transition(
                 task,
                 TaskTransition::Block {
@@ -707,6 +1084,33 @@ impl Engine {
 
     fn accept_handoff(&mut self, handoff: HandoffId, by: AgentId) -> Result<Vec<EventEnvelope>> {
         let roles = self.require_agent(by)?.roles.clone();
+        let offer = self
+            .handoffs
+            .get(&handoff)
+            .ok_or(EngineError::UnknownHandoff { handoff })?;
+        if offer.kind.transfers_ownership() {
+            self.require_assignee(offer.task, offer.from)?;
+            let task = self.require_task(offer.task)?;
+            if !matches!(
+                task.state,
+                TaskState::Claimed | TaskState::InProgress | TaskState::Blocked
+            ) {
+                return Err(EngineError::NotPermitted {
+                    agent: by,
+                    action: "accept a delegation after the work entered review or finished".into(),
+                });
+            }
+            if !self
+                .require_agent(by)?
+                .can_take(task.required_role.as_deref())
+            {
+                return Err(EngineError::RoleMismatch {
+                    task: task.id,
+                    agent: by,
+                    required: task.required_role.clone().unwrap_or_default(),
+                });
+            }
+        }
         let record = self
             .handoffs
             .get_mut(&handoff)
@@ -806,9 +1210,9 @@ impl Engine {
         for task in waiting {
             // Drop just this blocker; a task can be waiting on several things.
             if let Some(record) = self.tasks.get_mut(&task) {
-                record.blocked_on.retain(|r| {
-                    !matches!(r, BlockReason::AwaitingHandoff { handoff: h } if *h == handoff)
-                });
+                record.blocked_on.retain(
+                    |r| !matches!(r, BlockReason::AwaitingHandoff { handoff: h } if *h == handoff),
+                );
                 if !record.blocked_on.is_empty() {
                     continue;
                 }
@@ -866,6 +1270,10 @@ impl Engine {
                 agent: inspector,
             });
         }
+        // Validate before recording anything, including a critical rejection.
+        record
+            .state
+            .apply(&TaskTransition::Approve { by: inspector })?;
         let (revision, artifacts) = (record.revision, record.artifacts.clone());
 
         let mut review = Review::from_findings(task, inspector, revision, findings, summary);
@@ -885,7 +1293,11 @@ impl Engine {
         })];
 
         events.extend(match verdict {
-            Verdict::Approve => self.transition(task, TaskTransition::Approve { by: inspector }, Some(inspector))?,
+            Verdict::Approve => self.transition(
+                task,
+                TaskTransition::Approve { by: inspector },
+                Some(inspector),
+            )?,
             Verdict::RequestChanges => self.request_changes(task, inspector, reason)?,
             Verdict::Reject => self.transition(
                 task,
@@ -1030,8 +1442,7 @@ impl Engine {
                     _ => None,
                 })
             });
-            let withdrawable =
-                blocking.and_then(|id| self.handoffs.get(&id).map(|h| (id, h.from)));
+            let withdrawable = blocking.and_then(|id| self.handoffs.get(&id).map(|h| (id, h.from)));
 
             let resolution = match withdrawable {
                 Some((handoff, _)) => DeadlockResolution::WithdrewHandoff { handoff },
@@ -1138,7 +1549,11 @@ impl Engine {
 
         // Whoever held the task before and whoever holds it now may both have
         // changed availability.
-        for agent in [previous_holder, actor].into_iter().flatten().collect::<BTreeSet<_>>() {
+        for agent in [previous_holder, actor]
+            .into_iter()
+            .flatten()
+            .collect::<BTreeSet<_>>()
+        {
             events.extend(self.recompute_status(agent));
         }
         Ok(events)
@@ -1184,7 +1599,9 @@ impl Engine {
     }
 
     fn require_task(&self, task: TaskId) -> Result<&Task> {
-        self.tasks.get(&task).ok_or(EngineError::UnknownTask { task })
+        self.tasks
+            .get(&task)
+            .ok_or(EngineError::UnknownTask { task })
     }
 
     fn require_assignee(&self, task: TaskId, agent: AgentId) -> Result<()> {

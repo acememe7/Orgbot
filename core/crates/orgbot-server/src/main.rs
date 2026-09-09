@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use orgbot_server::config::RoomConfig;
-use orgbot_server::Access;
 use orgbot_server::runner::run_headless;
+use orgbot_server::Access;
 use tracing_subscriber::EnvFilter;
 
 /// Run and host multi-bot group-chat rooms.
@@ -142,25 +142,8 @@ fn access_for(
     token: Option<String>,
     behind_proxy: bool,
 ) -> anyhow::Result<Access> {
-    if addr.ip().is_loopback() {
-        return Ok(match token {
-            Some(token) => Access::with_token(token),
-            None => Access::open(),
-        });
-    }
-
-    if !behind_proxy {
-        anyhow::bail!(
-            concat!(
-                "refusing to serve {} without TLS.\n\n",
-                "This address is reachable from other machines, and plain ",
-                "HTTP would put the room's token on the wire in the clear.",
-                "\n\nPut TLS in front of it - a Cloudflare tunnel, nginx ",
-                "or Caddy - then pass --behind-proxy.\n",
-                "To try it on this machine only, bind 127.0.0.1 instead.",
-            ),
-            addr
-        );
+    if !addr.ip().is_loopback() && !behind_proxy {
+        anyhow::bail!("a reachable room requires TLS in front of it; use --behind-proxy only behind a TLS proxy");
     }
 
     let token = match token {
@@ -297,9 +280,7 @@ provider = { kind = "anthropic", model = "claude-opus-5" }
 fn pair(out: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     let bundle = orgbot_server::pair::collect();
     if bundle.providers.is_empty() {
-        anyhow::bail!(
-            "no sign-ins found. Sign in with `claude`, `codex` or `grok` first."
-        );
+        anyhow::bail!("no sign-ins found. Sign in with `claude`, `codex` or `grok` first.");
     }
     let json = serde_json::to_string(&bundle)?;
 
@@ -311,12 +292,13 @@ fn pair(out: Option<std::path::PathBuf>) -> anyhow::Result<()> {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &path,
-                    std::fs::Permissions::from_mode(0o600),
-                );
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
             }
-            eprintln!("wrote {} ({} provider(s))", path.display(), bundle.providers.len());
+            eprintln!(
+                "wrote {} ({} provider(s))",
+                path.display(),
+                bundle.providers.len()
+            );
             for provider in &bundle.providers {
                 eprintln!(
                     "  {} — {} model(s){}",

@@ -38,11 +38,7 @@ pub use session::{Control, RoomSession, SessionHandle};
 /// bots, runs the room on its own task, and serves the HTTP/WS surface at
 /// `addr` (the Flutter app, a browser, or the desktop shell attach there).
 /// It returns when the listener stops serving.
-pub async fn serve_room(
-    config: &Path,
-    addr: SocketAddr,
-    access: Access,
-) -> anyhow::Result<()> {
+pub async fn serve_room(config: &Path, addr: SocketAddr, access: Access) -> anyhow::Result<()> {
     serve_room_with_readiness(config, addr, access, None).await
 }
 
@@ -51,13 +47,30 @@ pub async fn serve_room(
 /// A room's snapshot is the whole thing — roster, board and transcript — and
 /// a client can post as a person and drive the bots. So reaching the port is
 /// reaching the room, and everything that is not loopback needs a token.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub struct Access {
     /// The token a client must present in its opening `Hello`.
     ///
     /// `None` means anyone who can reach the port is in, which is only
     /// defensible when the operating system is the boundary.
     pub token: Option<String>,
+}
+
+impl Default for Access {
+    fn default() -> Self {
+        Self::with_token(format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+}
+impl std::fmt::Debug for Access {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Access")
+            .field("authenticated", &self.token.is_some())
+            .finish()
+    }
 }
 
 impl Access {
@@ -87,6 +100,12 @@ pub async fn serve_room_with_readiness(
     access: Access,
     ready: Option<tokio::sync::oneshot::Sender<Result<std::net::SocketAddr, String>>>,
 ) -> anyhow::Result<()> {
+    if !addr.ip().is_loopback() && access.token.is_none() {
+        anyhow::bail!("a reachable room requires a token");
+    }
+    if access.token.as_ref().is_some_and(|t| t.trim().len() < 20) {
+        anyhow::bail!("room tokens must contain at least 20 characters");
+    }
     let mut ready = ready;
     let mut report = |outcome: Result<std::net::SocketAddr, String>| {
         if let Some(tx) = ready.take() {
@@ -111,8 +130,6 @@ pub async fn serve_room_with_readiness(
     };
     let (session, handle) = RoomSession::build(resolved)?;
 
-    tokio::spawn(session.run());
-
     let state = ws::AppState {
         session: handle,
         room_name,
@@ -133,10 +150,17 @@ pub async fn serve_room_with_readiness(
             return Err(error.into());
         }
     };
+    // Dropping a host also stops its room, including a model call in flight.
+    struct RunningSession(tokio::task::JoinHandle<orgbot_runtime::RunOutcome>);
+    impl Drop for RunningSession {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _session = RunningSession(tokio::spawn(session.run()));
     let local = listener.local_addr().unwrap_or(addr);
     report(Ok(local));
     tracing::info!(%addr, "serving room; connect a client to ws://{addr}/ws");
     axum::serve(listener, app).await?;
     Ok(())
 }
-

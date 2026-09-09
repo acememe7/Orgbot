@@ -122,7 +122,7 @@ impl Provider for ScriptedProvider {
                     )
                     .await;
                 }
-                ContentBlock::ToolResult { .. } => {}
+                ContentBlock::ToolResult { .. } | ContentBlock::Image { .. } => {}
             }
         }
         emit(

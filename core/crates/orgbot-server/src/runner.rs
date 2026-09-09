@@ -38,7 +38,7 @@ pub async fn run_headless(resolved: ResolvedRoom, quiet: bool) -> anyhow::Result
         }
     });
 
-    let outcome = session.run().await;
+    let outcome = session.run_batch().await;
     let _ = printer.await;
     Ok(outcome)
 }
@@ -47,9 +47,7 @@ pub async fn run_headless(resolved: ResolvedRoom, quiet: bool) -> anyhow::Result
 /// that would only add noise.
 fn render(event: &Event) -> Option<String> {
     match event {
-        Event::RoomOpened { name, goal, .. } => {
-            Some(format!("╭─ room `{name}` — {goal}"))
-        }
+        Event::RoomOpened { name, goal, .. } => Some(format!("╭─ room `{name}` — {goal}")),
         Event::MessagePosted { message } => {
             let who = match &message.author {
                 orgbot_proto::Author::Agent { agent } => format!("@{}", agent.short()),
@@ -58,10 +56,10 @@ fn render(event: &Event) -> Option<String> {
             };
             Some(format!("  {who}: {}", message.body))
         }
-        Event::TaskCreated { task } => Some(format!("  + task {} — {}", task.id.short(), task.title)),
-        Event::TaskTransitioned {
-            task, from, to, ..
-        } => Some(format!(
+        Event::TaskCreated { task } => {
+            Some(format!("  + task {} — {}", task.id.short(), task.title))
+        }
+        Event::TaskTransitioned { task, from, to, .. } => Some(format!(
             "  · {} {} → {}",
             task.short(),
             from.as_str(),
@@ -83,9 +81,15 @@ fn render(event: &Event) -> Option<String> {
         Event::DeadlockDetected { resolution, .. } => {
             Some(format!("  ⚠ deadlock broken: {resolution:?}"))
         }
-        Event::AgentErrored { agent, error, attempt, .. } => {
-            Some(format!("  ✗ {} errored (attempt {attempt}): {error}", agent.short()))
-        }
+        Event::AgentErrored {
+            agent,
+            error,
+            attempt,
+            ..
+        } => Some(format!(
+            "  ✗ {} errored (attempt {attempt}): {error}",
+            agent.short()
+        )),
         Event::RoomClosed { reason, .. } => Some(format!("╰─ closed: {reason}")),
         // Status flips and artifact adds are visible through their effects.
         _ => None,

@@ -63,6 +63,14 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
 
     out.push_str(
         "Working with the others:\n\
+         - Answer a human's new question or greeting directly, including when you have no task. \
+           If it tags other bots only, let those bots answer.\n\
+         - Read existing relevant artifacts with read_artifact before guessing the product or repeating research. \
+           Include artifact IDs and concrete product context when delegating.\n\
+         - Do not choose the owner's geography, audience, budget or personal identity for them. \
+           Ask when it materially affects the work; label any provisional assumption.\n\
+         - Avoid repeating another bot's status or asking it to confirm a requirement already stated. \
+           Contribute new evidence, a decision, or completed work.\n\
          - If you need someone to *do* something, use offer_handoff, not a chat \
            message. A message is a conversation; a handoff is tracked, routed, and \
            chased up if it goes unanswered.\n\
@@ -177,7 +185,10 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
                 ));
             }
             if !task.blocked_on.is_empty() {
-                out.push_str(&format!("    blocked on {} thing(s)\n", task.blocked_on.len()));
+                out.push_str(&format!(
+                    "    blocked on {} thing(s)\n",
+                    task.blocked_on.len()
+                ));
             }
         }
     }
@@ -188,7 +199,10 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
         out.push_str("\nOpen tasks you could claim:\n");
         for id in claimable.iter().take(8) {
             if let Some(task) = engine.task(*id) {
-                out.push_str(&format!("  {} [{:?}] {}\n", task.id, task.priority, task.title));
+                out.push_str(&format!(
+                    "  {} [{:?}] {}\n",
+                    task.id, task.priority, task.title
+                ));
             }
         }
     }
@@ -283,11 +297,26 @@ fn recent_messages(engine: &Engine, agent: AgentId, since: Seq) -> String {
                     message.audience,
                     orgbot_proto::Audience::Agents { .. } | orgbot_proto::Audience::Roles { .. }
                 );
+                let roles = engine
+                    .agent(agent)
+                    .map(|spec| spec.roles.as_slice())
+                    .unwrap_or(&[]);
+                let to_you = directed && message.audience.addresses(agent, roles);
                 out.push_str(&format!(
                     "  {who}{}: {}\n",
-                    if directed { " (to you)" } else { "" },
+                    if to_you {
+                        " (to you)"
+                    } else if directed {
+                        " (to other bots)"
+                    } else {
+                        ""
+                    },
                     message.body
                 ));
+            }
+            Event::ArtifactAdded { artifact } => {
+                out.push_str(&format!("  [artifact available] {}: {} (task {}). Read it with read_artifact if relevant.\n",
+                    artifact.id, artifact.name, artifact.task));
             }
             Event::TaskTransitioned { task, to, .. } if *to == TaskState::Submitted => {
                 if let Some(record) = engine.task(*task) {

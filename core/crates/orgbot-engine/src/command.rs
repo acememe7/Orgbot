@@ -5,6 +5,7 @@
 //! tool calls, the UI issues them through the WebSocket, and tests issue them
 //! directly — all three go down the same validation path.
 
+use orgbot_proto::graph::AuthorizationState;
 use orgbot_proto::artifact::ArtifactBody;
 use orgbot_proto::handoff::{HandoffKind, Recipient};
 use orgbot_proto::review::Finding;
@@ -141,6 +142,37 @@ pub enum Command {
         criteria_failed: Vec<String>,
     },
 
+    /// Replace `task` with `replacement`, which takes over its work.
+    ///
+    /// The original becomes permanently non-actionable: unclaimable, absent
+    /// from ready scans, and excluded from anything counted for the operator.
+    /// Its history is kept.
+    SupersedeTask {
+        /// The task being replaced.
+        task: TaskId,
+        /// The task that now carries the work.
+        replacement: TaskId,
+        /// Why it was replaced.
+        reason: String,
+    },
+    /// Close `task` as no longer relevant, permanently.
+    RetireTask {
+        /// The task to retire.
+        task: TaskId,
+        /// Why it is no longer relevant.
+        reason: String,
+    },
+    /// Put an authorization hold on a task, or lift one.
+    ///
+    /// Holds are how policy, security and operator gates reach the scheduler.
+    /// Setting [`AuthorizationState::Authorized`] lifts whatever was there.
+    SetAuthorization {
+        /// The task to hold or release.
+        task: TaskId,
+        /// The state to put it in.
+        authorization: AuthorizationState,
+    },
+
     // ---- engine housekeeping ----
     /// Charge one model turn against the room budget.
     RecordTurn { agent: AgentId },
@@ -187,6 +219,9 @@ impl Command {
             Self::WithdrawHandoff { .. } => "withdraw_handoff",
             Self::AddArtifact { .. } => "add_artifact",
             Self::RecordReview { .. } => "record_review",
+            Self::SupersedeTask { .. } => "supersede_task",
+            Self::RetireTask { .. } => "retire_task",
+            Self::SetAuthorization { .. } => "set_authorization",
             Self::RecordTurn { .. } => "record_turn",
             Self::ReportError { .. } => "report_error",
             Self::Tick { .. } => "tick",

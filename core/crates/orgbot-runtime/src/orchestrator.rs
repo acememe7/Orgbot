@@ -67,6 +67,72 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    /// Complete room state and bot conversations, without provider credentials.
+    pub fn checkpoint(&self) -> serde_json::Value {
+        serde_json::json!({
+            "version": 1, "engine": self.engine,
+            "bots": self.bots.iter().map(|(id, bot)| (*id, bot.memory())).collect::<BTreeMap<_, _>>(),
+            "cursor": self.cursor,
+        })
+    }
+
+    /// Reopen saved work paused; providers come from the current account settings.
+    pub fn restore(
+        value: serde_json::Value,
+        spec: RoomSpec,
+        providers: Vec<(AgentSpec, Arc<dyn Provider>)>,
+    ) -> Result<Self, String> {
+        let version = value["version"]
+            .as_u64()
+            .ok_or("Missing room memory version")?;
+        let mut engine = match version {
+            0 => Engine::from_archive(
+                serde_json::from_value(value["room"].clone()).map_err(|e| e.to_string())?,
+                serde_json::from_value(value["events"].clone()).map_err(|e| e.to_string())?,
+            )?,
+            1 => serde_json::from_value::<Engine>(value["engine"].clone())
+                .map_err(|e| e.to_string())?,
+            _ => return Err("Room memory was written by a newer app".into()),
+        };
+        engine.configure_saved_room(spec);
+        let memory: BTreeMap<AgentId, crate::bot::BotMemory> = if version == 1 {
+            serde_json::from_value(value["bots"].clone()).map_err(|e| e.to_string())?
+        } else {
+            BTreeMap::new()
+        };
+        let mut restored = Self {
+            engine,
+            bots: BTreeMap::new(),
+            rotation: vec![],
+            cursor: value["cursor"].as_u64().unwrap_or(0) as usize,
+            idle_rounds: 0,
+            last_said: BTreeMap::new(),
+        };
+        for (mut configured, provider) in providers {
+            if let Some(saved) = restored.engine.agent_by_handle(&configured.handle).cloned() {
+                configured.id = saved.id;
+                configured.created_at = saved.created_at;
+                let same_provider = saved.provider == configured.provider;
+                restored.engine.update_agent(configured.clone());
+                let mut bot = Bot::new(configured.clone(), provider);
+                if same_provider {
+                    if let Some(memory) = memory.get(&configured.id) {
+                        bot.restore_memory(memory.clone());
+                    }
+                }
+                if let Some((rx, socket)) = spawn_mcp_host(&configured) {
+                    bot.attach_mcp(rx, socket);
+                }
+                restored.rotation.push(configured.id);
+                restored.bots.insert(configured.id, bot);
+            } else {
+                restored
+                    .seat(configured, provider)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(restored)
+    }
     /// Open a room.
     pub fn new(spec: RoomSpec) -> Self {
         Self {
@@ -96,6 +162,25 @@ impl Orchestrator {
         self.bots.insert(id, bot);
         self.rotation.push(id);
         Ok(id)
+    }
+
+    pub fn attach_workspace(&mut self, workspace: crate::workspace::Workspace) {
+        for bot in self.bots.values_mut() {
+            bot.attach_workspace(workspace.clone());
+        }
+    }
+
+    pub fn attach_attachments(&mut self, root: std::path::PathBuf) {
+        for bot in self.bots.values_mut() {
+            bot.attachments_root = Some(root.clone());
+        }
+    }
+
+    /// Yield API waits to human input without interrupting workspace operations.
+    pub fn attach_input_interrupt(&mut self, token: tokio_util::sync::CancellationToken) {
+        for bot in self.bots.values_mut() {
+            bot.input_interrupt = token.clone();
+        }
     }
 
     /// The room engine, for inspection.
@@ -313,6 +398,16 @@ impl Orchestrator {
 
     /// Whether the room's completion rule is satisfied.
     pub fn is_complete(&self) -> bool {
+        // A settled board does not answer a new question. Give each available
+        // addressee a turn before applying the board's completion rule again.
+        if self.rotation.iter().any(|agent| {
+            !matches!(
+                self.engine.status(*agent),
+                AgentStatus::Offline | AgentStatus::Faulted
+            ) && self.has_unanswered_message(*agent)
+        }) {
+            return false;
+        }
         let mut tasks = self.engine.tasks().peekable();
         if tasks.peek().is_none() {
             // A room with no board has not completed; it has not started.
@@ -380,10 +475,19 @@ fn spawn_mcp_host(
             return None;
         }
     };
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).is_err() {
+        return None;
+    }
     let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let cleanup = socket.clone();
     tokio::spawn(async move {
         loop {
-            match listener.accept().await {
+            let accepted = tokio::select! {
+                _ = tx.closed() => break,
+                accepted = listener.accept() => accepted,
+            };
+            match accepted {
                 Ok((stream, _)) => {
                     let tx = tx.clone();
                     tokio::spawn(async move {
@@ -396,6 +500,7 @@ fn spawn_mcp_host(
                 }
             }
         }
+        let _ = std::fs::remove_file(cleanup);
     });
     Some((rx, socket))
 }

@@ -113,10 +113,7 @@ fn parse_environment(raw: Option<&str>) -> Vec<(String, String)> {
 /// # Safety
 /// Both arguments must be null or valid NUL-terminated strings.
 #[no_mangle]
-pub unsafe extern "C" fn orgbot_room_open(
-    toml: *const c_char,
-    environment: *const c_char,
-) -> u64 {
+pub unsafe extern "C" fn orgbot_room_open(toml: *const c_char, environment: *const c_char) -> u64 {
     // SAFETY: the caller guarantees valid strings; see the doc comment.
     let Some(toml) = (unsafe { borrow(toml) }) else {
         set_error("a room file is required");
@@ -208,10 +205,29 @@ pub unsafe extern "C" fn orgbot_room_say(
     }
 }
 
+/// Deliver a JSON client control or workspace tool result.
+/// # Safety
+/// `message` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn orgbot_room_control(handle: u64, message: *const c_char) -> i32 {
+    // SAFETY: the caller guarantees a valid C string.
+    let Some(message) = (unsafe { borrow(message) }) else {
+        return 0;
+    };
+    i32::from(
+        with_rooms(|rooms| rooms.get(&handle).is_some_and(|room| room.control(message)))
+            .unwrap_or(false),
+    )
+}
+
 /// Pause the room. Returns 1 on success.
 #[no_mangle]
 pub extern "C" fn orgbot_room_pause(handle: u64) -> i32 {
-    let ok = with_rooms(|rooms| rooms.get(&handle).map(|room| room.pause("paused from the app")));
+    let ok = with_rooms(|rooms| {
+        rooms
+            .get(&handle)
+            .map(|room| room.pause("paused from the app"))
+    });
     matches!(ok.flatten(), Some(true)) as i32
 }
 
@@ -257,5 +273,5 @@ pub unsafe extern "C" fn orgbot_string_free(ptr: *mut c_char) {
 /// The ABI version. A caller should refuse a library it does not know.
 #[no_mangle]
 pub extern "C" fn orgbot_abi_version() -> u32 {
-    1
+    2
 }

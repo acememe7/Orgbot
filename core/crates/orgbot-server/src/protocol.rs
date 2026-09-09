@@ -42,6 +42,8 @@ pub enum ClientMessage {
     },
     /// Post a human message into the chat.
     SendMessage {
+        #[serde(default)]
+        files: Vec<String>,
         /// The person's display name.
         author: String,
         /// The message text.
@@ -136,6 +138,9 @@ pub struct AgentView {
     pub roles: Vec<String>,
     /// Its current availability.
     pub status: AgentStatus,
+    /// Current consecutive failures; old journal errors may already be resolved.
+    #[serde(default)]
+    pub error_streak: u32,
 }
 
 #[cfg(test)]
@@ -160,6 +165,7 @@ mod tests {
     fn client_messages_round_trip() {
         let messages = [
             ClientMessage::SendMessage {
+                files: vec![],
                 author: "Alex".into(),
                 body: "how's it going?".into(),
                 task: None,

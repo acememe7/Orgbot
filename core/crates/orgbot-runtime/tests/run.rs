@@ -578,6 +578,8 @@ async fn a_bot_is_scheduled_to_answer_a_question_addressed_to_it() {
                 handoff: None,
                 reply_to: None,
                 attachments: vec![],
+
+                files: vec![],
                 sent_at: orgbot_proto::Timestamp::now(),
             }),
         })

@@ -54,6 +54,9 @@ pub enum EngineError {
     #[error("task {task} cannot start until {blocker} is submitted")]
     DependencyNotMet { task: TaskId, blocker: TaskId },
 
+    #[error("task {task} is not ready: {reason}")]
+    NotReady { task: TaskId, reason: String },
+
     #[error("{agent} already has {open} handoffs open, limit is {limit}")]
     TooManyOpenHandoffs {
         agent: AgentId,

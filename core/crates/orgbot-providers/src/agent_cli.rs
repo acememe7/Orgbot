@@ -618,9 +618,7 @@ fn write_agent_home(
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .ok_or_else(|| {
-            ProviderError::Unsupported(format!(
-                "HOME is not set; cannot build a {label} overlay"
-            ))
+            ProviderError::Unsupported(format!("HOME is not set; cannot build a {label} overlay"))
         })?
         .join(dot_dir);
     if !home.is_dir() {
@@ -695,7 +693,22 @@ fn latest_instruction(messages: &[Turn]) -> Option<String> {
         .iter()
         .rev()
         .find(|turn| turn.role == Role::User)
-        .map(|turn| turn.text())
+        .map(|turn| {
+            let mut text = turn.text();
+            for block in &turn.content {
+                if let ContentBlock::Image {
+                    source: crate::types::ImageSource::File { path },
+                    ..
+                } = block
+                {
+                    text.push_str(&format!(
+                        "\nAttached image file (use your image-reading tool): {}",
+                        path.display()
+                    ));
+                }
+            }
+            text
+        })
         .filter(|text| !text.trim().is_empty())
 }
 
@@ -725,13 +738,16 @@ fn build_args(
                 .arg("--json")
                 .arg("--skip-git-repo-check")
                 .arg(prompt);
-            if mcp {
+            if mcp && policy == AgentPolicy::WorkspaceWrite {
                 // Headless codex refuses MCP tool calls under a plain sandbox;
                 // --approve-for-me routes them through automatic review (and
                 // implies the workspace-write sandbox, so -s must not be set).
                 cmd.arg("--approve-for-me");
             } else {
-                cmd.arg("-s").arg(policy_value);
+                cmd.arg("-s")
+                    .arg(policy_value)
+                    .arg("-c")
+                    .arg("approval_policy=\"never\"");
             }
         }
         (CliKind::Codex, Some(session)) => {
@@ -901,6 +917,33 @@ mod tests {
         assert_eq!(episode.usage.input_tokens, 10);
         assert_eq!(episode.usage.output_tokens, 2);
         assert_eq!(episode.usage.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn codex_mcp_keeps_the_requested_filesystem_policy() {
+        for (policy, expected) in [
+            (AgentPolicy::ReadOnly, "read-only"),
+            (AgentPolicy::FullAccess, "danger-full-access"),
+        ] {
+            let mut cmd = Command::new("codex");
+            build_args(
+                &mut cmd,
+                CliKind::Codex,
+                "test",
+                None,
+                "",
+                policy,
+                None,
+                true,
+            );
+            let args: Vec<_> = cmd
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert!(args.windows(2).any(|pair| pair == ["-s", expected]));
+            assert!(!args.iter().any(|arg| arg == "--approve-for-me"));
+        }
     }
 
     #[test]

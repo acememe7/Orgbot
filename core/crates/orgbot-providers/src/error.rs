@@ -24,10 +24,12 @@ pub enum ProviderError {
     },
 
     /// Rate limited. Retry after the given delay if one was supplied.
-    #[error("{provider} rate limited this request")]
+    #[error("{provider} rate limited this request (HTTP 429): {message}{delay}", delay = retry_after_secs.map(|seconds| format!("; retry after {seconds}s")).unwrap_or_default())]
     RateLimited {
         /// Which backend.
         provider: String,
+        /// The backend's explanation, including quota or capacity details.
+        message: String,
         /// Seconds to wait, from the `retry-after` header.
         retry_after_secs: Option<u64>,
     },
@@ -53,7 +55,7 @@ pub enum ProviderError {
     },
 
     /// The network failed.
-    #[error("transport error talking to {provider}: {source}")]
+    #[error("transport error talking to {provider}: {detail}", detail = transport_detail(.source))]
     Transport {
         /// Which backend.
         provider: String,
@@ -61,6 +63,10 @@ pub enum ProviderError {
         #[source]
         source: reqwest::Error,
     },
+
+    /// HTTP ended cleanly, but the model never finished its response.
+    #[error("{provider} response stream interrupted: {message}")]
+    StreamInterrupted { provider: String, message: String },
 
     /// The response did not match the shape the adapter expected.
     #[error("could not decode {provider} response: {detail}")]
@@ -92,7 +98,7 @@ impl ProviderError {
     /// bot: a 429 or a 503 is worth another attempt, a 400 never is.
     pub const fn is_retryable(&self) -> bool {
         match self {
-            Self::RateLimited { .. } | Self::Transport { .. } => true,
+            Self::RateLimited { .. } | Self::Transport { .. } | Self::StreamInterrupted { .. } => true,
             Self::Upstream { status, .. } => *status >= 500,
             _ => false,
         }
@@ -107,6 +113,32 @@ impl ProviderError {
             _ => None,
         }
     }
+}
+
+fn transport_detail(error: &reqwest::Error) -> String {
+    use std::error::Error;
+    if error.is_timeout() {
+        return "request timed out".into();
+    }
+    // The outer reqwest display omits the cause and may include a credential
+    // in a custom endpoint's URL. Keep the network cause, never that URL.
+    let mut detail = if error.is_connect() {
+        "connection failed"
+    } else if error.is_body() || error.is_decode() {
+        "response stream interrupted"
+    } else {
+        "request failed"
+    }.to_string();
+    let mut cause = error.source();
+    for _ in 0..6 {
+        let Some(next) = cause else { break };
+        if next.downcast_ref::<reqwest::Error>().is_none() {
+            detail.push_str(": ");
+            detail.push_str(&next.to_string());
+        }
+        cause = next.source();
+    }
+    detail
 }
 
 /// Shorthand for provider results.
@@ -133,7 +165,7 @@ impl From<&ProviderError> for ErrorReport {
             ProviderError::RateLimited { provider, .. } => (provider.clone(), "rate_limited"),
             ProviderError::BadRequest { provider, .. } => (provider.clone(), "bad_request"),
             ProviderError::Upstream { provider, .. } => (provider.clone(), "upstream"),
-            ProviderError::Transport { provider, .. } => (provider.clone(), "transport"),
+            ProviderError::Transport { provider, .. } | ProviderError::StreamInterrupted { provider, .. } => (provider.clone(), "transport"),
             ProviderError::Decode { provider, .. } => (provider.clone(), "decode"),
             ProviderError::Process { provider, .. } => (provider.clone(), "process"),
             ProviderError::Unsupported(_) => ("unknown".to_string(), "unsupported"),
@@ -151,10 +183,54 @@ impl From<&ProviderError> for ErrorReport {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_network_timeout_is_named_in_the_room_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = reqwest::Client::new()
+            .get(format!("http://{}", listener.local_addr().unwrap()))
+            .timeout(std::time::Duration::from_millis(20))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(source.is_timeout());
+        let error = ProviderError::Transport {
+            provider: "codex".into(),
+            source,
+        };
+        assert_eq!(
+            error.to_string(),
+            "transport error talking to codex: request timed out"
+        );
+        assert!(error.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn a_truncated_http_body_keeps_its_cause_without_leaking_the_url() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            stream.read(&mut request).await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\npartial").await.unwrap();
+        });
+        let url = format!("http://{address}/?access_token=SECRET_NOT_TO_LOG");
+        let source = reqwest::get(&url).await.unwrap().bytes().await.unwrap_err().with_url(url.parse().unwrap());
+        let error = ProviderError::Transport { provider: "codex".into(), source };
+        let text = error.to_string();
+        assert!(text.contains("response stream interrupted"), "{text}");
+        assert!(text.contains("end of file") || text.contains("body"), "underlying cause: {text}");
+        assert!(!text.contains("SECRET_NOT_TO_LOG"));
+        assert!(!text.contains("http://"));
+        server.await.unwrap();
+    }
+
     #[test]
     fn server_errors_and_rate_limits_are_retryable() {
         assert!(ProviderError::RateLimited {
             provider: "anthropic".into(),
+            message: "Too many requests".into(),
             retry_after_secs: Some(3),
         }
         .is_retryable());
@@ -191,6 +267,7 @@ mod tests {
     fn the_retry_delay_is_surfaced_when_the_backend_supplies_one() {
         let error = ProviderError::RateLimited {
             provider: "anthropic".into(),
+            message: "Too many requests".into(),
             retry_after_secs: Some(12),
         };
         assert_eq!(error.retry_after_secs(), Some(12));

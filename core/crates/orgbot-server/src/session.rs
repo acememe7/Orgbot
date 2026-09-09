@@ -9,15 +9,15 @@
 //! no bot is actionable the session does **not** end the room — it waits for a
 //! human to say something. A group chat is meant to sit idle between requests.
 
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 use orgbot_engine::Command;
 use orgbot_proto::chat::Audience;
 use orgbot_proto::event::{EventEnvelope, Seq};
 use orgbot_proto::task::BlockReason;
-use orgbot_proto::{
-    Author, ChatMessage, MessageIntent, RoomPhase, TaskId, TaskState, Timestamp,
-};
+use orgbot_proto::{Author, ChatMessage, MessageIntent, RoomPhase, TaskId, TaskState, Timestamp};
 use orgbot_runtime::{Orchestrator, RunOutcome};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -51,6 +51,7 @@ pub enum Control {
     },
     /// A human speaks into the chat.
     HumanMessage {
+        files: Vec<String>,
         /// The person's name.
         author: String,
         /// The text.
@@ -72,6 +73,8 @@ pub enum Control {
     },
     /// Resume it.
     Resume,
+    /// Stop the session and cancel an in-flight model call.
+    Stop,
 }
 
 /// A cheap, clonable handle to a running room.
@@ -79,6 +82,9 @@ pub enum Control {
 pub struct SessionHandle {
     control: mpsc::Sender<Control>,
     events: broadcast::Sender<ServerMessage>,
+    published: Arc<RwLock<Published>>,
+    interrupt: Arc<Mutex<CancellationToken>>,
+    input_interrupt: Arc<Mutex<CancellationToken>>,
 }
 
 impl SessionHandle {
@@ -87,38 +93,57 @@ impl SessionHandle {
         self.events.subscribe()
     }
 
-    /// Send a control message. Returns `false` if the room has stopped.
+    /// Enqueue control without waiting for a model to finish.
     pub async fn send(&self, control: Control) -> bool {
-        self.control.send(control).await.is_ok()
+        self.try_send(control)
     }
 
-    /// Request a snapshot, or `None` if the room has stopped.
+    pub fn try_send(&self, control: Control) -> bool {
+        let interrupts = matches!(control, Control::Pause { .. } | Control::Stop);
+        let input = matches!(control, Control::HumanMessage { .. } | Control::Answer { .. });
+        // Queue and cancel under the same lock: the session must not replace
+        // this token between accepting the input and receiving its signal.
+        let input_interrupt = self.input_interrupt.lock().unwrap();
+        if self.control.try_send(control).is_err() {
+            return false;
+        }
+        if input {
+            input_interrupt.cancel();
+        }
+        if interrupts {
+            self.interrupt.lock().unwrap().cancel();
+        }
+        true
+    }
+
+    /// The last committed state is readable even during a model/tool call.
     pub async fn snapshot(&self) -> Option<ServerMessage> {
-        let (tx, rx) = oneshot::channel();
-        if self.control.send(Control::Snapshot(tx)).await.is_err() {
-            return None;
-        }
-        rx.await.ok()
+        Some(self.published.read().unwrap().snapshot.clone())
     }
 
-    /// Everything in the room's log after `since`.
     pub async fn backlog(&self, since: Seq) -> Vec<EventEnvelope> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .control
-            .send(Control::Backlog { since, reply: tx })
-            .await
-            .is_err()
-        {
-            return Vec::new();
-        }
-        rx.await.unwrap_or_default()
+        self.published
+            .read()
+            .unwrap()
+            .backlog
+            .iter()
+            .filter(|e| e.seq > since)
+            .cloned()
+            .collect()
     }
+}
+
+#[derive(Debug)]
+struct Published {
+    snapshot: ServerMessage,
+    backlog: Vec<EventEnvelope>,
 }
 
 /// A room and the machinery to run it.
 #[derive(Debug)]
 pub struct RoomSession {
+    state_path: Option<std::path::PathBuf>,
+    saved_at: Option<(Seq, orgbot_proto::room::RoomPhase, u32)>,
     orchestrator: Orchestrator,
     control: mpsc::Receiver<Control>,
     events: broadcast::Sender<ServerMessage>,
@@ -128,6 +153,9 @@ pub struct RoomSession {
     /// turns but stays connected, so its transcript can still be read and a
     /// person can still speak into it.
     settled: bool,
+    published: Arc<RwLock<Published>>,
+    interrupt: Arc<Mutex<CancellationToken>>,
+    input_interrupt: Arc<Mutex<CancellationToken>>,
 }
 
 impl RoomSession {
@@ -138,19 +166,62 @@ impl RoomSession {
     /// task that names a missing role); a caller should surface them rather than
     /// spawn a room that cannot work.
     pub fn build(resolved: ResolvedRoom) -> anyhow::Result<(Self, SessionHandle)> {
-        let mut orchestrator = Orchestrator::new(resolved.spec);
-        for bot in resolved.bots {
+        let state_path = resolved.state_path.clone();
+        let saved = match &state_path {
+            Some(path) => {
+                anyhow::ensure!(
+                    path.is_absolute(),
+                    "Room memory needs an absolute local path"
+                );
+                match std::fs::symlink_metadata(path) {
+                    Ok(meta) => {
+                        anyhow::ensure!(
+                            meta.is_file() && meta.len() <= 64 * 1024 * 1024,
+                            "Saved room memory is not a regular file or exceeds 64 MiB"
+                        );
+                        Some(serde_json::from_slice::<serde_json::Value>(
+                            &std::fs::read(path)?,
+                        )?)
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            None => None,
+        };
+        let restored = saved.is_some();
+        let mut orchestrator = if let Some(saved) = saved {
+            Orchestrator::restore(
+                saved,
+                resolved.spec,
+                resolved
+                    .bots
+                    .into_iter()
+                    .map(|b| (b.spec, b.provider))
+                    .collect(),
+            )
+            .map_err(|e| {
+                anyhow::anyhow!("Could not restore saved room; the file was preserved: {e}")
+            })?
+        } else {
+            let mut orchestrator = Orchestrator::new(resolved.spec);
+            for bot in resolved.bots {
+                orchestrator
+                    .seat(bot.spec, bot.provider)
+                    .map_err(|e| anyhow::anyhow!("seating a bot: {e}"))?;
+            }
             orchestrator
-                .seat(bot.spec, bot.provider)
-                .map_err(|e| anyhow::anyhow!("seating a bot: {e}"))?;
-        }
-        orchestrator
-            .start()
-            .map_err(|e| anyhow::anyhow!("starting the room: {e}"))?;
+                .start()
+                .map_err(|e| anyhow::anyhow!("starting the room: {e}"))?;
+            orchestrator
+        };
 
+        if let Some(parent) = state_path.as_ref().and_then(|path| path.parent()) {
+            orchestrator.attach_attachments(parent.join("attachments"));
+        }
         // Seed the board after the room is running, since CreateTask is a
         // running-room command.
-        for task in resolved.tasks {
+        for task in resolved.tasks.into_iter().filter(|_| !restored) {
             let events = orchestrator
                 .engine_mut()
                 .apply(Command::CreateTask {
@@ -177,27 +248,105 @@ impl RoomSession {
         let (control_tx, control_rx) = mpsc::channel(64);
         let (events_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
 
-        let session = Self {
+        let published = Arc::new(RwLock::new(Published {
+            snapshot: snapshot_of(&orchestrator),
+            backlog: orchestrator.engine().log().to_vec(),
+        }));
+        let interrupt = Arc::new(Mutex::new(CancellationToken::new()));
+        let input_token = CancellationToken::new();
+        orchestrator.attach_input_interrupt(input_token.clone());
+        let input_interrupt = Arc::new(Mutex::new(input_token));
+        let mut session = Self {
+            state_path,
+            saved_at: None,
             orchestrator,
             control: control_rx,
             events: events_tx.clone(),
             broadcast_head: Seq::ZERO,
             settled: false,
+            published: published.clone(),
+            interrupt: interrupt.clone(),
+            input_interrupt: input_interrupt.clone(),
         };
         let handle = SessionHandle {
             control: control_tx,
             events: events_tx,
+            published,
+            interrupt,
+            input_interrupt,
         };
+        session.save_state()?;
         Ok((session, handle))
+    }
+
+    /// Save completed state atomically before announcing it to clients.
+    fn save_state(&mut self) -> anyhow::Result<()> {
+        use std::io::Write;
+        let Some(path) = &self.state_path else {
+            return Ok(());
+        };
+        let room = self.orchestrator.engine().room();
+        let stamp = (
+            self.orchestrator.engine().head(),
+            room.phase,
+            room.turns_used,
+        );
+        if self.saved_at == Some(stamp) {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec(&self.orchestrator.checkpoint())?;
+        anyhow::ensure!(
+            bytes.len() <= 64 * 1024 * 1024,
+            "Room memory exceeds 64 MiB"
+        );
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Invalid memory path"))?;
+        std::fs::create_dir_all(parent)?;
+        let temp = parent.join(format!(".{}.tmp", orgbot_proto::EventId::new()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let result = (|| -> std::io::Result<()> {
+            let mut file = options.open(&temp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::rename(&temp, path)?;
+            std::fs::File::open(parent)?.sync_all()
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        result?;
+        self.saved_at = Some(stamp);
+        Ok(())
     }
 
     /// Run the room to a stopping point.
     ///
-    /// Bots take turns; between turns, pending human input is applied. When no
+    /// Bots yield API waits for human input, finishing any workspace operation
+    /// already in progress before applying it. When no
     /// bot has anything to do the session waits — it does not close — because a
     /// person may still speak. It stops only when the completion rule is met, a
     /// budget is spent, or every client and control sender has gone away.
-    pub async fn run(mut self) -> RunOutcome {
+    pub fn attach_workspace(&mut self, workspace: orgbot_runtime::workspace::Workspace) {
+        self.orchestrator.attach_workspace(workspace);
+    }
+
+    pub async fn run(self) -> RunOutcome {
+        self.run_mode(false).await
+    }
+
+    /// A batch run has no human input to wait for.
+    pub async fn run_batch(self) -> RunOutcome {
+        self.run_mode(true).await
+    }
+
+    async fn run_mode(mut self, batch: bool) -> RunOutcome {
         let mut ticker = tokio::time::interval(IDLE_TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -215,9 +364,18 @@ impl RoomSession {
             // an ending — but the room must actually rest. Continuing to take
             // turns while stalled burned the whole turn budget in milliseconds
             // and paused the room before a client could even connect.
-            let resting = match self.orchestrator.stop_condition() {
+            let outcome = self.orchestrator.stop_condition();
+            if batch {
+                if let Some(outcome) = outcome {
+                    return self.close(outcome);
+                }
+                if self.orchestrator.next_actor().is_none() {
+                    return self.close(RunOutcome::Idle);
+                }
+            }
+            let resting = match outcome {
                 None => false,
-                Some(RunOutcome::Idle | RunOutcome::Stalled { .. }) => true,
+                Some(RunOutcome::Idle | RunOutcome::Stalled { .. } | RunOutcome::Paused) => true,
                 Some(settled) => {
                     if !self.settled {
                         self.settled = true;
@@ -262,7 +420,23 @@ impl RoomSession {
         let actor = self.orchestrator.next_actor();
         let sink = actor.map(|agent| self.spawn_stream_forwarder(agent));
 
-        self.orchestrator.step(sink).await;
+        let interrupt = self.interrupt.lock().unwrap().clone();
+        let room = self.orchestrator.engine().room();
+        let limit = room.spec.limits.max_duration_ms;
+        let remaining = (limit - room.created_at.elapsed_to(Timestamp::now())).max(0) as u64;
+        let deadline = async {
+            if limit > 0 {
+                tokio::time::sleep(Duration::from_millis(remaining)).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = interrupt.cancelled() => {},
+            _ = deadline => {},
+            _ = self.orchestrator.step(sink) => {},
+        }
         self.broadcast_new_events();
         let _ = self.events.send(ServerMessage::Phase {
             phase: self.orchestrator.engine().room().phase,
@@ -288,12 +462,34 @@ impl RoomSession {
 
     /// Broadcast every log event not yet sent.
     fn broadcast_new_events(&mut self) {
+        if self.save_state().is_err() {
+            if self.orchestrator.engine().room().phase.is_live() {
+                let _ = self.orchestrator.engine_mut().apply(Command::PauseRoom {
+                    reason: "Room memory could not be saved".into(),
+                });
+            }
+            let _ = self.events.send(ServerMessage::Error {
+                message: "Room memory could not be saved. Work is paused; free storage and resume."
+                    .into(),
+            });
+        }
         let new: Vec<_> = self
             .orchestrator
             .engine()
             .events_since(self.broadcast_head)
             .cloned()
             .collect();
+        {
+            let mut published = self.published.write().unwrap();
+            published.snapshot = snapshot_of(&self.orchestrator);
+            let head = published.backlog.last().map(|e| e.seq).unwrap_or(Seq::ZERO);
+            published
+                .backlog
+                .extend(new.iter().filter(|e| e.seq > head).cloned());
+        }
+        let _ = self.events.send(ServerMessage::Phase {
+            phase: self.orchestrator.engine().room().phase,
+        });
         for envelope in new {
             self.broadcast_head = self.broadcast_head.max(envelope.seq);
             let _ = self.events.send(ServerMessage::Event {
@@ -314,13 +510,20 @@ impl RoomSession {
                 Err(mpsc::error::TryRecvError::Empty) => return ControlFlow::Continue,
                 // All handles dropped: keep running for the bots' sake, but
                 // there will be no more human input.
-                Err(mpsc::error::TryRecvError::Disconnected) => return ControlFlow::Continue,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    return ControlFlow::Stop(RunOutcome::Idle)
+                }
             }
         }
     }
 
     /// Act on one control message.
     fn handle(&mut self, control: Control) -> ControlFlow {
+        if matches!(control, Control::HumanMessage { .. } | Control::Answer { .. }) {
+            let mut token = self.input_interrupt.lock().unwrap();
+            *token = CancellationToken::new();
+            self.orchestrator.attach_input_interrupt(token.clone());
+        }
         match control {
             Control::Snapshot(reply) => {
                 let _ = reply.send(self.snapshot());
@@ -334,27 +537,61 @@ impl RoomSession {
                     .collect();
                 let _ = reply.send(events);
             }
-            Control::HumanMessage { author, body, task } => {
+            Control::HumanMessage {
+                author,
+                body,
+                task,
+                files,
+            } => {
+                let root = self
+                    .state_path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.join("attachments"));
+                let files = match orgbot_runtime::attachments::manifests(root.as_deref(), &files) {
+                    Ok(files) => files,
+                    Err(message) => {
+                        let _ = self.events.send(ServerMessage::Error {
+                            message: format!(
+                                "Message was not sent: {message}. Your files are kept."
+                            ),
+                        });
+                        return ControlFlow::Continue;
+                    }
+                };
                 let room = self.orchestrator.engine().room_id();
+                let audience = human_audience(self.orchestrator.engine(), &body);
                 let mut message = ChatMessage {
                     id: orgbot_proto::MessageId::new(),
                     room,
                     author: Author::Human { name: author },
-                    audience: Audience::Everyone,
+                    audience,
                     intent: MessageIntent::Ask,
                     body,
                     task,
                     handoff: None,
                     reply_to: None,
                     attachments: vec![],
+
+                    files,
                     sent_at: Timestamp::now(),
                 };
                 // A human message is addressed to the room and expects a reply,
                 // so it wakes the bots.
                 message.intent = MessageIntent::Ask;
-                let _ = self.orchestrator.engine_mut().apply(Command::PostMessage {
+                let completed = self.orchestrator.engine().room().phase == RoomPhase::Completed;
+                if let Err(error) = self.orchestrator.engine_mut().apply(Command::PostMessage {
                     message: Box::new(message),
-                });
+                }) {
+                    let _ = self.events.send(ServerMessage::Error {
+                        message: format!("Message was not sent: {error}"),
+                    });
+                    return ControlFlow::Continue;
+                }
+                if completed {
+                    *self.interrupt.lock().unwrap() = CancellationToken::new();
+                    self.settled = false;
+                }
                 // Someone spoke: give the room a fresh budget so it does not
                 // immediately re-declare itself stalled on old history.
                 self.orchestrator.wake();
@@ -364,7 +601,11 @@ impl RoomSession {
                 self.answer_waiting_task(task, answer);
                 self.broadcast_new_events();
             }
+            Control::Stop => return ControlFlow::Stop(RunOutcome::Idle),
             Control::Pause { reason } => {
+                if self.orchestrator.engine().room().phase.is_finished() {
+                    return ControlFlow::Continue;
+                }
                 let _ = self
                     .orchestrator
                     .engine_mut()
@@ -372,6 +613,13 @@ impl RoomSession {
                 self.broadcast_new_events();
             }
             Control::Resume => {
+                if !matches!(
+                    self.orchestrator.engine().room().phase,
+                    RoomPhase::Paused | RoomPhase::Completed
+                ) {
+                    return ControlFlow::Continue;
+                }
+                *self.interrupt.lock().unwrap() = CancellationToken::new();
                 let _ = self.orchestrator.engine_mut().apply(Command::ResumeRoom);
                 self.orchestrator.wake();
                 self.settled = false;
@@ -414,6 +662,8 @@ impl RoomSession {
             handoff: None,
             reply_to: None,
             attachments: vec![],
+
+            files: vec![],
             sent_at: Timestamp::now(),
         };
         message.intent = MessageIntent::Answer;
@@ -426,24 +676,7 @@ impl RoomSession {
 
     /// A full snapshot of the room right now.
     pub fn snapshot(&self) -> ServerMessage {
-        let engine = self.orchestrator.engine();
-        let roster = engine
-            .agents()
-            .map(|spec| AgentView {
-                id: spec.id,
-                handle: spec.handle.clone(),
-                display_name: spec.display_name.clone(),
-                roles: spec.roles.clone(),
-                status: engine.status(spec.id),
-            })
-            .collect();
-        ServerMessage::Snapshot {
-            wire_version: crate::protocol::WIRE_VERSION,
-            room: Box::new(engine.room().clone()),
-            roster,
-            tasks: engine.tasks().cloned().collect(),
-            head: engine.head(),
-        }
+        snapshot_of(&self.orchestrator)
     }
 
     /// Record that the room has finished, without disconnecting anyone.
@@ -451,10 +684,12 @@ impl RoomSession {
     /// Deliberately does not send [`ServerMessage::Closed`]: that tells clients
     /// to tear down, and a finished room should still be readable.
     fn finish(&mut self, outcome: &RunOutcome) {
+        let command = match outcome {
+            RunOutcome::OutOfTime | RunOutcome::OutOfTurns => Command::PauseRoom { reason: describe(outcome) },
+            _ => Command::CloseRoom { reason: describe(outcome) },
+        };
         if self.orchestrator.engine().room().phase != RoomPhase::Completed {
-            let _ = self.orchestrator.engine_mut().apply(Command::CloseRoom {
-                reason: describe(outcome),
-            });
+            let _ = self.orchestrator.engine_mut().apply(command);
             self.broadcast_new_events();
         }
         let _ = self.events.send(ServerMessage::Phase {
@@ -466,20 +701,57 @@ impl RoomSession {
     fn close(mut self, outcome: RunOutcome) -> RunOutcome {
         // Only a genuinely finished room emits room_closed; a pause or an idle
         // wait that ended because the last client left leaves it resumable.
-        if matches!(
-            outcome,
-            RunOutcome::Completed | RunOutcome::OutOfTurns | RunOutcome::OutOfTime
-        ) && self.orchestrator.engine().room().phase != RoomPhase::Completed
-        {
-            let _ = self.orchestrator.engine_mut().apply(Command::CloseRoom {
-                reason: describe(&outcome),
-            });
-            self.broadcast_new_events();
+        if matches!(outcome, RunOutcome::Completed | RunOutcome::OutOfTurns | RunOutcome::OutOfTime) {
+            self.finish(&outcome);
         }
         let _ = self.events.send(ServerMessage::Closed {
             reason: describe(&outcome),
         });
         outcome
+    }
+}
+
+fn snapshot_of(orchestrator: &Orchestrator) -> ServerMessage {
+    let engine = orchestrator.engine();
+    let roster = engine
+        .agents()
+        .map(|spec| AgentView {
+            id: spec.id,
+            handle: spec.handle.clone(),
+            display_name: spec.display_name.clone(),
+            roles: spec.roles.clone(),
+            status: engine.status(spec.id),
+            error_streak: engine.error_streak(spec.id),
+        })
+        .collect();
+    ServerMessage::Snapshot {
+        wire_version: crate::protocol::WIRE_VERSION,
+        room: Box::new(engine.room().clone()),
+        roster,
+        tasks: engine.tasks().cloned().collect(),
+        head: engine.head(),
+    }
+}
+
+/// Tags direct attention; the room transcript remains visible to everyone.
+fn human_audience(engine: &orgbot_engine::Engine, body: &str) -> Audience {
+    let tags: Vec<_> = body
+        .split(|c: char| !(c.is_alphanumeric() || matches!(c, '@' | '_' | '-')))
+        .filter_map(|word| word.strip_prefix('@'))
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    if tags.is_empty() || tags.iter().any(|tag| tag.eq_ignore_ascii_case("all")) {
+        return Audience::Everyone;
+    }
+    Audience::Agents {
+        agents: engine
+            .agents()
+            .filter(|agent| {
+                tags.iter()
+                    .any(|tag| tag.eq_ignore_ascii_case(&agent.handle))
+            })
+            .map(|agent| agent.id)
+            .collect(),
     }
 }
 
@@ -533,13 +805,216 @@ mod tests {
         RoomSession::build(resolved).unwrap()
     }
 
+    #[tokio::test]
+    async fn exhausted_budgets_pause_unfinished_work_and_resume_without_losing_it() {
+        for outcome in [RunOutcome::OutOfTime, RunOutcome::OutOfTurns] {
+            let (mut session, _) = session();
+            let task = session.orchestrator.engine().tasks().next().unwrap().id;
+            session.finish(&outcome);
+            assert_eq!(session.orchestrator.engine().room().phase, RoomPhase::Paused);
+            assert!(session.orchestrator.engine().task(task).is_some());
+            assert!(!session.orchestrator.engine().log().iter().any(|e| matches!(e.event, orgbot_proto::Event::RoomClosed { .. })));
+            session.handle(Control::Resume);
+            assert_eq!(session.orchestrator.engine().room().phase, RoomPhase::Running);
+            assert!(session.orchestrator.engine().task(task).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_rooms_answer_followups_and_resume_saved_unread_requests() {
+        for restored_request in [false, true] {
+            let (mut session, mut handle) = session();
+            let task = session.orchestrator.engine().tasks().next().unwrap().id;
+            session
+                .orchestrator
+                .engine_mut()
+                .apply(Command::CancelTask {
+                    task,
+                    reason: "prior work settled".into(),
+                })
+                .unwrap();
+            session.finish(&RunOutcome::Completed);
+            session.settled = true;
+            let id = session.orchestrator.engine().room_id();
+            let dir = std::env::temp_dir().join(format!("orgbot-continue-{id}"));
+            if restored_request {
+                // Reproduce an older checkpoint: saved human input exists but
+                // the phase is still completed and no bot consumed the request.
+                session.handle(Control::HumanMessage {
+                    author: "Alex".into(),
+                    body: "Read the context I already sent".into(),
+                    task: None,
+                    files: vec![],
+                });
+                session
+                    .orchestrator
+                    .engine_mut()
+                    .apply(Command::CloseRoom {
+                        reason: "old completed state".into(),
+                    })
+                    .unwrap();
+                std::fs::create_dir_all(&dir).unwrap();
+                session.state_path = Some(dir.join("state.json"));
+                session.save_state().unwrap();
+                let mut config = RoomConfig::parse(SCRIPTED_ROOM, "test.toml").unwrap();
+                config.room.state_path = session.state_path.clone();
+                (session, handle) = RoomSession::build(config.resolve().unwrap()).unwrap();
+                assert_eq!(session.orchestrator.engine().room_id(), id);
+            }
+            let mut events = handle.subscribe();
+            let run = tokio::spawn(session.run());
+            for pass in 0..2 {
+                if restored_request && pass == 0 {
+                    handle.send(Control::Resume).await;
+                } else {
+                    handle
+                        .send(Control::HumanMessage {
+                            author: "Alex".into(),
+                            body: format!("Follow-up {pass}"),
+                            task: None,
+                            files: vec![],
+                        })
+                        .await;
+                }
+                let mut answered = false;
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        match events.recv().await.unwrap() {
+                            ServerMessage::Event { envelope } => {
+                                if let orgbot_proto::Event::MessagePosted { message } = envelope.event {
+                                    if message.author.agent().is_some() {
+                                        answered = true;
+                                    }
+                                }
+                            }
+                            ServerMessage::Phase {
+                                phase: RoomPhase::Completed,
+                            } if answered => break,
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .expect(
+                    "a completed board must not swallow a new request or prevent settling again",
+                );
+                let ServerMessage::Snapshot { room, .. } = handle.snapshot().await.unwrap() else {
+                    panic!("snapshot")
+                };
+                assert_eq!(room.id, id);
+                assert_eq!(room.phase, RoomPhase::Completed);
+            }
+            // An explicit pause continues to park messages until Resume.
+            // Post directly because Pause ignores an already-completed session.
+            run.abort();
+            let _ = run.await;
+            if dir.exists() {
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+        let (mut session, _) = session();
+        session.handle(Control::Pause {
+            reason: "owner paused".into(),
+        });
+        session.handle(Control::HumanMessage {
+            author: "Alex".into(),
+            body: "Kept until resume".into(),
+            task: None,
+            files: vec![],
+        });
+        assert_eq!(
+            session.orchestrator.engine().room().phase,
+            RoomPhase::Paused
+        );
+    }
+
+    #[test]
+    fn human_tags_route_attention_and_ignore_email_addresses() {
+        let (session, _handle) = session();
+        let engine = session.orchestrator.engine();
+        let lead = engine.agent_by_handle("lead").unwrap().id;
+        assert_eq!(
+            human_audience(engine, "@LEAD, please check"),
+            Audience::Agents { agents: vec![lead] }
+        );
+        assert_eq!(
+            human_audience(engine, "@lead @lead check"),
+            Audience::Agents { agents: vec![lead] }
+        );
+        assert_eq!(
+            human_audience(engine, "@missing check"),
+            Audience::Agents { agents: vec![] }
+        );
+        assert_eq!(human_audience(engine, "@all hello"), Audience::Everyone);
+        assert_eq!(
+            human_audience(engine, "mail foo@lead.example"),
+            Audience::Everyone
+        );
+    }
+
+    #[test]
+    fn prompt_labels_the_actual_recipient_and_exposes_existing_artifacts() {
+        let (mut session, _handle) = session();
+        let engine = session.orchestrator.engine_mut();
+        let agent = engine.agent_by_handle("lead").unwrap().clone();
+        let task = engine.tasks().next().unwrap().id;
+        engine
+            .apply(Command::ClaimTask { task, by: agent.id })
+            .unwrap();
+        engine
+            .apply(Command::StartTask { task, by: agent.id })
+            .unwrap();
+        let outcome = orgbot_tools::dispatch(
+            engine,
+            agent.id,
+            "add_artifact",
+            &serde_json::json!({
+                "task":task, "name":"Product context", "content":"A social app, not a work tracker."
+            }),
+        );
+        assert!(!outcome.is_error, "{}", outcome.content);
+        engine
+            .apply(Command::PostMessage {
+                message: Box::new(ChatMessage {
+                    id: orgbot_proto::MessageId::new(),
+                    room: engine.room_id(),
+                    author: Author::Human {
+                        name: "Alex".into(),
+                    },
+                    audience: Audience::Agents { agents: vec![] },
+                    intent: MessageIntent::Ask,
+                    body: "hello another bot".into(),
+                    task: None,
+                    handoff: None,
+                    reply_to: None,
+                    attachments: vec![],
+
+                    files: vec![],
+                    sent_at: Timestamp::now(),
+                }),
+            })
+            .unwrap();
+        let prompt = orgbot_runtime::prompt::situation(engine, agent.id, Seq::ZERO);
+        assert!(prompt.contains("Alex (to other bots): hello another bot"));
+        assert!(!prompt.contains("Alex (to you)"));
+        assert!(prompt.contains("[artifact available]"));
+        assert!(prompt.contains("Product context"));
+    }
+
     #[test]
     fn a_built_session_has_seeded_its_board_and_started() {
         let (session, _handle) = session();
-        assert_eq!(session.orchestrator.engine().room().phase, RoomPhase::Running);
+        assert_eq!(
+            session.orchestrator.engine().room().phase,
+            RoomPhase::Running
+        );
         assert_eq!(session.orchestrator.engine().tasks().count(), 1);
         let task = session.orchestrator.engine().tasks().next().unwrap();
-        assert_eq!(task.state, TaskState::Ready, "a seeded task with open=true is claimable");
+        assert_eq!(
+            task.state,
+            TaskState::Ready,
+            "a seeded task with open=true is claimable"
+        );
     }
 
     #[test]
@@ -611,6 +1086,7 @@ mod tests {
 
         handle
             .send(Control::HumanMessage {
+                files: vec![],
                 author: "Alex".into(),
                 body: "any progress?".into(),
                 task: None,
@@ -747,6 +1223,7 @@ mod resting_tests {
         assert!(
             handle
                 .send(Control::HumanMessage {
+                    files: vec![],
                     author: "Tester".into(),
                     body: "hello?".into(),
                     task: None,

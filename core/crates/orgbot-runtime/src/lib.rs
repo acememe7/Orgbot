@@ -36,6 +36,8 @@ pub mod mcp;
 pub mod orchestrator;
 pub mod prompt;
 pub mod relay;
+pub mod workspace;
+pub mod attachments;
 
 pub use bot::{Bot, TurnReport};
 pub use mcp::{room_tools_for, McpCall, McpSession};
