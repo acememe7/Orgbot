@@ -1110,7 +1110,12 @@ impl Engine {
             }
 
             Command::RecordTurn { agent } => self.record_turn(agent),
-            Command::ReportError { agent, task, error } => self.report_error(agent, task, error),
+            Command::ReportError {
+                agent,
+                task,
+                error,
+                permanent,
+            } => self.report_error(agent, task, error, permanent),
             Command::Tick { now } => self.tick(now),
         };
         // Any command may have moved a task, and a task moving can free
@@ -2051,6 +2056,7 @@ impl Engine {
         agent: AgentId,
         task: Option<TaskId>,
         error: String,
+        permanent: bool,
     ) -> Result<Vec<EventEnvelope>> {
         self.require_agent(agent)?;
         let attempt = self.error_streak.entry(agent).or_insert(0);
@@ -2064,7 +2070,10 @@ impl Engine {
             attempt,
         })];
 
-        if attempt >= self.room.spec.limits.max_consecutive_errors {
+        // A misconfiguration does not get three goes. The next two attempts
+        // would fail identically, and until they do the bot sits in the roster
+        // looking free while being unable to take a turn.
+        if permanent || attempt >= self.room.spec.limits.max_consecutive_errors {
             events.extend(self.set_status(agent, AgentStatus::Faulted));
             // Hand back whatever the faulted bot was holding so the room can
             // continue without it.
@@ -2072,7 +2081,11 @@ impl Engine {
                 if let Ok(released) = self.transition(
                     held,
                     TaskTransition::Release {
-                        reason: format!("{} faulted after {attempt} errors", agent.short()),
+                        reason: if permanent {
+                            format!("{} cannot run as configured", agent.short())
+                        } else {
+                            format!("{} faulted after {attempt} errors", agent.short())
+                        },
                     },
                     Some(agent),
                 ) {

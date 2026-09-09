@@ -224,7 +224,7 @@ class ModelCatalog {
       final slug = entry['slug'];
       if (slug is! String || slug.isEmpty) continue;
       // Hidden and internal entries are in the cache but are not choices.
-      if (entry['visibility'] == 'hidden') continue;
+      if (_isHidden(entry['visibility'])) continue;
       final display = entry['display_name'];
       options.add(
         ModelOption(
@@ -266,6 +266,15 @@ class ModelCatalog {
     return ModelList(options, ModelSource.live);
   }
 
+  /// Whether a model entry is one the provider does not mean to offer.
+  ///
+  /// The Codex catalogue marks these `hide`, not `hidden` — a filter written
+  /// against the wrong spelling matched nothing and put internal entries like
+  /// `gpt-reserve` in the picker, where choosing one gets a bot rejected on
+  /// every turn.
+  static bool _isHidden(Object? visibility) =>
+      visibility == 'hide' || visibility == 'hidden';
+
   /// The Codex client version the models endpoint is asked for. It is a
   /// required query parameter, and the backend tailors the list to it.
   static const String _codexClientVersion = '0.153.2';
@@ -300,7 +309,7 @@ class ModelCatalog {
       if (entry is! Map) continue;
       final slug = entry['slug'];
       if (slug is! String || slug.isEmpty) continue;
-      if (entry['visibility'] == 'hidden') continue;
+      if (_isHidden(entry['visibility'])) continue;
       final display = entry['display_name'];
       options.add(
         ModelOption(

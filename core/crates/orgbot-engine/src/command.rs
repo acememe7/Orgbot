@@ -197,6 +197,15 @@ pub enum Command {
         agent: AgentId,
         task: Option<TaskId>,
         error: String,
+        /// Whether the same request could never succeed — a model that does
+        /// not exist, a credential the backend refuses, a configuration this
+        /// build cannot honour.
+        ///
+        /// Retrying one of those is not resilience, it is three wasted turns
+        /// followed by the same answer, and in between the bot looks available
+        /// while being incapable of doing anything.
+        #[serde(default)]
+        permanent: bool,
     },
     /// Advance the clock: expire stale handoffs and sweep for deadlocks.
     ///

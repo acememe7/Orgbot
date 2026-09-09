@@ -258,6 +258,9 @@ impl Bot {
                         agent: self.spec.id,
                         task: engine.active_tasks_of(self.spec.id).first().copied(),
                         error: error.to_string(),
+                        // A model that does not exist, or a credential the
+                        // backend refuses, will answer the same way next turn.
+                        permanent: !error.is_retryable(),
                     });
                     return Err(error);
                 }

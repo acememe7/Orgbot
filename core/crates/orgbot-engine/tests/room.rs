@@ -731,12 +731,13 @@ fn a_bot_that_keeps_failing_is_faulted_and_gives_its_work_back() {
             agent: worker,
             task: Some(task),
             error: "provider timed out".into(),
+            permanent: false,
         });
     }
 
     assert_eq!(
         f.engine.status(worker),
-        orgbot_proto::AgentStatus::Faulted
+        orgbot_proto::agent::AgentStatus::Faulted
     );
     assert_eq!(
         f.state(task),
@@ -2605,4 +2606,90 @@ fn free_bots_beside_work_they_can_take_is_wasting_capacity() {
     let utilization = f.engine.utilization();
     assert!(utilization.is_wasting_capacity());
     assert!(!utilization.is_short_handed());
+}
+
+// ------------------------------------------------- a bot that cannot run
+//
+// One bot in a real room was configured with a model its account is not
+// offered. Every turn it took was rejected identically, three times before it
+// faulted, and in between it sat in the roster looking free while being unable
+// to do anything at all.
+
+/// A misconfiguration does not get three goes.
+#[test]
+fn a_bot_that_cannot_run_faults_on_the_first_attempt() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("write the notes", None);
+    f.apply(Command::ClaimTask { task, by: worker });
+
+    f.apply(Command::ReportError {
+        agent: worker,
+        task: Some(task),
+        error: "codex rejected the request: the model `gpt-5.4-mini` is not \
+                supported when using Codex with a ChatGPT account"
+            .into(),
+        permanent: true,
+    });
+
+    assert_eq!(
+        f.engine.status(worker),
+        orgbot_proto::agent::AgentStatus::Faulted,
+        "a request that can never succeed must not be retried"
+    );
+    assert_eq!(
+        f.state(task),
+        TaskState::Ready,
+        "and whatever it held goes back to the pool"
+    );
+}
+
+/// A network blip still gets its retries.
+#[test]
+fn a_transient_failure_is_still_retried() {
+    let mut f = fixture();
+    let worker = f.worker;
+
+    f.apply(Command::ReportError {
+        agent: worker,
+        task: None,
+        error: "transport error talking to codex: request timed out".into(),
+        permanent: false,
+    });
+
+    assert_ne!(
+        f.engine.status(worker),
+        orgbot_proto::agent::AgentStatus::Faulted,
+        "one timeout is not a reason to give up on a bot"
+    );
+}
+
+/// A faulted bot is not free capacity, however idle it looks.
+#[test]
+fn a_faulted_bot_is_not_counted_as_available() {
+    let mut f = fixture();
+    let worker = f.worker;
+    f.open_task("anyone could do this", None);
+
+    let before = f.engine.utilization();
+    assert!(before.bots.iter().any(|bot| bot.free));
+
+    f.apply(Command::ReportError {
+        agent: worker,
+        task: None,
+        error: "the model does not exist".into(),
+        permanent: true,
+    });
+
+    let after = f.engine.utilization();
+    let state = after
+        .bots
+        .iter()
+        .find(|bot| bot.agent == worker)
+        .expect("still on the roster");
+    assert_eq!(state.doing, "faulted");
+    assert!(
+        !state.free,
+        "a bot that cannot take a turn is not spare capacity"
+    );
 }

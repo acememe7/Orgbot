@@ -196,6 +196,15 @@ fn find_str(value: &Value, name: &str) -> Option<String> {
     }
 }
 
+/// Whether a model entry is one the provider does not mean to offer.
+///
+/// The Codex catalogue marks these `hide`, not `hidden`. A filter written
+/// against the wrong spelling matched nothing and carried internal entries
+/// across to a phone, where picking one gets the bot rejected every turn.
+fn is_hidden(visibility: Option<&str>) -> bool {
+    matches!(visibility, Some("hide" | "hidden"))
+}
+
 /// Read a CLI's cached model list, if it keeps one.
 fn cached_models(path: PathBuf) -> Vec<PairedModel> {
     let Some(root) = read_json(path) else {
@@ -221,7 +230,7 @@ fn cached_models(path: PathBuf) -> Vec<PairedModel> {
     };
     entries
         .iter()
-        .filter(|entry| entry.get("visibility").and_then(Value::as_str) != Some("hidden"))
+        .filter(|entry| !is_hidden(entry.get("visibility").and_then(Value::as_str)))
         .filter_map(|entry| {
             let id = entry
                 .get("slug")
@@ -286,7 +295,7 @@ mod tests {
             &path,
             r#"{"models":[
                 {"slug":"good","display_name":"Good"},
-                {"slug":"secret","visibility":"hidden"}
+                {"slug":"secret","visibility":"hide"}
             ]}"#,
         )
         .unwrap();
