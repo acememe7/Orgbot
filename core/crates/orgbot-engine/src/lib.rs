@@ -31,10 +31,12 @@
 
 pub mod command;
 pub mod deadlock;
+pub mod digest;
 pub mod engine;
 pub mod error;
 
 pub use command::Command;
 pub use deadlock::WaitGraph;
+pub use digest::{digest, BoardCounts, ObjectiveCard, Progress, RoomDigest};
 pub use engine::Engine;
 pub use error::{EngineError, Result};

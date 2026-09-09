@@ -282,6 +282,15 @@ impl Engine {
     }
 
     /// Every task on the board.
+    /// What a person should see instead of the raw board.
+    ///
+    /// Objectives, progress and the decisions only they can make. The full
+    /// graph stays available through [`Engine::tasks`] for the bots, which
+    /// need all of it.
+    pub fn digest(&self) -> crate::digest::RoomDigest {
+        crate::digest::digest(self.tasks())
+    }
+
     pub fn tasks(&self) -> impl Iterator<Item = &Task> {
         self.tasks.values()
     }
