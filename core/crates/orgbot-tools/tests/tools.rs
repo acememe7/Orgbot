@@ -735,3 +735,112 @@ fn an_ordinary_task_needs_no_kind_at_all() {
     assert_eq!(task.kind, TaskKind::Task);
     assert_eq!(task.lineage, Lineage::default());
 }
+
+// ------------------------------------------------- artifacts arrive whole
+//
+// The board's worst quiet failure: read_artifact returned a preview, so an
+// inspector could read two thirds of an architecture document, see no sign of
+// that, and approve it.
+
+/// A long deliverable must announce that it is partial.
+#[test]
+fn a_long_artifact_is_handed_over_in_named_parts() {
+    let mut f = fixture();
+    let task = f.make(json!({ "title": "write the design", "brief": "long doc" }));
+    f.ok(f.worker, "claim_task", json!({ "task": task }));
+    f.ok(f.worker, "start_task", json!({ "task": task }));
+    let told = f.ok(
+        f.worker,
+        "add_artifact",
+        json!({
+            "task": task,
+            "name": "architecture.md",
+            "content": "x".repeat(20_000),
+        }),
+    );
+    let artifact = id_in(&told, "art");
+
+    let read = f.ok(f.worker, "read_artifact", json!({ "artifact": artifact }));
+    assert!(read.contains("BEGIN PART 1/3"), "got: {}", &read[..read.len().min(200)]);
+    assert!(
+        read.contains("not the whole document"),
+        "a partial read must say so"
+    );
+    assert!(read.contains("part=2"), "and say how to continue");
+    assert!(
+        !read.contains('…'),
+        "never a bare ellipsis standing in for the rest"
+    );
+}
+
+/// The last part says it is the last, so a reader knows when to stop.
+#[test]
+fn the_final_part_closes_the_document() {
+    let mut f = fixture();
+    let task = f.make(json!({ "title": "write the design", "brief": "long doc" }));
+    f.ok(f.worker, "claim_task", json!({ "task": task }));
+    f.ok(f.worker, "start_task", json!({ "task": task }));
+    let told = f.ok(
+        f.worker,
+        "add_artifact",
+        json!({
+            "task": task,
+            "name": "architecture.md",
+            "content": "x".repeat(20_000),
+        }),
+    );
+    let artifact = id_in(&told, "art");
+
+    let last = f.ok(
+        f.worker,
+        "read_artifact",
+        json!({ "artifact": artifact, "part": 3 }),
+    );
+    assert!(last.contains("END PART 3/3"));
+    assert!(last.contains("That was the last part"));
+}
+
+/// A short one still reads as a single whole document.
+#[test]
+fn a_short_artifact_reads_as_one_piece() {
+    let mut f = fixture();
+    let task = f.make(json!({ "title": "write a note", "brief": "short" }));
+    f.ok(f.worker, "claim_task", json!({ "task": task }));
+    f.ok(f.worker, "start_task", json!({ "task": task }));
+    let told = f.ok(
+        f.worker,
+        "add_artifact",
+        json!({ "task": task, "name": "notes.md", "content": "all of it" }),
+    );
+    let artifact = id_in(&told, "art");
+
+    let read = f.ok(f.worker, "read_artifact", json!({ "artifact": artifact }));
+    assert!(read.contains("BEGIN ("));
+    assert!(read.contains("all of it"));
+    assert!(!read.contains("PART"), "no part machinery for a short doc");
+}
+
+/// What is being inspected must not change under the inspector.
+#[test]
+fn submitting_for_review_freezes_the_artifacts() {
+    let mut f = fixture();
+    let task = f.make(json!({ "title": "write the notes", "brief": "do it" }));
+    f.ok(f.worker, "claim_task", json!({ "task": task }));
+    f.ok(f.worker, "start_task", json!({ "task": task }));
+    let told = f.ok(
+        f.worker,
+        "add_artifact",
+        json!({ "task": task, "name": "notes.md", "content": "v1" }),
+    );
+    let artifact = id_in(&told, "art");
+
+    f.ok(
+        f.worker,
+        "submit_for_review",
+        json!({ "task": task, "artifacts": [artifact.clone()] }),
+    );
+
+    let id: orgbot_proto::ArtifactId = artifact.parse().expect("an artifact id");
+    let sealed = f.engine.artifact(id).expect("artifact exists");
+    assert!(sealed.sealed, "the reviewed version is frozen");
+}

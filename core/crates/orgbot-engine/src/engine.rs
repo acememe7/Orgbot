@@ -1145,6 +1145,14 @@ impl Engine {
                 });
             }
         }
+        // Freeze what is being inspected. An artifact that changes under the
+        // inspector means the verdict describes something that no longer
+        // exists, and neither party can tell.
+        for artifact in &artifacts {
+            if let Some(record) = self.artifacts.get_mut(artifact) {
+                record.sealed = true;
+            }
+        }
         self.transition(
             task,
             TaskTransition::SubmitForReview { artifacts },

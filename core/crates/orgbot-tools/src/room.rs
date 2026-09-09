@@ -17,7 +17,7 @@
 use orgbot_engine::{Command, Engine, EngineError};
 use orgbot_proto::graph::{Lineage, TaskKind, TaskOrigin};
 use orgbot_proto::agent::AgentSpec;
-use orgbot_proto::artifact::ArtifactBody;
+use orgbot_proto::artifact::{ArtifactBody, PART_CHARS};
 use orgbot_proto::handoff::{HandoffKind, Recipient};
 use orgbot_proto::review::{Finding, Severity};
 use orgbot_proto::task::{BlockReason, Priority};
@@ -155,9 +155,21 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
         tool(
             "read_artifact",
             "Read a deliverable by id — yours or another bot's. Use this to pick up \
-             the context attached to a handoff before starting work.",
+             the context attached to a handoff before starting work.\n\
+             A long artifact arrives in numbered parts. If what you get says it is \
+             part 1 of 3, you have not read the document: call this again with \
+             `part` until you reach the last one. Never review or build on a \
+             partial read.",
             schema::object(
-                vec![("artifact", schema::string("The artifact id."))],
+                vec![
+                    ("artifact", schema::string("The artifact id.")),
+                    (
+                        "part",
+                        schema::string(
+                            "Which part to read, from 1. Defaults to the first.",
+                        ),
+                    ),
+                ],
                 &["artifact"],
             ),
         ),
@@ -879,14 +891,25 @@ fn read_artifact(engine: &Engine, input: &Value) -> ToolOutcome {
         Ok(id) => id,
         Err(message) => return ToolOutcome::error(message),
     };
+    let part = input
+        .get("part")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .clamp(1, u64::from(u32::MAX)) as u32;
+
     match engine.artifact(id) {
-        Some(artifact) => ToolOutcome::ok(format!(
-            "{} ({}), by {}:\n{}",
-            artifact.name,
-            artifact.body.kind(),
-            artifact.author.short(),
-            artifact.body.preview(8_000),
-        )),
+        Some(artifact) => {
+            let heading = format!(
+                "{} ({}), by {}:",
+                artifact.name,
+                artifact.body.kind(),
+                artifact.author.short(),
+            );
+            // Never a bare preview. A reviewer who reads two thirds of a
+            // document with no sign that anything is missing, and approves it,
+            // has approved something nobody read.
+            ToolOutcome::ok(artifact.body.excerpt(part, PART_CHARS).render(&heading))
+        }
         None => ToolOutcome::error(format!("There is no artifact {id}.")),
     }
 }
