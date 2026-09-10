@@ -20,6 +20,9 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
+        // flutter_local_notifications schedules against java.time, which needs
+        // desugaring to run on the older API levels this app still supports.
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -76,4 +79,9 @@ gradle.taskGraph.whenReady {
     if (allTasks.any { it.name == "assembleRelease" || it.name == "bundleRelease" } && !releaseKeyFile.exists()) {
         throw GradleException("Release signing requires android/key.properties. Use a debug build for development installs.")
     }
+}
+
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
