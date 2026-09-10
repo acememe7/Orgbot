@@ -29,6 +29,14 @@ pub enum Reason {
     RoomFinished,
     /// The room stopped and cannot continue on its own.
     RoomStuck,
+    /// A bot asked you something directly.
+    Mentioned,
+    /// The room hit its turn budget and is waiting to be resumed.
+    ///
+    /// Its own reason because it is not a fault and not a finish: the room is
+    /// fine and simply out of the allowance it was given. Left unsaid it
+    /// becomes a silent stall — one room sat like this for six hours.
+    BudgetSpent,
 }
 
 impl Reason {
@@ -40,6 +48,8 @@ impl Reason {
             Self::MilestoneReached => "An objective is done",
             Self::RoomFinished => "The room finished",
             Self::RoomStuck => "The room cannot continue",
+            Self::Mentioned => "A bot is asking you something",
+            Self::BudgetSpent => "The room is out of turns",
         }
     }
 
@@ -50,7 +60,11 @@ impl Reason {
     pub const fn is_urgent(self) -> bool {
         matches!(
             self,
-            Self::DecisionNeeded | Self::SecurityIncident | Self::RoomStuck
+            Self::DecisionNeeded
+                | Self::SecurityIncident
+                | Self::RoomStuck
+                | Self::Mentioned
+                | Self::BudgetSpent
         )
     }
 }
@@ -65,6 +79,18 @@ pub fn reason_for(event: &Event) -> Option<Reason> {
         // A question was raised that a standing rule did not already answer.
         Event::DecisionAsked { .. } => Some(Reason::DecisionNeeded),
         Event::RoomClosed { .. } => Some(Reason::RoomFinished),
+        // A bot asking a question, or the room reporting it has stopped. Both
+        // are things a person is waiting to be told rather than expected to
+        // discover by opening the app.
+        Event::MessagePosted { message } => {
+            if message.intent.expects_reply() && message.author.agent().is_some() {
+                Some(Reason::Mentioned)
+            } else if message.body.contains("turn budget exhausted") {
+                Some(Reason::BudgetSpent)
+            } else {
+                None
+            }
+        }
         // A deadlock the room broke by itself is not news; one it reports and
         // cannot resolve is.
         Event::DeadlockDetected { resolution, .. } => {
@@ -110,6 +136,15 @@ pub fn notification_for(event: &Event) -> Option<Notification> {
             "Work is waiting in a circle and the room could not break it.".into()
         }
         Event::TaskTransitioned { title, .. } => format!("\"{title}\" is delivered."),
+        Event::MessagePosted { message } => {
+            if reason == Reason::BudgetSpent {
+                "It has used the turns it was given. Resume it to grant more, \
+                 or raise its budget."
+                    .into()
+            } else {
+                message.body.chars().take(160).collect()
+            }
+        }
         _ => String::new(),
     };
     Some(Notification {
@@ -221,5 +256,76 @@ mod tests {
         ] {
             assert!(!reason.headline().is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::*;
+    use orgbot_proto::chat::{Audience, Author, ChatMessage, MessageIntent};
+    use orgbot_proto::{AgentId, MessageId, RoomId, Timestamp};
+
+    fn said(body: &str, intent: MessageIntent, from_bot: bool) -> Event {
+        Event::MessagePosted {
+            message: Box::new(ChatMessage {
+                id: MessageId::new(),
+                room: RoomId::new(),
+                author: if from_bot {
+                    Author::Agent { agent: AgentId::new() }
+                } else {
+                    Author::System
+                },
+                audience: Audience::Everyone,
+                intent,
+                body: body.into(),
+                task: None,
+                handoff: None,
+                reply_to: None,
+                attachments: vec![],
+                files: vec![],
+                sent_at: Timestamp::now(),
+            }),
+        }
+    }
+
+    /// A bot asking a question is the clearest case of "this needs you".
+    #[test]
+    fn a_bot_asking_something_reaches_you() {
+        let event = said("Which registry should I use?", MessageIntent::Ask, true);
+        let notification = notification_for(&event).expect("worth telling");
+        assert_eq!(notification.reason, Reason::Mentioned);
+        assert!(notification.urgent);
+        assert!(notification.body.contains("Which registry"));
+    }
+
+    /// Bots talking among themselves is not.
+    #[test]
+    fn bots_reporting_progress_stay_quiet() {
+        for chatter in [
+            said("Claimed it, starting now.", MessageIntent::Say, true),
+            said("Nothing actionable for me.", MessageIntent::Say, true),
+            said("Done, submitting for review.", MessageIntent::Status, true),
+        ] {
+            assert_eq!(reason_for(&chatter), None, "{chatter:?} should stay quiet");
+        }
+    }
+
+    /// A room out of turns is stopped and waiting, which is not a fault and
+    /// not a finish — and left unsaid it is a silent stall.
+    #[test]
+    fn running_out_of_turns_is_reported_as_its_own_thing() {
+        let event = said("room paused: turn budget exhausted", MessageIntent::SystemNotice, false);
+        let notification = notification_for(&event).expect("worth telling");
+        assert_eq!(notification.reason, Reason::BudgetSpent);
+        assert!(notification.urgent, "it is waiting on you to act");
+        assert!(notification.body.contains("Resume it"));
+    }
+
+    #[test]
+    fn ordinary_phase_notices_stay_quiet() {
+        assert_eq!(
+            reason_for(&said("room running: resumed", MessageIntent::SystemNotice, false)),
+            None
+        );
     }
 }

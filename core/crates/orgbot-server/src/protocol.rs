@@ -127,6 +127,14 @@ pub enum ServerMessage {
     Event {
         /// The event and its position.
         envelope: Box<EventEnvelope>,
+        /// Set when this event is one a person should be told about.
+        ///
+        /// Decided here rather than in each client: the judgement about what
+        /// is worth interrupting someone for belongs beside the events, and
+        /// two implementations of it would drift — the one that drifted being
+        /// the one that woke you at three in the morning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notification: Option<orgbot_engine::Notification>,
     },
     /// A live model delta, for showing a bot typing. Not part of the durable
     /// log — a reconnecting client never replays these.

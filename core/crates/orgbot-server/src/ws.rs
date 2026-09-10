@@ -132,6 +132,10 @@ async fn replay(
             sender,
             &ServerMessage::Event {
                 envelope: Box::new(envelope),
+                // Replaying history must not buzz anyone: these already
+                // happened, and a reconnect would otherwise repeat every
+                // alert in the log.
+                notification: None,
             },
         )
         .await?;

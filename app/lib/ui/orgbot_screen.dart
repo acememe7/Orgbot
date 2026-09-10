@@ -716,6 +716,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
     final goal = TextEditingController(text: existing?.goal ?? '');
     final path = TextEditingController(text: existing?.path);
     var workspace = existing?.workspace.copy() ?? WorkspaceConfig();
+    var maxTurns = existing?.maxTurns ?? defaultMaxTurns;
     final selected = <String, String>{
       for (final slot in existing?.bots ?? <RoomSlot>[]) slot.botId: '',
     }; // botId -> role
@@ -746,6 +747,32 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                         controller: goal,
                         maxLines: 3,
                         decoration: const InputDecoration(labelText: 'Goal'),
+                      ),
+                      const SizedBox(height: 12),
+                      // A spend control, not a deadline. It was fixed at 500,
+                      // which a busy room spends in about a day — and then it
+                      // stopped and waited, sometimes for hours, for someone
+                      // to notice.
+                      DropdownButtonFormField<int>(
+                        initialValue: turnBudgetChoices.contains(maxTurns)
+                            ? maxTurns
+                            : defaultMaxTurns,
+                        decoration: const InputDecoration(
+                          labelText: 'Turn budget',
+                          helperText: 'Pauses the room when spent, so it never '
+                              'runs up a bill unwatched. You will be told.',
+                        ),
+                        items: [
+                          for (final choice in turnBudgetChoices)
+                            DropdownMenuItem(
+                              value: choice,
+                              child: Text(
+                                choice == 0 ? 'No limit' : '$choice turns',
+                              ),
+                            ),
+                        ],
+                        onChanged: (value) =>
+                            setLocal(() => maxTurns = value ?? defaultMaxTurns),
                       ),
                       const SizedBox(height: 12),
                     ],
@@ -868,6 +895,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                   name: name.text.trim(),
                   goal: goal.text.trim(),
                   path: path.text.trim(),
+                  maxTurns: maxTurns,
                   tasks: [goal.text.trim()].where((t) => t.isNotEmpty).toList(),
                   bots: selected.keys.map(RoomSlot.new).toList(),
                 );

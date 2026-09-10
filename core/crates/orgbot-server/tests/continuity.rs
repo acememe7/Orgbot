@@ -76,7 +76,7 @@ async fn restart_restores_identity_chat_and_bot_memory_without_running_again() {
         .await;
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if let ServerMessage::Event { envelope } = events.recv().await.unwrap() {
+            if let ServerMessage::Event { envelope, .. } = events.recv().await.unwrap() {
                 if let Event::MessagePosted { message } = envelope.event {
                     if message.body == "I remember the room." {
                         break;
@@ -205,7 +205,7 @@ async fn attachments_reach_bot_memory_and_survive_restart_with_room_boundaries()
         .await;
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if let ServerMessage::Event { envelope } = events.recv().await.unwrap() {
+            if let ServerMessage::Event { envelope, .. } = events.recv().await.unwrap() {
                 if let Event::MessagePosted { message } = envelope.event {
                     if message.body == "I remember the room." {
                         break;

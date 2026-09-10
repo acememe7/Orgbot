@@ -20,7 +20,7 @@ pub async fn run_headless(resolved: ResolvedRoom, quiet: bool) -> anyhow::Result
     let printer = tokio::spawn(async move {
         while let Ok(message) = events.recv().await {
             match &message {
-                ServerMessage::Event { envelope } => {
+                ServerMessage::Event { envelope, .. } => {
                     if let Some(line) = render(&envelope.event) {
                         if !quiet {
                             println!("{line}");

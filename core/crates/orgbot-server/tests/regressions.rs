@@ -369,7 +369,7 @@ async fn broken_api_streams_recover_without_replaying_workspace_operations() {
                 ServerMessage::Stream { event: orgbot_providers::StreamEvent::Retry { attempt, max_retries }, .. } => {
                     assert_eq!(max_retries, 2); retries.push(attempt);
                 }
-                ServerMessage::Event { envelope } => match &envelope.event {
+                ServerMessage::Event { envelope, .. } => match &envelope.event {
                     Event::AgentErrored { error, .. } => panic!("recovery must not fault the bot: {error}"),
                     Event::MessagePosted { message } if message.body == "Recovered after reconnecting." => break,
                     _ => {},

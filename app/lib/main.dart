@@ -1,3 +1,6 @@
+import 'state/room_store.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'ui/polish.dart';
 import 'orgbot/credentials.dart';
@@ -176,6 +179,9 @@ class _OrgBotAppState extends State<OrgBotApp> {
   }
 
   Future<void> _initialize() async {
+    // Ask once, early. A room that stops overnight should be able to say so
+    // rather than be discovered in the morning.
+    unawaited(RoomStore.attentions.start());
     try {
       await _credentials.load();
       await _library.load();

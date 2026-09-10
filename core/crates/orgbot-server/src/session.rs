@@ -516,6 +516,7 @@ impl RoomSession {
         for envelope in new {
             self.broadcast_head = self.broadcast_head.max(envelope.seq);
             let _ = self.events.send(ServerMessage::Event {
+                notification: orgbot_engine::notification_for(&envelope.event),
                 envelope: Box::new(envelope),
             });
         }
@@ -986,7 +987,7 @@ mod tests {
                 tokio::time::timeout(Duration::from_secs(3), async {
                     loop {
                         match events.recv().await.unwrap() {
-                            ServerMessage::Event { envelope } => {
+                            ServerMessage::Event { envelope, .. } => {
                                 if let orgbot_proto::Event::MessagePosted { message } = envelope.event {
                                     if message.author.agent().is_some() {
                                         answered = true;
@@ -1207,7 +1208,7 @@ mod tests {
 
         let mut saw_message = false;
         while let Ok(message) = events.try_recv() {
-            if let ServerMessage::Event { envelope } = message {
+            if let ServerMessage::Event { envelope, .. } = message {
                 if let orgbot_proto::Event::MessagePosted { message } = &envelope.event {
                     if message.body.contains("any progress") {
                         saw_message = true;
@@ -1342,7 +1343,7 @@ mod resting_tests {
         let mut said_it = false;
         let mut bot_replied = false;
         while let Ok(message) = events.try_recv() {
-            if let ServerMessage::Event { envelope } = message {
+            if let ServerMessage::Event { envelope, .. } = message {
                 if let Event::MessagePosted { message } = &envelope.event {
                     if message.body.contains("hello?") {
                         said_it = true;

@@ -112,7 +112,11 @@ impl Room {
 
     /// Whether the room has spent its turn budget.
     pub const fn is_out_of_turns(&self) -> bool {
-        self.turns_used >= self.spec.limits.max_total_turns
+        // Zero means no ceiling, matching `max_duration_ms`. Without this the
+        // two limits disagree: a room asking for no turn limit would be out of
+        // budget before it took its first turn.
+        let limit = self.spec.limits.max_total_turns;
+        limit > 0 && self.turns_used >= limit
     }
 
     /// Whether the room has run past its wall-clock ceiling as of `now`.
@@ -124,6 +128,54 @@ impl Room {
     /// Whether a bot may take a turn right now.
     pub fn may_take_turn(&self, now: Timestamp) -> bool {
         self.phase.is_live() && !self.is_out_of_turns() && !self.is_out_of_time(now)
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    fn room(max_turns: u32) -> Room {
+        let mut room = Room::new(RoomSpec {
+            name: "budget".into(),
+            goal: "spend carefully".into(),
+            roster: vec![],
+            completion: CompletionRule::AllTasksTerminal,
+            limits: RoomLimits {
+                max_total_turns: max_turns,
+                ..Default::default()
+            },
+        });
+        room.phase = RoomPhase::Running;
+        room
+    }
+
+    #[test]
+    fn a_budget_stops_the_room_when_it_is_spent() {
+        let mut room = room(3);
+        assert!(!room.is_out_of_turns());
+        room.turns_used = 3;
+        assert!(room.is_out_of_turns());
+    }
+
+    /// Zero means no ceiling, as it does for the time limit. Read the other
+    /// way it means "out of budget before the first turn", which is how a
+    /// room would refuse to do anything at all.
+    #[test]
+    fn no_turn_limit_means_no_limit_not_no_turns() {
+        let mut room = room(0);
+        assert!(!room.is_out_of_turns());
+        room.turns_used = 100_000;
+        assert!(!room.is_out_of_turns());
+        assert!(room.may_take_turn(Timestamp::now()));
+    }
+
+    /// The two limits should agree about what zero means.
+    #[test]
+    fn the_two_ceilings_read_zero_the_same_way() {
+        let room = room(0);
+        assert!(!room.is_out_of_turns());
+        assert!(!room.is_out_of_time(Timestamp::now()));
     }
 }
 

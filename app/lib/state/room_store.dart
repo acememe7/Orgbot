@@ -9,6 +9,8 @@ library;
 
 import 'dart:async';
 
+import '../orgbot/attention.dart';
+
 import 'package:flutter/foundation.dart';
 
 import '../net/room_client.dart';
@@ -111,6 +113,10 @@ class RoomStore extends ChangeNotifier {
 
   /// Objectives, progress, and the decisions only you can make.
   RoomDigest get digest => _digest;
+
+  /// Tells you when the room needs you. Shared across rooms so a single
+  /// permission prompt and a single de-duplication set cover all of them.
+  static Attentions attentions = Attentions();
 
   /// Answer a question the room asked. Releases every task it was holding.
   void answerDecision(String decision, String chosen, {String note = ''}) =>
@@ -275,6 +281,9 @@ class RoomStore extends ChangeNotifier {
         _applyDigest((message['digest'] as Map?)?.cast<String, Object?>());
         notifyListeners();
       case 'event':
+        // The engine decided whether this is worth telling anyone about; this
+        // only delivers it.
+        unawaited(attentions.consider(message));
         _applyEvent((message['envelope'] as Map?)?.cast<String, Object?>());
       case 'phase':
         _applyPhase(message['phase'] as String?);

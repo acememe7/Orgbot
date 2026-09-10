@@ -66,7 +66,14 @@ RoomFile buildRoomFile(
 
   // Interactive phone rooms keep working until completion or an explicit pause.
   // Preserve the separate CLI build's defaults and the native turn/error limits.
-  if (!runsClis) buffer.writeln('[room.limits]\nmax_duration_ms = 0\n');
+  // The turn budget is the room's spend control. Written explicitly so it is
+  // the room's setting rather than whatever the engine defaults to, and so a
+  // long-running room is not stopped once a day by a number nobody chose.
+  buffer.writeln('[room.limits]');
+  if (!runsClis) buffer.writeln('max_duration_ms = 0');
+  buffer
+    ..writeln('max_total_turns = ' + room.maxTurns.toString())
+    ..writeln();
 
   if (!runsClis && workspace != null) {
     buffer

@@ -158,6 +158,17 @@ class RoomSlot {
       RoomSlot(json['bot_id'] as String);
 }
 
+/// The turn budget a new room starts with.
+///
+/// Higher than the old fixed 500: a room with a dozen bots working a real
+/// goal spends that in about a day, and every exhaustion is a stop that waits
+/// on a person. Still finite, because it is the only thing standing between a
+/// misbehaving room and an unbounded bill.
+const int defaultMaxTurns = 2000;
+
+/// Turn budgets offered in the UI. `0` means no limit.
+const List<int> turnBudgetChoices = [500, 2000, 5000, 20000, 0];
+
 class RoomDef {
   final String id;
   String name;
@@ -168,12 +179,21 @@ class RoomDef {
   List<String> tasks;
   List<RoomSlot> bots;
 
+  /// How many model turns the room may take before it stops and asks you.
+  ///
+  /// A spend control, not a deadline: hitting it pauses the room rather than
+  /// ending it, and resuming grants another budget. The default was 500 and
+  /// was not settable, which meant a long-running room stopped roughly once a
+  /// day and waited — sometimes for hours — for someone to notice.
+  int maxTurns;
+
   RoomDef({
     String? id,
     required this.name,
     this.goal = '',
     this.path = '',
     this.memory = '',
+    this.maxTurns = defaultMaxTurns,
     WorkspaceConfig? workspace,
     List<String>? tasks,
     List<RoomSlot>? bots,
@@ -190,6 +210,7 @@ class RoomDef {
     'memory': memory,
     'workspace': workspace.toJson(),
     'tasks': tasks,
+    'max_turns': maxTurns,
     'bots': bots.map((b) => b.toJson()).toList(),
   };
 
@@ -205,6 +226,7 @@ class RoomDef {
           )
         : null,
     tasks: (json['tasks'] as List? ?? []).cast<String>(),
+    maxTurns: (json['max_turns'] as num?)?.toInt() ?? defaultMaxTurns,
     bots: (json['bots'] as List? ?? [])
         .map((b) => RoomSlot.fromJson((b as Map).cast<String, Object?>()))
         .toList(),
