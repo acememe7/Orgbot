@@ -951,3 +951,176 @@ fn remediations_stop_multiplying_and_ask_to_be_consolidated() {
     assert!(told.contains("open remediations"), "{told}");
     assert!(told.contains("invariant they share"), "{told}");
 }
+
+// ------------------------------------------------------- artifact pagination
+//
+// Through `dispatch`, which is the path a bot actually takes. The reference
+// tests beside the splitter check the splitting; these check that a request
+// made the way a model makes one arrives at the splitter unchanged, which is
+// where this went wrong: the schema declared `part` a string, the handler
+// accepted only a number, and every value a model sent was silently discarded
+// in favour of part 1. The splitter was correct the whole time and never saw
+// the argument.
+
+/// Create a task, claim it, and attach an artifact of `chars` characters.
+fn artifact_of(f: &mut Fixture, chars: usize, title: &str) -> String {
+    let worker = f.worker;
+    // The board refuses work that looks like work it already has, which is
+    // correct — so a test creating two tasks needs two genuinely different
+    // subjects, not the same sentence with a number changed.
+    let task = f.make(json!({"title": title, "brief": "a document to read back"}));
+    f.ok(worker, "claim_task", json!({"task": task}));
+    f.ok(worker, "start_task", json!({"task": task}));
+    let body: String = (0..chars)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
+    let recorded = f.ok(
+        worker,
+        "add_artifact",
+        json!({"task": task, "name": "long.md", "content": body}),
+    );
+    id_in(&recorded, "art")
+}
+
+/// The reported defect, through the real tool: asking past the end must be an
+/// error, never a repeat of the final chunk.
+#[test]
+fn reading_past_the_last_part_is_refused_not_answered_with_the_last_part() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let artifact = artifact_of(&mut f, 12_000, "the deployment runbook"); // two parts at 8k
+
+    let first = f.ok(worker, "read_artifact", json!({"artifact": artifact}));
+    assert!(first.contains("TRANSPORT part_index=1 total_parts=2"), "{first}");
+
+    let second = f.ok(worker, "read_artifact", json!({"artifact": artifact, "part": 2}));
+    assert!(second.contains("TRANSPORT part_index=2 total_parts=2"), "{second}");
+    assert!(second.contains("is_final_part=true"));
+
+    let past = f.err(worker, "read_artifact", json!({"artifact": artifact, "part": 3}));
+    assert!(past.contains("PART_OUT_OF_RANGE"), "{past}");
+    assert!(past.contains("requested=3"), "{past}");
+    assert!(past.contains("total_parts=2"), "{past}");
+    assert!(
+        !past.contains("TRANSPORT"),
+        "a refusal must not carry a chunk at all: {past}"
+    );
+}
+
+/// The severe one: a `part` sent as a string used to be dropped, so every
+/// request for a later part returned the first — and the tail of the document
+/// was unreachable while looking, to the reader, like the end.
+#[test]
+fn a_part_number_sent_as_a_string_is_honoured_not_discarded() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let artifact = artifact_of(&mut f, 12_000, "the migration plan");
+
+    let one = f.ok(worker, "read_artifact", json!({"artifact": artifact, "part": "1"}));
+    let two = f.ok(worker, "read_artifact", json!({"artifact": artifact, "part": "2"}));
+
+    assert!(one.contains("part_index=1"), "{one}");
+    assert!(
+        two.contains("part_index=2"),
+        "a string part must not fall back to part 1: {two}"
+    );
+    assert_ne!(
+        one, two,
+        "part 1 and part 2 must not return byte-identical payloads"
+    );
+
+    // And out of range is still refused when it arrives as a string.
+    let past = f.err(worker, "read_artifact", json!({"artifact": artifact, "part": "9"}));
+    assert!(past.contains("PART_OUT_OF_RANGE"), "{past}");
+}
+
+/// Anything that is not a part number is refused out loud. What must never
+/// happen is an argument being supplied and quietly ignored.
+#[test]
+fn an_unusable_part_argument_is_refused_rather_than_defaulted() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let artifact = artifact_of(&mut f, 12_000, "the incident timeline");
+
+    for bad in [json!(0), json!(-1), json!("two"), json!(1.5), json!(true), json!([2])] {
+        let out = f.call(worker, "read_artifact", json!({"artifact": artifact, "part": bad}));
+        assert!(
+            out.is_error,
+            "part={bad} should be refused, got: {}",
+            out.content
+        );
+        assert!(
+            out.content.contains("PART_INVALID") || out.content.contains("PART_OUT_OF_RANGE"),
+            "part={bad} needs a reason code, got: {}",
+            out.content
+        );
+    }
+
+    // An absent part is not an error: it means the first.
+    let default = f.ok(worker, "read_artifact", json!({"artifact": artifact}));
+    assert!(default.contains("part_index=1"), "{default}");
+    let null = f.ok(worker, "read_artifact", json!({"artifact": artifact, "part": null}));
+    assert!(null.contains("part_index=1"), "{null}");
+}
+
+/// Every part is identified by something the author did not write.
+///
+/// A document can say "PART 2/2" in its own text and be wrong, or be lying.
+/// The transport line is the only claim about which chunk this is that the
+/// author had no hand in.
+#[test]
+fn each_part_carries_transport_owned_identity_a_reader_can_check() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let artifact = artifact_of(&mut f, 20_000, "the architecture review"); // three parts
+
+    let mut digests = Vec::new();
+    let mut reassembled = 0usize;
+    for part in 1..=3 {
+        let out = f.ok(worker, "read_artifact", json!({"artifact": artifact, "part": part}));
+        assert!(out.contains(&format!("part_index={part} total_parts=3")), "{out}");
+        assert!(out.contains("artifact_sha256="), "{out}");
+        let digest = out
+            .split("chunk_sha256=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("a chunk digest")
+            .to_string();
+        let bytes: usize = out
+            .split("bytes=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .expect("a byte count");
+        reassembled += bytes;
+        digests.push(digest);
+        assert_eq!(
+            out.contains("is_final_part=true"),
+            part == 3,
+            "only the last part may claim to be the last: {out}"
+        );
+    }
+    assert_eq!(reassembled, 20_000, "the parts account for the whole document");
+    digests.sort();
+    digests.dedup();
+    assert_eq!(digests.len(), 3, "no two parts may present the same digest");
+}
+
+/// The first read hands over the reading order, so a reader knows what the
+/// complete set is before deciding they have all of it.
+#[test]
+fn the_first_part_comes_with_the_manifest_for_the_whole_document() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let artifact = artifact_of(&mut f, 20_000, "the security assessment");
+
+    let first = f.ok(worker, "read_artifact", json!({"artifact": artifact}));
+    assert!(first.contains("MANIFEST"), "{first}");
+    assert!(first.contains("3 parts"), "{first}");
+
+    // A document that arrives whole has no reading order to publish.
+    let short = artifact_of(&mut f, 200, "a one line changelog");
+    let whole = f.ok(worker, "read_artifact", json!({"artifact": short}));
+    assert!(!whole.contains("MANIFEST"), "{whole}");
+    assert!(whole.contains("total_parts=1"), "{whole}");
+}

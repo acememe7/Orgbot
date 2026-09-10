@@ -174,8 +174,9 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                     ("artifact", schema::string("The artifact id.")),
                     (
                         "part",
-                        schema::string(
-                            "Which part to read, from 1. Defaults to the first.",
+                        schema::integer(
+                            "Which part to read, from 1. Defaults to the first. \
+                             Asking past the last part is an error, not the last part.",
                         ),
                     ),
                 ],
@@ -962,31 +963,78 @@ fn add_artifact(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
     }
 }
 
+/// Which part the caller asked for.
+///
+/// The schema said `part` was a string and this parser only accepted a JSON
+/// number, so a model following the schema sent `"2"`, `as_u64()` gave `None`,
+/// and the fallback quietly served part 1. Every request for a later part
+/// returned the first one — with the document's own header still reading "PART
+/// 1/2" — which made the tail of every multi-part artifact unreachable and
+/// looked, from the outside, like the document simply ended there.
+///
+/// So: take a number or a string of digits, and refuse anything else out
+/// loud. What must never happen again is a supplied argument being ignored.
+fn requested_part(input: &Value) -> Result<u32, String> {
+    let Some(raw) = input.get("part") else {
+        return Ok(1);
+    };
+    if raw.is_null() {
+        return Ok(1);
+    }
+    let parsed = match raw {
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) => text.trim().parse::<u64>().ok(),
+        _ => None,
+    };
+    match parsed {
+        Some(part) if part >= 1 && part <= u64::from(u32::MAX) => Ok(part as u32),
+        _ => Err(format!(
+            "PART_INVALID requested={raw} — `part` must be a whole number from 1. \
+             The part you asked for was not read."
+        )),
+    }
+}
+
 fn read_artifact(engine: &Engine, input: &Value) -> ToolOutcome {
     let id = match required_str(input, "artifact").and_then(|raw| parse_id(raw, "artifact", "art")) {
         Ok(id) => id,
         Err(message) => return ToolOutcome::error(message),
     };
-    let part = input
-        .get("part")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1)
-        .clamp(1, u64::from(u32::MAX)) as u32;
+    let part = match requested_part(input) {
+        Ok(part) => part,
+        Err(message) => return ToolOutcome::error(message),
+    };
 
-    match engine.artifact(id) {
-        Some(artifact) => {
-            let heading = format!(
-                "{} ({}), by {}:",
-                artifact.name,
-                artifact.body.kind(),
-                artifact.author.short(),
-            );
-            // Never a bare preview. A reviewer who reads two thirds of a
-            // document with no sign that anything is missing, and approves it,
-            // has approved something nobody read.
-            ToolOutcome::ok(artifact.body.excerpt(part, PART_CHARS).render(&heading))
+    let Some(artifact) = engine.artifact(id) else {
+        return ToolOutcome::error(format!("There is no artifact {id}."));
+    };
+    let heading = format!(
+        "{} ({}), by {}:",
+        artifact.name,
+        artifact.body.kind(),
+        artifact.author.short(),
+    );
+    // Never a bare preview. A reviewer who reads two thirds of a document with
+    // no sign that anything is missing, and approves it, has approved
+    // something nobody read.
+    match artifact.body.excerpt(part, PART_CHARS) {
+        Some(excerpt) => {
+            let mut out = excerpt.render(&heading);
+            // The manifest on the first read, so a reader knows up front what
+            // the complete set is and can check each part off against a digest
+            // the room produced rather than one the document claims.
+            if !excerpt.is_whole() && excerpt.part == 1 {
+                out.push_str("\n\n");
+                out.push_str(&artifact.manifest(PART_CHARS).render());
+            }
+            ToolOutcome::ok(out)
         }
-        None => ToolOutcome::error(format!("There is no artifact {id}.")),
+        None => ToolOutcome::error(format!(
+            "PART_OUT_OF_RANGE requested={part} total_parts={} artifact={id} — \
+             there is no such part. Nothing was returned; do not treat any \
+             earlier part as the end of the document.",
+            artifact.body.parts(PART_CHARS)
+        )),
     }
 }
 

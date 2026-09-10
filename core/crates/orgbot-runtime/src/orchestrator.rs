@@ -267,8 +267,9 @@ impl Orchestrator {
             return Some(Wake::HeldWork);
         }
         // Something to inspect.
-        if !engine.review_queue_for(agent).is_empty() {
-            return Some(Wake::Review);
+        let queue = engine.review_queue_for(agent);
+        if !queue.is_empty() {
+            return Some(Wake::Review { queue });
         }
         // Approved work waiting to be delivered. A coordinator holds no tasks
         // of its own, so this is the only thing that wakes it at the end.
@@ -395,8 +396,22 @@ impl Orchestrator {
                     }
                     deliveries -= 1;
                 }
+                Wake::Review { queue } => {
+                    // The review queue is shared, not per-bot: every inspector
+                    // sees the same work in review. Waking two of them for one
+                    // task means the second arrives to find it already
+                    // reviewed and sent back, and its own review refused —
+                    // which reads like the board contradicting itself rather
+                    // than like a race it lost. This is the same reservation
+                    // the free-work case makes, and it was missing here
+                    // because the queue looked per-bot and is not.
+                    let Some(task) = queue.into_iter().find(|id| !earmarked.contains(id)) else {
+                        continue;
+                    };
+                    earmarked.insert(task);
+                }
                 // Nobody else can act on these, so there is nothing to divide.
-                Wake::Handoff | Wake::Question | Wake::HeldWork | Wake::Review => {}
+                Wake::Handoff | Wake::Question | Wake::HeldWork => {}
             }
             chosen.push(agent);
         }
@@ -739,8 +754,11 @@ enum Wake {
     Question,
     /// It is holding work that is not parked.
     HeldWork,
-    /// Something is queued for it to inspect.
-    Review,
+    /// Work is queued for it to inspect — a shared pool.
+    Review {
+        /// Tasks this bot could inspect right now.
+        queue: Vec<TaskId>,
+    },
     /// Approved work is waiting to be delivered — a shared pool.
     Delivery,
     /// The board is empty and this bot can plan — contended by definition.

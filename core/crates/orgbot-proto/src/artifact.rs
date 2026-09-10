@@ -56,6 +56,15 @@ pub struct Excerpt {
     /// Digest of the whole artifact, so two readers can confirm they read the
     /// same thing.
     pub digest: String,
+    /// Bytes in *this part*.
+    pub bytes: usize,
+    /// Digest of *this part*.
+    ///
+    /// The whole-document digest cannot tell you which piece you are holding.
+    /// A reader that asked for part 2 needs something only the transport could
+    /// have produced to confirm it got part 2 — text inside the document
+    /// saying "PART 2/2" proves nothing, because the author wrote it.
+    pub chunk_digest: String,
 }
 
 impl Excerpt {
@@ -77,10 +86,11 @@ impl Excerpt {
     pub fn render(&self, heading: &str) -> String {
         if self.is_whole() {
             return format!(
-                "{heading}\nBEGIN ({} characters, sha256 {})\n{}\nEND",
+                "{heading}\nBEGIN ({} characters, sha256 {})\n{}\nEND\n{}",
                 self.total_chars,
                 &self.digest[..12.min(self.digest.len())],
-                self.text
+                self.text,
+                self.provenance(),
             );
         }
         let mut out = format!(
@@ -102,7 +112,28 @@ impl Excerpt {
         } else {
             out.push_str("\n\nThat was the last part.");
         }
+        out.push('\n');
+        out.push_str(&self.provenance());
         out
+    }
+
+    /// What the transport says about this chunk, as opposed to what the
+    /// document says about itself.
+    ///
+    /// A reader verifies against this line, never against prose in the body.
+    /// The author controls the body; only the room controls this.
+    pub fn provenance(&self) -> String {
+        format!(
+            "TRANSPORT part_index={} total_parts={} bytes={} chunk_sha256={} \
+             artifact_sha256={} is_final_part={} complete={}",
+            self.part,
+            self.parts,
+            self.bytes,
+            &self.chunk_digest[..16.min(self.chunk_digest.len())],
+            &self.digest[..16.min(self.digest.len())],
+            !self.has_more(),
+            self.is_whole(),
+        )
     }
 }
 
@@ -144,22 +175,37 @@ impl ArtifactBody {
     /// model that miscounts should get the end of the document and a clear
     /// statement that it is the end, not an empty result it might read as
     /// "there was nothing there".
-    pub fn excerpt(&self, part: u32, limit: usize) -> Excerpt {
+    pub fn excerpt(&self, part: u32, limit: usize) -> Option<Excerpt> {
         let full = self.full_text();
         let chars: Vec<char> = full.chars().collect();
         let limit = limit.max(1);
         let parts = self.parts(limit);
-        let part = part.clamp(1, parts);
+        // Out of range is an error, not the last part.
+        //
+        // This used to clamp, on the reasoning that a model which miscounts
+        // should get the end of the document rather than an empty result. The
+        // cost of that turned out to be far higher than the benefit: asking
+        // for part 3 of a two-part document returned part 2 labelled "PART
+        // 2/2", which is indistinguishable from having read to the end. A
+        // reviewer can approve evidence they never saw, and be shown a
+        // document that agrees with them.
+        if part == 0 || part > parts {
+            return None;
+        }
         let start = (part as usize - 1) * limit;
         let text: String = chars.iter().skip(start).take(limit).collect();
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
 
-        Excerpt {
+        Some(Excerpt {
+            bytes: text.len(),
+            chunk_digest: format!("{:x}", hasher.finalize()),
             text,
             part,
             parts,
             total_chars: chars.len(),
             digest: self.digest(),
-        }
+        })
     }
 
     /// A short preview for chat transcripts and list views.
@@ -355,14 +401,15 @@ impl Artifact {
         let total = self.body.parts(limit);
         let parts = (1..=total)
             .map(|index| {
-                let excerpt = self.body.excerpt(index, limit);
-                let mut hasher = Sha256::new();
-                hasher.update(excerpt.text.as_bytes());
+                let excerpt = self
+                    .body
+                    .excerpt(index, limit)
+                    .expect("indices run 1..=total, which are in range by construction");
                 Part {
                     index,
                     total,
                     chars: excerpt.text.chars().count(),
-                    digest: format!("{:x}", hasher.finalize()),
+                    digest: excerpt.chunk_digest,
                 }
             })
             .collect::<Vec<Part>>();
@@ -493,7 +540,7 @@ mod completeness_tests {
     #[test]
     fn a_long_artifact_never_arrives_looking_whole() {
         let body = long(20_000);
-        let first = body.excerpt(1, PART_CHARS);
+        let first = body.excerpt(1, PART_CHARS).expect("part 1 exists");
 
         assert!(!first.is_whole());
         assert_eq!(first.parts, 3);
@@ -514,14 +561,22 @@ mod completeness_tests {
         let body = ArtifactBody::Text {
             text: "the whole thing".into(),
         };
-        let only = body.excerpt(1, PART_CHARS);
+        let only = body.excerpt(1, PART_CHARS).expect("the only part");
 
         assert!(only.is_whole());
         assert!(!only.has_more());
         let rendered = only.render("notes.md:");
         assert!(rendered.contains("BEGIN ("));
-        assert!(rendered.trim_end().ends_with("END"));
-        assert!(!rendered.contains("PART"));
+        assert!(rendered.contains("\nEND\n"), "the body still closes: {rendered}");
+        assert!(
+            !rendered.contains("BEGIN PART"),
+            "a whole document is not announced as a part: {rendered}"
+        );
+        // A single-part read still carries transport identity, so a reader
+        // never has to decide whether to trust the metadata based on how long
+        // the document happened to be.
+        assert!(rendered.contains("TRANSPORT part_index=1 total_parts=1"));
+        assert!(rendered.contains("is_final_part=true complete=true"));
     }
 
     /// Reading every part in order reconstructs the document exactly.
@@ -533,7 +588,7 @@ mod completeness_tests {
         let parts = body.parts(PART_CHARS);
         let mut rebuilt = String::new();
         for part in 1..=parts {
-            rebuilt.push_str(&body.excerpt(part, PART_CHARS).text);
+            rebuilt.push_str(&body.excerpt(part, PART_CHARS).expect("in range").text);
         }
         assert_eq!(rebuilt, text, "nothing lost and nothing repeated");
     }
@@ -541,25 +596,56 @@ mod completeness_tests {
     #[test]
     fn the_last_part_says_it_is_the_last() {
         let body = long(20_000);
-        let last = body.excerpt(3, PART_CHARS);
+        let last = body.excerpt(3, PART_CHARS).expect("the last part");
         assert!(!last.has_more());
         assert!(last.render("x:").contains("That was the last part"));
     }
 
-    /// A model that miscounts should get the end of the document and be told
-    /// so, not an empty result it might read as "there was nothing there".
+    /// Asking past the end is an error, not the last part.
+    ///
+    /// This test used to assert the opposite, on the reasoning that a model
+    /// which miscounts is better served the end of the document than an empty
+    /// result. That reasoning is wrong in the one case that matters: part 3 of
+    /// a three-part document and part 99 of it come back identical, so a
+    /// reader cannot tell "I have reached the end" from "I asked for something
+    /// that does not exist". A reviewer checking they had the whole document
+    /// by reading until the parts stopped changing would have been told yes.
     #[test]
-    fn asking_past_the_end_returns_the_last_part() {
+    fn asking_past_the_end_is_refused_rather_than_answered_with_the_last_part() {
         let body = long(20_000);
-        let past = body.excerpt(99, PART_CHARS);
-        assert_eq!(past.part, 3);
-        assert!(!past.text.is_empty());
-        assert!(!past.has_more());
+        assert_eq!(body.parts(PART_CHARS), 3);
+        assert!(body.excerpt(4, PART_CHARS).is_none());
+        assert!(body.excerpt(99, PART_CHARS).is_none());
+        assert!(body.excerpt(u32::MAX, PART_CHARS).is_none());
+        assert!(body.excerpt(0, PART_CHARS).is_none(), "nor part zero");
+        assert!(body.excerpt(3, PART_CHARS).is_some(), "but the last is fine");
+    }
+
+    /// Every part can be told apart from every other by something the author
+    /// did not write.
+    #[test]
+    fn each_part_carries_its_own_digest_and_size() {
+        let text: String = (0..20_000).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+        let body = ArtifactBody::Text { text };
+        let one = body.excerpt(1, PART_CHARS).unwrap();
+        let two = body.excerpt(2, PART_CHARS).unwrap();
+
+        assert_ne!(
+            one.chunk_digest, two.chunk_digest,
+            "two different parts must not hash the same"
+        );
+        assert_eq!(one.digest, two.digest, "but the document digest is shared");
+        assert_eq!(one.bytes, one.text.len());
+
+        let rendered = two.render("x:");
+        assert!(rendered.contains("TRANSPORT part_index=2 total_parts=3"), "{rendered}");
+        assert!(rendered.contains("is_final_part=false"));
+        assert!(rendered.contains(&two.chunk_digest[..16]));
     }
 
     #[test]
-    fn asking_for_part_zero_returns_the_first() {
-        assert_eq!(long(20_000).excerpt(0, PART_CHARS).part, 1);
+    fn part_zero_is_not_a_part() {
+        assert!(long(20_000).excerpt(0, PART_CHARS).is_none());
     }
 
     /// Splitting must not cut a character in half.
@@ -571,7 +657,7 @@ mod completeness_tests {
         let parts = body.parts(100);
         let mut rebuilt = String::new();
         for part in 1..=parts {
-            rebuilt.push_str(&body.excerpt(part, 100).text);
+            rebuilt.push_str(&body.excerpt(part, 100).expect("in range").text);
         }
         assert_eq!(rebuilt, text);
     }
@@ -579,7 +665,7 @@ mod completeness_tests {
     #[test]
     fn an_empty_artifact_is_one_whole_part() {
         let body = ArtifactBody::Text { text: String::new() };
-        let only = body.excerpt(1, PART_CHARS);
+        let only = body.excerpt(1, PART_CHARS).expect("the only part");
         assert!(only.is_whole());
         assert_eq!(only.total_chars, 0);
     }
@@ -592,7 +678,7 @@ mod completeness_tests {
         assert_eq!(digest.len(), 64, "sha256 hex");
 
         for part in 1..=3 {
-            assert_eq!(body.excerpt(part, PART_CHARS).digest, digest);
+            assert_eq!(body.excerpt(part, PART_CHARS).unwrap().digest, digest);
         }
 
         let different = ArtifactBody::Text {

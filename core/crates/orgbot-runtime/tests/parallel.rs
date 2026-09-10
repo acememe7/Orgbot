@@ -539,3 +539,67 @@ fn reopening_a_saved_room_picks_up_the_current_concurrency() {
         "days-old work should speed up on reopening, not stay as it was saved"
     );
 }
+
+/// Two inspectors are not sent at the same piece of work.
+///
+/// The review queue looked per-bot when the batch scheduler was written and is
+/// not: every inspector sees the same work in review. Waking two for one task
+/// meant the second arrived to find it already ruled on and sent back, and its
+/// own review refused — which reads like the board contradicting itself rather
+/// than like a race it lost. It cost a model turn every time.
+#[tokio::test]
+async fn two_inspectors_are_not_woken_for_the_same_review() {
+    use orgbot_proto::agent::Autonomy;
+
+    let provider = Arc::new(Fixed(CompletionResponse {
+        model: "test".into(),
+        content: vec![ContentBlock::text("looking")],
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    })) as Arc<dyn Provider>;
+
+    let mut room = Orchestrator::new(room_spec(8));
+    let author = worker("author");
+    let author_id = room.seat(author, provider.clone()).unwrap();
+    for index in 0..3 {
+        let spec = AgentSpec::new(
+            format!("qa{index}"),
+            "Inspector",
+            ProviderRef::Scripted {
+                script: "test".into(),
+            },
+        )
+        .with_roles(vec!["reviewer"])
+        .with_autonomy(Autonomy::inspector());
+        room.seat(spec, provider.clone()).unwrap();
+    }
+    room.start().unwrap();
+
+    // One piece of work, submitted and waiting on inspection.
+    let task = open_task(&mut room.engine_mut(), "the thing to inspect");
+    for command in [
+        Command::ClaimTask {
+            task,
+            by: author_id,
+        },
+        Command::StartTask {
+            task,
+            by: author_id,
+        },
+        Command::SubmitForReview {
+            task,
+            by: author_id,
+            artifacts: vec![],
+        },
+    ] {
+        room.engine_mut().apply(command).unwrap();
+    }
+
+    let woken = room.next_actors(8);
+    assert_eq!(
+        woken.len(),
+        1,
+        "one task in review must wake one inspector, not three"
+    );
+    assert_ne!(woken[0], author_id, "and not the bot that wrote it");
+}

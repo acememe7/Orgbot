@@ -2259,6 +2259,36 @@ impl Engine {
             });
         }
         // Validate before recording anything, including a critical rejection.
+        //
+        // Say what happened rather than only what is disallowed. Inspectors
+        // share one queue, so two of them can be woken for the same task; the
+        // second arrives after the first has already ruled and been sent back,
+        // and "cannot record_review a task that is in_progress" reads like the
+        // board contradicting itself. It is a race that was lost, and the
+        // difference matters to whoever has to decide what to do next.
+        if record.state != TaskState::InReview {
+            let previous = self
+                .reviews
+                .iter()
+                .filter(|review| review.task == task)
+                .next_back();
+            return Err(EngineError::NotUnderReview {
+                task,
+                state: record.state.as_str(),
+                detail: match previous {
+                    Some(review) => format!(
+                        "{} already inspected it at round {} and it is {} now",
+                        review.inspector.short(),
+                        review.revision,
+                        record.state.as_str()
+                    ),
+                    None => format!(
+                        "it is {} and has not been submitted for inspection",
+                        record.state.as_str()
+                    ),
+                },
+            });
+        }
         record
             .state
             .apply(&TaskTransition::Approve { by: inspector })?;

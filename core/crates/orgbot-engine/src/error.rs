@@ -57,6 +57,17 @@ pub enum EngineError {
     #[error("task {task} is not ready: {reason}")]
     NotReady { task: TaskId, reason: String },
 
+    /// A review was recorded on work that is not under inspection.
+    ///
+    /// Almost always a lost race between inspectors rather than a mistake:
+    /// they share one queue, and the first to rule sends the work back.
+    #[error("cannot review task {task}: {detail} [REVIEW_NOT_OPEN state={state}]")]
+    NotUnderReview {
+        task: TaskId,
+        state: &'static str,
+        detail: String,
+    },
+
     /// A claim was refused, with the reason the evaluator gave.
     ///
     /// Carries the stable code as well as the sentence: a bot reads the

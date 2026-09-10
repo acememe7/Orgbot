@@ -30,6 +30,15 @@ pub fn string(description: &str) -> Value {
     json!({"type": "string", "description": description})
 }
 
+/// A whole-number field.
+///
+/// Worth reaching for whenever the handler will do arithmetic with the value.
+/// Declaring a number as a string invites the model to send one, and a parser
+/// that only accepts numbers then drops it silently.
+pub fn integer(description: &str) -> Value {
+    json!({"type": "integer", "description": description, "minimum": 1})
+}
+
 /// A string field constrained to a fixed set of values.
 pub fn enumerated(description: &str, values: &[&str]) -> Value {
     json!({"type": "string", "description": description, "enum": values})
