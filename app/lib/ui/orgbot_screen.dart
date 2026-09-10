@@ -789,8 +789,10 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                           labelText: 'Bots working at once',
                           helperText:
                               'Most of a turn is waiting on a model, so this '
-                              'is what decides how much of the room is busy. '
-                              'Higher uses more of your rate limit.',
+                              'is what decides how much of the room is busy — '
+                              'and it multiplies how fast you draw on your '
+                              'plan. Four at once spends roughly four times '
+                              'as much per hour as one.',
                         ),
                         items: [
                           for (final choice in parallelTurnChoices)

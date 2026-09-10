@@ -174,9 +174,16 @@ const List<int> turnBudgetChoices = [500, 2000, 5000, 20000, 0];
 /// A turn is almost all waiting on a model, so this is what decides how much
 /// of the roster is actually working: at one, a room of twenty bots has
 /// nineteen idle at every moment and seating more cannot make the work finish
-/// sooner. Four is a real speed-up while staying well inside the request rates
-/// a subscription allows.
-const int defaultParallelTurns = 4;
+/// sooner.
+///
+/// Two, not four. Concurrency is a rate multiplier as much as a speed-up — a
+/// room drawing four at a time spends roughly four times as much per hour as
+/// one at a time — and a default that quadruples someone's consumption is a
+/// decision made on their behalf with their allowance. Four was the default
+/// for a day and took a weekly subscription limit with it. Two is a real
+/// improvement over taking turns one at a time and leaves the larger step as
+/// something chosen, by someone who can see what the room has drawn.
+const int defaultParallelTurns = 2;
 
 /// Concurrency settings offered in the UI.
 ///

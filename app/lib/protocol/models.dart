@@ -730,6 +730,7 @@ class RoomDigest {
     required this.criticalPath,
     required this.health,
     required this.utilization,
+    this.spend = const [],
   });
 
   /// The outcomes, most urgent first.
@@ -750,6 +751,13 @@ class RoomDigest {
   /// Where the room's effort is going.
   final Utilization utilization;
 
+  /// What the room has drawn, by the account it drew it from.
+  ///
+  /// Grouped by account, not by bot, because that is the unit an allowance is
+  /// granted in: a roster mostly on one subscription draws on one limit, and
+  /// per-bot numbers hide that entirely.
+  final List<AccountSpend> spend;
+
   /// The state before a room has said anything.
   const RoomDigest.empty()
       : objectives = const [],
@@ -757,7 +765,8 @@ class RoomDigest {
         needsYou = const [],
         criticalPath = const [],
         health = const RoomHealth.healthy(),
-        utilization = const Utilization.empty();
+        utilization = const Utilization.empty(),
+        spend = const [];
 
   /// Whether there is anything to show yet.
   bool get isEmpty => objectives.isEmpty && needsYou.isEmpty;
@@ -778,5 +787,42 @@ class RoomDigest {
             (json['health'] as Map?)?.cast<String, Object?>() ?? const {}),
         utilization: Utilization.fromJson(
             (json['utilization'] as Map?)?.cast<String, Object?>() ?? const {}),
+        spend: (json['spend'] as List? ?? const [])
+            .whereType<Map>()
+            .map((s) => AccountSpend.fromJson(s.cast<String, Object?>()))
+            .toList(),
+      );
+}
+
+/// What one account has been asked for.
+class AccountSpend {
+  const AccountSpend({
+    required this.backend,
+    required this.turns,
+    required this.tokens,
+    required this.perTurn,
+  });
+
+  /// The account, as the scheduler groups it.
+  final String backend;
+
+  /// Turns taken against it.
+  final int turns;
+
+  /// Tokens across those turns. Zero means this backend does not report
+  /// usage — which is not the same as free, and should not be shown as it.
+  final int tokens;
+
+  /// Average tokens per turn.
+  final int perTurn;
+
+  /// Whether the backend reported anything at all.
+  bool get isMetered => tokens > 0;
+
+  factory AccountSpend.fromJson(Map<String, Object?> json) => AccountSpend(
+        backend: json['backend'] as String? ?? '',
+        turns: (json['turns'] as num?)?.toInt() ?? 0,
+        tokens: (json['tokens'] as num?)?.toInt() ?? 0,
+        perTurn: (json['per_turn'] as num?)?.toInt() ?? 0,
       );
 }

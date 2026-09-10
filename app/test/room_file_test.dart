@@ -24,6 +24,28 @@ RoomDef room({List<String> tasks = const []}) => RoomDef(
 void main() {
   _roleTableTests();
 
+  // Concurrency is a rate multiplier, not only a speed-up: a room running four
+  // at a time draws about four times as fast as one at a time. A default that
+  // quadruples someone's consumption is a decision taken on their behalf.
+  test('a new room does not default to quadrupling what it draws', () {
+    expect(defaultParallelTurns, lessThanOrEqualTo(2));
+    expect(
+      defaultParallelTurns,
+      greaterThan(1),
+      reason: 'but still better than one bot at a time',
+    );
+  });
+
+  test('a room saved before the setting existed picks up the safer default',
+      () {
+    final restored = RoomDef.fromJson({
+      'id': 'room_old',
+      'name': 'Existing',
+      'goal': 'carry on',
+    });
+    expect(restored.parallelTurns, defaultParallelTurns);
+  });
+
   // ---------------------------------------------------------- Claude on a phone
   //
   // A Claude sign-in reaches a phone through a pairing bundle, not a sign-in

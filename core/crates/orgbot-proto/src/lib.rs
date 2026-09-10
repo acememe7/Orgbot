@@ -31,6 +31,7 @@ pub mod ids;
 pub mod review;
 pub mod roles;
 pub mod room;
+pub mod spend;
 pub mod task;
 pub mod text;
 pub mod time;

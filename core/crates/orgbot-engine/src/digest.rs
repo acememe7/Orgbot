@@ -228,6 +228,27 @@ pub struct RoomDigest {
     pub health: Health,
     /// Where the room's effort is going.
     pub utilization: Utilization,
+    /// What the room has drawn, by the account it drew it from.
+    ///
+    /// Grouped by account rather than by bot because that is the unit an
+    /// allowance is granted in: a roster mostly on one subscription draws on
+    /// one limit, and a per-bot list hides that completely.
+    #[serde(default)]
+    pub spend: Vec<AccountSpend>,
+}
+
+/// What one account has been asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountSpend {
+    /// The account, as the scheduler groups it.
+    pub backend: String,
+    /// Turns taken against it.
+    pub turns: u32,
+    /// Tokens across those turns. Zero means the backend does not report
+    /// usage, which is not the same as free.
+    pub tokens: u32,
+    /// Average tokens per turn.
+    pub per_turn: u32,
 }
 
 impl RoomDigest {
@@ -393,6 +414,7 @@ pub fn digest<'a>(
         counts,
         // Filled by the engine, which can see the roster.
         utilization: Utilization::default(),
+        spend: Vec::new(),
     }
 }
 

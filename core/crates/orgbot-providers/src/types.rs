@@ -275,32 +275,10 @@ impl StopReason {
 }
 
 /// Token accounting for one turn.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Usage {
-    /// Tokens read.
-    pub input_tokens: u32,
-    /// Tokens written.
-    pub output_tokens: u32,
-    /// Tokens served from the prompt cache.
-    pub cache_read_tokens: u32,
-    /// Tokens written into the prompt cache.
-    pub cache_write_tokens: u32,
-}
-
-impl Usage {
-    /// Fold another turn's usage into this one.
-    pub fn add(&mut self, other: Usage) {
-        self.input_tokens += other.input_tokens;
-        self.output_tokens += other.output_tokens;
-        self.cache_read_tokens += other.cache_read_tokens;
-        self.cache_write_tokens += other.cache_write_tokens;
-    }
-
-    /// Total tokens billed as input, cache reads included.
-    pub const fn total_input(&self) -> u32 {
-        self.input_tokens + self.cache_read_tokens
-    }
-}
+///
+/// The engine's own type: what a turn costs is recorded on the board, so there
+/// is one definition of it rather than one per layer.
+pub use orgbot_proto::spend::TokenUsage as Usage;
 
 /// One completed model turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

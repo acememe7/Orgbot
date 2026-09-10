@@ -191,7 +191,12 @@ pub enum Command {
 
     // ---- engine housekeeping ----
     /// Charge one model turn against the room budget.
-    RecordTurn { agent: AgentId },
+    RecordTurn {
+        agent: AgentId,
+        /// What the turn cost. Default when a backend does not report it.
+        #[serde(default)]
+        usage: orgbot_proto::spend::TokenUsage,
+    },
     /// Report a failed bot turn.
     ReportError {
         agent: AgentId,

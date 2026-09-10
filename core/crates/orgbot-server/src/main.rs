@@ -198,6 +198,19 @@ fn generate_token() -> String {
 }
 
 /// Say why a saved room is not making progress.
+/// Group digits so a seven-figure token count is readable at a glance.
+fn thousands(value: u32) -> String {
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn diagnose(state: &std::path::Path, bot: Option<&str>) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(state)?;
     let saved: serde_json::Value = serde_json::from_str(&raw)?;
@@ -215,6 +228,29 @@ fn diagnose(state: &std::path::Path, bot: Option<&str>) -> anyhow::Result<()> {
         println!("Health: the room is working normally.\n");
     } else {
         println!("Health: {}\n{}", health.summary(), health.report());
+    }
+
+    // What it has cost, by account, because that is the unit an allowance is
+    // granted in. Fifteen bots on one subscription draw on one limit, and a
+    // per-bot list hides that entirely.
+    let by_backend = engine.spend_by_backend();
+    if !by_backend.is_empty() {
+        let total = engine.spend_total();
+        println!(
+            "Spend: {} turns, {} tokens in total",
+            total.turns,
+            thousands(total.usage.total())
+        );
+        for (backend, spend) in &by_backend {
+            println!(
+                "  {:<16} {:>5} turns  {:>12} tokens  ({} per turn)",
+                backend,
+                spend.turns,
+                thousands(spend.usage.total()),
+                thousands(spend.per_turn())
+            );
+        }
+        println!();
     }
 
     println!("Phase: {:?}", engine.room().phase);

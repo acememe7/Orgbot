@@ -338,6 +338,7 @@ impl Bot {
             }
             let _ = engine.apply(Command::RecordTurn {
                 agent: self.spec.id,
+                usage: report.usage,
             });
         });
         Ok(report)

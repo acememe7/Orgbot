@@ -21,6 +21,7 @@ use orgbot_proto::convergence::{self, Convergence};
 use orgbot_proto::text;
 use orgbot_proto::decision::{Answer, Decision, DecisionLog, Governance, Request, Settled};
 use orgbot_proto::roles::{Eligibility as RoleFit, RoleTable};
+use orgbot_proto::spend::{Spend, TokenUsage};
 use orgbot_proto::ids::DecisionId;
 use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness, TaskKind, TaskOrigin};
 use orgbot_proto::task::{DEFAULT_LEASE_MILLIS, BlockReason, Priority, Task, TaskState, TaskTransition};
@@ -69,6 +70,9 @@ pub struct Engine {
     /// The condition last reported, so a standing problem is raised once.
     #[serde(default)]
     last_health: String,
+    /// What each bot has drawn, so a room can say what it has cost.
+    #[serde(default)]
+    spend: BTreeMap<AgentId, Spend>,
     handoffs: BTreeMap<HandoffId, Handoff>,
     artifacts: BTreeMap<ArtifactId, Artifact>,
     reviews: Vec<Review>,
@@ -255,6 +259,7 @@ impl Engine {
             handles: BTreeMap::new(),
             tasks: BTreeMap::new(),
             last_health: String::new(),
+            spend: BTreeMap::new(),
             handoffs: BTreeMap::new(),
             artifacts: BTreeMap::new(),
             reviews: Vec::new(),
@@ -385,6 +390,16 @@ impl Engine {
     pub fn digest(&self) -> crate::digest::RoomDigest {
         let mut view = crate::digest::digest(self.tasks(), &self.decisions);
         view.utilization = self.utilization();
+        view.spend = self
+            .spend_by_backend()
+            .into_iter()
+            .map(|(backend, spend)| crate::digest::AccountSpend {
+                backend,
+                turns: spend.turns,
+                tokens: spend.usage.total(),
+                per_turn: spend.per_turn(),
+            })
+            .collect();
 
         // Review history lives here, not on the tasks, so the digest cannot
         // work this out for itself.
@@ -948,6 +963,46 @@ impl Engine {
         self.artifacts.get_mut(&id)
     }
 
+    /// What one bot has drawn.
+    pub fn spend_of(&self, agent: AgentId) -> Spend {
+        self.spend.get(&agent).copied().unwrap_or_default()
+    }
+
+    /// What the room has drawn in total.
+    pub fn spend_total(&self) -> Spend {
+        let mut total = Spend::default();
+        for spend in self.spend.values() {
+            total.merge(*spend);
+        }
+        total
+    }
+
+    /// What each account has drawn, heaviest first.
+    ///
+    /// Grouped by backend rather than by bot because that is the unit an
+    /// allowance is granted in: fifteen bots on one subscription draw on one
+    /// limit, and a per-bot list hides that completely. It is the view that
+    /// would have shown a weekly allowance being eaten four times faster than
+    /// the week before.
+    pub fn spend_by_backend(&self) -> Vec<(String, Spend)> {
+        let mut totals: BTreeMap<String, Spend> = BTreeMap::new();
+        for (agent, spend) in &self.spend {
+            let Some(spec) = self.specs.get(agent) else {
+                continue;
+            };
+            let backend = spec.provider.backend();
+            if backend.is_empty() {
+                continue;
+            }
+            totals.entry(backend).or_default().merge(*spend);
+        }
+        let mut ranked: Vec<(String, Spend)> = totals.into_iter().collect();
+        ranked.sort_by(|(a_name, a), (b_name, b)| {
+            b.usage.total().cmp(&a.usage.total()).then(a_name.cmp(b_name))
+        });
+        ranked
+    }
+
     /// Every invariant this room breaks, if any.
     ///
     /// An empty result means it is coherent. Anything returned is a bug
@@ -1499,7 +1554,7 @@ impl Engine {
                 self.answer_decision(decision, answer)
             }
 
-            Command::RecordTurn { agent } => self.record_turn(agent),
+            Command::RecordTurn { agent, usage } => self.record_turn(agent, usage),
             Command::ReportError {
                 agent,
                 task,
@@ -2460,9 +2515,10 @@ impl Engine {
 
     // ---------------------------------------------------------- housekeeping
 
-    fn record_turn(&mut self, agent: AgentId) -> Result<Vec<EventEnvelope>> {
+    fn record_turn(&mut self, agent: AgentId, usage: TokenUsage) -> Result<Vec<EventEnvelope>> {
         self.require_agent(agent)?;
         self.room.turns_used = self.room.turns_used.saturating_add(1);
+        self.spend.entry(agent).or_default().record(usage);
         self.error_streak.insert(agent, 0);
         if self.room.is_out_of_turns() {
             return self.set_phase(RoomPhase::Paused, "turn budget exhausted");

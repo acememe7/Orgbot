@@ -115,6 +115,10 @@ class _ObjectivesPaneState extends State<ObjectivesPane> {
               ],
               const SizedBox(height: 14),
               _UtilizationStrip(utilization: digest.utilization),
+              if (digest.spend.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                _SpendStrip(spend: digest.spend),
+              ],
               if (digest.health.coordinationExpansion) ...[
                 const SizedBox(height: 16),
                 _ExpansionWarning(health: digest.health),
@@ -929,6 +933,85 @@ class _CriticalPath extends StatelessWidget {
 }
 
 /// Where the room's effort is going.
+/// What the room has drawn, by account.
+///
+/// Turns were always on the board and tokens were not, which meant the only
+/// visible cost of raising concurrency was that the room went faster. A
+/// roster mostly on one subscription draws on one allowance, and drawing on
+/// it four times faster is not visible anywhere until the allowance is gone.
+class _SpendStrip extends StatelessWidget {
+  const _SpendStrip({required this.spend});
+
+  final List<AccountSpend> spend;
+
+  /// Group digits: a seven-figure token count is unreadable otherwise.
+  static String _grouped(int value) {
+    final digits = value.toString();
+    final out = StringBuffer();
+    for (var i = 0; i < digits.length; i++) {
+      if (i > 0 && (digits.length - i) % 3 == 0) out.write(',');
+      out.write(digits[i]);
+    }
+    return out.toString();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'What this has drawn',
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.4,
+            color: scheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 6),
+        for (final account in spend)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    account.backend,
+                    style: const TextStyle(fontSize: 12),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Text(
+                  '${account.turns} turns',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  // Zero is "this backend does not report usage", not "free".
+                  account.isMetered
+                      ? '${_grouped(account.tokens)} tokens'
+                      : 'not metered',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: account.isMetered
+                        ? scheme.onSurface
+                        : scheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class _UtilizationStrip extends StatelessWidget {
   const _UtilizationStrip({required this.utilization});
 

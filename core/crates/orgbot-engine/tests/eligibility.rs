@@ -883,3 +883,107 @@ fn releasing_a_task_releases_its_claim_too() {
     assert_eq!(record.lease_expires_at, None, "the claim went with the holder");
     assert!(r.engine.health().is_ok(), "{}", r.engine.health().report());
 }
+
+// ------------------------------------------------------------------- spend
+
+/// A room can say what it has cost, by the unit an allowance is granted in.
+///
+/// Turns were always counted; tokens were reported by every turn and thrown
+/// away. So the room could say it had taken 347 turns and nothing at all about
+/// what that drew — which is how a four-fold rise in concurrency was argued
+/// for on the strength of "no rate-limit errors today", against a weekly
+/// allowance that does not fail that way.
+#[test]
+fn a_room_counts_what_it_draws_and_from_which_account() {
+    use orgbot_proto::agent::ProviderRef;
+    use orgbot_proto::spend::TokenUsage;
+
+    let mut r = room();
+    let cost = |input: u32, output: u32| TokenUsage {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+    };
+
+    // Two bots on one account, one on another.
+    let heavy = AgentSpec::new(
+        "heavy",
+        "Heavy",
+        ProviderRef::OpenAiCompatible {
+            model: "gpt-6".into(),
+            profile: "codex".into(),
+        },
+    )
+    .with_roles(vec!["writer"]);
+    let also_codex = AgentSpec::new(
+        "also",
+        "Also",
+        ProviderRef::OpenAiCompatible {
+            model: "gpt-6".into(),
+            profile: "codex".into(),
+        },
+    )
+    .with_roles(vec!["writer"]);
+    let elsewhere = AgentSpec::new(
+        "elsewhere",
+        "Elsewhere",
+        ProviderRef::DeepSeek {
+            model: "deepseek-chat".into(),
+        },
+    )
+    .with_roles(vec!["writer"]);
+    let (heavy_id, also_id, other_id) = (heavy.id, also_codex.id, elsewhere.id);
+    for spec in [heavy, also_codex, elsewhere] {
+        r.apply(Command::JoinAgent {
+            spec: Box::new(spec),
+        });
+    }
+
+    r.apply(Command::RecordTurn {
+        agent: heavy_id,
+        usage: cost(1_000, 200),
+    });
+    r.apply(Command::RecordTurn {
+        agent: also_id,
+        usage: cost(500, 100),
+    });
+    r.apply(Command::RecordTurn {
+        agent: other_id,
+        usage: cost(10, 5),
+    });
+
+    assert_eq!(r.engine.spend_of(heavy_id).usage.total(), 1_200);
+    assert_eq!(r.engine.spend_total().turns, 3);
+
+    let by_backend = r.engine.spend_by_backend();
+    assert_eq!(
+        by_backend[0].0, "openai:codex",
+        "the heaviest account comes first: {by_backend:?}"
+    );
+    assert_eq!(
+        by_backend[0].1.usage.total(),
+        1_800,
+        "both bots on one account draw on one limit, and must be summed as one"
+    );
+    assert_eq!(by_backend[0].1.turns, 2);
+    assert_eq!(by_backend[1].0, "deepseek");
+}
+
+/// A turn from a backend that reports nothing still counts as a turn.
+#[test]
+fn an_unmetered_backend_is_counted_but_not_presented_as_free() {
+    use orgbot_proto::spend::TokenUsage;
+
+    let mut r = room();
+    r.apply(Command::RecordTurn {
+        agent: r.a,
+        usage: TokenUsage::default(),
+    });
+    let spend = r.engine.spend_of(r.a);
+    assert_eq!(spend.turns, 1, "the turn happened");
+    assert!(
+        spend.usage.is_empty(),
+        "and its cost is unknown, which is not the same as zero"
+    );
+}
