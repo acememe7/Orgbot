@@ -75,11 +75,21 @@ pub struct RoomLimits {
     /// How many of those turns may be going to the same backend at once.
     ///
     /// Parallel turns are parallel requests, and bots sharing a provider share
-    /// its rate limit. Without this a room of mostly-Anthropic bots turns its
-    /// concurrency straight into 429s: the turns are spent, the work is not
-    /// done, and the room is slower than if it had waited.
+    /// its rate limit, so a room whose roster sits mostly on one account can
+    /// turn its concurrency straight into 429s: the turns are spent, the work
+    /// is not done, and the room is slower than if it had waited.
     ///
-    /// Zero means no separate cap — [`Self::max_parallel_turns`] alone.
+    /// **Off by default**, because that risk is a guess and the cost is not. A
+    /// real room of twenty-one bots had fifteen of them on one account; a flat
+    /// cap of two would have held the bulk of that roster to two turns at a
+    /// time and quietly undone the concurrency it was given — while that room
+    /// had been running four at a time all day without being rate limited
+    /// once. Guessing a limit tighter than the evidence is how a safety rail
+    /// becomes the thing that slows you down.
+    ///
+    /// So it is the knob to reach for when rate limiting actually shows up,
+    /// not a toll charged in advance. Zero means no separate cap —
+    /// [`Self::max_parallel_turns`] alone.
     pub max_parallel_per_backend: u32,
 }
 
@@ -99,7 +109,7 @@ impl Default for RoomLimits {
             handoff_timeout_ms: 5 * 60 * 1000,
             max_consecutive_errors: 3,
             max_parallel_turns: default_parallel_turns(),
-            max_parallel_per_backend: 2,
+            max_parallel_per_backend: 0,
         }
     }
 }

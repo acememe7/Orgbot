@@ -688,3 +688,46 @@ async fn bots_on_separate_backends_all_run_together() {
         "four separate accounts do not compete and must not be throttled"
     );
 }
+
+/// The per-backend cap is off unless somebody turns it on.
+///
+/// It guards against a risk that may not exist for a given roster, and it
+/// costs throughput that certainly does. A room of fifteen bots on one account
+/// running four at a time, with no rate limiting all day, is evidence — and a
+/// cap set tighter than the evidence is just a slower room.
+#[tokio::test]
+async fn a_roster_on_one_account_is_not_throttled_by_default() {
+    let provider = Arc::new(Fixed(CompletionResponse {
+        model: "test".into(),
+        content: vec![ContentBlock::text("idle")],
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    })) as Arc<dyn Provider>;
+
+    let mut room = Orchestrator::new(room_spec(4));
+    for index in 0..8 {
+        let bot = AgentSpec::new(
+            format!("w{index}"),
+            "Worker",
+            ProviderRef::OpenAiCompatible {
+                model: "gpt-6-astra".into(),
+                profile: "codex".into(),
+            },
+        )
+        .with_roles(vec!["writer"]);
+        room.seat(bot, provider.clone()).unwrap();
+    }
+    room.start().unwrap();
+    for index in 0..8 {
+        open_task(&mut room.engine_mut(), &format!("task {index}"));
+    }
+
+    // Through `batch_size`, which is what actually drives a batch: the
+    // room-wide setting is the ceiling, and nothing narrows it further.
+    assert_eq!(room.batch_size(), 4);
+    assert_eq!(
+        room.next_actors(room.batch_size()).len(),
+        4,
+        "the room's own concurrency is the only limit until one is asked for"
+    );
+}
