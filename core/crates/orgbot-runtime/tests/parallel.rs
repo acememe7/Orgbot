@@ -518,3 +518,24 @@ fn a_room_saved_without_a_parallelism_setting_still_loads() {
         "an existing room should benefit from this without being rebuilt"
     );
 }
+
+/// Reopening saved work adopts the room's current setting.
+///
+/// This is the one that decides whether an existing room benefits. The room
+/// that prompted all of this had been running for days; if reopening it kept
+/// the concurrency it was saved with, the fix would only ever help rooms
+/// created after it, and the room that needed it would stay slow.
+#[test]
+fn reopening_a_saved_room_picks_up_the_current_concurrency() {
+    let mut engine = Engine::new(room_spec(1));
+    engine.apply(Command::StartRoom).unwrap();
+    assert_eq!(engine.room().spec.limits.parallel_turns(), 1);
+
+    // What opening the saved room does: apply the spec as it is configured now.
+    engine.configure_saved_room(room_spec(6));
+    assert_eq!(
+        engine.room().spec.limits.parallel_turns(),
+        6,
+        "days-old work should speed up on reopening, not stay as it was saved"
+    );
+}
