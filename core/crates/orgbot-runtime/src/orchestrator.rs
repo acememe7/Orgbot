@@ -1,25 +1,38 @@
 //! Who acts next, and when the room is finished.
 //!
-//! Bots do not run concurrently against the engine. One bot takes a turn, the
-//! room state changes, and the next choice is made against the new state. That
-//! is slower than fanning out, but it is what makes the room's behaviour
-//! reproducible from its event log — and with a shared task board, two bots
-//! acting on stale state is exactly how you get two claims on one task.
+//! Bots take turns in batches. A turn is almost entirely time spent waiting on
+//! a model, so running them one at a time meant a room of twenty bots had
+//! nineteen idle at every instant, and seating more of them could not make the
+//! work finish sooner. `max_parallel_turns` sets how many act at once.
 //!
-//! Concurrency lives one level down instead: a single bot's turn can issue
-//! parallel tool calls, and its model call streams.
+//! Two bots acting on the same board at the same time is only safe because of
+//! where the checking happens. What a bot is told in its prompt is a snapshot
+//! from when the prompt was built, and by the time it acts, minutes later, the
+//! board may have moved. So nothing trusts that snapshot: every command
+//! revalidates when it applies, against the board as it is then. Claiming goes
+//! through the task state machine, which refuses a task already claimed;
+//! anything touching work in progress goes through `require_assignee`, which
+//! refuses a task held by somebody else. A bot that loses a race is told the
+//! task was taken and picks another — it cannot overwrite the winner's work.
+//! See [`crate::shared`] for the lock that keeps single commands atomic.
+//!
+//! Scheduling then tries to avoid staging those races at all: when picking a
+//! batch, work that has already been earmarked for a bot earlier in the batch
+//! is not offered again, so free bots are woken for distinct tasks rather than
+//! sent to compete for one. Losing a race is safe but it still costs a turn.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use orgbot_engine::{Command, Engine};
 use orgbot_proto::event::Event;
 use orgbot_proto::room::{CompletionRule, RoomPhase, RoomSpec};
-use orgbot_proto::{AgentId, AgentSpec, AgentStatus, Timestamp};
+use orgbot_proto::{AgentId, AgentSpec, AgentStatus, TaskId, Timestamp};
 use orgbot_providers::{Provider, StreamEvent};
 use tokio::sync::mpsc;
 
 use crate::bot::{Bot, TurnReport};
+use crate::shared::SharedEngine;
 
 /// Why a run stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +66,7 @@ impl RunOutcome {
 /// Drives a room.
 #[derive(Debug)]
 pub struct Orchestrator {
-    engine: Engine,
+    engine: SharedEngine,
     bots: BTreeMap<AgentId, Bot>,
     /// Turn order. Kept separate from `bots` so scheduling is round-robin
     /// rather than by id, which would starve whoever sorts last.
@@ -69,8 +82,9 @@ pub struct Orchestrator {
 impl Orchestrator {
     /// Complete room state and bot conversations, without provider credentials.
     pub fn checkpoint(&self) -> serde_json::Value {
+        let engine = self.engine.borrow();
         serde_json::json!({
-            "version": 1, "engine": self.engine,
+            "version": 1, "engine": &*engine,
             "bots": self.bots.iter().map(|(id, bot)| (*id, bot.memory())).collect::<BTreeMap<_, _>>(),
             "cursor": self.cursor,
         })
@@ -101,7 +115,7 @@ impl Orchestrator {
             BTreeMap::new()
         };
         let mut restored = Self {
-            engine,
+            engine: SharedEngine::new(engine),
             bots: BTreeMap::new(),
             rotation: vec![],
             cursor: value["cursor"].as_u64().unwrap_or(0) as usize,
@@ -109,11 +123,16 @@ impl Orchestrator {
             last_said: BTreeMap::new(),
         };
         for (mut configured, provider) in providers {
-            if let Some(saved) = restored.engine.agent_by_handle(&configured.handle).cloned() {
+            let saved = restored
+                .engine
+                .with(|engine| engine.agent_by_handle(&configured.handle).cloned());
+            if let Some(saved) = saved {
                 configured.id = saved.id;
                 configured.created_at = saved.created_at;
                 let same_provider = saved.provider == configured.provider;
-                restored.engine.update_agent(configured.clone());
+                restored
+                    .engine
+                    .with(|engine| engine.update_agent(configured.clone()));
                 let mut bot = Bot::new(configured.clone(), provider);
                 if same_provider {
                     if let Some(memory) = memory.get(&configured.id) {
@@ -136,7 +155,7 @@ impl Orchestrator {
     /// Open a room.
     pub fn new(spec: RoomSpec) -> Self {
         Self {
-            engine: Engine::new(spec),
+            engine: SharedEngine::new(Engine::new(spec)),
             bots: BTreeMap::new(),
             rotation: Vec::new(),
             cursor: 0,
@@ -152,8 +171,10 @@ impl Orchestrator {
         provider: Arc<dyn Provider>,
     ) -> Result<AgentId, orgbot_engine::EngineError> {
         let id = spec.id;
-        self.engine.apply(Command::JoinAgent {
-            spec: Box::new(spec.clone()),
+        self.engine.with(|engine| {
+            engine.apply(Command::JoinAgent {
+                spec: Box::new(spec.clone()),
+            })
         })?;
         let mut bot = Bot::new(spec.clone(), provider);
         if let Some((rx, socket)) = spawn_mcp_host(&spec) {
@@ -184,106 +205,185 @@ impl Orchestrator {
     }
 
     /// The room engine, for inspection.
-    pub fn engine(&self) -> &Engine {
-        &self.engine
+    ///
+    /// Borrows it until the returned guard drops. Every bot taking a turn
+    /// waits on this, so read what you need and let it go; never hold it
+    /// across an `.await`.
+    pub fn engine(&self) -> impl std::ops::Deref<Target = Engine> + use<'_> {
+        self.engine.borrow()
     }
 
     /// The room engine, for a human issuing commands mid-run.
-    pub fn engine_mut(&mut self) -> &mut Engine {
-        &mut self.engine
+    ///
+    /// An operator's command is applied through the same lock as a bot's, so
+    /// it lands between turns rather than in the middle of one.
+    pub fn engine_mut(&mut self) -> impl std::ops::DerefMut<Target = Engine> + use<'_> {
+        self.engine.borrow_mut()
+    }
+
+    /// A handle to the shared engine, for code that runs alongside turns.
+    pub fn shared_engine(&self) -> SharedEngine {
+        self.engine.clone()
     }
 
     /// Move the room into the running phase.
     pub fn start(&mut self) -> Result<(), orgbot_engine::EngineError> {
-        self.engine.apply(Command::StartRoom)?;
+        self.engine.with(|engine| engine.apply(Command::StartRoom))?;
         Ok(())
     }
 
-    /// Whether `agent` has anything worth waking up for.
+    /// Why a bot should be woken, if it should be.
     ///
-    /// Ordered by how much the room gains: answering a handoff unblocks another
-    /// bot, so it outranks starting fresh work.
-    pub fn is_actionable(&self, agent: AgentId) -> bool {
-        let status = self.engine.status(agent);
+    /// Ordered by how much the room gains: answering a handoff unblocks
+    /// another bot, so it outranks starting fresh work.
+    ///
+    /// This says *why* rather than just yes, because batching needs to know.
+    /// Some reasons are the bot's own business — its held work, a question
+    /// addressed to it — and several bots can act on them at once without ever
+    /// meeting. Others point at a shared pool, and waking two bots for the
+    /// same item in that pool means one of them wastes a turn discovering the
+    /// other got there first.
+    fn wake_reason(&self, engine: &Engine, agent: AgentId) -> Option<Wake> {
+        let status = engine.status(agent);
         if matches!(status, AgentStatus::Offline | AgentStatus::Faulted) {
-            return false;
+            return None;
         }
         // Someone is blocked on this bot's answer.
-        if !self.engine.offers_for(agent).is_empty() {
-            return true;
+        if !engine.offers_for(agent).is_empty() {
+            return Some(Wake::Handoff);
         }
         // A question addressed to this bot that it has not answered yet. This
         // is what lets a human (or another bot) talk to the room and get a
         // reply, rather than the message landing in the log unheard.
-        if self.has_unanswered_message(agent) {
-            return true;
+        if self.has_unanswered_message(engine, agent) {
+            return Some(Wake::Question);
         }
         // Work in hand that is not parked.
-        let held = self.engine.active_tasks_of(agent);
-        let has_live_work = held.iter().any(|id| {
-            self.engine
-                .task(*id)
-                .is_some_and(|task| !task.state.is_waiting())
-        });
+        let held = engine.active_tasks_of(agent);
+        let has_live_work = held
+            .iter()
+            .any(|id| engine.task(*id).is_some_and(|task| !task.state.is_waiting()));
         if has_live_work {
-            return true;
+            return Some(Wake::HeldWork);
         }
         // Something to inspect.
-        if !self.engine.review_queue_for(agent).is_empty() {
-            return true;
+        if !engine.review_queue_for(agent).is_empty() {
+            return Some(Wake::Review);
         }
         // Approved work waiting to be delivered. A coordinator holds no tasks
         // of its own, so this is the only thing that wakes it at the end.
-        if self
-            .engine
+        if engine
             .agent(agent)
             .is_some_and(|spec| spec.autonomy.may_submit)
-            && !self.engine.awaiting_delivery().is_empty()
+            && !engine.awaiting_delivery().is_empty()
         {
-            return true;
+            return Some(Wake::Delivery);
         }
         // An empty board is a coordinator's cue to plan. Without this nobody is
         // actionable at the start of a room and it idles before it begins.
-        if self
-            .engine
+        if engine
             .agent(agent)
             .is_some_and(|spec| spec.autonomy.may_create_tasks)
-            && self.engine.tasks().next().is_none()
+            && engine.tasks().next().is_none()
         {
-            return true;
+            return Some(Wake::Planning);
         }
         // Free, with work available. A bot whose only tasks are parked is still
         // free to pick up something else.
-        held.is_empty() && !self.engine.claimable_by(agent).is_empty()
+        if held.is_empty() {
+            let open = engine.claimable_by(agent);
+            if !open.is_empty() {
+                return Some(Wake::FreshWork { open });
+            }
+        }
+        None
+    }
+
+    /// Whether `agent` has anything worth waking up for.
+    pub fn is_actionable(&self, agent: AgentId) -> bool {
+        let engine = self.engine.borrow();
+        self.wake_reason(&engine, agent).is_some()
     }
 
     /// Whether a message the bot has not seen yet is addressed to it and
     /// expects a reply.
-    fn has_unanswered_message(&self, agent: AgentId) -> bool {
+    fn has_unanswered_message(&self, engine: &Engine, agent: AgentId) -> bool {
         let Some(bot) = self.bots.get(&agent) else {
             return false;
         };
-        let roles = self
-            .engine
+        let roles = engine
             .agent(agent)
             .map(|spec| spec.roles.clone())
             .unwrap_or_default();
-        self.engine.events_since(bot.last_seen()).any(|envelope| {
+        engine.events_since(bot.last_seen()).any(|envelope| {
             matches!(&envelope.event, Event::MessagePosted { message } if message.wakes(agent, &roles))
         })
     }
 
     /// The next bot that should act, if any.
-    ///
-    /// Round-robin from wherever the last turn left off, so a chatty bot cannot
-    /// monopolise the room.
     pub fn next_actor(&self) -> Option<AgentId> {
-        if self.rotation.is_empty() {
-            return None;
+        self.next_actors(1).first().copied()
+    }
+
+    /// Up to `limit` bots that should act now, in turn order.
+    ///
+    /// Round-robin from wherever the last batch left off, so a chatty bot
+    /// cannot monopolise the room.
+    ///
+    /// Bots woken for shared work are held to what is actually there. A free
+    /// bot is only included if some claimable task has not already been
+    /// earmarked for a bot ahead of it in this batch, so nine free bots and
+    /// eight open tasks wake eight bots rather than nine racing for the same
+    /// pile. Planning an empty board is capped at one bot outright: two
+    /// coordinators drawing up plans at the same moment produces two sets of
+    /// tasks for the same goal, which is worse than a wasted turn.
+    pub fn next_actors(&self, limit: usize) -> Vec<AgentId> {
+        if self.rotation.is_empty() || limit == 0 {
+            return Vec::new();
         }
-        (0..self.rotation.len())
-            .map(|offset| self.rotation[(self.cursor + offset) % self.rotation.len()])
-            .find(|agent| self.is_actionable(*agent))
+        let engine = self.engine.borrow();
+        let mut chosen = Vec::new();
+        // Work an earlier bot in this batch is expected to take.
+        let mut earmarked: BTreeSet<TaskId> = BTreeSet::new();
+        let mut planner_taken = false;
+        let mut deliveries = engine.awaiting_delivery().len();
+
+        for offset in 0..self.rotation.len() {
+            if chosen.len() >= limit {
+                break;
+            }
+            let agent = self.rotation[(self.cursor + offset) % self.rotation.len()];
+            let Some(reason) = self.wake_reason(&engine, agent) else {
+                continue;
+            };
+            match reason {
+                Wake::FreshWork { open } => {
+                    // Reserve one task for this bot. Which one is not binding —
+                    // the bot chooses for itself — but it keeps the count
+                    // honest, and keeps two bots off a single open task.
+                    let Some(task) = open.into_iter().find(|id| !earmarked.contains(id)) else {
+                        continue;
+                    };
+                    earmarked.insert(task);
+                }
+                Wake::Planning => {
+                    if planner_taken {
+                        continue;
+                    }
+                    planner_taken = true;
+                }
+                Wake::Delivery => {
+                    if deliveries == 0 {
+                        continue;
+                    }
+                    deliveries -= 1;
+                }
+                // Nobody else can act on these, so there is nothing to divide.
+                Wake::Handoff | Wake::Question | Wake::HeldWork | Wake::Review => {}
+            }
+            chosen.push(agent);
+        }
+        chosen
     }
 
     /// Give one bot one turn.
@@ -292,53 +392,115 @@ impl Orchestrator {
     /// against the bot and reported as a turn that achieved nothing, rather
     /// than ending the run — one flaky backend should not take the room down.
     pub async fn step(&mut self, sink: Option<mpsc::Sender<StreamEvent>>) -> Option<TurnReport> {
-        let agent = self.next_actor()?;
-        self.cursor = self
-            .rotation
-            .iter()
-            .position(|id| *id == agent)
-            .map(|index| index + 1)
-            .unwrap_or(0);
+        self.step_many(1, sink).await.pop()
+    }
 
-        let bot = self.bots.get_mut(&agent)?;
-        let report = match bot.take_turn(&mut self.engine, sink).await {
-            Ok(report) => report,
-            Err(error) => {
-                tracing::warn!(%agent, %error, "bot turn failed");
-                TurnReport {
-                    agent,
-                    tool_calls: 0,
-                    tool_errors: 0,
-                    said: None,
-                    steps: 0,
-                    usage: Default::default(),
-                    stop_reason: orgbot_providers::StopReason::Other("provider_error".into()),
+    /// Give up to `limit` bots a turn at the same time.
+    ///
+    /// Returns what each of them did, or an empty batch when nobody is
+    /// actionable. Turns run concurrently but every board change still goes
+    /// through the engine one at a time, so what lands in the log is a
+    /// sequence — see this module's opening note for why that is enough.
+    ///
+    /// Whether a batch counted as progress is judged over the batch as a
+    /// whole: if any bot in it did something, the room is not stalling. That
+    /// makes a round longer than it was, and stall detection correspondingly
+    /// less twitchy, which is the right trade — a room only looks stuck now if
+    /// several bots working at once all achieve nothing.
+    pub async fn step_many(
+        &mut self,
+        limit: usize,
+        sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> Vec<TurnReport> {
+        let chosen = self.next_actors(limit);
+        if chosen.is_empty() {
+            return Vec::new();
+        }
+        // Resume after the last bot picked, so the next batch starts with
+        // whoever has been waiting longest.
+        if let Some(last) = chosen.last() {
+            self.cursor = self
+                .rotation
+                .iter()
+                .position(|id| id == last)
+                .map(|index| index + 1)
+                .unwrap_or(0);
+        }
+
+        let engine = self.engine.clone();
+        // Only one bot streams. The deltas from several turns arriving on one
+        // channel would interleave into a paragraph none of them wrote; the
+        // rest of the batch still posts its work to the room as usual.
+        let mut streaming = sink;
+        let turns = self
+            .bots
+            .iter_mut()
+            .filter(|(id, _)| chosen.contains(id))
+            .map(|(id, bot)| {
+                let id = *id;
+                let engine = engine.clone();
+                let sink = streaming.take();
+                async move { (id, bot.take_turn(&engine, sink).await) }
+            })
+            .collect::<Vec<_>>();
+
+        let finished = futures::future::join_all(turns).await;
+        let mut reports = Vec::with_capacity(finished.len());
+        for (agent, result) in finished {
+            reports.push(match result {
+                Ok(report) => report,
+                Err(error) => {
+                    tracing::warn!(%agent, %error, "bot turn failed");
+                    TurnReport {
+                        agent,
+                        tool_calls: 0,
+                        tool_errors: 0,
+                        said: None,
+                        steps: 0,
+                        usage: Default::default(),
+                        stop_reason: orgbot_providers::StopReason::Other("provider_error".into()),
+                    }
                 }
-            }
-        };
+            });
+        }
 
-        // Expire stale handoffs and break any circular wait the turn created.
-        let _ = self.engine.apply(Command::Tick {
-            now: Timestamp::now(),
+        // Expire stale handoffs and break any circular wait the batch created.
+        self.engine.with(|engine| {
+            let _ = engine.apply(Command::Tick {
+                now: Timestamp::now(),
+            });
         });
 
         // A successful action is always progress. Saying something is progress
         // only if it is not a verbatim repeat of what this bot last said — a
         // bot stuck repeating itself must not keep the room awake.
-        let did_work = report.tool_calls > report.tool_errors;
-        let said_something_new = report
-            .said
-            .as_deref()
-            .is_some_and(|said| self.last_said.get(&agent).map(String::as_str) != Some(said));
-        if let Some(said) = &report.said {
-            self.last_said.insert(agent, said.clone());
+        let mut anyone_progressed = false;
+        for report in &reports {
+            let did_work = report.tool_calls > report.tool_errors;
+            let said_something_new = report.said.as_deref().is_some_and(|said| {
+                self.last_said.get(&report.agent).map(String::as_str) != Some(said)
+            });
+            if let Some(said) = &report.said {
+                self.last_said.insert(report.agent, said.clone());
+            }
+            anyone_progressed |= did_work || said_something_new;
         }
-        if did_work || said_something_new {
+        if anyone_progressed {
             self.idle_rounds = 0;
         } else {
             self.idle_rounds += 1;
         }
-        Some(report)
+        reports
+    }
+
+    /// How many bots this room may run at once.
+    pub fn parallelism(&self) -> usize {
+        self.engine
+            .borrow()
+            .room()
+            .spec
+            .limits
+            .parallel_turns()
     }
 
     /// Run until the room finishes, stalls, or runs out of budget.
@@ -346,19 +508,15 @@ impl Orchestrator {
         loop {
             if let Some(outcome) = self.stop_condition() {
                 if outcome == RunOutcome::Completed {
-                    let _ = self.engine.apply(Command::CloseRoom {
-                        reason: "the room's goal was met".into(),
-                    });
+                    self.close_as_met();
                 }
                 return outcome;
             }
-            if self.step(sink.clone()).await.is_none() {
+            if self.step_many(self.batch_size(), sink.clone()).await.is_empty() {
                 // Nobody actionable. The completion rule decides whether that
                 // is success or a room that has run out of road.
                 return if self.is_complete() {
-                    let _ = self.engine.apply(Command::CloseRoom {
-                        reason: "the room's goal was met".into(),
-                    });
+                    self.close_as_met();
                     RunOutcome::Completed
                 } else {
                     RunOutcome::Idle
@@ -367,19 +525,63 @@ impl Orchestrator {
         }
     }
 
+    /// How many bots to run in the next batch.
+    ///
+    /// The room's parallelism, narrowed so that running several bots at once
+    /// cannot overshoot a turn budget the operator set. Never zero: a room
+    /// with budget left always gets to try.
+    pub fn batch_size(&self) -> usize {
+        self.parallelism().min(self.turns_left()).max(1)
+    }
+
+    /// Turns left in the budget, or unbounded when there is no ceiling.
+    ///
+    /// A batch is bounded by this so that running several bots at once cannot
+    /// overshoot a limit the operator set; the last batch of a room narrows to
+    /// whatever remains.
+    fn turns_left(&self) -> usize {
+        let room = self.engine.borrow();
+        let room = room.room();
+        let limit = room.spec.limits.max_total_turns;
+        if limit == 0 {
+            return usize::MAX;
+        }
+        (limit.saturating_sub(room.turns_used)) as usize
+    }
+
+    fn close_as_met(&mut self) {
+        self.engine.with(|engine| {
+            let _ = engine.apply(Command::CloseRoom {
+                reason: "the room's goal was met".into(),
+            });
+        });
+    }
+
     /// Whether a batch run should stop before taking another turn.
     ///
     /// A server hosting a long-lived, human-in-the-loop room reads this too, but
     /// treats [`RunOutcome::Idle`] as "wait for a person" rather than a reason to
     /// close — see the note on [`Self::next_actor`].
     pub fn stop_condition(&self) -> Option<RunOutcome> {
-        let room = self.engine.room();
+        let engine = self.engine.borrow();
+        self.stop_condition_of(&engine)
+    }
+
+    /// As [`Self::stop_condition`], against an engine already in hand.
+    ///
+    /// Every predicate here has this shape: the inner form takes the engine as
+    /// an argument and the public one acquires it. The lock is not reentrant,
+    /// so a method that holds it and then calls another that acquires it hangs
+    /// the room — which is exactly what happened when `stop_condition` called
+    /// `is_complete` while holding the engine.
+    fn stop_condition_of(&self, engine: &Engine) -> Option<RunOutcome> {
+        let room = engine.room();
         match room.phase {
             RoomPhase::Paused => return Some(RunOutcome::Paused),
             phase if phase.is_finished() => return Some(RunOutcome::Completed),
             _ => {}
         }
-        if self.is_complete() {
+        if self.is_complete_of(engine) {
             return Some(RunOutcome::Completed);
         }
         if room.is_out_of_turns() {
@@ -398,27 +600,30 @@ impl Orchestrator {
 
     /// Whether the room's completion rule is satisfied.
     pub fn is_complete(&self) -> bool {
+        let engine = self.engine.borrow();
+        self.is_complete_of(&engine)
+    }
+
+    /// As [`Self::is_complete`], against an engine already in hand.
+    fn is_complete_of(&self, engine: &Engine) -> bool {
         // A settled board does not answer a new question. Give each available
         // addressee a turn before applying the board's completion rule again.
         if self.rotation.iter().any(|agent| {
             !matches!(
-                self.engine.status(*agent),
+                engine.status(*agent),
                 AgentStatus::Offline | AgentStatus::Faulted
-            ) && self.has_unanswered_message(*agent)
+            ) && self.has_unanswered_message(engine, *agent)
         }) {
             return false;
         }
-        let mut tasks = self.engine.tasks().peekable();
+        let mut tasks = engine.tasks().peekable();
         if tasks.peek().is_none() {
             // A room with no board has not completed; it has not started.
             return false;
         }
-        match self.engine.room().spec.completion {
-            CompletionRule::AllTasksTerminal => {
-                self.engine.tasks().all(|task| task.state.is_terminal())
-            }
-            CompletionRule::RootTaskSubmitted => self
-                .engine
+        match engine.room().spec.completion {
+            CompletionRule::AllTasksTerminal => engine.tasks().all(|task| task.state.is_terminal()),
+            CompletionRule::RootTaskSubmitted => engine
                 .tasks()
                 .filter(|task| task.parent.is_none())
                 .all(|task| task.state.is_terminal()),
@@ -437,7 +642,7 @@ impl Orchestrator {
 
     /// Turns taken so far.
     pub fn turns_used(&self) -> u32 {
-        self.engine.room().turns_used
+        self.engine.borrow().room().turns_used
     }
 }
 
@@ -505,7 +710,32 @@ fn spawn_mcp_host(
     Some((rx, socket))
 }
 
-/// Consecutive fruitless turns before the run is called stalled.
+/// Why a bot is being woken.
+///
+/// The distinction that matters for batching is whether the reason points at
+/// something only this bot can act on, or at a pool several bots share.
+#[derive(Debug, Clone)]
+enum Wake {
+    /// Another bot is blocked waiting for this one to answer.
+    Handoff,
+    /// A question addressed to this bot is unanswered.
+    Question,
+    /// It is holding work that is not parked.
+    HeldWork,
+    /// Something is queued for it to inspect.
+    Review,
+    /// Approved work is waiting to be delivered — a shared pool.
+    Delivery,
+    /// The board is empty and this bot can plan — contended by definition.
+    Planning,
+    /// It is free, and these tasks are open to it — a shared pool.
+    FreshWork {
+        /// Tasks this bot could claim right now.
+        open: Vec<TaskId>,
+    },
+}
+
+/// Consecutive fruitless rounds before the run is called stalled.
 ///
 /// One or two are normal — a bot checks the board and finds nothing. A run of
 /// them means the bots are talking past each other.

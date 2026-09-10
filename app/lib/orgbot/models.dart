@@ -169,6 +169,22 @@ const int defaultMaxTurns = 2000;
 /// Turn budgets offered in the UI. `0` means no limit.
 const List<int> turnBudgetChoices = [500, 2000, 5000, 20000, 0];
 
+/// How many bots work at the same time in a new room.
+///
+/// A turn is almost all waiting on a model, so this is what decides how much
+/// of the roster is actually working: at one, a room of twenty bots has
+/// nineteen idle at every moment and seating more cannot make the work finish
+/// sooner. Four is a real speed-up while staying well inside the request rates
+/// a subscription allows.
+const int defaultParallelTurns = 4;
+
+/// Concurrency settings offered in the UI.
+///
+/// Stops at eight deliberately. Past that the limit stops being the room and
+/// starts being the providers, and a room that spends its turns collecting
+/// rate-limit errors is slower than one that waited its turn.
+const List<int> parallelTurnChoices = [1, 2, 4, 6, 8];
+
 class RoomDef {
   final String id;
   String name;
@@ -187,6 +203,13 @@ class RoomDef {
   /// day and waited — sometimes for hours — for someone to notice.
   int maxTurns;
 
+  /// How many bots may be taking a turn at the same moment.
+  ///
+  /// Raising this does not risk the board. Two bots reaching for the same task
+  /// is settled by the engine — one gets it, the other is told it was taken —
+  /// so what this actually spends is provider rate limit, not correctness.
+  int parallelTurns;
+
   RoomDef({
     String? id,
     required this.name,
@@ -194,6 +217,7 @@ class RoomDef {
     this.path = '',
     this.memory = '',
     this.maxTurns = defaultMaxTurns,
+    this.parallelTurns = defaultParallelTurns,
     WorkspaceConfig? workspace,
     List<String>? tasks,
     List<RoomSlot>? bots,
@@ -211,6 +235,7 @@ class RoomDef {
     'workspace': workspace.toJson(),
     'tasks': tasks,
     'max_turns': maxTurns,
+    'parallel_turns': parallelTurns,
     'bots': bots.map((b) => b.toJson()).toList(),
   };
 
@@ -227,6 +252,8 @@ class RoomDef {
         : null,
     tasks: (json['tasks'] as List? ?? []).cast<String>(),
     maxTurns: (json['max_turns'] as num?)?.toInt() ?? defaultMaxTurns,
+    parallelTurns:
+        (json['parallel_turns'] as num?)?.toInt() ?? defaultParallelTurns,
     bots: (json['bots'] as List? ?? [])
         .map((b) => RoomSlot.fromJson((b as Map).cast<String, Object?>()))
         .toList(),

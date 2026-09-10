@@ -22,6 +22,43 @@ RoomDef room({List<String> tasks = const []}) => RoomDef(
 
 void main() {
   _roleTableTests();
+
+  // The engine runs one bot at a time unless the room file says otherwise,
+  // which is how a room could hold twenty bots and have nineteen idle.
+  test('the room file says how many bots may work at once', () {
+    final bot = BotDef(name: 'Demo', provider: ProviderKind.scripted);
+    final toml = buildRoomFile(
+      RoomDef(name: 'Busy', goal: 'get on with it', parallelTurns: 6),
+      [bot],
+      canRunClis: false,
+    ).toml;
+    expect(toml, contains('max_parallel_turns = 6'));
+  });
+
+  test('a room set to one bot at a time still says so explicitly', () {
+    final bot = BotDef(name: 'Demo', provider: ProviderKind.scripted);
+    final toml = buildRoomFile(
+      RoomDef(name: 'Careful', goal: 'one thing at a time', parallelTurns: 1),
+      [bot],
+      canRunClis: false,
+    ).toml;
+    expect(toml, contains('max_parallel_turns = 1'));
+  });
+
+  test('a room saved before the setting existed gets the default', () {
+    final restored = RoomDef.fromJson({
+      'id': 'room_old',
+      'name': 'Existing',
+      'goal': 'carry on',
+      'max_turns': 2000,
+    });
+    expect(restored.parallelTurns, defaultParallelTurns);
+    expect(
+      restored.parallelTurns,
+      greaterThan(1),
+      reason: 'an existing room should speed up without being rebuilt',
+    );
+  });
   test(
     'Android rooms have no hidden time cutoff; CLI defaults are independent',
     () {

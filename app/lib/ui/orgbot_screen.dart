@@ -717,6 +717,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
     final path = TextEditingController(text: existing?.path);
     var workspace = existing?.workspace.copy() ?? WorkspaceConfig();
     var maxTurns = existing?.maxTurns ?? defaultMaxTurns;
+    var parallelTurns = existing?.parallelTurns ?? defaultParallelTurns;
     final selected = <String, String>{
       for (final slot in existing?.bots ?? <RoomSlot>[]) slot.botId: '',
     }; // botId -> role
@@ -773,6 +774,36 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                         ],
                         onChanged: (value) =>
                             setLocal(() => maxTurns = value ?? defaultMaxTurns),
+                      ),
+                      const SizedBox(height: 12),
+                      // The room used to give one bot a turn at a time, so
+                      // most of the roster sat idle no matter how many bots
+                      // were in it, and seating more could not make the work
+                      // finish sooner.
+                      DropdownButtonFormField<int>(
+                        initialValue:
+                            parallelTurnChoices.contains(parallelTurns)
+                            ? parallelTurns
+                            : defaultParallelTurns,
+                        decoration: const InputDecoration(
+                          labelText: 'Bots working at once',
+                          helperText:
+                              'Most of a turn is waiting on a model, so this '
+                              'is what decides how much of the room is busy. '
+                              'Higher uses more of your rate limit.',
+                        ),
+                        items: [
+                          for (final choice in parallelTurnChoices)
+                            DropdownMenuItem(
+                              value: choice,
+                              child: Text(
+                                choice == 1 ? 'One at a time' : '$choice bots',
+                              ),
+                            ),
+                        ],
+                        onChanged: (value) => setLocal(
+                          () => parallelTurns = value ?? defaultParallelTurns,
+                        ),
                       ),
                       const SizedBox(height: 12),
                     ],
@@ -896,6 +927,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                   goal: goal.text.trim(),
                   path: path.text.trim(),
                   maxTurns: maxTurns,
+                  parallelTurns: parallelTurns,
                   tasks: [goal.text.trim()].where((t) => t.isNotEmpty).toList(),
                   bots: selected.keys.map(RoomSlot.new).toList(),
                 );

@@ -97,7 +97,7 @@ impl Room {
         let pending = Arc::new(Mutex::new(HashMap::new()));
         if let Some(spec) = config.workspace.clone() {
             let (tx, mut rx) = mpsc::channel::<orgbot_runtime::workspace::WorkspaceCall>(8);
-            session.attach_workspace(Workspace { spec, tx });
+            session.attach_workspace(Workspace::new(spec, tx));
             let calls = Arc::clone(&calls);
             let pending = Arc::clone(&pending);
             runtime.spawn(async move {

@@ -337,13 +337,14 @@ async fn a_room_plans_works_inspects_and_delivers() {
     );
 
     // Exactly one task, delivered.
-    let tasks: Vec<_> = room.engine().tasks().collect();
+    let engine = room.engine();
+    let tasks: Vec<_> = engine.tasks().collect();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].state, TaskState::Submitted);
 
     // The work itself exists, and was inspected by someone other than its author.
     assert_eq!(tasks[0].artifacts.len(), 1);
-    let reviews = room.engine().reviews();
+    let reviews = engine.reviews();
     assert_eq!(reviews.len(), 1);
     assert_ne!(
         Some(reviews[0].inspector),
@@ -352,7 +353,7 @@ async fn a_room_plans_works_inspects_and_delivers() {
     );
 
     // And the run is reconstructible from its log.
-    let log = room.engine().log();
+    let log = engine.log();
     assert!(log.iter().any(|e| e.event.name() == "task_created"));
     assert!(log.iter().any(|e| e.event.name() == "review_recorded"));
     assert!(log.iter().any(|e| e.event.name() == "room_closed"));
@@ -379,19 +380,30 @@ async fn work_that_keeps_failing_inspection_fails_rather_than_looping() {
     room.start().unwrap();
 
     let outcome = room.run(None).await;
-    let tasks: Vec<_> = room.engine().tasks().collect();
+    // Everything read from one borrow: asking for the engine again while this
+    // one is alive is a nested lock, and the engine refuses it.
+    let (state, revision, max_revisions, used, budget) = {
+        let engine = room.engine();
+        let task = engine.tasks().next().expect("the board has a task");
+        (
+            task.state,
+            task.revision,
+            task.max_revisions,
+            engine.room().turns_used,
+            engine.room().spec.limits.max_total_turns,
+        )
+    };
     assert_eq!(
-        tasks[0].state,
+        state,
         TaskState::Failed,
         "a worker and an inspector that never agree must terminate"
     );
     assert!(
-        tasks[0].revision <= tasks[0].max_revisions,
-        "the rework budget must be respected, saw revision {}",
-        tasks[0].revision
+        revision <= max_revisions,
+        "the rework budget must be respected, saw revision {revision}"
     );
     assert!(
-        room.turns_used() < room.engine().room().spec.limits.max_total_turns,
+        used < budget,
         "it should fail on the revision budget, not by exhausting the room"
     );
     assert!(matches!(
@@ -814,8 +826,8 @@ async fn an_mcp_agent_bot_claims_a_seeded_task_in_band() {
         "the in-band MCP claim must count as work"
     );
 
-    let task = room
-        .engine()
+    let engine = room.engine();
+    let task = engine
         .tasks()
         .find(|task| task.title == "mcp-claimed task")
         .expect("the task still exists");
@@ -908,8 +920,8 @@ async fn a_real_codex_bot_claims_a_task_through_the_room_bridge() {
         .expect("the codex episode finished in time")
         .expect("the bot was actionable");
 
-    let task = room
-        .engine()
+    let engine = room.engine();
+    let task = engine
         .tasks()
         .find(|task| task.id == task_id)
         .expect("the task still exists");
@@ -1109,7 +1121,8 @@ async fn a_room_cycle_claim_work_review_submit_runs_through_the_bridge() {
     *task_id.lock().unwrap() = Some(task.id.to_string());
 
     let outcome = room.run(None).await;
-    let final_task = room.engine().tasks().find(|t| t.id == task.id).unwrap();
+    let engine = room.engine();
+    let final_task = engine.tasks().find(|t| t.id == task.id).unwrap();
     assert_eq!(
         outcome,
         RunOutcome::Completed,

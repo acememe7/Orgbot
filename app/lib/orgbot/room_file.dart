@@ -71,8 +71,12 @@ RoomFile buildRoomFile(
   // long-running room is not stopped once a day by a number nobody chose.
   buffer.writeln('[room.limits]');
   if (!runsClis) buffer.writeln('max_duration_ms = 0');
+  // How many bots work at once. Without this the engine runs one at a time,
+  // which is why a room could hold twenty bots and still have nineteen of them
+  // sitting idle at any moment.
   buffer
     ..writeln('max_total_turns = ' + room.maxTurns.toString())
+    ..writeln('max_parallel_turns = ' + room.parallelTurns.toString())
     ..writeln();
 
   if (!runsClis && workspace != null) {

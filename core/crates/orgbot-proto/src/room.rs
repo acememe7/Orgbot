@@ -58,6 +58,28 @@ pub struct RoomLimits {
     pub handoff_timeout_ms: i64,
     /// How many consecutive failed turns fault a bot.
     pub max_consecutive_errors: u32,
+    /// How many bots may be taking a turn at the same moment.
+    ///
+    /// A turn is mostly waiting on a model, so this is what decides how much
+    /// of the roster is working rather than sitting idle: at one, a room of
+    /// twenty bots has nineteen doing nothing at every instant, and adding
+    /// bots cannot make it finish sooner.
+    ///
+    /// Raising it does not weaken the board. Every command is checked against
+    /// the board as it is when it applies, so the worst a race produces is a
+    /// bot told the task it wanted has been taken. What it does spend is rate
+    /// limit: these are concurrent calls to the model providers.
+    ///
+    /// Zero or one both mean one at a time.
+    pub max_parallel_turns: u32,
+}
+
+/// Rooms saved before this was settable still ran one turn at a time.
+///
+/// They are reopened faster rather than left slow — the whole reason the
+/// setting exists — but modestly, because it is a change made without asking.
+fn default_parallel_turns() -> u32 {
+    3
 }
 
 impl Default for RoomLimits {
@@ -67,6 +89,22 @@ impl Default for RoomLimits {
             max_duration_ms: 60 * 60 * 1000,
             handoff_timeout_ms: 5 * 60 * 1000,
             max_consecutive_errors: 3,
+            max_parallel_turns: default_parallel_turns(),
+        }
+    }
+}
+
+impl RoomLimits {
+    /// How many bots may act at once, as a usable count.
+    ///
+    /// Zero is treated as one rather than as "no limit": unlike a budget, an
+    /// unbounded fan-out is never what someone means, and it would put the
+    /// whole roster on the providers at once.
+    pub const fn parallel_turns(&self) -> usize {
+        if self.max_parallel_turns == 0 {
+            1
+        } else {
+            self.max_parallel_turns as usize
         }
     }
 }

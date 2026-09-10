@@ -304,12 +304,13 @@ impl RoomSession {
         let Some(path) = &self.state_path else {
             return Ok(());
         };
-        let room = self.orchestrator.engine().room();
-        let stamp = (
-            self.orchestrator.engine().head(),
-            room.phase,
-            room.turns_used,
-        );
+        // Scoped, because checkpoint() below takes the engine again and this
+        // lock is not reentrant.
+        let stamp = {
+            let engine = self.orchestrator.engine();
+            let room = engine.room();
+            (engine.head(), room.phase, room.turns_used)
+        };
         if self.saved_at == Some(stamp) {
             return Ok(());
         }
@@ -431,18 +432,30 @@ impl RoomSession {
         }
     }
 
-    /// Give one bot one turn, streaming its output and broadcasting the result.
+    /// Give a batch of bots a turn, streaming and broadcasting the result.
+    ///
+    /// Only the first bot of the batch is streamed. Deltas from several turns
+    /// on one channel would interleave into text none of them wrote, and the
+    /// others' work still reaches the room as events.
     async fn step(&mut self) {
         // Peek who will act so the live stream can be tagged with the bot. The
         // scheduler is deterministic on state, which does not change between
         // this peek and the step.
-        let actor = self.orchestrator.next_actor();
+        let batch = self.orchestrator.batch_size();
+        let actor = self.orchestrator.next_actors(batch).first().copied();
         let sink = actor.map(|agent| self.spawn_stream_forwarder(agent));
 
         let interrupt = self.interrupt.lock().unwrap().clone();
-        let room = self.orchestrator.engine().room();
-        let limit = room.spec.limits.max_duration_ms;
-        let remaining = (limit - room.created_at.elapsed_to(Timestamp::now())).max(0) as u64;
+        // Scoped: the turns below take the engine for every command they make.
+        let (limit, remaining) = {
+            let engine = self.orchestrator.engine();
+            let room = engine.room();
+            let limit = room.spec.limits.max_duration_ms;
+            (
+                limit,
+                (limit - room.created_at.elapsed_to(Timestamp::now())).max(0) as u64,
+            )
+        };
         let deadline = async {
             if limit > 0 {
                 tokio::time::sleep(Duration::from_millis(remaining)).await;
@@ -454,12 +467,11 @@ impl RoomSession {
             biased;
             _ = interrupt.cancelled() => {},
             _ = deadline => {},
-            _ = self.orchestrator.step(sink) => {},
+            _ = self.orchestrator.step_many(batch, sink) => {},
         }
         self.broadcast_new_events();
-        let _ = self.events.send(ServerMessage::Phase {
-            phase: self.orchestrator.engine().room().phase,
-        });
+        let phase = self.orchestrator.engine().room().phase;
+        let _ = self.events.send(ServerMessage::Phase { phase });
     }
 
     /// Wire a bot's streaming deltas onto the broadcast, tagged with the bot.
@@ -596,7 +608,7 @@ impl RoomSession {
                     }
                 };
                 let room = self.orchestrator.engine().room_id();
-                let audience = human_audience(self.orchestrator.engine(), &body);
+                let audience = human_audience(&self.orchestrator.engine(), &body);
                 let mut message = ChatMessage {
                     id: orgbot_proto::MessageId::new(),
                     room,
@@ -719,17 +731,20 @@ impl RoomSession {
     /// Unblock a task that was waiting on a human, recording the answer as a
     /// message so the working bot sees it on its next turn.
     fn answer_waiting_task(&mut self, task: TaskId, answer: String) {
-        let engine = self.orchestrator.engine();
-        let Some(record) = engine.task(task) else {
-            return;
+        // Read what is needed and release the engine: writing below takes it
+        // again, and holding it across both would be waiting on ourselves.
+        let (room, assignee) = {
+            let engine = self.orchestrator.engine();
+            let Some(record) = engine.task(task) else {
+                return;
+            };
+            let waiting_on_human = record.state == TaskState::Blocked
+                && record.blocked_on.iter().any(BlockReason::needs_human);
+            if !waiting_on_human {
+                return;
+            }
+            (engine.room_id(), record.assignee)
         };
-        let waiting_on_human = record.state == TaskState::Blocked
-            && record.blocked_on.iter().any(BlockReason::needs_human);
-        if !waiting_on_human {
-            return;
-        }
-        let room = engine.room_id();
-        let assignee = record.assignee;
 
         // Post the answer, directed at the bot that asked so it is woken.
         let mut message = ChatMessage {
@@ -754,7 +769,7 @@ impl RoomSession {
             sent_at: Timestamp::now(),
         };
         message.intent = MessageIntent::Answer;
-        let engine = self.orchestrator.engine_mut();
+        let mut engine = self.orchestrator.engine_mut();
         let _ = engine.apply(Command::PostMessage {
             message: Box::new(message),
         });
@@ -1041,20 +1056,20 @@ mod tests {
         let engine = session.orchestrator.engine();
         let lead = engine.agent_by_handle("lead").unwrap().id;
         assert_eq!(
-            human_audience(engine, "@LEAD, please check"),
+            human_audience(&engine, "@LEAD, please check"),
             Audience::Agents { agents: vec![lead] }
         );
         assert_eq!(
-            human_audience(engine, "@lead @lead check"),
+            human_audience(&engine, "@lead @lead check"),
             Audience::Agents { agents: vec![lead] }
         );
         assert_eq!(
-            human_audience(engine, "@missing check"),
+            human_audience(&engine, "@missing check"),
             Audience::Agents { agents: vec![] }
         );
-        assert_eq!(human_audience(engine, "@all hello"), Audience::Everyone);
+        assert_eq!(human_audience(&engine, "@all hello"), Audience::Everyone);
         assert_eq!(
-            human_audience(engine, "mail foo@lead.example"),
+            human_audience(&engine, "mail foo@lead.example"),
             Audience::Everyone
         );
     }
@@ -1062,7 +1077,7 @@ mod tests {
     #[test]
     fn prompt_labels_the_actual_recipient_and_exposes_existing_artifacts() {
         let (mut session, _handle) = session();
-        let engine = session.orchestrator.engine_mut();
+        let mut engine = session.orchestrator.engine_mut();
         let agent = engine.agent_by_handle("lead").unwrap().clone();
         let task = engine.tasks().next().unwrap().id;
         engine
@@ -1072,7 +1087,7 @@ mod tests {
             .apply(Command::StartTask { task, by: agent.id })
             .unwrap();
         let outcome = orgbot_tools::dispatch(
-            engine,
+            &mut engine,
             agent.id,
             "add_artifact",
             &serde_json::json!({
@@ -1080,11 +1095,12 @@ mod tests {
             }),
         );
         assert!(!outcome.is_error, "{}", outcome.content);
+        let room = engine.room_id();
         engine
             .apply(Command::PostMessage {
                 message: Box::new(ChatMessage {
                     id: orgbot_proto::MessageId::new(),
-                    room: engine.room_id(),
+                    room,
                     author: Author::Human {
                         name: "Alex".into(),
                     },
@@ -1101,7 +1117,7 @@ mod tests {
                 }),
             })
             .unwrap();
-        let prompt = orgbot_runtime::prompt::situation(engine, agent.id, Seq::ZERO);
+        let prompt = orgbot_runtime::prompt::situation(&engine, agent.id, Seq::ZERO);
         assert!(prompt.contains("Alex (to other bots): hello another bot"));
         assert!(!prompt.contains("Alex (to you)"));
         assert!(prompt.contains("[artifact available]"));
@@ -1116,7 +1132,8 @@ mod tests {
             RoomPhase::Running
         );
         assert_eq!(session.orchestrator.engine().tasks().count(), 1);
-        let task = session.orchestrator.engine().tasks().next().unwrap();
+        let engine = session.orchestrator.engine();
+        let task = engine.tasks().next().unwrap();
         assert_eq!(
             task.state,
             TaskState::Ready,

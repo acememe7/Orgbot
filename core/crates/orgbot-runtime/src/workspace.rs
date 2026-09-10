@@ -1,5 +1,7 @@
 //! Device-owned workspace tools. The Android host performs file/SSH I/O;
 //! neither credentials nor an executable command runner enter the room model.
+use std::sync::Arc;
+
 use orgbot_proto::AgentId;
 use orgbot_providers::types::ToolDef;
 use orgbot_tools::ToolOutcome;
@@ -29,9 +31,31 @@ pub struct WorkspaceCall {
 pub struct Workspace {
     pub spec: WorkspaceSpec,
     pub tx: mpsc::Sender<WorkspaceCall>,
+    /// One workspace operation at a time, across every bot.
+    ///
+    /// There is one device at the other end of this holding one connection,
+    /// and it refuses a second operation while one is running rather than
+    /// interleaving them. With bots taking turns concurrently, two of them
+    /// reaching for a file at the same moment is ordinary, so the wait belongs
+    /// here: the second call queues for its turn instead of coming back as a
+    /// failure the model has to interpret. Waiting is the honest answer — the
+    /// work is genuinely serial.
+    ///
+    /// Every clone of a `Workspace` shares this, which is what makes it a
+    /// room-wide queue rather than a per-bot one.
+    pub gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Workspace {
+    /// A workspace reachable through `tx`, with a fresh queue.
+    pub fn new(spec: WorkspaceSpec, tx: mpsc::Sender<WorkspaceCall>) -> Self {
+        Self {
+            spec,
+            tx,
+            gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
     pub fn definitions(&self) -> Vec<ToolDef> {
         let mut tools = vec![
             tool(
@@ -85,6 +109,11 @@ impl Workspace {
         } else {
             30
         };
+        // Wait for the device to be free before starting the clock, so a bot
+        // queued behind a long build still gets its own full allowance rather
+        // than spending it in the queue.
+        let _turn = self.gate.lock().await;
+
         let (reply, result) = oneshot::channel();
         let call = WorkspaceCall {
             agent,
@@ -200,15 +229,15 @@ mod tests {
         );
         let agent = room.seat(spec, provider.clone()).unwrap();
         let (tx, mut rx) = mpsc::channel(2);
-        let workspace = Workspace {
-            spec: WorkspaceSpec {
+        let workspace = Workspace::new(
+            WorkspaceSpec {
                 label: "SSH test computer".into(),
                 root: "/work".into(),
                 writable: false,
                 commands: true,
             },
             tx,
-        };
+        );
         assert!(
             !workspace
                 .definitions()
@@ -230,14 +259,16 @@ mod tests {
             provider.clone(),
         );
         bot.attach_workspace(workspace);
-        let mut engine = orgbot_engine::Engine::new(room.engine().room().spec.clone());
+        let spec = room.engine().room().spec.clone();
+        let mut engine = orgbot_engine::Engine::new(spec);
         engine
             .apply(orgbot_engine::Command::JoinAgent {
                 spec: Box::new(bot.spec.clone()),
             })
             .unwrap();
         engine.apply(orgbot_engine::Command::StartRoom).unwrap();
-        let run = tokio::spawn(async move { bot.take_turn(&mut engine, None).await });
+        let engine = crate::SharedEngine::new(engine);
+        let run = tokio::spawn(async move { bot.take_turn(&engine, None).await });
         let call = rx.recv().await.unwrap();
         assert_eq!(call.name, "workspace_read");
         assert_eq!(call.arguments["path"], "README.md");

@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use orgbot_engine::{Command, Engine};
+use orgbot_engine::Command;
+
+use crate::shared::SharedEngine;
 use orgbot_proto::agent::ProviderRef;
 use orgbot_proto::{AgentId, AgentSpec, Seq};
 use orgbot_providers::types::{
@@ -158,10 +160,10 @@ impl Bot {
     /// bot that keeps failing and hands its work back.
     pub async fn take_turn(
         &mut self,
-        engine: &mut Engine,
+        engine: &SharedEngine,
         sink: Option<mpsc::Sender<StreamEvent>>,
     ) -> Result<TurnReport, ProviderError> {
-        let mut system = prompt::system_prompt(engine, &self.spec);
+        let mut system = engine.with(|engine| prompt::system_prompt(engine, &self.spec));
         if let Some(workspace) = &self.workspace {
             system.push_str(&workspace.instruction());
         }
@@ -175,14 +177,18 @@ impl Bot {
             self.history.pop();
         }
         let previous_seen = self.last_seen;
-        let situation = prompt::situation(engine, self.spec.id, self.last_seen);
-        let mut turn = Turn::user(situation);
-        turn.content.extend(crate::attachments::context(
-            engine,
-            self.last_seen,
-            self.attachments_root.as_deref(),
-        ));
-        self.last_seen = engine.head();
+        // One lock for the whole prompt, so what the bot is told about the
+        // board is a single moment rather than several stitched together.
+        let (turn, head) = engine.with(|engine| {
+            let mut turn = Turn::user(prompt::situation(engine, self.spec.id, self.last_seen));
+            turn.content.extend(crate::attachments::context(
+                engine,
+                self.last_seen,
+                self.attachments_root.as_deref(),
+            ));
+            (turn, engine.head())
+        });
+        self.last_seen = head;
         self.history.push(turn);
 
         let mut report = TurnReport {
@@ -254,13 +260,16 @@ impl Bot {
                 Err(error) => {
                     // Tell the engine, so repeated failures fault the bot and
                     // release whatever it is holding.
-                    let _ = engine.apply(Command::ReportError {
+                    let _ = engine.with(|engine| {
+                        let task = engine.active_tasks_of(self.spec.id).first().copied();
+                        engine.apply(Command::ReportError {
                         agent: self.spec.id,
-                        task: engine.active_tasks_of(self.spec.id).first().copied(),
+                        task,
                         error: error.to_string(),
                         // A model that does not exist, or a credential the
                         // backend refuses, will answer the same way next turn.
                         permanent: !error.is_retryable(),
+                        })
                     });
                     return Err(error);
                 }
@@ -297,7 +306,7 @@ impl Bot {
                         },
                     }
                 } else {
-                    orgbot_tools::dispatch(engine, self.spec.id, name, input)
+                    engine.with(|engine| orgbot_tools::dispatch(engine, self.spec.id, name, input))
                 };
                 report.tool_calls += 1;
                 if outcome.is_error {
@@ -317,18 +326,19 @@ impl Bot {
         // other bots. Posted as an ordinary statement, so it does not wake the
         // room; anything needing an answer goes through post_message with
         // intent "ask".
-        if let Some(said) = &report.said {
-            if !posted_to_chat {
-                let message =
-                    orgbot_proto::ChatMessage::say(engine.room_id(), self.spec.id, said.clone());
-                let _ = engine.apply(Command::PostMessage {
-                    message: Box::new(message),
-                });
+        engine.with(|engine| {
+            if let Some(said) = &report.said {
+                if !posted_to_chat {
+                    let message =
+                        orgbot_proto::ChatMessage::say(engine.room_id(), self.spec.id, said.clone());
+                    let _ = engine.apply(Command::PostMessage {
+                        message: Box::new(message),
+                    });
+                }
             }
-        }
-
-        let _ = engine.apply(Command::RecordTurn {
-            agent: self.spec.id,
+            let _ = engine.apply(Command::RecordTurn {
+                agent: self.spec.id,
+            });
         });
         Ok(report)
     }
@@ -402,7 +412,7 @@ fn is_safe_cut_point(turn: &Turn) -> bool {
 async fn complete_with_mcp(
     provider: &Arc<dyn Provider>,
     tools: &[ToolDef],
-    engine: &mut Engine,
+    engine: &SharedEngine,
     actor: AgentId,
     request: CompletionRequest,
     sink: Option<mpsc::Sender<StreamEvent>>,
@@ -422,7 +432,8 @@ async fn complete_with_mcp(
                 while let Ok(call) = rx.try_recv() {
                     let reply = {
                         let mut dispatch = |name: &str, args: &serde_json::Value| {
-                            let outcome = orgbot_tools::dispatch(engine, actor, name, args);
+                            let outcome = engine
+                                .with(|engine| orgbot_tools::dispatch(engine, actor, name, args));
                             if outcome.is_error {
                                 calls_err += 1;
                             } else {
@@ -440,7 +451,8 @@ async fn complete_with_mcp(
                 let Some(call) = inbound else { continue };
                 let reply = {
                     let mut dispatch = |name: &str, args: &serde_json::Value| {
-                        let outcome = orgbot_tools::dispatch(engine, actor, name, args);
+                        let outcome =
+                            engine.with(|engine| orgbot_tools::dispatch(engine, actor, name, args));
                         tracing::debug!(
                             tool = name,
                             error = outcome.is_error,
@@ -611,6 +623,8 @@ mod mcp_tests {
 
     use async_trait::async_trait;
     use orgbot_engine::{Command, Engine};
+
+    use crate::shared::SharedEngine;
     use orgbot_proto::agent::ProviderRef;
     use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
     use orgbot_proto::AgentSpec;
@@ -707,11 +721,11 @@ mod mcp_tests {
 
         backend.0.store(0, Ordering::SeqCst);
         let spec = AgentSpec::new("worker", "Worker", ProviderRef::Scripted { script: "test".into() });
-        let mut engine = engine_with(&spec);
+        let engine = SharedEngine::new(engine_with(&spec));
         let mut bot = Bot::new(spec, provider);
         let interrupt = bot.input_interrupt.clone();
         let (tx, mut rx) = mpsc::channel(8);
-        let running = tokio::spawn(async move { bot.take_turn(&mut engine, Some(tx)).await });
+        let running = tokio::spawn(async move { bot.take_turn(&engine, Some(tx)).await });
         assert!(matches!(rx.recv().await.unwrap(), StreamEvent::Retry { attempt: 1, .. }));
         interrupt.cancel();
         let report = tokio::time::timeout(std::time::Duration::from_millis(300), running).await.unwrap().unwrap().unwrap();
@@ -734,16 +748,16 @@ mod mcp_tests {
             usage: Usage::default(),
         }]));
         let spec = AgentSpec::new("writer", "Writer", ProviderRef::Scripted { script: "x".into() });
-        let mut engine = engine_with(&spec);
+        let engine = SharedEngine::new(engine_with(&spec));
         let mut bot = Bot::new(spec, provider.clone());
         let token = bot.input_interrupt.clone();
         let (tx, mut calls) = mpsc::channel(2);
-        bot.attach_workspace(Workspace {
-            spec: WorkspaceSpec { label: "test".into(), root: "/work".into(), writable: true, commands: false },
+        bot.attach_workspace(Workspace::new(
+            WorkspaceSpec { label: "test".into(), root: "/work".into(), writable: true, commands: false },
             tx,
-        });
+        ));
         let mut running = tokio::spawn(async move {
-            let result = bot.take_turn(&mut engine, None).await;
+            let result = bot.take_turn(&engine, None).await;
             (bot, engine, result)
         });
         let call = calls.recv().await.unwrap();
@@ -752,7 +766,7 @@ mod mcp_tests {
         assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut running).await.is_err(),
             "input must not drop the pending write");
         call.reply.send(orgbot_tools::ToolOutcome { content: "write committed once".into(), is_error: false }).unwrap();
-        let (mut bot, mut engine, result) = running.await.unwrap();
+        let (mut bot, engine, result) = running.await.unwrap();
         let report = result.unwrap();
         assert_eq!(report.stop_reason, StopReason::Other("human_input".into()));
         assert_eq!(report.tool_calls, 1);
@@ -760,7 +774,7 @@ mod mcp_tests {
         assert_eq!(bot.last_seen(), orgbot_proto::Seq::ZERO, "interrupted requests remain actionable");
         assert!(matches!(&bot.history.last().unwrap().content[0], ContentBlock::ToolResult { content, .. } if content == "write committed once"));
         bot.input_interrupt = tokio_util::sync::CancellationToken::new();
-        bot.take_turn(&mut engine, None).await.unwrap();
+        bot.take_turn(&engine, None).await.unwrap();
         assert!(calls.try_recv().is_err(), "the write must not be replayed");
         assert!(serde_json::to_string(&provider.requests()[1].messages).unwrap().contains("write committed once"));
     }
@@ -776,13 +790,13 @@ mod mcp_tests {
             release: Mutex::new(Some(release_rx)),
         });
         let (mcp_tx, mcp_rx) = mpsc::channel(8);
-        let mut engine = engine_with(&spec);
+        let engine = SharedEngine::new(engine_with(&spec));
         let mut bot = Bot::new(spec, gate);
         bot.attach_mcp(mcp_rx, "/tmp/unused.sock".into());
         bot.input_interrupt.cancel(); // MCP tool loops must still finish safely.
 
         let bot_task =
-            tokio::spawn(async move { (bot.take_turn(&mut engine, None).await, engine) });
+            tokio::spawn(async move { (bot.take_turn(&engine, None).await, engine) });
 
         // The episode is now blocked inside complete(); the room bridge must
         // answer MCP calls and act on the engine while it waits.
@@ -819,6 +833,6 @@ mod mcp_tests {
             report.tool_calls >= 1,
             "the in-band MCP call must count as progress"
         );
-        assert_eq!(engine.room().spec.name, "mcp-room");
+        assert_eq!(engine.with(|e| e.room().spec.name.clone()), "mcp-room");
     }
 }

@@ -353,9 +353,9 @@ async fn broken_api_streams_recover_without_replaying_workspace_operations() {
     resolved.state_path = Some(dir.join("state.json"));
     let (mut session, handle) = RoomSession::build(resolved).unwrap();
     let (tx, mut calls) = tokio::sync::mpsc::channel(8);
-    session.attach_workspace(Workspace {
-        spec: WorkspaceSpec { label: "test".into(), root: "/work".into(), writable: true, commands: false }, tx,
-    });
+    session.attach_workspace(Workspace::new(
+        WorkspaceSpec { label: "test".into(), root: "/work".into(), writable: true, commands: false }, tx,
+    ));
     let mut events = handle.subscribe();
     let run = tokio::spawn(session.run());
     assert!(handle.try_send(Control::HumanMessage { files: vec![], author: "Alex".into(), body: "Write my research".into(), task: None }));
