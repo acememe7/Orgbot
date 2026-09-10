@@ -280,6 +280,16 @@ impl AgentStatus {
     pub const fn accepts_work(self) -> bool {
         matches!(self, Self::Idle)
     }
+
+    /// Whether a bot in this state can hold work at all.
+    ///
+    /// Different question from [`Self::accepts_work`], which asks whether it
+    /// is *free*. A bot part-way through a turn is not free, but it is
+    /// perfectly able to take a second task; a faulted or offline one is not
+    /// able to take any. Confusing the two stops a busy room working.
+    pub const fn is_available(self) -> bool {
+        !matches!(self, Self::Offline | Self::Faulted)
+    }
 }
 
 #[cfg(test)]

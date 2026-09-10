@@ -20,9 +20,9 @@ use orgbot_proto::room::{Room, RoomPhase, RoomSpec};
 use orgbot_proto::convergence::{self, Convergence};
 use orgbot_proto::text;
 use orgbot_proto::decision::{Answer, Decision, DecisionLog, Governance, Request, Settled};
-use orgbot_proto::roles::{Eligibility, RoleTable};
+use orgbot_proto::roles::{Eligibility as RoleFit, RoleTable};
 use orgbot_proto::ids::DecisionId;
-use orgbot_proto::graph::{AuthorizationState, DependencyState, TaskKind, TaskOrigin};
+use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness, TaskKind, TaskOrigin};
 use orgbot_proto::task::{DEFAULT_LEASE_MILLIS, BlockReason, Priority, Task, TaskState, TaskTransition};
 use orgbot_proto::{
     AgentId, AgentSpec, ArtifactId, ChatMessage, HandoffId, RoomId, TaskId, Timestamp,
@@ -30,6 +30,7 @@ use orgbot_proto::{
 
 use crate::command::Command;
 use crate::deadlock::{self, WaitGraph};
+use crate::eligibility::{Eligibility, LeaseState, Reason};
 use crate::error::{EngineError, Result};
 
 /// How many open remediations one task may carry before the room is told to
@@ -44,24 +45,17 @@ pub const MAX_OPEN_REMEDIATIONS: usize = 3;
 /// Deliberately not [`orgbot_proto::graph::Readiness::summary`], which is
 /// written for the person watching the room and reassures them that nothing is
 /// needed from them — exactly the wrong thing to tell an agent it cannot claim.
-fn graph_refusal(task: &Task) -> Option<String> {
-    if let Some(replacement) = task.lineage.superseded_by {
-        return Some(format!(
-            "it was superseded by {replacement}; work that instead"
-        ));
-    }
-    match &task.authorization {
-        AuthorizationState::Authorized => None,
-        AuthorizationState::HeldByPolicy { policy, reason } => {
-            Some(format!("the `{policy}` policy holds it: {reason}"))
-        }
-        AuthorizationState::SecurityHold { finding, .. } => {
-            Some(format!("security is holding it: {finding}"))
-        }
-        AuthorizationState::AwaitingOperator { because, .. } => {
-            Some(format!("it needs an operator decision: {because}"))
-        }
-    }
+/// A dependency that has not landed yet.
+#[derive(Debug, Clone)]
+struct UnmetDependency {
+    /// The upstream task, after following any supersession.
+    task: TaskId,
+    /// Its title, or a note that it is not here.
+    title: String,
+    /// Who is expected to clear it.
+    owner: Option<AgentId>,
+    /// Whether the upstream is actually in this room.
+    present: bool,
 }
 
 /// A live group chat and everything in it.
@@ -364,10 +358,10 @@ impl Engine {
     }
 
     /// How well `agent` matches work requiring `required`.
-    pub fn eligibility(&self, agent: AgentId, required: Option<&str>) -> Eligibility {
+    pub fn eligibility(&self, agent: AgentId, required: Option<&str>) -> RoleFit {
         self.specs
             .get(&agent)
-            .map_or(Eligibility::No, |spec| {
+            .map_or(RoleFit::No, |spec| {
                 self.roles.eligibility(&spec.roles, required)
             })
     }
@@ -435,11 +429,13 @@ impl Engine {
         crate::digest::Utilization {
             starved_roles: self.starved_roles(),
             idle: bots.iter().filter(|bot| bot.free).count() as u32,
-            unclaimed: self
-                .tasks
-                .values()
-                .filter(|task| task.readiness().is_claimable())
-                .count() as u32,
+            unclaimed: {
+                let now = Timestamp::now();
+                self.tasks
+                    .values()
+                    .filter(|task| self.evaluate_task(task.id, now).eligible)
+                    .count() as u32
+            },
             bots,
         }
     }
@@ -515,6 +511,336 @@ impl Engine {
             .collect()
     }
 
+    /// Whether this task could be claimed by anyone right now, and if not why.
+    ///
+    /// The task half of the decision: everything that does not depend on who
+    /// is asking. [`Self::evaluate_claim`] adds the bot half. Splitting it
+    /// this way is what lets a room-wide count of open work and a single bot's
+    /// offer of work come from the same reasoning instead of two.
+    pub fn evaluate_task(&self, task: TaskId, now: Timestamp) -> Eligibility {
+        let Some(record) = self.tasks.get(&task) else {
+            return Eligibility {
+                eligible: false,
+                reason: Reason::UnknownTask,
+                detail: format!("there is no task {task} in this room"),
+                effective: Readiness::Closed { state: "unknown" },
+                blocking_tasks: vec![],
+                holder: None,
+                lease: LeaseState::Unheld,
+                lease_expires_at: None,
+                ownership_epoch: 0,
+                repair_required: false,
+            };
+        };
+
+        let lease = self.lease_state_of(record, now);
+        let base = |reason: Reason, detail: String| Eligibility {
+            eligible: false,
+            reason,
+            detail,
+            effective: record.readiness(),
+            blocking_tasks: vec![],
+            holder: record.assignee,
+            lease,
+            lease_expires_at: record.lease_expires_at,
+            ownership_epoch: record.ownership_epoch,
+            repair_required: reason.needs_repair(),
+        };
+
+        // 1. Replaced work is never actionable again, whatever else is true.
+        if let Some(replacement) = record.lineage.superseded_by {
+            return base(
+                Reason::Superseded,
+                format!("it was superseded by {replacement}; work that instead"),
+            );
+        }
+
+        // 2. Finished is finished.
+        if record.state.is_terminal() {
+            let reason = match record.state {
+                TaskState::Submitted => Reason::Delivered,
+                TaskState::Retired => Reason::Retired,
+                TaskState::Superseded => Reason::Superseded,
+                _ => Reason::Closed,
+            };
+            return base(
+                reason,
+                format!("it is {}, and will not be worked again", record.state.as_str()),
+            );
+        }
+
+        // 3. Permission to run, before anything about whether it could.
+        match &record.authorization {
+            AuthorizationState::HeldByPolicy { policy, reason } => {
+                return base(
+                    Reason::PolicyHeld,
+                    format!("the `{policy}` policy holds it: {reason}"),
+                );
+            }
+            AuthorizationState::SecurityHold { finding, .. } => {
+                return base(
+                    Reason::SecurityHold,
+                    format!("security is holding it: {finding}"),
+                );
+            }
+            AuthorizationState::AwaitingOperator { because, .. } => {
+                return base(
+                    Reason::BlockedOperator,
+                    format!("it needs an operator decision: {because}"),
+                );
+            }
+            AuthorizationState::Authorized => {}
+        }
+
+        // 4. Upstream work. Computed from the edges, not from the projection
+        //    of them, so the answer here and the answer at claim time are the
+        //    same answer.
+        if let Some(unmet) = self.first_unmet_dependency(record) {
+            let mut result = base(
+                if unmet.present {
+                    Reason::DependencyBlocked
+                } else {
+                    Reason::DependencyMissing
+                },
+                if unmet.present {
+                    format!("it waits on {} ({})", unmet.task, unmet.title)
+                } else {
+                    format!(
+                        "it waits on {}, which is not in this room and so can never land",
+                        unmet.task
+                    )
+                },
+            );
+            result.blocking_tasks = vec![unmet.task];
+            return result;
+        }
+
+        // 5. Where the work itself has got to.
+        match record.state {
+            TaskState::Ready => {}
+            TaskState::Draft => {
+                return base(
+                    Reason::NotOpenYet,
+                    "it has not been opened for claiming yet".into(),
+                );
+            }
+            TaskState::Blocked => {
+                // Reuse the readiness rendering rather than writing a second
+                // description of the same blocker.
+                let detail = match record.readiness() {
+                    Readiness::BlockedInternal { reason } => format!("it is blocked: {reason}"),
+                    other => other.summary(),
+                };
+                return base(Reason::BlockedInternal, detail);
+            }
+            _ => {}
+        }
+
+        // 6. Who holds it. A state that says somebody is working on this is
+        //    only true if somebody actually is; the two ways that can be false
+        //    are both recoverable, and both used to be permanent.
+        match (record.state.is_assigned(), record.assignee, lease) {
+            (true, None, _) => {
+                return base(
+                    Reason::ZombieInProgress,
+                    format!(
+                        "it is {} with nobody holding it; the room will return it to the pool",
+                        record.state.as_str()
+                    ),
+                );
+            }
+            (true, Some(holder), LeaseState::Expired | LeaseState::Missing) => {
+                return base(
+                    Reason::LeaseExpired,
+                    format!(
+                        "{} holds it but has stopped reporting progress; the room will return it to the pool",
+                        holder.short()
+                    ),
+                );
+            }
+            (true, Some(holder), _) => {
+                return base(
+                    Reason::AlreadyClaimed,
+                    format!("{} is holding it", holder.short()),
+                );
+            }
+            // Ready with a holder recorded is not a state the transitions can
+            // produce, but a saved room could carry one. Treat the holder as
+            // real rather than handing the task to somebody else.
+            (false, Some(holder), LeaseState::Active) => {
+                return base(
+                    Reason::AlreadyClaimed,
+                    format!("{} is holding it", holder.short()),
+                );
+            }
+            (false, _, _) => {}
+        }
+
+        Eligibility {
+            eligible: true,
+            reason: Reason::ReadyNow,
+            detail: "it is open and everything it needs has landed".into(),
+            effective: record.readiness(),
+            blocking_tasks: vec![],
+            holder: None,
+            lease: LeaseState::Unheld,
+            lease_expires_at: record.lease_expires_at,
+            ownership_epoch: record.ownership_epoch,
+            repair_required: false,
+        }
+    }
+
+    /// Whether `agent` could claim `task` right now, and if not why.
+    ///
+    /// **This is the only place that decides.** The per-bot prompt, the
+    /// claimable listing, the scheduler, the board counts, the Work UI and
+    /// `claim_task` itself are all callers. Anything that advertises work
+    /// without going through here can advertise work the claim would refuse,
+    /// which is exactly the bug this exists to make impossible.
+    ///
+    /// It is still a reading, not a promise: the board moves, and a claim
+    /// re-evaluates at the moment it applies.
+    pub fn evaluate_claim(&self, task: TaskId, agent: AgentId, now: Timestamp) -> Eligibility {
+        let Some(spec) = self.specs.get(&agent) else {
+            return Eligibility {
+                eligible: false,
+                reason: Reason::UnknownBot,
+                detail: format!("there is no bot {agent} in this room"),
+                effective: Readiness::Closed { state: "unknown" },
+                blocking_tasks: vec![],
+                holder: None,
+                lease: LeaseState::Unheld,
+                lease_expires_at: None,
+                ownership_epoch: 0,
+                repair_required: false,
+            };
+        };
+
+        let mut result = self.evaluate_task(task, now);
+        if !result.eligible {
+            return result;
+        }
+
+        // A bot that is not taking work must not be offered any. Without this
+        // a faulted bot is still told about open tasks every turn, and every
+        // claim it makes is refused somewhere further down.
+        let status = self.status(agent);
+        if !status.is_available() {
+            result.eligible = false;
+            result.reason = if status == AgentStatus::Faulted {
+                Reason::BotFaulted
+            } else {
+                Reason::BotUnavailable
+            };
+            result.detail = format!("{} is {status:?} and is not taking work", spec.handle);
+            return result;
+        }
+
+        let Some(record) = self.tasks.get(&task) else {
+            return result;
+        };
+        let fit = self
+            .roles
+            .eligibility(&spec.roles, record.required_role.as_deref());
+        if !fit.is_eligible() {
+            result.eligible = false;
+            result.reason = Reason::RoleMismatch;
+            result.detail = format!(
+                "it needs the `{}` role, which {} does not hold",
+                record.required_role.clone().unwrap_or_default(),
+                spec.handle
+            );
+            return result;
+        }
+        result
+    }
+
+    /// Turn a refusal into the error the caller already knows.
+    ///
+    /// The decision is the evaluator's; this only chooses how to say it. Every
+    /// refusal that had a specific error before still gets that error, so
+    /// nothing downstream had to learn a new shape to keep working — a claim
+    /// on replaced work is still `NotReady`, a claim on a task somebody else
+    /// holds is still the state machine's own complaint. `NotClaimable` is for
+    /// what genuinely had no answer before: ownership that has come apart, and
+    /// bots that cannot be given work.
+    fn refusal(&self, task: TaskId, agent: AgentId, verdict: Eligibility) -> EngineError {
+        match verdict.reason {
+            Reason::RoleMismatch => EngineError::RoleMismatch {
+                task,
+                agent,
+                required: self
+                    .tasks
+                    .get(&task)
+                    .and_then(|t| t.required_role.clone())
+                    .unwrap_or_default(),
+            },
+            Reason::DependencyBlocked | Reason::DependencyMissing => {
+                match verdict.blocking_tasks.first() {
+                    Some(blocker) => EngineError::DependencyNotMet {
+                        task,
+                        blocker: *blocker,
+                    },
+                    None => EngineError::NotReady {
+                        task,
+                        reason: verdict.detail,
+                    },
+                }
+            }
+            Reason::Superseded
+            | Reason::PolicyHeld
+            | Reason::SecurityHold
+            | Reason::BlockedOperator => EngineError::NotReady {
+                task,
+                reason: verdict.detail,
+            },
+            // New ground: nothing used to refuse these, so there is no older
+            // error to be faithful to, and the reason code is the useful part.
+            Reason::ZombieInProgress
+            | Reason::LeaseExpired
+            | Reason::BotFaulted
+            | Reason::BotUnavailable
+            | Reason::UnknownBot => EngineError::NotClaimable {
+                task,
+                agent,
+                code: verdict.reason.code(),
+                reason: verdict.detail,
+            },
+            // Everything else is the workflow saying no. Ask the state machine
+            // so the wording is the one it has always given.
+            _ => match self
+                .tasks
+                .get(&task)
+                .map(|t| t.state.apply(&TaskTransition::Claim { by: agent }))
+            {
+                Some(Err(error)) => EngineError::Transition(error),
+                _ => EngineError::NotClaimable {
+                    task,
+                    agent,
+                    code: verdict.reason.code(),
+                    reason: verdict.detail,
+                },
+            },
+        }
+    }
+
+    /// The state of the claim on `task` as of `now`.
+    fn lease_state_of(&self, task: &Task, now: Timestamp) -> LeaseState {
+        if task.assignee.is_none() {
+            return LeaseState::Unheld;
+        }
+        match task.lease_expires_at {
+            // Held with no expiry recorded. Rooms saved before claims carried
+            // one come back like this, and the sweep that returns abandoned
+            // work to the pool compares against an expiry — so without
+            // treating this as reclaimable the task is held forever.
+            None if !task.state.is_terminal() => LeaseState::Missing,
+            None => LeaseState::Unheld,
+            Some(expiry) if now >= expiry => LeaseState::Expired,
+            Some(_) => LeaseState::Active,
+        }
+    }
+
     /// Open tasks `agent` is eligible to claim, best first.
     ///
     /// Ordering is by priority then age, so a room drains urgent work before
@@ -526,13 +852,18 @@ impl Engine {
         // Every gate is resolved before ranking, not after. Ranking first and
         // validating later is what let superseded and dependency-blocked work
         // be offered as ready.
-        let mut open: Vec<(&Task, Eligibility)> = self
+        //
+        // The gate is `evaluate_claim` and nothing else, so what is listed here
+        // is by construction what a claim would accept. This list is the source
+        // for the per-bot prompt and for `list_tasks(claimable)` alike.
+        let now = Timestamp::now();
+        let mut open: Vec<(&Task, RoleFit)> = self
             .tasks
             .values()
-            .filter(|t| t.readiness().is_claimable())
-            .filter_map(|t| {
+            .filter(|t| self.evaluate_claim(t.id, agent, now).eligible)
+            .map(|t| {
                 let fit = self.roles.eligibility(&spec.roles, t.required_role.as_deref());
-                fit.is_eligible().then_some((t, fit))
+                (t, fit)
             })
             .collect();
         // A bot's own work first, then work it can stand in for. Standing in
@@ -707,9 +1038,10 @@ impl Engine {
             .filter(|spec| self.status(spec.id).accepts_work() && self.workload(spec.id) == 0)
             .collect();
 
+        let now = Timestamp::now();
         let mut starved: Vec<(String, u32)> = Vec::new();
         for task in self.tasks.values() {
-            if !task.readiness().is_claimable() {
+            if !self.evaluate_task(task.id, now).eligible {
                 continue;
             }
             let Some(role) = task.required_role.as_deref().filter(|r| !r.is_empty()) else {
@@ -797,23 +1129,6 @@ impl Engine {
     }
 
     /// Whether every dependency of `task` has been submitted.
-    fn dependencies_met(&self, task: &Task) -> Result<()> {
-        for dep in &task.depends_on {
-            let resolved = self.follow_supersession(*dep);
-            let met = self
-                .tasks
-                .get(&resolved)
-                .is_some_and(|d| d.state == TaskState::Submitted);
-            if !met {
-                return Err(EngineError::DependencyNotMet {
-                    task: task.id,
-                    blocker: resolved,
-                });
-            }
-        }
-        Ok(())
-    }
-
     /// Which objective a new task ultimately serves.
     ///
     /// Walks up whatever link the creator gave — a parent, or the task a review
@@ -859,26 +1174,56 @@ impl Engine {
         task
     }
 
-    /// Describe `task`'s first unmet dependency, or that it has none.
-    fn dependency_state_of(&self, task: &Task) -> DependencyState {
+    /// The first dependency of `task` that has not landed, if any.
+    ///
+    /// One implementation, because there used to be two. This one walks the
+    /// `depends_on` edges; the other read the `dependency` field the first one
+    /// wrote. They agreed except on a dependency naming a task that is not in
+    /// the room, which the projection skipped as satisfied and the claim gate
+    /// refused — so such a task advertised itself as ready in every prompt and
+    /// refused every claim.
+    ///
+    /// Returns the upstream and whether it exists. A dependency on a task that
+    /// is not here can never be satisfied, so it is a blocker, not a nothing.
+    fn first_unmet_dependency(&self, task: &Task) -> Option<UnmetDependency> {
         for dep in &task.depends_on {
             let resolved = self.follow_supersession(*dep);
-            let Some(upstream) = self.tasks.get(&resolved) else {
-                continue;
-            };
-            if upstream.state == TaskState::Submitted {
-                continue;
+            match self.tasks.get(&resolved) {
+                Some(upstream) if upstream.state == TaskState::Submitted => continue,
+                Some(upstream) => {
+                    return Some(UnmetDependency {
+                        task: resolved,
+                        title: upstream.title.clone(),
+                        owner: upstream.assignee,
+                        present: true,
+                    });
+                }
+                None => {
+                    return Some(UnmetDependency {
+                        task: resolved,
+                        title: format!("{resolved}, which is not in this room"),
+                        owner: None,
+                        present: false,
+                    });
+                }
             }
-            return DependencyState::Waiting {
-                on: resolved,
+        }
+        None
+    }
+
+    /// Describe `task`'s first unmet dependency, or that it has none.
+    fn dependency_state_of(&self, task: &Task) -> DependencyState {
+        match self.first_unmet_dependency(task) {
+            Some(unmet) => DependencyState::Waiting {
+                on: unmet.task,
                 // The upstream's own title, so the board can say what is being
                 // waited on instead of printing `awaiting_task`.
-                reason: upstream.title.clone(),
+                reason: unmet.title,
                 // Who is expected to clear it, so nobody has to ask.
-                owner: upstream.assignee,
-            };
+                owner: unmet.owner,
+            },
+            None => DependencyState::Satisfied,
         }
-        DependencyState::Satisfied
     }
 
     /// Recompute every task's dependency state from the current graph.
@@ -1542,24 +1887,22 @@ impl Engine {
 
     fn claim_task(&mut self, task: TaskId, by: AgentId) -> Result<Vec<EventEnvelope>> {
         let spec = self.require_agent(by)?.clone();
-        let record = self.require_task(task)?;
-        let fit = self
-            .roles
-            .eligibility(&spec.roles, record.required_role.as_deref());
-        if !fit.is_eligible() {
-            return Err(EngineError::RoleMismatch {
-                task,
-                agent: by,
-                required: record.required_role.clone().unwrap_or_default(),
-            });
+        self.require_task(task)?;
+
+        // The same evaluation that decided to advertise this, run again now.
+        // A bot acts on a prompt built minutes earlier, and by now the board
+        // may have moved — so what was advertised is a reading, and this is
+        // the decision. Refusing here with the reason code says which of the
+        // two happened, which is the difference between "somebody beat me to
+        // it" and "the room told me something false".
+        let verdict = self.evaluate_claim(task, by, Timestamp::now());
+        if !verdict.eligible {
+            return Err(self.refusal(task, by, verdict));
         }
-        // The graph gates are checked here because the state machine cannot
-        // see them; the workflow gate is left to the transition itself, which
-        // gives a precise error for cases like a task someone already holds.
-        self.dependencies_met(record)?;
-        if let Some(reason) = graph_refusal(record) {
-            return Err(EngineError::NotReady { task, reason });
-        }
+        let fit = self.roles.eligibility(
+            &spec.roles,
+            self.require_task(task)?.required_role.as_deref(),
+        );
         let events = self.transition(task, TaskTransition::Claim { by }, Some(by))?;
         if let Some(record) = self.tasks.get_mut(&task) {
             // A claim is a lease, not a deed. Without one, a bot that crashes
@@ -1575,7 +1918,12 @@ impl Engine {
     fn start_task(&mut self, task: TaskId, by: AgentId) -> Result<Vec<EventEnvelope>> {
         self.require_assignee(task, by)?;
         let record = self.require_task(task)?;
-        self.dependencies_met(record)?;
+        if let Some(unmet) = self.first_unmet_dependency(record) {
+            return Err(EngineError::DependencyNotMet {
+                task,
+                blocker: unmet.task,
+            });
+        }
         self.transition(task, TaskTransition::Start, Some(by))
     }
 
@@ -2114,26 +2462,92 @@ impl Engine {
             // than a dead end.
             events.extend(self.drive_handoff(handoff, HandoffTransition::Expire)?);
         }
-        events.extend(self.reclaim_stale_leases(now)?);
+        events.extend(self.clear_landed_dependencies()?);
+        events.extend(self.reconcile_ownership(now)?);
         events.extend(self.sweep_deadlocks());
         Ok(events)
     }
 
-    /// Return work whose holder has gone quiet to the pool.
+    /// Put ownership back in agreement with itself.
     ///
-    /// A bot that crashes, is removed, or stops mid-task would otherwise hold
-    /// its claim for the rest of the run, with the board showing only that the
-    /// task is assigned. The task keeps its history; it simply becomes
-    /// claimable again.
-    fn reclaim_stale_leases(&mut self, now: Timestamp) -> Result<Vec<EventEnvelope>> {
+    /// A task's state says whether somebody is working on it; the holder and
+    /// the claim say who and until when. Those three can disagree, and every
+    /// way they can disagree used to be permanent — the sweep that returned
+    /// abandoned work to the pool only looked at claims that had an expiry to
+    /// compare against, so a task held with no expiry, or in a working state
+    /// with no holder at all, was stuck for the life of the room. It was not
+    /// even visible as stuck: a task in progress with nobody on it reads as
+    /// "closed" to the board.
+    ///
+    /// Each case here is repaired only where the repair is determined. A task
+    /// the state machine will not release is left alone for the consistency
+    /// report rather than forced, and one bad task does not stop the sweep.
+    fn reconcile_ownership(&mut self, now: Timestamp) -> Result<Vec<EventEnvelope>> {
+        let mut events = Vec::new();
+
+        // 1. Held, with no claim recorded. Rooms saved before claims carried an
+        //    expiry come back this way. Granting one now rather than reclaiming
+        //    immediately gives a holder that is still alive its full window;
+        //    one that is gone loses the task a window later, through the
+        //    ordinary path below.
+        let unrecorded: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| {
+                !task.state.is_terminal()
+                    && task.assignee.is_some()
+                    && task.lease_expires_at.is_none()
+            })
+            .map(|task| task.id)
+            .collect();
+        for task in unrecorded {
+            if let Some(record) = self.tasks.get_mut(&task) {
+                record.lease_expires_at = Some(now.plus_millis(DEFAULT_LEASE_MILLIS));
+            }
+        }
+
+        // 2. A working state with nobody working it. Nothing is being
+        //    interrupted, so this returns to the pool immediately.
+        let ownerless: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| task.state.is_assigned() && task.assignee.is_none())
+            .map(|task| task.id)
+            .collect();
+        for task in ownerless {
+            events.extend(self.try_release(
+                task,
+                "it was left in a working state with nobody holding it".into(),
+            ));
+        }
+
+        // 3. Held by a bot that is no longer in the room.
+        let orphaned: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| {
+                !task.state.is_terminal()
+                    && task
+                        .assignee
+                        .is_some_and(|holder| !self.specs.contains_key(&holder))
+            })
+            .map(|task| task.id)
+            .collect();
+        for task in orphaned {
+            events.extend(self.try_release(
+                task,
+                "the bot holding it is no longer in this room".into(),
+            ));
+        }
+
+        // 4. Held by a bot that has stopped reporting progress. A faulted bot
+        //    cannot act, so it cannot renew, so it arrives here on its own.
         let stale: Vec<TaskId> = self
             .tasks
             .values()
             .filter(|task| task.lease_expired_at(now))
             .map(|task| task.id)
             .collect();
-
-        let mut events = Vec::new();
         for task in stale {
             let held_by = self
                 .tasks
@@ -2141,20 +2555,89 @@ impl Engine {
                 .and_then(|t| t.assignee)
                 .map(|a| a.short())
                 .unwrap_or_default();
-            events.extend(self.transition(
+            events.extend(self.try_release(
                 task,
-                TaskTransition::Release {
-                    reason: format!(
-                        "the claim lapsed; {held_by} stopped reporting progress"
-                    ),
-                },
-                None,
-            )?);
-            if let Some(record) = self.tasks.get_mut(&task) {
-                record.lease_expires_at = None;
+                format!("the claim lapsed; {held_by} stopped reporting progress"),
+            ));
+        }
+        Ok(events)
+    }
+
+    /// Unblock work whose upstream task has landed.
+    ///
+    /// A task can be blocked on a handoff or on another task. When a handoff
+    /// resolves, the tasks waiting on it are released. When a *task* lands,
+    /// nothing happened at all — the wait was recorded and then nobody was
+    /// watching for it to end. So a task blocked on work that finished stayed
+    /// blocked, and the bot holding it stayed parked, for the rest of the
+    /// room's life.
+    ///
+    /// Only a dependency that actually succeeded clears a wait. One that
+    /// failed or was cancelled leaves the wait in place: that work is not
+    /// going to arrive, and deciding what should happen instead is not
+    /// something to guess at silently.
+    fn clear_landed_dependencies(&mut self) -> Result<Vec<EventEnvelope>> {
+        let landed: BTreeSet<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| task.state == TaskState::Submitted)
+            .map(|task| task.id)
+            .collect();
+
+        let waiting: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| task.state == TaskState::Blocked)
+            .filter(|task| {
+                task.blocked_on.iter().any(
+                    |reason| matches!(reason, BlockReason::AwaitingTask { task } if landed.contains(task)),
+                )
+            })
+            .map(|task| task.id)
+            .collect();
+
+        let mut events = Vec::new();
+        for task in waiting {
+            // Drop just the waits that are over; a task can be waiting on
+            // several things, and the others still hold.
+            let Some(record) = self.tasks.get_mut(&task) else {
+                continue;
+            };
+            record.blocked_on.retain(
+                |reason| !matches!(reason, BlockReason::AwaitingTask { task } if landed.contains(task)),
+            );
+            if !record.blocked_on.is_empty() {
+                continue;
+            }
+            match self.transition(task, TaskTransition::Unblock, None) {
+                Ok(unblocked) => events.extend(unblocked),
+                Err(error) => {
+                    tracing::debug!(%task, %error, "could not unblock a task whose wait ended");
+                }
             }
         }
         Ok(events)
+    }
+
+    /// Return one task to the pool, or leave it be if the board will not.
+    ///
+    /// Repair is best-effort by design: a state the transition table refuses
+    /// to release is a state nobody has decided how to unwind, and forcing it
+    /// would be inventing a decision. It stays for the consistency report,
+    /// and the rest of the sweep carries on.
+    fn try_release(&mut self, task: TaskId, reason: String) -> Vec<EventEnvelope> {
+        match self.transition(task, TaskTransition::Release { reason }, None) {
+            Ok(events) => {
+                if let Some(record) = self.tasks.get_mut(&task) {
+                    record.lease_expires_at = None;
+                }
+                events
+            }
+            Err(error) => {
+                tracing::debug!(%task, %error, "ownership repair left this task alone");
+                Vec::new()
+            }
+        }
     }
 
     /// Extend the holder's lease. Called whenever a bot acts on its task.
@@ -2293,6 +2776,13 @@ impl Engine {
             }
             TaskTransition::RequestChanges { .. } => record.revision += 1,
             _ => {}
+        }
+        // The holder changed, so this is a different holding of the task.
+        // Nothing is fenced on this — the holder's identity is what every
+        // mutation is checked against — but it is what lets a reader tell one
+        // holding from the next when the same bot picks the task back up.
+        if record.assignee != previous_holder {
+            record.ownership_epoch = record.ownership_epoch.saturating_add(1);
         }
         record.state = to;
         record.updated_at = Timestamp::now();

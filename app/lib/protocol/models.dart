@@ -30,6 +30,9 @@ enum TaskState {
   submitted,
   failed,
   cancelled,
+  superseded,
+  retired,
+  archived,
   unknown;
 
   static TaskState parse(String? raw) {
@@ -54,6 +57,15 @@ enum TaskState {
         return TaskState.failed;
       case 'cancelled':
         return TaskState.cancelled;
+      // Permanent states. Without these three they read as `unknown`, which
+      // renders as if the board had lost track of them rather than as work
+      // that was deliberately replaced or set down.
+      case 'superseded':
+        return TaskState.superseded;
+      case 'retired':
+        return TaskState.retired;
+      case 'archived':
+        return TaskState.archived;
       default:
         return TaskState.unknown;
     }

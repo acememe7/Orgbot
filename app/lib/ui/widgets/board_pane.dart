@@ -169,6 +169,14 @@ class _TaskCard extends StatelessWidget {
         return (Colors.red, 'FAILED');
       case TaskState.cancelled:
         return (Colors.grey, 'CANCELLED');
+      // Permanent. Distinct from cancelled: this work was replaced or set
+      // down deliberately, and the card should say which.
+      case TaskState.superseded:
+        return (Colors.grey, 'SUPERSEDED');
+      case TaskState.retired:
+        return (Colors.grey, 'RETIRED');
+      case TaskState.archived:
+        return (Colors.grey, 'ARCHIVED');
       case TaskState.unknown:
         return (Colors.grey, 'UNKNOWN');
     }

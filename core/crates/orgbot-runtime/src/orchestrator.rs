@@ -288,9 +288,26 @@ impl Orchestrator {
         {
             return Some(Wake::Planning);
         }
-        // Free, with work available. A bot whose only tasks are parked is still
-        // free to pick up something else.
-        if held.is_empty() {
+        // Free, with work available.
+        //
+        // Reaching here means nothing this bot holds is live. Holding nothing
+        // is the ordinary case. The other one is a bot holding only *blocked*
+        // work, and it used to be a trap: never woken for the blocked task,
+        // because it is parked, and never offered another, because it was
+        // holding something. A bot that landed there went silent for the rest
+        // of the room's life. In a real room five of twenty-one bots had.
+        //
+        // Work in review is deliberately not treated the same way. That wait
+        // ends by itself — an inspector acts and the task comes back — so the
+        // bot will be woken without needing anything else to hold. A blocked
+        // task carries no such promise.
+        let parked_indefinitely = !held.is_empty()
+            && held.iter().all(|id| {
+                engine
+                    .task(*id)
+                    .is_some_and(|task| task.state == orgbot_proto::TaskState::Blocked)
+            });
+        if held.is_empty() || parked_indefinitely {
             let open = engine.claimable_by(agent);
             if !open.is_empty() {
                 return Some(Wake::FreshWork { open });

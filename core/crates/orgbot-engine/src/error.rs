@@ -57,6 +57,20 @@ pub enum EngineError {
     #[error("task {task} is not ready: {reason}")]
     NotReady { task: TaskId, reason: String },
 
+    /// A claim was refused, with the reason the evaluator gave.
+    ///
+    /// Carries the stable code as well as the sentence: a bot reads the
+    /// sentence, and everything else — tests, telemetry, the Work UI — matches
+    /// on the code. Without the code, "somebody beat me to it" and "you were
+    /// told something false" are the same string to everyone downstream.
+    #[error("cannot claim task {task}: {reason} [{code}]")]
+    NotClaimable {
+        task: TaskId,
+        agent: AgentId,
+        code: &'static str,
+        reason: String,
+    },
+
     #[error("{agent} already has {open} handoffs open, limit is {limit}")]
     TooManyOpenHandoffs {
         agent: AgentId,

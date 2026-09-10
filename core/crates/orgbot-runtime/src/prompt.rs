@@ -195,6 +195,11 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
     }
 
     // Work this bot could pick up.
+    //
+    // This is a reading taken now, not a reservation. Several bots take their
+    // turns at once and each is looking at the same board, so by the time this
+    // one acts, one of these may be gone. Saying so is what stops a bot
+    // treating a lost race as the room contradicting itself.
     let claimable = engine.claimable_by(agent);
     if !claimable.is_empty() && mine.iter().all(|t| t.state.is_waiting()) {
         out.push_str("\nOpen tasks you could claim:\n");
@@ -206,6 +211,11 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
                 ));
             }
         }
+        out.push_str(
+            "  (the board as it stands now; another bot may take one first. A \
+             claim refused as ALREADY_CLAIMED means somebody got there ahead of \
+             you — claim a different one rather than stopping.)\n",
+        );
     }
 
     // An inspector's queue.
@@ -314,9 +324,10 @@ fn closing_instruction(engine: &Engine, agent: AgentId, mine: &[&Task]) -> Strin
         return format!(
             "\nYou are holding nothing and {} task(s) are open to you, including \
              {named}. Claim one and begin it. Do not reply that there is nothing \
-             to do — there is, and it is listed above. If every one of them is \
-             genuinely blocked by something not on the board, say which task and \
-             what blocks it.\n",
+             to do — there is, and it is listed above. If a claim is refused as \
+             ALREADY_CLAIMED, somebody simply got there first: claim another. If \
+             every one of them is genuinely blocked by something not on the \
+             board, say which task and what blocks it.\n",
             claimable.len(),
         );
     }

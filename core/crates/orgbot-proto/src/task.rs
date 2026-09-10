@@ -351,6 +351,17 @@ pub struct Task {
     /// untouched with nothing on the board saying so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_expires_at: Option<Timestamp>,
+    /// How many times this task has changed hands.
+    ///
+    /// Incremented every time the holder changes — claimed, released, handed
+    /// on, reclaimed after going quiet. It is not the fence that stops a stale
+    /// bot writing to work it no longer owns; the holder's identity is, and
+    /// every mutation is checked against it. What the epoch adds is the
+    /// ability to tell *which* holding is being talked about, so a claim
+    /// somebody was told about can be told apart from a later one that happens
+    /// to look the same.
+    #[serde(default)]
+    pub ownership_epoch: u64,
     /// Whether the holder is standing in for the role the work asked for.
     ///
     /// Worth recording: a room where most work is done by stand-ins is a room
@@ -398,6 +409,7 @@ impl Task {
             dependency: DependencyState::Satisfied,
             authorization: AuthorizationState::Authorized,
             lease_expires_at: None,
+            ownership_epoch: 0,
             stood_in: false,
             artifacts: Vec::new(),
             requires_artifacts: Vec::new(),
@@ -521,7 +533,12 @@ impl Task {
                     .first()
                     .map_or_else(|| "an unnamed blocker".to_string(), describe_block),
             },
-            // Assigned states with no assignee recorded: still not claimable.
+            // A state that says somebody is working on this, with nobody
+            // recorded as holding it. Not claimable as it stands, but not
+            // closed either — calling it closed is what kept these invisible.
+            other if other.is_assigned() => Readiness::Recovering {
+                state: other.as_str(),
+            },
             other => Readiness::Closed {
                 state: other.as_str(),
             },

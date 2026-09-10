@@ -15,6 +15,7 @@
 //! This is a check, not a repair. Silently fixing an inconsistent room hides
 //! the bug that produced it, and the next one is harder to find.
 
+use orgbot_proto::graph::DependencyState;
 use orgbot_proto::ids::TaskId;
 use orgbot_proto::task::{Task, TaskState};
 
@@ -53,6 +54,8 @@ pub fn check(engine: &Engine) -> Vec<Violation> {
         required_inputs_are_current(engine, task, &mut found);
     }
     dependencies_resolve(engine, &mut found);
+    ownership_holds_together(engine, &mut found);
+    projections_match_the_board(engine, &mut found);
     found
 }
 
@@ -171,6 +174,61 @@ fn a_lease_belongs_to_a_holder(task: &Task, found: &mut Vec<Violation>) {
             task: task.id,
             detail: "it holds a lease with nobody assigned".into(),
         });
+    }
+}
+
+/// A working state must have somebody working it.
+///
+/// Both halves of this used to be permanent once they happened, and neither
+/// was visible: a task in progress with nobody on it renders as "closed", and
+/// a holder with no claim recorded is skipped by the sweep that returns
+/// abandoned work to the pool. Reconciliation repairs both now; this is here
+/// so that if one ever survives a repair, it is reported rather than silent.
+fn ownership_holds_together(engine: &Engine, found: &mut Vec<Violation>) {
+    for task in engine.tasks() {
+        if task.state.is_assigned() && task.assignee.is_none() {
+            found.push(Violation {
+                rule: "working-state-has-a-holder",
+                task: task.id,
+                detail: format!("it is {} with nobody holding it", task.state.as_str()),
+            });
+        }
+        if task.assignee.is_some() && !task.state.is_terminal() && task.lease_expires_at.is_none() {
+            found.push(Violation {
+                rule: "a-holder-holds-a-claim",
+                task: task.id,
+                detail: "it is held with no claim that can ever lapse".into(),
+            });
+        }
+    }
+}
+
+/// What the board renders must agree with what the board is.
+///
+/// `dependency` is a projection of the `depends_on` edges, kept so the UI can
+/// say what a task is waiting on without walking the graph. Every path that
+/// *decides* anything reads the edges instead, so drift here cannot make
+/// unclaimable work claimable — but it can make the board describe itself
+/// wrongly to a person, which is worth knowing about.
+fn projections_match_the_board(engine: &Engine, found: &mut Vec<Violation>) {
+    for task in engine.tasks() {
+        let waiting_by_edges = task.depends_on.iter().any(|dep| {
+            engine
+                .task(*dep)
+                .is_none_or(|upstream| upstream.state != TaskState::Submitted)
+        });
+        let waiting_by_projection = matches!(task.dependency, DependencyState::Waiting { .. });
+        if waiting_by_edges != waiting_by_projection {
+            found.push(Violation {
+                rule: "dependency-projection-current",
+                task: task.id,
+                detail: format!(
+                    "the board says its dependencies are {}, the edges say {}",
+                    if waiting_by_projection { "waiting" } else { "met" },
+                    if waiting_by_edges { "waiting" } else { "met" }
+                ),
+            });
+        }
     }
 }
 

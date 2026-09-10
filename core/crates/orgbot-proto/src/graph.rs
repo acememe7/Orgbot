@@ -488,6 +488,16 @@ pub enum Readiness {
         /// The terminal state, for display.
         state: &'static str,
     },
+    /// Its state says somebody is working on it, and nobody is.
+    ///
+    /// Rendering this as "closed" — which is what happened before it had a
+    /// name of its own — is worse than useless: the work is not finished, it
+    /// is stranded, and the board said the one thing that would stop anyone
+    /// looking. The room returns it to the pool on its next pass.
+    Recovering {
+        /// The state it was left in.
+        state: &'static str,
+    },
 }
 
 impl Readiness {
@@ -530,6 +540,7 @@ impl Readiness {
             Self::HeldByPolicy { .. } => "Held by policy",
             Self::BlockedOperator { .. } => "Needs you",
             Self::Closed { .. } => "Closed",
+            Self::Recovering { .. } => "Recovering",
         }
     }
 
@@ -564,6 +575,10 @@ impl Readiness {
                 format!("Operator decision required because: {because}")
             }
             Self::Closed { state } => format!("Closed ({state})."),
+            Self::Recovering { state } => format!(
+                "Left {state} with nobody working on it; the room is returning \
+                 it to the pool. No action needed from you."
+            ),
         }
     }
 }
