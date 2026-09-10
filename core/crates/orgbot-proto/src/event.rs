@@ -130,6 +130,20 @@ pub enum Event {
         resolution: DeadlockResolution,
     },
 
+    /// The room's own assessment of whether it can carry on changed.
+    ///
+    /// Raised when a condition appears or clears, not on every check: a room
+    /// that repeats itself trains its operator to ignore it, and then the new
+    /// thing goes unread with the rest.
+    RoomHealthChanged {
+        /// Whether the room can carry on without anyone.
+        ok: bool,
+        /// One line naming what is wrong.
+        summary: String,
+        /// The whole picture, for someone reading deliberately.
+        detail: String,
+    },
+
     /// A bot's turn failed. Repeated failures fault the bot.
     AgentErrored {
         agent: AgentId,
@@ -173,6 +187,7 @@ impl Event {
             Self::ReviewRecorded { .. } => "review_recorded",
             Self::DeadlockDetected { .. } => "deadlock_detected",
             Self::AgentErrored { .. } => "agent_errored",
+            Self::RoomHealthChanged { .. } => "room_health_changed",
         }
     }
 

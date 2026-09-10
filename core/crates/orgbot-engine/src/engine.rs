@@ -66,6 +66,9 @@ pub struct Engine {
     statuses: BTreeMap<AgentId, AgentStatus>,
     handles: BTreeMap<String, AgentId>,
     tasks: BTreeMap<TaskId, Task>,
+    /// The condition last reported, so a standing problem is raised once.
+    #[serde(default)]
+    last_health: String,
     handoffs: BTreeMap<HandoffId, Handoff>,
     artifacts: BTreeMap<ArtifactId, Artifact>,
     reviews: Vec<Review>,
@@ -108,7 +111,9 @@ impl Engine {
                 return Err("Saved room history has a gap or belongs to another room".into());
             }
             match &envelope.event {
-                Event::RoomOpened { .. } => {}
+                // A report about the room, not a change to it: replaying one
+                // must not re-raise it.
+                Event::RoomOpened { .. } | Event::RoomHealthChanged { .. } => {}
                 Event::RoomClosed { .. } => engine.room.phase = RoomPhase::Completed,
                 Event::AgentJoined { spec } => {
                     engine.handles.insert(spec.handle.clone(), spec.id);
@@ -249,6 +254,7 @@ impl Engine {
             statuses: BTreeMap::new(),
             handles: BTreeMap::new(),
             tasks: BTreeMap::new(),
+            last_health: String::new(),
             handoffs: BTreeMap::new(),
             artifacts: BTreeMap::new(),
             reviews: Vec::new(),
@@ -1031,6 +1037,45 @@ impl Engine {
     /// "nobody who could do this is available" — which look identical from a
     /// count of idle bots beside a count of open tasks, and have completely
     /// different answers.
+    /// Claimable work no bot in this room could ever take.
+    ///
+    /// Different question from [`Self::starved_roles`], which asks who is free
+    /// *now* — a fair question for a board that wants to explain why something
+    /// is not moving this minute, and a terrible one to notify on, because
+    /// every eligible bot being mid-turn is ordinary and momentary. This asks
+    /// whether anyone could cover it at all. A yes means a queue; a no means
+    /// the roster does not match the work, and only a person can fix it.
+    pub fn unstaffed_roles(&self) -> Vec<(String, u32)> {
+        let now = Timestamp::now();
+        let usable: Vec<&AgentSpec> = self
+            .specs
+            .values()
+            .filter(|spec| self.status(spec.id).is_available())
+            .collect();
+
+        let mut missing: Vec<(String, u32)> = Vec::new();
+        for task in self.tasks.values() {
+            if !self.evaluate_task(task.id, now).eligible {
+                continue;
+            }
+            let Some(role) = task.required_role.as_deref().filter(|r| !r.is_empty()) else {
+                continue;
+            };
+            if usable
+                .iter()
+                .any(|spec| self.roles.eligibility(&spec.roles, Some(role)).is_eligible())
+            {
+                continue;
+            }
+            match missing.iter_mut().find(|(name, _)| name == role) {
+                Some((_, count)) => *count += 1,
+                None => missing.push((role.to_string(), 1)),
+            }
+        }
+        missing.sort_by(|(a_role, a), (b_role, b)| b.cmp(a).then(a_role.cmp(b_role)));
+        missing
+    }
+
     pub fn starved_roles(&self) -> Vec<(String, u32)> {
         let free: Vec<&AgentSpec> = self
             .specs
@@ -2267,11 +2312,7 @@ impl Engine {
         // board contradicting itself. It is a race that was lost, and the
         // difference matters to whoever has to decide what to do next.
         if record.state != TaskState::InReview {
-            let previous = self
-                .reviews
-                .iter()
-                .filter(|review| review.task == task)
-                .next_back();
+            let previous = self.reviews.iter().rfind(|review| review.task == task);
             return Err(EngineError::NotUnderReview {
                 task,
                 state: record.state.as_str(),
@@ -2494,6 +2535,7 @@ impl Engine {
         }
         events.extend(self.clear_landed_dependencies()?);
         events.extend(self.reconcile_ownership(now)?);
+        events.extend(self.report_health());
         events.extend(self.sweep_deadlocks());
         Ok(events)
     }
@@ -2591,6 +2633,25 @@ impl Engine {
             ));
         }
         Ok(events)
+    }
+
+    /// Say so when the room's condition changes.
+    ///
+    /// Checked after reconciliation, so what is raised is what the room has
+    /// already tried and failed to fix by itself — never something it was
+    /// about to resolve on the next line.
+    fn report_health(&mut self) -> Vec<EventEnvelope> {
+        let health = self.health();
+        let fingerprint = health.fingerprint();
+        if fingerprint == self.last_health {
+            return Vec::new();
+        }
+        self.last_health = fingerprint;
+        vec![self.emit(Event::RoomHealthChanged {
+            ok: health.is_ok(),
+            summary: health.summary(),
+            detail: health.report(),
+        })]
     }
 
     /// Unblock work whose upstream task has landed.
@@ -2790,6 +2851,12 @@ impl Engine {
             TaskTransition::Release { .. } | TaskTransition::Reopen => {
                 record.assignee = None;
                 record.blocked_on.clear();
+                // The claim goes with the holder. Clearing it only on the
+                // paths that reclaim work left every bot-initiated release
+                // holding a lease on a task nobody owned — harmless in itself,
+                // since a claim with no holder expires against nothing, but a
+                // standing invariant violation that the room now reports.
+                record.lease_expires_at = None;
             }
             TaskTransition::Block { reason } => {
                 if !record.blocked_on.contains(reason) {

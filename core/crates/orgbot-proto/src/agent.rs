@@ -103,6 +103,23 @@ pub enum ProviderRef {
 }
 
 impl ProviderRef {
+    /// Which backend this bot's turns go to.
+    ///
+    /// Bots sharing a backend share its rate limit, so the scheduler needs to
+    /// know which ones would be competing before it starts them at once. The
+    /// profile is part of the identity: two OpenAI-compatible bots on
+    /// different profiles are different accounts and do not contend.
+    pub fn backend(&self) -> String {
+        match self {
+            Self::Anthropic { .. } => "anthropic".into(),
+            Self::DeepSeek { .. } => "deepseek".into(),
+            Self::OpenAiCompatible { profile, .. } => format!("openai:{profile}"),
+            Self::CliAgent { cli, .. } => format!("cli:{}", cli.binary()),
+            // No backend and no limit: scripted bots answer in process.
+            Self::Scripted { .. } => String::new(),
+        }
+    }
+
     /// The model identifier, for display and logging.
     pub fn model(&self) -> &str {
         match self {

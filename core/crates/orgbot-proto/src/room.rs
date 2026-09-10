@@ -72,6 +72,15 @@ pub struct RoomLimits {
     ///
     /// Zero or one both mean one at a time.
     pub max_parallel_turns: u32,
+    /// How many of those turns may be going to the same backend at once.
+    ///
+    /// Parallel turns are parallel requests, and bots sharing a provider share
+    /// its rate limit. Without this a room of mostly-Anthropic bots turns its
+    /// concurrency straight into 429s: the turns are spent, the work is not
+    /// done, and the room is slower than if it had waited.
+    ///
+    /// Zero means no separate cap — [`Self::max_parallel_turns`] alone.
+    pub max_parallel_per_backend: u32,
 }
 
 /// Rooms saved before this was settable still ran one turn at a time.
@@ -90,11 +99,21 @@ impl Default for RoomLimits {
             handoff_timeout_ms: 5 * 60 * 1000,
             max_consecutive_errors: 3,
             max_parallel_turns: default_parallel_turns(),
+            max_parallel_per_backend: 2,
         }
     }
 }
 
 impl RoomLimits {
+    /// How many turns may go to one backend at once, as a usable count.
+    pub const fn parallel_per_backend(&self) -> usize {
+        if self.max_parallel_per_backend == 0 {
+            usize::MAX
+        } else {
+            self.max_parallel_per_backend as usize
+        }
+    }
+
     /// How many bots may act at once, as a usable count.
     ///
     /// Zero is treated as one rather than as "no limit": unlike a budget, an

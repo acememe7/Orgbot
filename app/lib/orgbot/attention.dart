@@ -28,6 +28,11 @@ enum Attention {
   /// A bot asked you something directly.
   mentioned('A bot is asking you something'),
 
+  /// The room is still running, but some of its work has nowhere to go.
+  ///
+  /// Easy to miss without being told: from the outside the room looks busy.
+  needsAttention('Some work has nowhere to go'),
+
   /// The room used the turns it was given and stopped.
   budget('The room is out of turns'),
 
@@ -55,6 +60,7 @@ enum Attention {
         'decision_needed' => decision,
         'security_incident' => security,
         'mentioned' => mentioned,
+        'needs_attention' => needsAttention,
         'budget_spent' => budget,
         'room_stuck' => stuck,
         'milestone_reached' => milestone,

@@ -603,3 +603,88 @@ async fn two_inspectors_are_not_woken_for_the_same_review() {
     );
     assert_ne!(woken[0], author_id, "and not the bot that wrote it");
 }
+
+/// Concurrency is not aimed all at one provider.
+///
+/// Parallel turns are parallel requests. Bots sharing a backend share its rate
+/// limit, so starting six of them at once against one subscription spends six
+/// turns to get two answers and four refusals. The room is then slower than if
+/// it had waited, which is the opposite of the point.
+#[tokio::test]
+async fn one_backend_does_not_receive_the_whole_batch() {
+    let provider = Arc::new(Fixed(CompletionResponse {
+        model: "test".into(),
+        content: vec![ContentBlock::text("idle")],
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    })) as Arc<dyn Provider>;
+
+    let mut spec = room_spec(8);
+    spec.limits.max_parallel_per_backend = 2;
+    let mut room = Orchestrator::new(spec);
+
+    // Six bots, all on the same account.
+    for index in 0..6 {
+        let bot = AgentSpec::new(
+            format!("w{index}"),
+            "Worker",
+            ProviderRef::Anthropic {
+                model: "claude-opus-5".into(),
+            },
+        )
+        .with_roles(vec!["writer"]);
+        room.seat(bot, provider.clone()).unwrap();
+    }
+    room.start().unwrap();
+    for index in 0..6 {
+        open_task(&mut room.engine_mut(), &format!("task {index}"));
+    }
+
+    assert_eq!(
+        room.next_actors(8).len(),
+        2,
+        "six bots on one subscription must not all be started at once"
+    );
+}
+
+/// Different accounts do not contend, so they are not held back.
+#[tokio::test]
+async fn bots_on_separate_backends_all_run_together() {
+    let provider = Arc::new(Fixed(CompletionResponse {
+        model: "test".into(),
+        content: vec![ContentBlock::text("idle")],
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    })) as Arc<dyn Provider>;
+
+    let mut spec = room_spec(8);
+    spec.limits.max_parallel_per_backend = 2;
+    let mut room = Orchestrator::new(spec);
+
+    let backends = [
+        ProviderRef::Anthropic { model: "a".into() },
+        ProviderRef::DeepSeek { model: "d".into() },
+        ProviderRef::OpenAiCompatible {
+            model: "g".into(),
+            profile: "grok".into(),
+        },
+        ProviderRef::OpenAiCompatible {
+            model: "c".into(),
+            profile: "codex".into(),
+        },
+    ];
+    for (index, backend) in backends.into_iter().enumerate() {
+        let bot = AgentSpec::new(format!("w{index}"), "Worker", backend).with_roles(vec!["writer"]);
+        room.seat(bot, provider.clone()).unwrap();
+    }
+    room.start().unwrap();
+    for index in 0..4 {
+        open_task(&mut room.engine_mut(), &format!("task {index}"));
+    }
+
+    assert_eq!(
+        room.next_actors(8).len(),
+        4,
+        "four separate accounts do not compete and must not be throttled"
+    );
+}

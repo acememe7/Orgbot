@@ -31,6 +31,13 @@ pub enum Reason {
     RoomStuck,
     /// A bot asked you something directly.
     Mentioned,
+    /// The room is carrying work it cannot get moving on its own.
+    ///
+    /// Distinct from [`Self::RoomStuck`], which is the whole room stopping.
+    /// This is the room still running while some of its work has nowhere to
+    /// go — the shape that is easy to miss, because from the outside the room
+    /// looks busy. One went four days like that.
+    NeedsAttention,
     /// The room hit its turn budget and is waiting to be resumed.
     ///
     /// Its own reason because it is not a fault and not a finish: the room is
@@ -49,6 +56,7 @@ impl Reason {
             Self::RoomFinished => "The room finished",
             Self::RoomStuck => "The room cannot continue",
             Self::Mentioned => "A bot is asking you something",
+            Self::NeedsAttention => "Some work has nowhere to go",
             Self::BudgetSpent => "The room is out of turns",
         }
     }
@@ -65,6 +73,7 @@ impl Reason {
                 | Self::RoomStuck
                 | Self::Mentioned
                 | Self::BudgetSpent
+                | Self::NeedsAttention
         )
     }
 }
@@ -107,6 +116,9 @@ pub fn reason_for(event: &Event) -> Option<Reason> {
                 && kind.is_headline())
             .then_some(Reason::MilestoneReached)
         }
+        // The room's own assessment, raised only when it changes. Recovering
+        // is not news; needing somebody is.
+        Event::RoomHealthChanged { ok, .. } => (!ok).then_some(Reason::NeedsAttention),
         _ => None,
     }
 }
@@ -132,6 +144,7 @@ pub fn notification_for(event: &Event) -> Option<Notification> {
             format!("Decision required because: {}", decision.because)
         }
         Event::RoomClosed { reason, .. } => reason.clone(),
+        Event::RoomHealthChanged { summary, .. } => summary.clone(),
         Event::DeadlockDetected { .. } => {
             "Work is waiting in a circle and the room could not break it.".into()
         }

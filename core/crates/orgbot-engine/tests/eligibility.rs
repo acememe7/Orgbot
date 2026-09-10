@@ -684,3 +684,202 @@ fn work_left_with_nobody_on_it_reads_as_recovering_not_closed() {
         "the room fixes this itself; it must not interrupt anyone"
     );
 }
+
+// ---------------------------------------------- the room reporting on itself
+
+/// A room that cannot get its work moving says so, once.
+///
+/// The failure this exists to prevent has a shape: the room keeps running, the
+/// board looks busy, and nobody has any reason to look. One ran four days like
+/// that. The engine could already work out what was wrong — nothing asked it.
+#[test]
+fn a_room_carrying_work_that_cannot_move_raises_it_exactly_once() {
+    use orgbot_proto::event::Event;
+
+    let mut r = room();
+    let upstream = r.open("doomed upstream", vec![]);
+    let waiting = r.open("waits on the doomed thing", vec![]);
+    r.apply(Command::ClaimTask {
+        task: waiting,
+        by: r.a,
+    });
+    r.apply(Command::StartTask {
+        task: waiting,
+        by: r.a,
+    });
+    r.apply(Command::BlockTask {
+        task: waiting,
+        by: r.a,
+        reason: BlockReason::AwaitingTask { task: upstream },
+    });
+    assert!(r.engine.health().is_ok(), "nothing is wrong yet");
+
+    // The thing it waits on will never arrive.
+    r.apply(Command::FailTask {
+        task: upstream,
+        reason: "cannot be done".into(),
+    });
+
+    let health = r.engine.health();
+    assert!(!health.is_ok());
+    assert_eq!(health.dead_waits.len(), 1);
+    assert!(
+        health.summary().contains("cannot arrive"),
+        "the summary must say what is wrong: {}",
+        health.summary()
+    );
+
+    // The room raises it on its next pass...
+    let raised = r.engine.apply(Command::Tick {
+        now: Timestamp::now(),
+    });
+    let count = |events: &[orgbot_proto::event::EventEnvelope]| {
+        events
+            .iter()
+            .filter(|e| matches!(e.event, Event::RoomHealthChanged { ok: false, .. }))
+            .count()
+    };
+    assert_eq!(count(&raised.unwrap()), 1, "it should be raised");
+
+    // ...and not again on the next, because nothing changed. A room that
+    // repeats itself every minute teaches its operator to ignore it.
+    let again = r.engine.apply(Command::Tick {
+        now: Timestamp::now(),
+    });
+    assert_eq!(count(&again.unwrap()), 0, "a standing problem is raised once");
+}
+
+/// A wait that can still end on its own is not raised at all.
+#[test]
+fn ordinary_waiting_is_not_reported_as_a_problem() {
+    let mut r = room();
+    let upstream = r.open("upstream, still going", vec![]);
+    let waiting = r.open("waiter", vec![]);
+    r.apply(Command::ClaimTask {
+        task: waiting,
+        by: r.a,
+    });
+    r.apply(Command::StartTask {
+        task: waiting,
+        by: r.a,
+    });
+    r.apply(Command::BlockTask {
+        task: waiting,
+        by: r.a,
+        reason: BlockReason::AwaitingTask { task: upstream },
+    });
+
+    let health = r.engine.health();
+    assert!(
+        health.dead_waits.is_empty(),
+        "work that is simply not its turn yet is the system working"
+    );
+    assert!(health.is_ok());
+}
+
+/// A halted bot is something a person has to restart, so it is raised.
+#[test]
+fn a_halted_bot_is_something_the_room_says_out_loud() {
+    let mut r = room();
+    for _ in 0..5 {
+        let _ = r.engine.apply(Command::ReportError {
+            agent: r.a,
+            task: None,
+            error: "the configured model does not exist".into(),
+            permanent: true,
+        });
+    }
+    let health = r.engine.health();
+    assert!(!health.is_ok());
+    assert_eq!(health.faulted, vec!["a".to_string()]);
+    assert!(health.summary().contains('a'), "{}", health.summary());
+}
+
+/// Every eligible bot being busy is not a staffing problem.
+///
+/// The difference decides whether a notification is worth having. "Nobody is
+/// free right now" is true constantly in a working room; "nobody here can do
+/// this at all" is true until somebody changes the roster. Notifying on the
+/// first would teach the operator to ignore the second.
+#[test]
+fn work_waiting_for_a_busy_bot_is_a_queue_not_a_staffing_gap() {
+    let mut r = room();
+    let first = r.open("first", vec![]);
+    let second = r.open("second", vec![]);
+    r.apply(Command::ClaimTask {
+        task: first,
+        by: r.a,
+    });
+    r.apply(Command::ClaimTask {
+        task: second,
+        by: r.b,
+    });
+    let third = r.open("third, with both writers busy", vec![]);
+
+    assert!(
+        !r.engine.starved_roles().is_empty(),
+        "the board may fairly say nobody is free this minute"
+    );
+    assert!(
+        r.engine.unstaffed_roles().is_empty(),
+        "but the room is staffed for it, so nobody should be woken"
+    );
+    assert!(r.engine.health().is_ok());
+    let _ = third;
+}
+
+/// Work no bot in the room could ever take is raised, because only a person
+/// can fix it.
+#[test]
+fn work_no_bot_could_ever_take_is_raised() {
+    let mut r = room();
+    let events = r.apply(Command::CreateTask {
+        title: "port the firmware".into(),
+        brief: "needs an embedded engineer".into(),
+        by: Some(r.lead),
+        required_role: Some("embedded".into()),
+        priority: orgbot_proto::task::Priority::Normal,
+        acceptance_criteria: vec![],
+        depends_on: vec![],
+        origin: TaskOrigin::plain(),
+    });
+    let task = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::TaskCreated { task } => Some(task.id),
+            _ => None,
+        })
+        .unwrap();
+    r.apply(Command::OpenTask { task });
+
+    let health = r.engine.health();
+    assert_eq!(health.starved, vec![("embedded".to_string(), 1)]);
+    assert!(!health.is_ok());
+    assert!(health.summary().contains("embedded"), "{}", health.summary());
+}
+
+/// Letting go of a task lets go of the claim on it.
+///
+/// Found by pointing the health check at a real room: two tasks were carrying
+/// a claim with nobody assigned. Harmless on its own — a claim with no holder
+/// expires against nothing — but it is a standing inconsistency, and a room
+/// that reports a standing inconsistency forever is a room whose reports get
+/// ignored.
+#[test]
+fn releasing_a_task_releases_its_claim_too() {
+    let mut r = room();
+    let task = r.open("handed back", vec![]);
+    r.apply(Command::ClaimTask { task, by: r.a });
+    assert!(r.engine.task(task).unwrap().lease_expires_at.is_some());
+
+    r.apply(Command::ReleaseTask {
+        task,
+        by: r.a,
+        reason: "not mine".into(),
+    });
+
+    let record = r.engine.task(task).unwrap();
+    assert_eq!(record.assignee, None);
+    assert_eq!(record.lease_expires_at, None, "the claim went with the holder");
+    assert!(r.engine.health().is_ok(), "{}", r.engine.health().report());
+}

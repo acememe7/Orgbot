@@ -208,6 +208,15 @@ fn diagnose(state: &std::path::Path, bot: Option<&str>) -> anyhow::Result<()> {
     let view = engine.digest();
     println!("{}\n", view.summary(&engine.room().spec.name));
 
+    // What the room would tell you about itself, first: if something here
+    // needs a person, none of the detail below matters until it is dealt with.
+    let health = engine.health();
+    if health.is_ok() {
+        println!("Health: the room is working normally.\n");
+    } else {
+        println!("Health: {}\n{}", health.summary(), health.report());
+    }
+
     println!("Phase: {:?}", engine.room().phase);
     println!(
         "Turns: {} of {}",

@@ -1,0 +1,279 @@
+//! Surviving being killed.
+//!
+//! A phone kills backgrounded apps whenever it likes, and it will not wait for
+//! a batch of turns to finish. So the question is not whether a room gets
+//! interrupted mid-work — it will, routinely — but what it looks like when it
+//! comes back: the same work, held by the same bots, with nothing lost and
+//! nothing done twice.
+//!
+//! The dangerous shape is a task left half-claimed by a turn that never
+//! returned. Before ownership reconciliation that could strand the task for
+//! the life of the room; these check that it either comes back to its holder
+//! or comes back to the pool, and never to both.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use orgbot_engine::{Command, Engine};
+use orgbot_proto::agent::{Autonomy, ProviderRef};
+use orgbot_proto::graph::TaskOrigin;
+use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+use orgbot_proto::task::TaskState;
+use orgbot_proto::{AgentSpec, TaskId, Timestamp};
+use orgbot_providers::types::{
+    CompletionRequest, CompletionResponse, ContentBlock, StopReason, StreamEvent, Usage,
+};
+use orgbot_providers::Provider;
+use orgbot_runtime::Orchestrator;
+use serde_json::json;
+use tokio::sync::mpsc;
+
+/// Claims the first task it is offered, once, then stops.
+///
+/// Reads the id out of the prompt rather than being handed one, the way a real
+/// bot does — which also means it does not need to exist before the board.
+#[derive(Debug)]
+struct Claimer;
+
+#[async_trait]
+impl Provider for Claimer {
+    fn name(&self) -> &str {
+        "claimer"
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+        _sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> orgbot_providers::Result<CompletionResponse> {
+        let done = CompletionResponse {
+            model: "test".into(),
+            content: vec![ContentBlock::text("done")],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        let text: String = request
+            .messages
+            .iter()
+            .flat_map(|turn| turn.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.clone()),
+                ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Already acted this turn: say something and stop.
+        if request.messages.iter().any(|turn| {
+            turn.content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        }) {
+            return Ok(done);
+        }
+        let Some(task) = text
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .find(|word| word.starts_with("task_") && word.len() > 13)
+        else {
+            return Ok(done);
+        };
+        Ok(CompletionResponse {
+            model: "test".into(),
+            content: vec![ContentBlock::ToolUse {
+                id: "toolu_1".into(),
+                name: "claim_task".into(),
+                input: json!({ "task": task }),
+            }],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        })
+    }
+}
+
+fn spec(handle: &str) -> AgentSpec {
+    AgentSpec::new(
+        handle,
+        handle,
+        ProviderRef::Scripted {
+            script: "test".into(),
+        },
+    )
+    .with_roles(vec!["writer"])
+    .with_autonomy(Autonomy::default())
+}
+
+fn room_spec() -> RoomSpec {
+    RoomSpec {
+        name: "restart".into(),
+        goal: "survive being killed".into(),
+        roster: vec![],
+        completion: CompletionRule::AllTasksTerminal,
+        limits: RoomLimits::default(),
+    }
+}
+
+fn open_task(engine: &mut Engine, title: &str) -> TaskId {
+    let events = engine
+        .apply(Command::CreateTask {
+            title: title.into(),
+            brief: "work".into(),
+            by: None,
+            required_role: Some("writer".into()),
+            priority: orgbot_proto::task::Priority::Normal,
+            acceptance_criteria: vec![],
+            depends_on: vec![],
+            origin: TaskOrigin::plain(),
+        })
+        .unwrap();
+    let task = events
+        .iter()
+        .find_map(|e| match &e.event {
+            orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+            _ => None,
+        })
+        .unwrap();
+    engine.apply(Command::OpenTask { task }).unwrap();
+    task
+}
+
+fn claiming() -> Arc<dyn Provider> {
+    Arc::new(Claimer)
+}
+
+/// A running room, one bot, one task it is scripted to claim.
+///
+/// The board has to be opened after the room starts, so the provider cannot be
+/// built with the task id at seating time; it is swapped in once the id
+/// exists.
+fn started() -> (Orchestrator, AgentSpec, TaskId) {
+    let mut room = Orchestrator::new(room_spec());
+    let worker = spec("w1");
+    room.seat(worker.clone(), claiming()).unwrap();
+    room.start().unwrap();
+    let task = {
+        let mut engine = room.engine_mut();
+        open_task(&mut engine, "the work in hand")
+    };
+    (room, worker, task)
+}
+
+/// Work in hand comes back in hand.
+///
+/// The app is killed after a bot has claimed a task and before it finishes.
+/// On reopening, the claim is still that bot's: its lease has not lapsed, so
+/// nothing should have taken the work off it.
+#[tokio::test]
+async fn a_room_killed_mid_turn_reopens_with_its_work_intact() {
+    let (mut room, worker, task) = started();
+    let handle = worker.handle.clone();
+    room.step_many(1, None).await;
+
+    let holder = room.engine().task(task).unwrap().assignee;
+    assert!(holder.is_some(), "the bot took the task before the kill");
+
+    // The kill: nothing but the last checkpoint survives.
+    let saved = room.checkpoint();
+    drop(room);
+
+    let mut reopened = Orchestrator::restore(saved, room_spec(), vec![(worker, claiming())])
+        .expect("a saved room must reopen");
+
+    let record = reopened.engine().task(task).unwrap().clone();
+    assert_eq!(record.state, TaskState::Claimed, "the work is still claimed");
+    assert_eq!(record.assignee, holder, "and by the same bot");
+    assert_eq!(
+        reopened.engine().agent_by_handle(&handle).map(|s| s.id),
+        holder,
+        "whose identity survived the restart"
+    );
+
+    // Reconciliation on reopening must not take live work away.
+    reopened.engine_mut().apply(Command::Tick {
+        now: Timestamp::now(),
+    })
+    .unwrap();
+    assert_eq!(reopened.engine().task(task).unwrap().assignee, holder);
+}
+
+/// A room reopens paused, so an interrupted operation is never replayed blind.
+#[tokio::test]
+async fn a_reopened_room_waits_to_be_told_to_carry_on() {
+    let (mut room, worker, task) = started();
+    room.step_many(1, None).await;
+
+    let reopened =
+        Orchestrator::restore(room.checkpoint(), room_spec(), vec![(worker, claiming())])
+            .expect("reopen");
+
+    assert_eq!(
+        reopened.engine().room().phase,
+        orgbot_proto::room::RoomPhase::Paused,
+        "an interrupted room must not resume itself and repeat what it was doing"
+    );
+}
+
+/// Nothing is lost and nothing is duplicated across the restart.
+#[tokio::test]
+async fn the_board_is_the_same_board_after_a_restart() {
+    let (mut room, worker, first) = started();
+    let second = {
+        let mut engine = room.engine_mut();
+        open_task(&mut engine, "a second, quite different piece of work")
+    };
+    room.step_many(1, None).await;
+
+    let before: Vec<(TaskId, TaskState)> = room
+        .engine()
+        .tasks()
+        .map(|task| (task.id, task.state))
+        .collect();
+    let head = room.engine().head();
+
+    let reopened =
+        Orchestrator::restore(room.checkpoint(), room_spec(), vec![(worker, claiming())])
+            .expect("reopen");
+
+    let after: Vec<(TaskId, TaskState)> = reopened
+        .engine()
+        .tasks()
+        .map(|task| (task.id, task.state))
+        .collect();
+    assert_eq!(before, after, "the board came back exactly as it was");
+    assert_eq!(reopened.engine().head(), head, "and so did its history");
+    assert!(
+        reopened.engine().health().is_ok(),
+        "a restart must not leave the room in a state it has to repair: {}",
+        reopened.engine().health().report()
+    );
+    let _ = second;
+}
+
+/// A turn that never returned does not strand its task.
+///
+/// The bot claimed the work and the process died before it did anything else.
+/// Its claim lapses like any other, and the work goes back to the pool rather
+/// than sitting assigned to a bot that is never coming back.
+#[tokio::test]
+async fn work_claimed_by_a_turn_that_never_finished_is_recovered() {
+    let (mut room, worker, task) = started();
+    room.step_many(1, None).await;
+
+    let mut reopened =
+        Orchestrator::restore(room.checkpoint(), room_spec(), vec![(worker, claiming())])
+            .expect("reopen");
+
+    // Time passes with the bot never coming back.
+    reopened.engine_mut().task_mut(task).unwrap().lease_expires_at =
+        Some(Timestamp::now().plus_millis(-1));
+    reopened
+        .engine_mut()
+        .apply(Command::Tick {
+            now: Timestamp::now(),
+        })
+        .unwrap();
+
+    let engine = reopened.engine();
+    let record = engine.task(task).unwrap();
+    assert_eq!(record.state, TaskState::Ready, "back on the board");
+    assert_eq!(record.assignee, None, "and held by nobody");
+}

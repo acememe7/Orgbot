@@ -365,6 +365,11 @@ impl Orchestrator {
         let mut earmarked: BTreeSet<TaskId> = BTreeSet::new();
         let mut planner_taken = false;
         let mut deliveries = engine.awaiting_delivery().len();
+        // Bots sharing a backend share its rate limit, so starting several at
+        // once turns concurrency into 429s rather than throughput. The turns
+        // are spent either way; the work only gets done if the request lands.
+        let per_backend = engine.room().spec.limits.parallel_per_backend();
+        let mut in_flight: BTreeMap<String, usize> = BTreeMap::new();
 
         for offset in 0..self.rotation.len() {
             if chosen.len() >= limit {
@@ -374,6 +379,16 @@ impl Orchestrator {
             let Some(reason) = self.wake_reason(&engine, agent) else {
                 continue;
             };
+            let backend = engine
+                .agent(agent)
+                .map(|spec| spec.provider.backend())
+                .unwrap_or_default();
+            if !backend.is_empty() {
+                let running = in_flight.entry(backend.clone()).or_default();
+                if *running >= per_backend {
+                    continue;
+                }
+            }
             match reason {
                 Wake::FreshWork { open } => {
                     // Reserve one task for this bot. Which one is not binding —
@@ -412,6 +427,9 @@ impl Orchestrator {
                 }
                 // Nobody else can act on these, so there is nothing to divide.
                 Wake::Handoff | Wake::Question | Wake::HeldWork => {}
+            }
+            if !backend.is_empty() {
+                *in_flight.entry(backend).or_default() += 1;
             }
             chosen.push(agent);
         }
