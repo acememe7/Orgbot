@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:orgbot_app/orgbot/credentials.dart';
 import 'package:orgbot_app/orgbot/models.dart';
+import 'package:orgbot_app/orgbot/model_catalog.dart';
 import 'package:orgbot_app/orgbot/room_file.dart';
 import 'package:orgbot_app/orgbot/roles.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -22,6 +23,37 @@ RoomDef room({List<String> tasks = const []}) => RoomDef(
 
 void main() {
   _roleTableTests();
+
+  // ---------------------------------------------------------- Claude on a phone
+  //
+  // A Claude sign-in reaches a phone through a pairing bundle, not a sign-in
+  // flow: there is no device-code flow for Anthropic, so the desktop's own
+  // credential is carried across and the engine calls the Messages API directly.
+  // The list of models offered has to match the route taken, and it did not.
+
+  test('a device with no CLI is offered model ids, not Claude Code aliases', () {
+    final onPhone = ModelCatalog.claudeModels(viaCli: false);
+    expect(onPhone, isNotEmpty);
+    for (final option in onPhone) {
+      expect(
+        option.id,
+        startsWith('claude-'),
+        reason: '`${option.id}` is an alias the Messages API will not accept',
+      );
+    }
+  });
+
+  test('a computer with the CLI keeps the aliases, which follow the plan', () {
+    final ids = ModelCatalog.claudeModels(
+      viaCli: true,
+    ).map((m) => m.id).toList();
+    expect(ids, contains('opus'));
+    expect(
+      ids,
+      contains(''),
+      reason: 'and the option to let the subscription choose',
+    );
+  });
 
   // The engine runs one bot at a time unless the room file says otherwise,
   // which is how a room could hold twenty bots and have nineteen idle.

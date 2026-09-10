@@ -171,7 +171,10 @@ class ModelCatalog {
       case ProviderKind.grok:
         return token == null ? _fromGrokCli() : _fromGrokApi(token);
       case ProviderKind.anthropic:
-        return ModelList(_claudeAliases, ModelSource.live);
+        return ModelList(
+          claudeModels(viaCli: canRunAgentClis),
+          ModelSource.live,
+        );
       case ProviderKind.deepseek:
       case ProviderKind.ollama:
         return _fromApi(kind, apiKey);
@@ -182,15 +185,37 @@ class ModelCatalog {
 
   // ---- sources ------------------------------------------------------------
 
-  /// Claude Code takes aliases as well as ids. An alias follows whatever the
-  /// subscription currently serves, so it does not need updating here when a
-  /// new model ships.
-  static const List<ModelOption> _claudeAliases = [
-    ModelOption('opus', 'Opus', note: 'Best judgement'),
-    ModelOption('sonnet', 'Sonnet', note: 'Fast and capable'),
-    ModelOption('haiku', 'Haiku', note: 'Cheapest — good for inspectors'),
-    ModelOption('', 'Subscription default', note: 'Whatever your plan selects'),
-  ];
+  /// Claude models, named the way the caller will actually reach them.
+  ///
+  /// Claude Code accepts `opus` and `sonnet` and resolves them against
+  /// whatever the plan currently serves, which is why they were listed here.
+  /// But a phone has no CLI to do that resolving: it reaches Claude through
+  /// the Messages API, which takes ids only and rejects an alias outright. A
+  /// list that only works where a CLI happens to be installed is not a list.
+  ///
+  /// `viaCli` is a parameter rather than a read of the host so this can be
+  /// checked for the platform it is wrong on, from the platform it is right
+  /// on.
+  static List<ModelOption> claudeModels({required bool viaCli}) => viaCli
+      ? const [
+          ModelOption('opus', 'Opus', note: 'Best judgement'),
+          ModelOption('sonnet', 'Sonnet', note: 'Fast and capable'),
+          ModelOption('haiku', 'Haiku', note: 'Cheapest — good for inspectors'),
+          ModelOption(
+            '',
+            'Subscription default',
+            note: 'Whatever your plan selects',
+          ),
+        ]
+      : const [
+          ModelOption('claude-opus-5', 'Opus 5', note: 'Best judgement'),
+          ModelOption('claude-sonnet-5', 'Sonnet 5', note: 'Fast and capable'),
+          ModelOption(
+            'claude-haiku-4-5-20251001',
+            'Haiku 4.5',
+            note: 'Cheapest — good for inspectors',
+          ),
+        ];
 
   /// Read the model list the Codex CLI keeps at ~/.codex/models_cache.json.
   static Future<ModelList> _fromCodexCache() async {
@@ -477,7 +502,7 @@ class ModelCatalog {
   static List<ModelOption> fallbackFor(ProviderKind kind) {
     switch (kind) {
       case ProviderKind.anthropic:
-        return _claudeAliases;
+        return claudeModels(viaCli: canRunAgentClis);
       case ProviderKind.codex:
       case ProviderKind.grok:
         if (Platform.isAndroid || Platform.isIOS) return const [];

@@ -112,13 +112,32 @@ fn anthropic() -> Option<PairedProvider> {
             .get("subscriptionType")
             .and_then(Value::as_str)
             .map(str::to_string),
-        // Claude Code takes aliases, which follow whatever the plan serves.
-        models: vec![
-            PairedModel { id: "opus".into(), label: "Opus".into() },
-            PairedModel { id: "sonnet".into(), label: "Sonnet".into() },
-            PairedModel { id: "haiku".into(), label: "Haiku".into() },
-        ],
+        models: claude_models(),
     })
+}
+
+/// The Claude models a paired device can actually call.
+///
+/// Real ids, not the `opus`/`sonnet` aliases Claude Code accepts. A bundle
+/// exists to carry a sign-in to a device that has no CLI, and such a device
+/// reaches Claude through the Messages API, which does not resolve aliases.
+/// Sending the convenient name there fails every turn — so the bundle carries
+/// what its only reader can actually use.
+fn claude_models() -> Vec<PairedModel> {
+    vec![
+        PairedModel {
+            id: "claude-opus-5".into(),
+            label: "Opus 5".into(),
+        },
+        PairedModel {
+            id: "claude-sonnet-5".into(),
+            label: "Sonnet 5".into(),
+        },
+        PairedModel {
+            id: "claude-haiku-4-5-20251001".into(),
+            label: "Haiku 4.5".into(),
+        },
+    ]
 }
 
 /// The ChatGPT sign-in the Codex CLI stores, plus its cached model list.
@@ -324,6 +343,21 @@ mod tests {
         assert_eq!(models[0].id, "grok-4.5");
         assert_eq!(models[1].label, "Grok 4.6");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A phone has no CLI to resolve an alias, so the bundle must not carry
+    /// one. `opus` is a Claude Code convenience; the Messages API rejects it,
+    /// and the bundle's only reader is a device that speaks to that API.
+    #[test]
+    fn the_bundle_carries_model_ids_the_messages_api_accepts() {
+        for model in claude_models() {
+            assert!(
+                model.id.starts_with("claude-"),
+                "`{}` is an alias, not an id the API will accept",
+                model.id
+            );
+        }
+        assert!(!claude_models().is_empty());
     }
 
     /// A bundle carries secrets, so its shape must stay explicit.

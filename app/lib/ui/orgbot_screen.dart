@@ -1163,13 +1163,20 @@ class _BotEditorState extends State<_BotEditor> {
                     isExpanded: true,
                     decoration: const InputDecoration(labelText: 'Provider'),
                     items: ProviderKind.values
-                        // Anthropic has no device-code sign-in, so off a computer
-                        // it would be an option that can never work.
+                        // Offer what could actually run here. A provider whose
+                        // only sign-in is a CLI cannot be set up on a phone —
+                        // but it can already be signed in, because `orgbot
+                        // pair` carries a desktop sign-in across, and the
+                        // engine then calls the provider's API directly. That
+                        // is how Claude gets onto a phone; hiding it whenever
+                        // there was no CLI hid an account that was already
+                        // there and working.
                         .where(
                           (k) =>
                               k.cli == null ||
                               canRunAgentClis ||
-                              k.signsInOnDevice,
+                              k.signsInOnDevice ||
+                              ModelCatalog.credentials?.isSignedIn(k) == true,
                         )
                         .map(
                           (k) => DropdownMenuItem(
