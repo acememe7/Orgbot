@@ -34,6 +34,7 @@ time        = { version = "0.3", features = ["serde", "formatting", "parsing", "
 tokio       = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "io-std", "process", "signal", "net"] }
 tokio-util  = "0.7"
 futures     = "0.3"
+toml        = "0.8"
 async-trait = "0.1"
 tracing     = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

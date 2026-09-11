@@ -60,6 +60,25 @@ pub enum McpTransport {
         #[serde(default)]
         env: BTreeMap<String, String>,
     },
+    /// Run the server on the connected computer, over the workspace.
+    ///
+    /// The phone cannot start a process; the machine it is already connected
+    /// to can, and that machine is usually the one the servers were installed
+    /// on in the first place. Each call is one invocation carrying its own
+    /// handshake, so a server that keeps no state between calls — which is
+    /// what a read-only data server is — works with no persistent channel at
+    /// all. One that does keep state will not, and that is worth knowing
+    /// before relying on it.
+    Workspace {
+        /// The executable on that machine.
+        command: String,
+        /// Its arguments.
+        #[serde(default)]
+        args: Vec<String>,
+        /// Environment for the invocation.
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+    },
     /// Post JSON-RPC to an HTTP endpoint.
     Http {
         /// Where the server listens.
@@ -97,6 +116,13 @@ enum Channel {
         headers: BTreeMap<String, String>,
         client: reqwest::Client,
     },
+    /// A fresh invocation on the connected computer for every exchange.
+    Workspace {
+        workspace: crate::workspace::Workspace,
+        command: String,
+        args: Vec<String>,
+        env: BTreeMap<String, String>,
+    },
 }
 
 struct StdioPipe {
@@ -123,9 +149,17 @@ impl std::fmt::Debug for McpClient {
 impl McpClient {
     /// Connect to each server, keeping the ones that answer.
     pub async fn connect(specs: &[McpServerSpec]) -> Self {
+        Self::connect_with(specs, None).await
+    }
+
+    /// As [`Self::connect`], with a computer the room can run servers on.
+    pub async fn connect_with(
+        specs: &[McpServerSpec],
+        workspace: Option<&crate::workspace::Workspace>,
+    ) -> Self {
         let mut servers = Vec::new();
         for spec in specs {
-            match connect_one(spec).await {
+            match connect_one(spec, workspace).await {
                 Ok(server) => {
                     tracing::info!(
                         server = %server.name,
@@ -218,8 +252,22 @@ fn render(result: &Value) -> String {
     }
 }
 
-async fn connect_one(spec: &McpServerSpec) -> Result<Connected, String> {
+async fn connect_one(
+    spec: &McpServerSpec,
+    workspace: Option<&crate::workspace::Workspace>,
+) -> Result<Connected, String> {
     let channel = match &spec.transport {
+        McpTransport::Workspace { command, args, env } => {
+            let workspace = workspace
+                .ok_or("this room has no connected computer to run it on")?
+                .clone();
+            Channel::Workspace {
+                workspace,
+                command: command.clone(),
+                args: args.clone(),
+                env: env.clone(),
+            }
+        }
         McpTransport::Stdio { command, args, env } => {
             let mut child = tokio::process::Command::new(command)
                 .args(args)
@@ -341,6 +389,50 @@ impl Channel {
                 }
                 Err("the server never answered".into())
             }
+            Self::Workspace {
+                workspace,
+                command,
+                args,
+                env,
+            } => {
+                // One invocation carrying its own handshake. A fresh process
+                // has not been initialized, so the exchange has to include it;
+                // the id below is what distinguishes the answer we want from
+                // the handshake's.
+                body["jsonrpc"] = json!("2.0");
+                body["id"] = json!(2);
+                let script = pipeline(command, args, env, &body)?;
+                let outcome = workspace
+                    .call(
+                        orgbot_proto::AgentId::new(),
+                        "workspace_run",
+                        &json!({ "command": script, "timeout_seconds": 120 }),
+                    )
+                    .await;
+                if outcome.is_error {
+                    return Err(outcome.content);
+                }
+                for line in outcome.content.lines() {
+                    let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+                        continue;
+                    };
+                    if value.get("id").and_then(Value::as_u64) != Some(2) {
+                        continue;
+                    }
+                    if let Some(error) = value.get("error") {
+                        return Err(error
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown error")
+                            .to_string());
+                    }
+                    return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+                }
+                Err(format!(
+                    "no reply from `{command}` on the connected computer: {}",
+                    outcome.content.chars().take(200).collect::<String>()
+                ))
+            }
             Self::Http {
                 url,
                 headers,
@@ -384,6 +476,8 @@ impl Channel {
                 let _ = pipe.stdin.write_all(line.as_bytes()).await;
                 let _ = pipe.stdin.flush().await;
             }
+            // A fresh process per exchange has nothing to notify.
+            Self::Workspace { .. } => {}
             Self::Http {
                 url,
                 headers,
@@ -397,6 +491,140 @@ impl Channel {
             }
         }
     }
+}
+
+/// Every MCP server the connected computer already has registered.
+///
+/// The point of this is that there is nothing to configure. The machine a room
+/// is connected to is usually the machine the servers were installed on, and
+/// it already keeps a list of them — the same list the CLI on that machine
+/// reads. So a room inherits what that computer offers, which is exactly what
+/// an agent-CLI bot running there would have had, and what an API-backed bot
+/// has been missing.
+///
+/// Only `stdio` entries are taken. An `http` server in that file is reachable
+/// by the room directly and does not need the computer in the middle.
+pub fn servers_in_codex_config(config: &str) -> Vec<McpServerSpec> {
+    let Ok(parsed) = config.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let Some(servers) = parsed.get("mcp_servers").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for (name, entry) in servers {
+        let Some(entry) = entry.as_table() else {
+            continue;
+        };
+        // A URL here is reachable without a machine in the middle.
+        if entry.contains_key("url") {
+            continue;
+        }
+        let Some(command) = entry.get("command").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let args = entry
+            .get("args")
+            .and_then(toml::Value::as_array)
+            .map(|args| {
+                args.iter()
+                    .filter_map(|a| a.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let env = entry
+            .get("env")
+            .and_then(toml::Value::as_table)
+            .map(|env| {
+                env.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        found.push(McpServerSpec {
+            name: name.clone(),
+            transport: McpTransport::Workspace {
+                command: command.to_string(),
+                args,
+                env,
+            },
+        });
+    }
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
+/// Read the connected computer's own MCP list.
+///
+/// Returns nothing if there is no such file, which is the ordinary case for a
+/// machine that has never had a CLI installed on it.
+pub async fn discover_on_workspace(
+    workspace: &crate::workspace::Workspace,
+) -> Vec<McpServerSpec> {
+    let outcome = workspace
+        .call(
+            orgbot_proto::AgentId::new(),
+            "workspace_run",
+            &serde_json::json!({
+                "command": "cat ~/.codex/config.toml 2>/dev/null || true",
+                "timeout_seconds": 30
+            }),
+        )
+        .await;
+    if outcome.is_error {
+        return Vec::new();
+    }
+    servers_in_codex_config(&outcome.content)
+}
+
+/// The shell line that runs one MCP exchange on the connected computer.
+///
+/// The handshake and the request go in together on stdin, because the process
+/// only lives for this exchange. A quoted heredoc carries the JSON verbatim —
+/// no shell expansion, so quotes and `$` in the payload are safe — and the
+/// delimiter is distinctive enough that content cannot close it by accident,
+/// which is checked rather than assumed.
+fn pipeline(
+    command: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+    request: &Value,
+) -> Result<String, String> {
+    const EOF: &str = "ORGBOT_MCP_EOF";
+
+    let handshake = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": { "name": "orgbot", "version": env!("CARGO_PKG_VERSION") },
+        },
+    });
+    let initialized = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    let payload = format!("{handshake}\n{initialized}\n{request}\n");
+    if payload.contains(EOF) {
+        return Err("the request cannot be sent safely".into());
+    }
+
+    let mut line = String::new();
+    for (key, value) in env {
+        line.push_str(&format!("{key}={} ", shell_quote(value)));
+    }
+    line.push_str(&shell_quote(command));
+    for arg in args {
+        line.push(' ');
+        line.push_str(&shell_quote(arg));
+    }
+    Ok(format!("{line} <<'{EOF}'\n{payload}{EOF}\n"))
+}
+
+/// Wrap a word so the shell takes it literally.
+fn shell_quote(word: &str) -> String {
+    // A single-quoted word is literal to the shell except for a quote itself,
+    // which has to leave the quoting, be escaped, and go back in.
+    format!("'{}'", word.replace('\'', r"'\''"))
 }
 
 /// An HTTP MCP server may answer with plain JSON or with one SSE event.
@@ -482,6 +710,110 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plain, sse);
+    }
+
+    /// A room inherits the connected computer's own list, so there is nothing
+    /// to configure — which is the whole point of reading it.
+    #[test]
+    fn a_computers_registered_servers_are_picked_up_as_they_are() {
+        let config = r#"
+[mcp_servers.aece-history]
+command = "python3"
+args = ["/home/theaece/scripts/mcp_history_server.py"]
+
+[mcp_servers.node_repl]
+command = "/usr/lib/chatgpt/node_repl"
+args = []
+[mcp_servers.node_repl.env]
+NODE_REPL_NODE_PATH = "/usr/lib/chatgpt/bin/node"
+
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
+
+[features]
+some = true
+"#;
+        let found = servers_in_codex_config(config);
+        let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["aece-history", "node_repl"],
+            "stdio entries are taken; a URL needs no computer in the middle"
+        );
+
+        let history = &found[0];
+        match &history.transport {
+            McpTransport::Workspace { command, args, .. } => {
+                assert_eq!(command, "python3");
+                assert_eq!(args.len(), 1);
+                assert!(args[0].ends_with("mcp_history_server.py"));
+            }
+            other => panic!("expected a workspace transport, got {other:?}"),
+        }
+
+        match &found[1].transport {
+            McpTransport::Workspace { env, .. } => {
+                assert_eq!(
+                    env.get("NODE_REPL_NODE_PATH").map(String::as_str),
+                    Some("/usr/lib/chatgpt/bin/node"),
+                    "a server's environment travels with it"
+                );
+            }
+            other => panic!("expected a workspace transport, got {other:?}"),
+        }
+    }
+
+    /// A machine with no CLI installed is the ordinary case, not an error.
+    #[test]
+    fn a_computer_with_no_config_offers_nothing_and_does_not_complain() {
+        assert!(servers_in_codex_config("").is_empty());
+        assert!(servers_in_codex_config("not valid toml {{{").is_empty());
+        assert!(servers_in_codex_config("[features]\nx = 1\n").is_empty());
+    }
+
+    /// The shell line has to survive the shell, which is easy to get wrong in
+    /// a way that only shows up against a real machine.
+    #[test]
+    fn the_generated_command_quotes_exactly_once() {
+        let line = pipeline(
+            "python3",
+            &["/home/me/mcp server.py".into()],
+            &BTreeMap::new(),
+            &json!({"method": "tools/list", "id": 2}),
+        )
+        .unwrap();
+        assert!(
+            line.starts_with("'python3' '/home/me/mcp server.py' <<'ORGBOT_MCP_EOF'"),
+            "a path with a space must be one argument, quoted once: {line}"
+        );
+        assert!(
+            !line.contains(r"'''"),
+            "three quotes in a row is the classic quoting bug: {line}"
+        );
+        assert!(line.trim_end().ends_with("ORGBOT_MCP_EOF"));
+    }
+
+    /// The handshake travels with the request, because the process is new.
+    #[test]
+    fn the_exchange_carries_its_own_handshake() {
+        let line = pipeline("srv", &[], &BTreeMap::new(), &json!({"id": 2})).unwrap();
+        assert!(line.contains("initialize"), "{line}");
+        assert!(line.contains("notifications/initialized"), "{line}");
+    }
+
+    /// A word carrying a quote must not break out of its quoting.
+    #[test]
+    fn a_quote_in_an_argument_cannot_escape() {
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// Environment is set for the invocation, not left to the far side.
+    #[test]
+    fn environment_is_carried_into_the_invocation() {
+        let mut env = BTreeMap::new();
+        env.insert("TOKEN".to_string(), "sec ret".to_string());
+        let line = pipeline("srv", &[], &env, &json!({"id": 2})).unwrap();
+        assert!(line.starts_with("TOKEN='sec ret' 'srv'"), "{line}");
     }
 
     /// Nothing a server offers may shadow a board tool.

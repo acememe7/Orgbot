@@ -77,6 +77,10 @@ pub struct Orchestrator {
     /// The last thing each bot said, so a bot repeating itself verbatim does
     /// not read as progress and stall detection still fires.
     last_said: BTreeMap<AgentId, String>,
+    /// The computer the room is connected to, kept so MCP servers installed on
+    /// it can be run there — a phone cannot start a process, and the machine
+    /// it is already talking to is usually where the servers live.
+    workspace: Option<crate::workspace::Workspace>,
 }
 
 impl Orchestrator {
@@ -121,6 +125,7 @@ impl Orchestrator {
             cursor: value["cursor"].as_u64().unwrap_or(0) as usize,
             idle_rounds: 0,
             last_said: BTreeMap::new(),
+            workspace: None,
         };
         for (mut configured, provider) in providers {
             let saved = restored
@@ -161,6 +166,7 @@ impl Orchestrator {
             cursor: 0,
             idle_rounds: 0,
             last_said: BTreeMap::new(),
+            workspace: None,
         }
     }
 
@@ -201,6 +207,12 @@ impl Orchestrator {
         for bot in self.bots.values_mut() {
             bot.attach_workspace(workspace.clone());
         }
+        self.workspace = Some(workspace);
+    }
+
+    /// The computer this room is connected to, if any.
+    pub fn workspace(&self) -> Option<&crate::workspace::Workspace> {
+        self.workspace.as_ref()
     }
 
     pub fn attach_attachments(&mut self, root: std::path::PathBuf) {

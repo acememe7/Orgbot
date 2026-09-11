@@ -380,8 +380,24 @@ impl RoomSession {
     }
 
     async fn run_mode(mut self, batch: bool) -> RunOutcome {
-        if !self.mcp.is_empty() {
-            let servers = orgbot_runtime::mcp_client::McpClient::connect(&self.mcp).await;
+        // What the room was told to use, plus whatever the connected computer
+        // already has registered. Inheriting the machine's own list is the
+        // point: it is the same list a CLI running there would read, and it is
+        // exactly what an API-backed bot has been missing.
+        let mut specs = self.mcp.clone();
+        if let Some(workspace) = self.orchestrator.workspace() {
+            for found in orgbot_runtime::mcp_client::discover_on_workspace(workspace).await {
+                if !specs.iter().any(|s| s.name == found.name) {
+                    specs.push(found);
+                }
+            }
+        }
+        if !specs.is_empty() {
+            let servers = orgbot_runtime::mcp_client::McpClient::connect_with(
+                &specs,
+                self.orchestrator.workspace(),
+            )
+            .await;
             tracing::info!(
                 servers = servers.len(),
                 tools = servers.tools().len(),
