@@ -198,9 +198,22 @@ impl RoomSession {
                             meta.is_file() && meta.len() <= 64 * 1024 * 1024,
                             "Saved room memory is not a regular file or exceeds 64 MiB"
                         );
-                        Some(serde_json::from_slice::<serde_json::Value>(
-                            &std::fs::read(path)?,
-                        )?)
+                        let mut board =
+                            serde_json::from_slice::<serde_json::Value>(&std::fs::read(path)?)?;
+                        let damaged =
+                            crate::bodies::restore(&mut board, &crate::bodies::directory_for(path));
+                        if !damaged.is_empty() {
+                            // Named rather than swallowed: a deliverable that
+                            // cannot be read back is something a person needs
+                            // to know about, not something to discover in a
+                            // review.
+                            tracing::warn!(
+                                count = damaged.len(),
+                                artifacts = ?damaged,
+                                "some deliverables could not be read back"
+                            );
+                        }
+                        Some(board)
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => return Err(e.into()),
@@ -340,7 +353,16 @@ impl RoomSession {
         if self.saved_at == Some(stamp) {
             return Ok(());
         }
-        let bytes = serde_json::to_vec(&self.orchestrator.checkpoint())?;
+        let mut board = self.orchestrator.checkpoint();
+        // Deliverables leave the board before the board is written, so it can
+        // never reference a file that is not there yet. A body that fails to
+        // write stays put: a larger board is a problem, a lost deliverable is
+        // not recoverable.
+        let bodies = crate::bodies::directory_for(path);
+        if let Err(error) = crate::bodies::spill(&mut board, &bodies) {
+            tracing::warn!(%error, "artifact bodies stayed in the board");
+        }
+        let bytes = serde_json::to_vec(&board)?;
         anyhow::ensure!(
             bytes.len() <= 64 * 1024 * 1024,
             "Room memory exceeds 64 MiB"

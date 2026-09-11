@@ -230,3 +230,113 @@ async fn attachments_reach_bot_memory_and_survive_restart_with_room_boundaries()
     assert!(attachments::manifests(Some(&root), &[id.into()]).is_err());
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A deliverable survives the round trip, and the board does not carry it.
+///
+/// Artifacts are the one thing in a board that must grow without limit — they
+/// are the work — while the board itself has a ceiling past which nothing can
+/// open it at all. So bodies live beside the board, and what matters is that
+/// an engine restored from such a board is indistinguishable from one that
+/// never left memory.
+#[test]
+fn a_deliverable_lives_beside_the_board_and_comes_back_whole() {
+    use orgbot_proto::artifact::ArtifactBody;
+
+    let dir = std::env::temp_dir().join(format!("orgbot-bodies-{}", orgbot_proto::RoomId::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("state.json");
+
+    let mut engine = Engine::new(orgbot_proto::room::RoomSpec {
+        name: "bodies".into(),
+        goal: "keep the work".into(),
+        roster: vec![],
+        completion: orgbot_proto::room::CompletionRule::AllTasksTerminal,
+        limits: orgbot_proto::room::RoomLimits::default(),
+    });
+    let author = orgbot_proto::AgentSpec::new(
+        "w1",
+        "Worker",
+        orgbot_proto::agent::ProviderRef::Scripted {
+            script: "s".into(),
+        },
+    );
+    let author_id = author.id;
+    engine
+        .apply(Command::JoinAgent {
+            spec: Box::new(author),
+        })
+        .unwrap();
+    engine.apply(Command::StartRoom).unwrap();
+    let created = engine
+        .apply(Command::CreateTask {
+            title: "write it".into(),
+            brief: "the thing".into(),
+            by: None,
+            required_role: None,
+            priority: orgbot_proto::task::Priority::Normal,
+            acceptance_criteria: vec![],
+            depends_on: vec![],
+            origin: orgbot_proto::graph::TaskOrigin::plain(),
+        })
+        .unwrap();
+    let task = created
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::TaskCreated { task } => Some(task.id),
+            _ => None,
+        })
+        .unwrap();
+
+    let document = "the deliverable itself. ".repeat(500);
+    let added = engine
+        .apply(Command::AddArtifact {
+            task,
+            author: author_id,
+            name: "report.md".into(),
+            body: ArtifactBody::Text {
+                text: document.clone(),
+            },
+            authority_bearing: false,
+        })
+        .unwrap();
+    let artifact = added
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::ArtifactAdded { artifact } => Some(artifact.id),
+            _ => None,
+        })
+        .unwrap();
+
+    // Saved exactly as the session saves: bodies out, then the board.
+    let mut board = serde_json::json!({ "version": 1, "engine": engine });
+    let bodies = orgbot_server::bodies::directory_for(&path);
+    assert_eq!(orgbot_server::bodies::spill(&mut board, &bodies).unwrap(), 1);
+    std::fs::write(&path, serde_json::to_vec(&board).unwrap()).unwrap();
+
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !written.contains("the deliverable itself."),
+        "the board must not carry the document"
+    );
+    assert!(
+        bodies.join(format!("{artifact}.body")).is_file(),
+        "and a file beside it must"
+    );
+
+    // Reopened exactly as the session reopens.
+    let mut reopened: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(orgbot_server::bodies::restore(&mut reopened, &bodies).is_empty());
+    let back: Engine = serde_json::from_value(reopened["engine"].clone()).unwrap();
+
+    let deliverable = back.artifact(artifact).expect("it is still there");
+    assert_eq!(deliverable.name, "report.md");
+    assert_eq!(
+        deliverable.body.full_text(),
+        document,
+        "whole and unchanged"
+    );
+    assert_eq!(back.task(task).unwrap().artifacts, vec![artifact]);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
