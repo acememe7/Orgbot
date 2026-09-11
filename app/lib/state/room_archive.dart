@@ -5,12 +5,29 @@ import '../workspace/workspace.dart';
 
 /// Read-only run history. Reopening a log never re-executes model/tool calls.
 class RoomArchive {
-  final File file;
+  File file;
+  final String roomId;
   final void Function(String) onError;
   Future<void> _writing = Future.value();
   int _bytes = 0;
   bool _failed = false;
-  RoomArchive._(this.file, this.onError);
+  RoomArchive._(this.file, this.roomId, this.onError, this._segmentBytes);
+
+  /// Where this log rolls. A field so a test can reach the boundary without
+  /// writing twenty megabytes to find out what happens at it.
+  final int _segmentBytes;
+
+  /// The most one segment of a run log may hold before a new one is started.
+  ///
+  /// A cap is right: one unbounded file is slow to open and impossible to
+  /// prune. Stopping at the cap was not — a four-day run reached it and the
+  /// transcript simply ended, which is the one thing a history is for. The
+  /// note left here said segmented logs could wait until a real run reached
+  /// twenty megabytes. One has.
+  static const int maxSegmentBytes = 20 * 1024 * 1024;
+
+  /// Segments already written for this run, newest last.
+  final List<File> segments = [];
 
   /// Migrate an older journal once. The original log is retained untouched.
   static Future<File> stateFile(String roomId) async {
@@ -119,15 +136,18 @@ class RoomArchive {
 
   static Future<RoomArchive> open(
     String roomId,
-    void Function(String) onError,
-  ) async {
+    void Function(String) onError, {
+    int segmentBytes = maxSegmentBytes,
+  }) async {
     final dir = await directory(roomId);
     await dir.create(recursive: true);
     final file = File(
       '${dir.path}/${DateTime.now().microsecondsSinceEpoch}.jsonl',
     );
     await file.create(exclusive: true);
-    return RoomArchive._(file, onError);
+    final archive = RoomArchive._(file, roomId, onError, segmentBytes);
+    archive.segments.add(file);
+    return archive;
   }
 
   void append(List<Map<String, Object?>> messages) {
@@ -143,16 +163,26 @@ class RoomArchive {
     );
     if (retained.isEmpty) return;
     final text = '${retained.map(jsonEncode).join('\n')}\n';
-    _bytes += utf8.encode(text).length;
-    // ponytail: cap a run log at 20 MiB; segmented logs only if real runs reach this.
-    if (_bytes > 20 * 1024 * 1024) {
-      _failed = true;
-      onError('Run history reached 20 MiB. This run is no longer being saved.');
-      return;
+    final length = utf8.encode(text).length;
+    // Start a new segment rather than stopping. The history view already reads
+    // every segment a room has, so a rolled log reads as one run; a log that
+    // stops reads as a room that went quiet.
+    if (_bytes > 0 && _bytes + length > _segmentBytes) {
+      final rolled = File(
+        '${file.parent.path}/${DateTime.now().microsecondsSinceEpoch}.jsonl',
+      );
+      file = rolled;
+      segments.add(rolled);
+      _bytes = 0;
+      _writing = _writing
+          .then((_) => rolled.create(exclusive: true))
+          .catchError((Object _) => rolled);
     }
+    _bytes += length;
+    final target = file;
     _writing = _writing
         .then((_) async {
-          await file.writeAsString(text, mode: FileMode.append, flush: true);
+          await target.writeAsString(text, mode: FileMode.append, flush: true);
         })
         .catchError((Object _) {
           if (!_failed) {
