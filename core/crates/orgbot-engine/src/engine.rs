@@ -21,6 +21,7 @@ use orgbot_proto::convergence::{self, Convergence};
 use orgbot_proto::text;
 use orgbot_proto::decision::{Answer, Decision, DecisionLog, Governance, Request, Settled};
 use orgbot_proto::roles::{Eligibility as RoleFit, RoleTable};
+use orgbot_proto::skill::Skill;
 use orgbot_proto::spend::{Spend, TokenUsage};
 use orgbot_proto::ids::DecisionId;
 use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness, TaskKind, TaskOrigin};
@@ -73,6 +74,9 @@ pub struct Engine {
     /// What each bot has drawn, so a room can say what it has cost.
     #[serde(default)]
     spend: BTreeMap<AgentId, Spend>,
+    /// Playbooks the room's bots can reach for.
+    #[serde(default)]
+    skills: Vec<Skill>,
     handoffs: BTreeMap<HandoffId, Handoff>,
     artifacts: BTreeMap<ArtifactId, Artifact>,
     reviews: Vec<Review>,
@@ -260,6 +264,7 @@ impl Engine {
             tasks: BTreeMap::new(),
             last_health: String::new(),
             spend: BTreeMap::new(),
+            skills: Vec::new(),
             handoffs: BTreeMap::new(),
             artifacts: BTreeMap::new(),
             reviews: Vec::new(),
@@ -961,6 +966,27 @@ impl Engine {
     /// storage or recording a correction.
     pub fn artifact_mut(&mut self, id: ArtifactId) -> Option<&mut Artifact> {
         self.artifacts.get_mut(&id)
+    }
+
+    /// The playbooks available in this room.
+    pub fn skills(&self) -> &[Skill] {
+        &self.skills
+    }
+
+    /// One playbook by name, for a bot that has decided it applies.
+    pub fn skill(&self, name: &str) -> Option<&Skill> {
+        self.skills
+            .iter()
+            .find(|skill| skill.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Stock the room's playbooks. Replaces whatever was there.
+    ///
+    /// Set from the room file on every open, so editing a skill on disk takes
+    /// effect the next time the room runs rather than being frozen into saved
+    /// state at the moment it was first read.
+    pub fn set_skills(&mut self, skills: Vec<Skill>) {
+        self.skills = skills;
     }
 
     /// What one bot has drawn.

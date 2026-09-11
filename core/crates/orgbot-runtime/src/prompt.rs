@@ -100,6 +100,23 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
         );
     }
 
+    // One line per skill. A bot cannot ask for what it does not know exists,
+    // and the whole point of the split is that this part is cheap: the body of
+    // a skill is fetched by the bot that decided it applied, on the turn it
+    // applies, and costs nothing on any other turn.
+    let skills = engine.skills();
+    if !skills.is_empty() {
+        out.push_str(
+            "\nPlaybooks available to you. Call use_skill with the name when one \
+             matches the work in front of you; it returns the full approach. \
+             Following a proven one beats working it out again.\n",
+        );
+        for skill in skills {
+            out.push_str(&format!("  {} — {}\n", skill.name, skill.summary()));
+        }
+        out.push('\n');
+    }
+
     out.push_str(
         "Style: you are talking to colleagues. Be brief and concrete. Say what you \
          did and what you need, not what you are about to do. Do not narrate your \

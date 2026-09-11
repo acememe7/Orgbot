@@ -162,6 +162,18 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             ),
         ),
         tool(
+            "use_skill",
+            "Load a playbook by name. The room lists what it has near the top of \
+             your instructions, with one line each; this returns the whole thing. \
+             Reach for one when its line matches the work in front of you — that \
+             is what they are for, and following a proven approach beats working \
+             one out again.",
+            schema::object(
+                vec![("skill", schema::string("The skill's name."))],
+                &["skill"],
+            ),
+        ),
+        tool(
             "read_artifact",
             "Read a deliverable by id — yours or another bot's. Use this to pick up \
              the context attached to a handoff before starting work.\n\
@@ -474,6 +486,7 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
             by: actor,
         }),
         "add_artifact" => add_artifact(engine, actor, input),
+        "use_skill" => use_skill(engine, input),
         "read_artifact" => read_artifact(engine, input),
         "submit_for_review" => submit_for_review(engine, actor, input),
         "offer_handoff" => offer_handoff(engine, actor, input),
@@ -992,6 +1005,36 @@ fn requested_part(input: &Value) -> Result<u32, String> {
             "PART_INVALID requested={raw} — `part` must be a whole number from 1. \
              The part you asked for was not read."
         )),
+    }
+}
+
+/// Hand over one playbook in full.
+///
+/// The index a bot carries is one line per skill; this is the rest. Kept as a
+/// call rather than folded into the prompt so a room of twenty skills costs a
+/// few hundred tokens to advertise and nothing until one is actually used.
+fn use_skill(engine: &Engine, input: &Value) -> ToolOutcome {
+    let name = match required_str(input, "skill") {
+        Ok(name) => name,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    match engine.skill(name) {
+        Some(skill) => ToolOutcome::ok(format!(
+            "SKILL {}\n{}\n\nFollow this for the work in front of you. If it does \
+             not fit, say so rather than forcing it.",
+            skill.name, skill.body
+        )),
+        None => {
+            let known: Vec<&str> = engine.skills().iter().map(|s| s.name.as_str()).collect();
+            ToolOutcome::error(if known.is_empty() {
+                "This room has no skills loaded.".to_string()
+            } else {
+                format!(
+                    "There is no skill called `{name}`. This room has: {}.",
+                    known.join(", ")
+                )
+            })
+        }
     }
 }
 

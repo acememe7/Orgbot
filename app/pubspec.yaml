@@ -40,6 +40,7 @@ dependencies:
   shared_preferences: ^2.5.5
   # Sign-ins and room tokens live in the platform keystore, not in
   # plaintext preferences.
+  path_provider: ^2.1.4
   flutter_secure_storage: ^9.2.4
   # Opening the provider's sign-in page from the device-code screen.
   url_launcher: ^6.3.2
@@ -82,6 +83,15 @@ flutter:
   assets:
     - assets/logo.png
     - assets/fonts/OFL.txt
+    # Playbooks the bots can reach for. Shipped with the app because a phone
+    # has no CLI whose skills folder it could inherit, which is how every
+    # bot on this device ended up with none.
+    - assets/skills/ponytail/SKILL.md
+    - assets/skills/ponytail-audit/SKILL.md
+    - assets/skills/ponytail-debt/SKILL.md
+    - assets/skills/ponytail-gain/SKILL.md
+    - assets/skills/ponytail-help/SKILL.md
+    - assets/skills/ponytail-review/SKILL.md
 
   # To add assets to your application, add an assets section, like this:
   # assets:

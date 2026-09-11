@@ -342,3 +342,29 @@ async fn a_dropped_board_leaves_a_note_rather_than_a_hole() {
         "the model should be told why the earlier board is missing"
     );
 }
+
+/// A bot is told that the computer may carry playbooks of its own.
+///
+/// The Hermes machines already hold skills written for them, and the tools to
+/// read those have worked all along — `workspace_list` and `workspace_read`.
+/// What was missing was any reason to look: a bot cannot use what it does not
+/// know is there, and nothing in its instructions had ever mentioned it.
+#[test]
+fn the_workspace_brief_points_at_the_computers_own_playbooks() {
+    let workspace = orgbot_runtime::workspace::Workspace::new(
+        orgbot_runtime::workspace::WorkspaceSpec {
+            label: "hermes".into(),
+            root: "/srv/app".into(),
+            writable: true,
+            commands: true,
+        },
+        tokio::sync::mpsc::channel(1).0,
+    );
+    let brief = workspace.instruction();
+    assert!(brief.contains("skills"), "{brief}");
+    assert!(brief.contains("SKILL.md"), "{brief}");
+    assert!(
+        brief.contains("workspace_read"),
+        "and say which tool reads one: {brief}"
+    );
+}

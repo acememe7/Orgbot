@@ -63,6 +63,21 @@ pub struct RoomConfig {
     /// work stranded when the one bot holding a role is occupied.
     #[serde(default)]
     pub roles: Vec<RoleSpec>,
+    /// Where to find the playbooks this room's bots may reach for.
+    ///
+    /// Directories of `SKILL.md` files, in the shape the agent CLIs already
+    /// use, so a machine's existing skills work here without being rewritten.
+    /// A path that is not there is skipped rather than failing the room: a
+    /// room file is shared between machines that do not have the same folders.
+    #[serde(default)]
+    pub skills: Vec<SkillSource>,
+}
+
+/// A folder of skills, or one named skill.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillSource {
+    /// A directory holding either `SKILL.md` itself or one folder per skill.
+    pub path: String,
 }
 
 /// The `[room]` section.
@@ -388,6 +403,8 @@ pub struct ResolvedRoom {
     pub spec: RoomSpec,
     /// What each role can do and who may cover for it.
     pub roles: RoleTable,
+    /// The playbooks found on this machine.
+    pub skills: Vec<orgbot_proto::skill::Skill>,
     /// The seated bots.
     pub bots: Vec<ResolvedBot>,
     /// The seed board.
@@ -487,11 +504,63 @@ impl RoomConfig {
 
         Ok(ResolvedRoom {
             roles: RoleTable::new(self.roles.clone()),
+            skills: self.load_skills(),
             spec,
             bots,
             tasks,
             state_path: self.room.state_path.clone(),
         })
+    }
+}
+
+impl RoomConfig {
+    /// Read every skill the declared sources actually hold.
+    ///
+    /// A missing path is skipped rather than refused. Room files travel between
+    /// machines that do not have the same folders, and a room that will not
+    /// open because a skills directory is absent is worse than one that opens
+    /// with fewer playbooks — the second is obvious from the index, the first
+    /// looks like the room is broken.
+    fn load_skills(&self) -> Vec<orgbot_proto::skill::Skill> {
+        use orgbot_proto::skill::Skill;
+
+        let mut found: Vec<Skill> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for source in &self.skills {
+            let root = std::path::Path::new(&source.path);
+            // Either the folder is a skill, or it holds one folder per skill.
+            let candidates: Vec<std::path::PathBuf> = if root.join("SKILL.md").is_file() {
+                vec![root.to_path_buf()]
+            } else {
+                let Ok(entries) = std::fs::read_dir(root) else {
+                    continue;
+                };
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| path.join("SKILL.md").is_file())
+                    .collect()
+            };
+            for dir in candidates {
+                let Ok(text) = std::fs::read_to_string(dir.join("SKILL.md")) else {
+                    continue;
+                };
+                let fallback = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let Some(skill) = Skill::parse(&text, &fallback) else {
+                    continue;
+                };
+                // First source wins, so a room can put its own ahead of a
+                // machine-wide set without having to remove anything.
+                if seen.insert(skill.name.to_ascii_lowercase()) {
+                    found.push(skill);
+                }
+            }
+        }
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        found
     }
 }
 

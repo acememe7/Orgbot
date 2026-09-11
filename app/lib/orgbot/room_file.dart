@@ -43,6 +43,7 @@ RoomFile buildRoomFile(
   String userName = 'You',
   String userProfile = '',
   String? statePath,
+  String? skillsPath,
 }) {
   // A CLI can only run where the binary exists. Everywhere else — a phone,
   // most obviously — the same subscription is reached through its API with
@@ -63,6 +64,16 @@ RoomFile buildRoomFile(
     ..writeln();
 
   if (statePath != null) buffer.writeln('state_path = ${_s(statePath)}\n');
+
+  // Playbooks. A bot backed by an agent CLI inherits that CLI's skills folder;
+  // a bot backed by an API inherits nothing, and on a phone every bot is
+  // API-backed — so without this the whole roster has none.
+  if (skillsPath != null && skillsPath.isNotEmpty) {
+    buffer
+      ..writeln('[[skills]]')
+      ..writeln('path = ' + _s(skillsPath))
+      ..writeln();
+  }
 
   // Interactive phone rooms keep working until completion or an explicit pause.
   // Preserve the separate CLI build's defaults and the native turn/error limits.

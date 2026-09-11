@@ -204,6 +204,7 @@ impl RoomSession {
         };
         let restored = saved.is_some();
         let roles = resolved.roles.clone();
+        let skills = resolved.skills.clone();
         let mut orchestrator = if let Some(saved) = saved {
             Orchestrator::restore(
                 saved,
@@ -234,6 +235,9 @@ impl RoomSession {
         // configuration, not history, and a saved room should pick up a table
         // added since it was written.
         orchestrator.engine_mut().set_roles(roles);
+        // Same reasoning: a skill edited on disk should take effect the next
+        // time the room opens, not be frozen into state the day it was written.
+        orchestrator.engine_mut().set_skills(skills);
 
         if let Some(parent) = state_path.as_ref().and_then(|path| path.parent()) {
             orchestrator.attach_attachments(parent.join("attachments"));

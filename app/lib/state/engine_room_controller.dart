@@ -26,6 +26,7 @@ import '../orgbot/models.dart';
 import '../orgbot/model_catalog.dart';
 import '../orgbot/room_check.dart';
 import '../orgbot/room_file.dart';
+import '../orgbot/skills.dart';
 import 'room_store.dart';
 import 'room_archive.dart';
 import 'background_rooms.dart';
@@ -227,6 +228,7 @@ class EngineRoomController extends ChangeNotifier {
         userName: library.userName,
         userProfile: library.userProfile,
         statePath: savedState.path,
+        skillsPath: await unpackBundledSkills(),
       );
       skipped = file.skipped;
       if (file.toml.contains('[[bots]]') == false) {

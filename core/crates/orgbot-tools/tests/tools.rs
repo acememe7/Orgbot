@@ -1124,3 +1124,59 @@ fn the_first_part_comes_with_the_manifest_for_the_whole_document() {
     assert!(!whole.contains("MANIFEST"), "{whole}");
     assert!(whole.contains("total_parts=1"), "{whole}");
 }
+
+// ------------------------------------------------------------------- skills
+//
+// A room of capable models still does poor work if every bot reasons out how
+// to approach a problem from scratch every time. A longer system prompt is the
+// wrong fix — it is paid for on every request by every bot whether the advice
+// applies or not. So a skill's one-line description is always in view and its
+// body is fetched only by the bot that decided it applied.
+
+fn with_skills(f: &mut Fixture, skills: Vec<(&str, &str, &str)>) {
+    f.engine.set_skills(
+        skills
+            .into_iter()
+            .map(|(name, description, body)| orgbot_proto::skill::Skill {
+                name: name.into(),
+                description: description.into(),
+                body: body.into(),
+            })
+            .collect(),
+    );
+}
+
+#[test]
+fn a_bot_can_load_a_playbook_by_name() {
+    let mut f = fixture();
+    with_skills(
+        &mut f,
+        vec![("ponytail", "the laziest thing that works", "Question the task.")],
+    );
+    let out = f.ok(f.worker, "use_skill", json!({"skill": "ponytail"}));
+    assert!(out.contains("Question the task."), "{out}");
+}
+
+/// The name is how a model refers to it, and models are inconsistent about case.
+#[test]
+fn asking_for_a_skill_is_not_case_sensitive() {
+    let mut f = fixture();
+    with_skills(&mut f, vec![("ponytail", "d", "body text")]);
+    assert!(f.ok(f.worker, "use_skill", json!({"skill": "Ponytail"})).contains("body text"));
+}
+
+/// A refusal names what there is, so the next call succeeds.
+#[test]
+fn asking_for_a_skill_that_is_not_there_says_what_is() {
+    let mut f = fixture();
+    with_skills(&mut f, vec![("ponytail", "d", "b"), ("skillops", "d", "b")]);
+    let out = f.err(f.worker, "use_skill", json!({"skill": "nonesuch"}));
+    assert!(out.contains("ponytail") && out.contains("skillops"), "{out}");
+}
+
+#[test]
+fn a_room_with_no_skills_says_so_plainly() {
+    let mut f = fixture();
+    let out = f.err(f.worker, "use_skill", json!({"skill": "anything"}));
+    assert!(out.contains("no skills"), "{out}");
+}
