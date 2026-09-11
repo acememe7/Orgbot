@@ -1015,3 +1015,108 @@ fn a_leftover_claim_on_unheld_work_is_cleaned_up() {
     );
     assert_eq!(r.state(task), TaskState::Ready, "without disturbing the work");
 }
+
+/// A board stays readable however long the room runs.
+///
+/// The file has a ceiling — past it nothing can open it at all — and two of
+/// the four things in it grew without limit. A four-day room reached
+/// thirty-three megabytes of a sixty-four megabyte budget, eleven of them log.
+#[test]
+fn a_long_running_room_does_not_grow_its_board_without_limit() {
+    let mut r = room();
+    let task = r.open("chatter", vec![]);
+    r.apply(Command::ClaimTask { task, by: r.a });
+
+    // Far more traffic than the retention allows.
+    for index in 0..4_200 {
+        let message = orgbot_proto::ChatMessage::say(
+            r.engine.room_id(),
+            r.a,
+            format!("progress note {index}"),
+        );
+        r.apply(Command::PostMessage {
+            message: Box::new(message),
+        });
+    }
+    assert!(
+        r.engine.log().len() > 3_000,
+        "the room holds everything until it is asked to tidy"
+    );
+
+    r.tick();
+
+    assert!(
+        r.engine.log().len() <= 3_000,
+        "the log is bounded, got {}",
+        r.engine.log().len()
+    );
+    assert!(
+        r.engine.transcript().len() <= 1_000,
+        "so is the transcript, got {}",
+        r.engine.transcript().len()
+    );
+}
+
+/// Trimming the record must not touch the work.
+#[test]
+fn the_board_itself_survives_the_tidying() {
+    let mut r = room();
+    let task = r.open("the work", vec![]);
+    r.apply(Command::ClaimTask { task, by: r.a });
+    r.apply(Command::StartTask { task, by: r.a });
+    r.apply(Command::AddArtifact {
+        task,
+        author: r.a,
+        name: "deliverable.md".into(),
+        body: orgbot_proto::artifact::ArtifactBody::Text {
+            text: "the thing that was built".into(),
+        },
+        authority_bearing: false,
+    });
+
+    for index in 0..4_200 {
+        let message = orgbot_proto::ChatMessage::say(
+            r.engine.room_id(),
+            r.a,
+            format!("noise {index}"),
+        );
+        r.apply(Command::PostMessage {
+            message: Box::new(message),
+        });
+    }
+    r.tick();
+
+    assert_eq!(r.engine.tasks().count(), 1, "the task is still there");
+    assert!(
+        r.engine.task(task).unwrap().artifacts.len() == 1,
+        "and so is what it produced — trimming a deliverable would throw away \
+         the thing the room exists to make"
+    );
+    assert_eq!(r.engine.task(task).unwrap().assignee, Some(r.a));
+}
+
+/// A bot still gets the catch-up it is owed after a trim.
+#[test]
+fn what_a_bot_has_not_seen_is_still_there_to_be_read() {
+    let mut r = room();
+    for index in 0..3_500 {
+        let message = orgbot_proto::ChatMessage::say(
+            r.engine.room_id(),
+            r.a,
+            format!("said {index}"),
+        );
+        r.apply(Command::PostMessage {
+            message: Box::new(message),
+        });
+    }
+    r.tick();
+
+    let head = r.engine.head();
+    // A bot that acted a hundred events ago sees all hundred.
+    let recently = orgbot_proto::Seq(head.0 - 100);
+    assert_eq!(
+        r.engine.events_since(recently).count(),
+        100,
+        "recent history is exactly what is kept"
+    );
+}

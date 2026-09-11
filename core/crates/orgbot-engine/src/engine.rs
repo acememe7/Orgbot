@@ -2632,6 +2632,7 @@ impl Engine {
         events.extend(self.clear_landed_dependencies()?);
         events.extend(self.reconcile_ownership(now)?);
         events.extend(self.report_health());
+        self.retain_recent();
         events.extend(self.sweep_deadlocks());
         Ok(events)
     }
@@ -2746,6 +2747,30 @@ impl Engine {
             ));
         }
         Ok(events)
+    }
+
+    /// Keep what the room reads; let the record live where records live.
+    ///
+    /// A saved board grows in four places and only two of them are unbounded.
+    /// The tasks, artifacts and reviews are the work itself and are kept whole
+    /// — trimming a deliverable would be throwing away the thing the room was
+    /// built to produce. The event log and the transcript are a *record*, and
+    /// the full one is already on disk in the run logs, segmented and readable.
+    /// What is worth keeping here is the recent part the room actually consults:
+    /// a bot catching up on what it missed, and a client asking for a backlog.
+    ///
+    /// A four-day room reached thirty-three megabytes, of which eleven were the
+    /// log and three the transcript, against a ceiling of sixty-four at which
+    /// the file stops being readable at all. Bounding this is what stops that
+    /// arriving.
+    fn retain_recent(&mut self) {
+        if self.log.len() > RETAINED_EVENTS {
+            self.log.drain(..self.log.len() - RETAINED_EVENTS);
+        }
+        if self.transcript.len() > RETAINED_MESSAGES {
+            self.transcript
+                .drain(..self.transcript.len() - RETAINED_MESSAGES);
+        }
     }
 
     /// Say so when the room's condition changes.
@@ -3106,3 +3131,14 @@ fn phase_label(phase: RoomPhase) -> &'static str {
         RoomPhase::Aborted => "aborted",
     }
 }
+
+/// Events kept in the saved board.
+///
+/// Enough that a bot which has not acted for a long stretch still gets the
+/// catch-up it is owed, and a client connecting mid-run gets a backlog worth
+/// having. Everything older is in the run logs, which is where a person reads
+/// history anyway.
+const RETAINED_EVENTS: usize = 3_000;
+
+/// Chat messages kept in the saved board.
+const RETAINED_MESSAGES: usize = 1_000;
