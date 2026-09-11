@@ -2634,7 +2634,24 @@ impl Engine {
             }
         }
 
-        // 2. A working state with nobody working it. Nothing is being
+        // 2. A claim on work nobody holds. Releasing clears both together now,
+        //    but a room that ran before it did still carries the leftovers —
+        //    and an inconsistency the room reports and cannot clear is worse
+        //    than one it never noticed, because it teaches the operator that
+        //    the report is noise.
+        let unheld: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| task.assignee.is_none() && task.lease_expires_at.is_some())
+            .map(|task| task.id)
+            .collect();
+        for task in unheld {
+            if let Some(record) = self.tasks.get_mut(&task) {
+                record.lease_expires_at = None;
+            }
+        }
+
+        // 3. A working state with nobody working it. Nothing is being
         //    interrupted, so this returns to the pool immediately.
         let ownerless: Vec<TaskId> = self
             .tasks
@@ -2649,7 +2666,7 @@ impl Engine {
             ));
         }
 
-        // 3. Held by a bot that is no longer in the room.
+        // 4. Held by a bot that is no longer in the room.
         let orphaned: Vec<TaskId> = self
             .tasks
             .values()
@@ -2668,7 +2685,7 @@ impl Engine {
             ));
         }
 
-        // 4. Held by a bot that has stopped reporting progress. A faulted bot
+        // 5. Held by a bot that has stopped reporting progress. A faulted bot
         //    cannot act, so it cannot renew, so it arrives here on its own.
         let stale: Vec<TaskId> = self
             .tasks

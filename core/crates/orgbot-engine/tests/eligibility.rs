@@ -987,3 +987,31 @@ fn an_unmetered_backend_is_counted_but_not_presented_as_free() {
         "and its cost is unknown, which is not the same as zero"
     );
 }
+
+/// A leftover claim on unheld work is cleared, not just prevented.
+///
+/// Releasing clears the holder and the claim together now. But a room that ran
+/// before it did still carries the leftovers, and the health report names them
+/// every time it is asked. An inconsistency the room reports and cannot clear
+/// is worse than one it never noticed: it teaches the operator that the report
+/// is noise, and then the real one goes unread with the rest. A live room had
+/// two, raised once and standing.
+#[test]
+fn a_leftover_claim_on_unheld_work_is_cleaned_up() {
+    let mut r = room();
+    let task = r.open("carried over from an older build", vec![]);
+    // The shape an older release left behind: back on the board, still
+    // carrying the claim of whoever last held it.
+    r.engine.task_mut(task).unwrap().lease_expires_at = Some(Timestamp::now());
+    assert!(!r.engine.health().is_ok(), "the room should notice");
+
+    r.tick();
+
+    assert_eq!(r.engine.task(task).unwrap().lease_expires_at, None);
+    assert!(
+        r.engine.health().is_ok(),
+        "and be able to say it is clear again: {}",
+        r.engine.health().report()
+    );
+    assert_eq!(r.state(task), TaskState::Ready, "without disturbing the work");
+}
