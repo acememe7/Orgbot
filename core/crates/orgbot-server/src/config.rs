@@ -71,6 +71,14 @@ pub struct RoomConfig {
     /// room file is shared between machines that do not have the same folders.
     #[serde(default)]
     pub skills: Vec<SkillSource>,
+    /// MCP servers this room's bots may call.
+    ///
+    /// A `stdio` server needs a machine that can start a process, so it works
+    /// on a desktop and not on a phone; an `http` one works anywhere the room
+    /// has a network. A server that cannot be reached is skipped with a
+    /// warning rather than failing the room.
+    #[serde(default)]
+    pub mcp: Vec<orgbot_runtime::mcp_client::McpServerSpec>,
 }
 
 /// A folder of skills, or one named skill.
@@ -405,6 +413,8 @@ pub struct ResolvedRoom {
     pub roles: RoleTable,
     /// The playbooks found on this machine.
     pub skills: Vec<orgbot_proto::skill::Skill>,
+    /// MCP servers to reach out to.
+    pub mcp: Vec<orgbot_runtime::mcp_client::McpServerSpec>,
     /// The seated bots.
     pub bots: Vec<ResolvedBot>,
     /// The seed board.
@@ -505,6 +515,7 @@ impl RoomConfig {
         Ok(ResolvedRoom {
             roles: RoleTable::new(self.roles.clone()),
             skills: self.load_skills(),
+            mcp: self.mcp.clone(),
             spec,
             bots,
             tasks,

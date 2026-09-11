@@ -79,6 +79,8 @@ pub struct Bot {
     /// the CLI so its tool loop can reach the board.
     mcp_socket: Option<std::path::PathBuf>,
     workspace: Option<crate::workspace::Workspace>,
+    /// MCP servers this room reaches out to, shared by every bot in it.
+    mcp_servers: Option<Arc<crate::mcp_client::McpClient>>,
     pub(crate) attachments_root: Option<std::path::PathBuf>,
     pub(crate) input_interrupt: CancellationToken,
 }
@@ -109,6 +111,7 @@ impl Bot {
             mcp_rx: None,
             mcp_socket: None,
             workspace: None,
+            mcp_servers: None,
             attachments_root: None,
             input_interrupt: CancellationToken::new(),
         }
@@ -117,6 +120,17 @@ impl Bot {
     pub fn attach_workspace(&mut self, workspace: crate::workspace::Workspace) {
         self.tools.extend(workspace.definitions());
         self.workspace = Some(workspace);
+    }
+
+    /// Give this bot the room's MCP servers.
+    ///
+    /// An agent-CLI bot inherits its machine's servers for free; an
+    /// API-backed one inherits nothing, which on a phone means every bot. The
+    /// tools arrive already named for the server they came from, so nothing
+    /// here can shadow a board tool.
+    pub fn attach_mcp_servers(&mut self, servers: Arc<crate::mcp_client::McpClient>) {
+        self.tools.extend(servers.tools());
+        self.mcp_servers = Some(servers);
     }
 
     /// Wire this bot to the room MCP bridge: while a turn runs, inbound
@@ -302,7 +316,15 @@ impl Bot {
                 if name == "post_message" {
                     posted_to_chat = true;
                 }
-                let outcome = if name.starts_with("workspace_") {
+                let outcome = if self
+                    .mcp_servers
+                    .as_ref()
+                    .is_some_and(|servers| servers.owns(name))
+                {
+                    // Safe to unwrap: `owns` is only true when it is set.
+                    let servers = self.mcp_servers.clone().expect("checked above");
+                    servers.call(name, input).await
+                } else if name.starts_with("workspace_") {
                     match &self.workspace {
                         Some(workspace) => workspace.call(self.spec.id, name, input).await,
                         None => orgbot_tools::ToolOutcome {

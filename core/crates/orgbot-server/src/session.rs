@@ -169,6 +169,12 @@ pub struct RoomSession {
     published: Arc<RwLock<Published>>,
     interrupt: Arc<Mutex<CancellationToken>>,
     input_interrupt: Arc<Mutex<CancellationToken>>,
+    /// MCP servers to reach out to, connected when the room starts running.
+    ///
+    /// Held as configuration rather than connected at build time: starting a
+    /// server is I/O, building a session is not, and a room that has been
+    /// assembled but never run should not have left processes behind.
+    mcp: Vec<orgbot_runtime::mcp_client::McpServerSpec>,
 }
 
 impl RoomSession {
@@ -205,6 +211,7 @@ impl RoomSession {
         let restored = saved.is_some();
         let roles = resolved.roles.clone();
         let skills = resolved.skills.clone();
+        let mcp = resolved.mcp.clone();
         let mut orchestrator = if let Some(saved) = saved {
             Orchestrator::restore(
                 saved,
@@ -238,6 +245,7 @@ impl RoomSession {
         // Same reasoning: a skill edited on disk should take effect the next
         // time the room opens, not be frozen into state the day it was written.
         orchestrator.engine_mut().set_skills(skills);
+
 
         if let Some(parent) = state_path.as_ref().and_then(|path| path.parent()) {
             orchestrator.attach_attachments(parent.join("attachments"));
@@ -290,6 +298,7 @@ impl RoomSession {
             published: published.clone(),
             interrupt: interrupt.clone(),
             input_interrupt: input_interrupt.clone(),
+            mcp,
         };
         let handle = SessionHandle {
             control: control_tx,
@@ -371,6 +380,15 @@ impl RoomSession {
     }
 
     async fn run_mode(mut self, batch: bool) -> RunOutcome {
+        if !self.mcp.is_empty() {
+            let servers = orgbot_runtime::mcp_client::McpClient::connect(&self.mcp).await;
+            tracing::info!(
+                servers = servers.len(),
+                tools = servers.tools().len(),
+                "mcp servers available to this room"
+            );
+            self.orchestrator.attach_mcp_servers(servers);
+        }
         let mut ticker = tokio::time::interval(IDLE_TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

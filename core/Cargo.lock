@@ -914,6 +914,7 @@ dependencies = [
  "orgbot-proto",
  "orgbot-providers",
  "orgbot-tools",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

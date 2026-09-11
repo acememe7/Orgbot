@@ -185,6 +185,18 @@ impl Orchestrator {
         Ok(id)
     }
 
+    /// Give every bot the room's MCP servers.
+    ///
+    /// One client shared by the whole roster: a stdio server is one process
+    /// with one pipe, and twenty bots each spawning their own copy of it would
+    /// be twenty processes racing over the same database.
+    pub fn attach_mcp_servers(&mut self, servers: crate::mcp_client::McpClient) {
+        let shared = Arc::new(servers);
+        for bot in self.bots.values_mut() {
+            bot.attach_mcp_servers(shared.clone());
+        }
+    }
+
     pub fn attach_workspace(&mut self, workspace: crate::workspace::Workspace) {
         for bot in self.bots.values_mut() {
             bot.attach_workspace(workspace.clone());

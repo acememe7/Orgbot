@@ -33,6 +33,7 @@
 
 pub mod bot;
 pub mod mcp;
+pub mod mcp_client;
 pub mod orchestrator;
 pub mod prompt;
 pub mod relay;
