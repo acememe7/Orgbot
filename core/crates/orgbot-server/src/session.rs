@@ -245,6 +245,19 @@ impl RoomSession {
         // Same reasoning: a skill edited on disk should take effect the next
         // time the room opens, not be frozen into state the day it was written.
         orchestrator.engine_mut().set_skills(skills);
+        // What earlier rooms built. Excludes this room's own board, so a room
+        // is never offered its own work as something somebody else did.
+        if !resolved.prior_boards.is_empty() {
+            let boards: Vec<std::path::PathBuf> = resolved
+                .prior_boards
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect();
+            let this_room = orchestrator.engine().room().spec.name.clone();
+            let archive = orgbot_engine::Archive::load(&boards, Some(&this_room));
+            tracing::info!(rooms = archive.rooms().len(), "earlier rooms available");
+            orchestrator.engine_mut().set_archive(archive);
+        }
 
 
         if let Some(parent) = state_path.as_ref().and_then(|path| path.parent()) {

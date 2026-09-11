@@ -29,6 +29,7 @@
 // variants are documented one level up, where the meaning actually lives.
 #![warn(missing_debug_implementations, rust_2018_idioms, unreachable_pub)]
 
+pub mod archive;
 pub mod command;
 pub mod analytics;
 pub mod consistency;
@@ -47,6 +48,7 @@ pub use deadlock::WaitGraph;
 pub use digest::{digest, BoardCounts, ObjectiveCard, Progress, RoomDigest};
 pub use eligibility::{Eligibility, LeaseState, Reason};
 pub use health::Health;
+pub use archive::Archive;
 pub use engine::Engine;
 pub use notify::{notification_for, Notification};
 pub use error::{EngineError, Result};

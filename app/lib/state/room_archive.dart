@@ -83,6 +83,30 @@ class RoomArchive {
     ];
   }
 
+  /// Every other room's saved board, so a new room can reuse their work.
+  ///
+  /// The room being opened is left out: a room offered its own work as
+  /// something an earlier room did would cheerfully cite itself.
+  static Future<List<String>> otherBoards(String exceptRoomId) async {
+    try {
+      final here = await directory(exceptRoomId);
+      final history = here.parent;
+      if (!await history.exists()) return const [];
+      final boards = <String>[];
+      await for (final entry in history.list()) {
+        if (entry is! Directory) continue;
+        if (entry.path == here.path) continue;
+        final state = File('${entry.path}/state.json');
+        if (await state.exists()) boards.add(state.path);
+      }
+      boards.sort();
+      return boards;
+    } catch (_) {
+      // Reuse is a bonus; failing to look must never stop a room opening.
+      return const [];
+    }
+  }
+
   static Future<Directory> directory(String roomId) async {
     if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(roomId)) {
       throw const FormatException('Invalid room identifier.');

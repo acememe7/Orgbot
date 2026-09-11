@@ -162,6 +162,25 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             ),
         ),
         tool(
+            "find_prior_work",
+            "Search what earlier rooms already built, before building it again.              Call this at the start of a task: if the work exists, reuse it rather              than starting from scratch. Returns titles, which room, whether it              was delivered, and the deliverables it produced.",
+            schema::object(
+                vec![(
+                    "about",
+                    schema::string("What the work is about, in your own words."),
+                )],
+                &["about"],
+            ),
+        ),
+        tool(
+            "read_prior_artifact",
+            "Read one deliverable an earlier room produced, in full. Get its id              from find_prior_work.",
+            schema::object(
+                vec![("artifact", schema::string("The artifact id."))],
+                &["artifact"],
+            ),
+        ),
+        tool(
             "use_skill",
             "Load a playbook by name. The room lists what it has near the top of \
              your instructions, with one line each; this returns the whole thing. \
@@ -487,6 +506,8 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
         }),
         "add_artifact" => add_artifact(engine, actor, input),
         "use_skill" => use_skill(engine, input),
+        "find_prior_work" => find_prior_work(engine, input),
+        "read_prior_artifact" => read_prior_artifact(engine, input),
         "read_artifact" => read_artifact(engine, input),
         "submit_for_review" => submit_for_review(engine, actor, input),
         "offer_handoff" => offer_handoff(engine, actor, input),
@@ -1004,6 +1025,69 @@ fn requested_part(input: &Value) -> Result<u32, String> {
         _ => Err(format!(
             "PART_INVALID requested={raw} — `part` must be a whole number from 1. \
              The part you asked for was not read."
+        )),
+    }
+}
+
+/// What earlier rooms already built on this subject.
+///
+/// The point is reuse. A room that cannot see what came before rebuilds it,
+/// re-argues the decision, and earns the same reviewer finding a second time.
+/// Summaries only — a body is fetched by the bot that decided it wanted one.
+fn find_prior_work(engine: &Engine, input: &Value) -> ToolOutcome {
+    let query = match required_str(input, "about") {
+        Ok(query) => query,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    let hits = engine.archive().search(query);
+    if hits.is_empty() {
+        return ToolOutcome::ok(
+            "No earlier room did anything like this. It is new work; carry on."
+                .to_string(),
+        );
+    }
+    let mut out = format!(
+        "{} earlier piece(s) of work look related. Read one before rebuilding it:\n",
+        hits.len()
+    );
+    for hit in hits {
+        out.push_str(&format!(
+            "\n  {} — in room `{}`{}\n    {}\n",
+            hit.task.title,
+            hit.room,
+            if hit.task.delivered {
+                ", delivered"
+            } else {
+                ", attempted but not delivered"
+            },
+            hit.task.brief.chars().take(200).collect::<String>(),
+        ));
+        for artifact in &hit.task.artifacts {
+            out.push_str(&format!(
+                "    produced {} ({}) — read_prior_artifact to see it\n",
+                artifact.name, artifact.id
+            ));
+        }
+    }
+    ToolOutcome::ok(out)
+}
+
+/// One deliverable an earlier room produced, in full.
+fn read_prior_artifact(engine: &Engine, input: &Value) -> ToolOutcome {
+    let id = match required_str(input, "artifact") {
+        Ok(id) => id,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    match engine.archive().artifact(id) {
+        Some((name, body)) if !body.is_empty() => ToolOutcome::ok(format!(
+            "{name} (from an earlier room)\nBEGIN\n{body}\nEND\n\nThis is prior \
+             work, not this room's. Reuse it, adapt it, or say why it does not fit."
+        )),
+        Some((name, _)) => ToolOutcome::error(format!(
+            "`{name}` has no readable text; it may be a file reference rather than a document."
+        )),
+        None => ToolOutcome::error(format!(
+            "No earlier room holds artifact `{id}`. Use find_prior_work to get an id."
         )),
     }
 }

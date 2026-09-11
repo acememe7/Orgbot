@@ -44,6 +44,7 @@ RoomFile buildRoomFile(
   String userProfile = '',
   String? statePath,
   String? skillsPath,
+  List<String> priorBoards = const [],
 }) {
   // A CLI can only run where the binary exists. Everywhere else — a phone,
   // most obviously — the same subscription is reached through its API with
@@ -64,6 +65,15 @@ RoomFile buildRoomFile(
     ..writeln();
 
   if (statePath != null) buffer.writeln('state_path = ${_s(statePath)}\n');
+
+  // Boards from earlier rooms. Reuse is the cheapest work there is: the most
+  // expensive mistake a room can make is rebuilding something the
+  // organisation already has.
+  if (priorBoards.isNotEmpty) {
+    buffer
+      ..writeln('prior_boards = [' + priorBoards.map(_s).join(', ') + ']')
+      ..writeln();
+  }
 
   // Playbooks. A bot backed by an agent CLI inherits that CLI's skills folder;
   // a bot backed by an API inherits nothing, and on a phone every bot is

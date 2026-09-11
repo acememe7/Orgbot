@@ -77,6 +77,9 @@ pub struct Engine {
     /// Playbooks the room's bots can reach for.
     #[serde(default)]
     skills: Vec<Skill>,
+    /// What earlier rooms already built.
+    #[serde(default, skip)]
+    archive: crate::archive::Archive,
     handoffs: BTreeMap<HandoffId, Handoff>,
     artifacts: BTreeMap<ArtifactId, Artifact>,
     reviews: Vec<Review>,
@@ -265,6 +268,7 @@ impl Engine {
             last_health: String::new(),
             spend: BTreeMap::new(),
             skills: Vec::new(),
+            archive: crate::archive::Archive::default(),
             handoffs: BTreeMap::new(),
             artifacts: BTreeMap::new(),
             reviews: Vec::new(),
@@ -987,6 +991,16 @@ impl Engine {
     /// state at the moment it was first read.
     pub fn set_skills(&mut self, skills: Vec<Skill>) {
         self.skills = skills;
+    }
+
+    /// What earlier rooms left behind.
+    pub fn archive(&self) -> &crate::archive::Archive {
+        &self.archive
+    }
+
+    /// Give this room sight of what earlier ones built.
+    pub fn set_archive(&mut self, archive: crate::archive::Archive) {
+        self.archive = archive;
     }
 
     /// What one bot has drawn.

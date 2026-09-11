@@ -79,6 +79,10 @@ pub struct RoomConfig {
     /// warning rather than failing the room.
     #[serde(default)]
     pub mcp: Vec<orgbot_runtime::mcp_client::McpServerSpec>,
+    /// Saved boards from earlier rooms, so this one can reuse their work
+    /// instead of rebuilding it.
+    #[serde(default)]
+    pub prior_boards: Vec<String>,
 }
 
 /// A folder of skills, or one named skill.
@@ -415,6 +419,8 @@ pub struct ResolvedRoom {
     pub skills: Vec<orgbot_proto::skill::Skill>,
     /// MCP servers to reach out to.
     pub mcp: Vec<orgbot_runtime::mcp_client::McpServerSpec>,
+    /// Saved boards from earlier rooms.
+    pub prior_boards: Vec<String>,
     /// The seated bots.
     pub bots: Vec<ResolvedBot>,
     /// The seed board.
@@ -516,6 +522,7 @@ impl RoomConfig {
             roles: RoleTable::new(self.roles.clone()),
             skills: self.load_skills(),
             mcp: self.mcp.clone(),
+            prior_boards: self.prior_boards.clone(),
             spec,
             bots,
             tasks,

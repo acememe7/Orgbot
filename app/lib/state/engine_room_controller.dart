@@ -229,6 +229,7 @@ class EngineRoomController extends ChangeNotifier {
         userProfile: library.userProfile,
         statePath: savedState.path,
         skillsPath: await unpackBundledSkills(),
+        priorBoards: await RoomArchive.otherBoards(room.id),
       );
       skipped = file.skipped;
       if (file.toml.contains('[[bots]]') == false) {

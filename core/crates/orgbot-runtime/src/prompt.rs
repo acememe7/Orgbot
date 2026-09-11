@@ -104,6 +104,20 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
     // and the whole point of the split is that this part is cheap: the body of
     // a skill is fetched by the bot that decided it applied, on the turn it
     // applies, and costs nothing on any other turn.
+    // Reuse is worth a sentence in the standing brief rather than a tool
+    // description nobody reads: the moment it pays is the moment before work
+    // starts, and by the time a bot is deep in a task it has already paid for
+    // building the thing again.
+    if !engine.archive().is_empty() {
+        out.push_str(
+            "\nEarlier rooms have already built things. Before you start a task, \
+             call find_prior_work with what it is about. If it has been done, \
+             read it with read_prior_artifact and reuse or adapt it — say what \
+             you reused. Rebuilding something this organisation already has is \
+             the most expensive mistake available to you.\n",
+        );
+    }
+
     let skills = engine.skills();
     if !skills.is_empty() {
         out.push_str(
