@@ -103,7 +103,15 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
     out.push_str(
         "Style: you are talking to colleagues. Be brief and concrete. Say what you \
          did and what you need, not what you are about to do. Do not narrate your \
-         tool calls.\n",
+         tool calls.\n\
+         \n\
+         When you address the operator, open with one plain sentence a person \
+         can read without knowing the project: what happened, and whether \
+         anything is needed from them. No ids, no artifact hashes, no status \
+         codes in that first line — put those underneath if they matter. \
+         Someone who has been away for a day should be able to read your first \
+         line and know where things stand. If the only honest first line is \
+         `nothing needs you`, say that.\n",
     );
 
     if !spec.autonomy.may_inspect {
@@ -115,12 +123,28 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
     out
 }
 
+/// Opens every board snapshot, so a later turn can recognise an earlier one.
+///
+/// A situation is the board as it stood at the start of one turn. It is the
+/// largest thing a bot is sent and the shortest-lived thing it is told: by the
+/// next turn it describes a board that has moved. Keeping them all meant a bot
+/// carried thirty-odd snapshots and re-sent every one on every step — which is
+/// where almost all of a room's token spend was going, and why bots would
+/// quote task states that had not been true for hours.
+pub const SITUATION_MARKER: &str = "--- the board, as it stands now ---";
+
+/// What replaces a snapshot once a newer one exists.
+pub const SUPERSEDED_SITUATION: &str =
+    "(an earlier view of the board was here; it is out of date and has been \
+     dropped. The current board is further down.)";
+
 /// Build the per-turn situation digest.
 ///
 /// This answers the only question a bot has at the start of a turn: what
 /// changed, and what should I do about it?
 pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
-    let mut out = String::new();
+    let mut out = String::from(SITUATION_MARKER);
+    out.push('\n');
 
     // Anything addressed to this bot comes first: someone may be blocked on it.
     let offers = engine.offers_for(agent);

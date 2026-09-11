@@ -13,7 +13,7 @@ use crate::shared::SharedEngine;
 use orgbot_proto::agent::ProviderRef;
 use orgbot_proto::{AgentId, AgentSpec, Seq};
 use orgbot_providers::types::{
-    CompletionRequest, CompletionResponse, ContentBlock, StopReason, ToolDef, Turn, Usage,
+    CompletionRequest, CompletionResponse, ContentBlock, Role, StopReason, ToolDef, Turn, Usage,
 };
 use orgbot_providers::{Provider, ProviderError, StreamEvent};
 use tokio::sync::mpsc;
@@ -176,6 +176,11 @@ impl Bot {
         }) {
             self.history.pop();
         }
+        // Older board snapshots describe a board that has moved on. Drop them
+        // before adding this turn's: they are the bulk of what a bot re-sends,
+        // and what they say is no longer true.
+        self.supersede_old_situations();
+
         let previous_seen = self.last_seen;
         // One lock for the whole prompt, so what the bot is told about the
         // board is a single moment rather than several stitched together.
@@ -344,16 +349,58 @@ impl Bot {
         Ok(report)
     }
 
+    /// How much text this bot would re-send on its next request.
+    fn history_chars(&self) -> usize {
+        self.history
+            .iter()
+            .flat_map(|turn| turn.content.iter())
+            .map(|block| match block {
+                ContentBlock::Text { text } => text.len(),
+                ContentBlock::ToolResult { content, .. } => content.len(),
+                other => serde_json::to_string(other).map(|s| s.len()).unwrap_or(0),
+            })
+            .sum()
+    }
+
+    /// Replace every board snapshot already in history with a short note.
+    ///
+    /// Only the text block that carries the snapshot is replaced; anything
+    /// else in that turn — an attached image, a file the operator sent — stays,
+    /// because those were given once and are not restated.
+    fn supersede_old_situations(&mut self) {
+        for turn in &mut self.history {
+            if turn.role != Role::User {
+                continue;
+            }
+            for block in &mut turn.content {
+                if let ContentBlock::Text { text } = block {
+                    if text.starts_with(prompt::SITUATION_MARKER) {
+                        *text = prompt::SUPERSEDED_SITUATION.to_string();
+                    }
+                }
+            }
+        }
+    }
+
     /// Keep the conversation from growing without bound.
     ///
     /// Cutting is only safe at a boundary where the remaining history does not
     /// begin with tool results — an orphaned `tool_result` whose `tool_use` has
     /// been trimmed away is rejected by every backend.
     fn trim_history(&mut self) {
-        if self.history.len() <= MAX_HISTORY_TURNS {
+        // Counting turns is the wrong unit on its own: one turn carrying a
+        // read artifact can outweigh fifty carrying a sentence. Trim on
+        // whichever ceiling is reached first.
+        let heavy = self.history_chars() > MAX_HISTORY_CHARS;
+        if self.history.len() <= MAX_HISTORY_TURNS && !heavy {
             return;
         }
-        let target = self.history.len() - KEEP_HISTORY_TURNS;
+        let keep = if heavy {
+            KEEP_HISTORY_TURNS.min(self.history.len() / 2)
+        } else {
+            KEEP_HISTORY_TURNS
+        };
+        let target = self.history.len().saturating_sub(keep);
         let cut = self.history[target..]
             .iter()
             .position(is_safe_cut_point)
@@ -480,6 +527,15 @@ const MAX_HISTORY_TURNS: usize = 60;
 
 /// Turns retained after a trim.
 const KEEP_HISTORY_TURNS: usize = 30;
+
+/// The most text a bot carries into its next request.
+///
+/// A ceiling in the unit that actually costs: one turn holding a read artifact
+/// can outweigh fifty holding a sentence, so a turn count alone lets a history
+/// grow to megabytes while looking well within its limit. A real room reached
+/// two megabytes a bot — roughly half a million tokens re-sent on every step
+/// of every turn.
+const MAX_HISTORY_CHARS: usize = 240_000;
 
 #[cfg(test)]
 mod tests {

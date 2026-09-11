@@ -277,3 +277,68 @@ async fn work_claimed_by_a_turn_that_never_finished_is_recovered() {
     assert_eq!(record.state, TaskState::Ready, "back on the board");
     assert_eq!(record.assignee, None, "and held by nobody");
 }
+
+// ------------------------------------------------------------ context weight
+//
+// A board snapshot is the biggest thing a bot is sent and the shortest-lived
+// thing it is told: by the next turn it describes a board that has moved. They
+// were all kept, so a bot carried thirty-odd of them and re-sent every one on
+// every step of every turn. In a real room that was two megabytes a bot —
+// roughly half a million tokens per request, against 368 thousand output
+// tokens across the entire room. Almost all of the spend was re-reading.
+
+/// Only the newest board snapshot is carried.
+#[tokio::test]
+async fn a_bot_does_not_re_send_every_board_it_has_ever_seen() {
+    let (mut room, _worker, _task) = started();
+
+    // Several turns, each of which would add a snapshot.
+    for _ in 0..4 {
+        room.step_many(1, None).await;
+        let mut engine = room.engine_mut();
+        open_task(&mut engine, &format!("more work {}", orgbot_proto::TaskId::new()));
+    }
+
+    let memory = room.checkpoint();
+    let history = memory["bots"]
+        .as_object()
+        .and_then(|bots| bots.values().next())
+        .and_then(|m| m["history"].as_array())
+        .expect("the bot kept a history");
+
+    let boards = history
+        .iter()
+        .flat_map(|turn| turn["content"].as_array().into_iter().flatten())
+        .filter_map(|block| block["text"].as_str())
+        .filter(|text| text.starts_with(orgbot_runtime::prompt::SITUATION_MARKER))
+        .count();
+
+    assert!(
+        boards <= 1,
+        "a bot should carry the current board and no older one, found {boards}"
+    );
+    assert!(
+        history.len() > 1,
+        "and must still have its conversation: {} turns",
+        history.len()
+    );
+}
+
+/// What replaces a snapshot says why it is gone.
+#[tokio::test]
+async fn a_dropped_board_leaves_a_note_rather_than_a_hole() {
+    let (mut room, _worker, _task) = started();
+    room.step_many(1, None).await;
+    {
+        let mut engine = room.engine_mut();
+        open_task(&mut engine, "something new to notice");
+    }
+    room.step_many(1, None).await;
+
+    let memory = room.checkpoint();
+    let text = memory["bots"].to_string();
+    assert!(
+        text.contains("out of date and has been dropped"),
+        "the model should be told why the earlier board is missing"
+    );
+}
