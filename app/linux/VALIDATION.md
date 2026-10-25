@@ -1,3 +1,48 @@
+# OrgBots coordination and continuity 1.7.1 — 2026-10-25
+
+- [x] Astra and Julian (Opus 5.5) coordinate and create role-specific tasks;
+  Miles remains support. Other specialist assignments and personalities remain.
+  Astra retains read-only workspace access and cannot claim implementation work.
+  Coordination permissions do not bypass independent review before delivery.
+- [x] Untagged top-level requests address one eligible coordinator, respecting
+  retry cooldowns and shared allowances. Tags, replies and explicit `@all`
+  retain their routing. An answered request reserves the initial planning turn;
+  task-creating workers do not preempt an available coordinator.
+- [x] CLI session IDs survive failed/interrupted first episodes in memory and
+  on disk. Role briefs refresh on the same native session; failed attempts do
+  not mark a new brief as applied. Retrieved memory stays in the current
+  situation instead of repeatedly changing the standing instructions.
+- [x] One-time Linux library migration validates and securely saves before
+  adopting changes. Managed identities, keys, rooms and unrelated specialist
+  settings are preserved; subsequent owner edits are not reapplied over.
+- [x] Rust workspace: 782 passed, zero failed, one ignored. Python preset
+  tests: six passed. Flutter: 270 passed, three external SSH checks
+  skipped; analyzer clean. Widget fixtures run asynchronous asset reads outside
+  fake time. Logs: `/tmp/orgbots-1.7.1-rust-tests.log`,
+  `/tmp/orgbots-1.7.1-flutter-final.log`, `/tmp/orgbots-1.7.1-analyze.log`.
+- [x] Release app/engine and packaging fixtures passed. Extracted bundle and
+  engine match their builds; native libraries resolve. Actual extracted app
+  migrated an isolated old-roster/keyring fixture, preserving test keys,
+  memberships, tasks and history. Wide Team view confirms coordinator labels;
+  normal Alt+F4 close is clean. Evidence: `/tmp/orgbots-final-qa/`.
+- [x] Staged credential-pattern scan found no credentials in the 19 owned
+  files; diff checks pass. Unrelated README, lockfile and Tauri changes remain
+  outside this update.
+- [x] Final scoped Astra source, integration, migration, visual, artifact and
+  verification-claims review approved; no required corrections remain.
+
+Package: `app/orgbot_1.7.1_amd64.deb`, 14,087,212 bytes.
+SHA-256: `f1f6746af1b0388bc901f965d794caf5bd74dbdfbffa5a4235fe0bd6b0fe413b`.
+Engine SHA-256: `2ec9076ef274d62e7a98fa4540e0b7ae506a900df5dc1f85b733c6e4913accdb`.
+
+No real inference, system install, live-library mutation or push was performed
+for this update. Install and reopen the app to apply the roster migration.
+Already-running room services retain their old configuration until explicitly
+stopped and restarted. Provider-live resume acceptance remains the 1.7.0
+evidence below; the new failure/retry checks use fake CLIs.
+
+---
+
 # OrgBots desktop workspace 1.7.0 — 2026-10-25
 
 ## Delivered and checked

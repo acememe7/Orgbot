@@ -455,6 +455,60 @@ async fn an_empty_board_is_planned_by_one_bot() {
     );
 }
 
+#[tokio::test]
+async fn coordinators_plan_before_workers_and_questions_reserve_the_planning_turn() {
+    use orgbot_proto::{Author, ChatMessage, MessageIntent};
+    let provider = Arc::new(Fixed(CompletionResponse {
+        model: "test".into(),
+        content: vec![ContentBlock::text("planning")],
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    })) as Arc<dyn Provider>;
+    let mut room = Orchestrator::new(room_spec(8));
+    let mut ids = Vec::new();
+    for (handle, role) in [
+        ("worker", "engineer"),
+        ("astra", "coordinator"),
+        ("opus", "coordinator"),
+    ] {
+        let spec = AgentSpec::new(
+            handle,
+            handle,
+            ProviderRef::Scripted {
+                script: "test".into(),
+            },
+        )
+        .with_roles([role])
+        .with_autonomy(Autonomy {
+            may_create_tasks: true,
+            ..Autonomy::default()
+        });
+        ids.push(spec.id);
+        room.seat(spec, provider.clone()).unwrap();
+    }
+    room.start().unwrap();
+    assert_eq!(
+        room.next_actors(8),
+        vec![ids[1]],
+        "a worker seated first must not take strategic planning"
+    );
+
+    let mut engine = room.engine_mut();
+    let mut message = ChatMessage::say(engine.room().id, ids[0], "Plan the app")
+        .to_agents(vec![ids[2]])
+        .with_intent(MessageIntent::Ask);
+    message.author = Author::Human {
+        name: "Owner".into(),
+    };
+    engine.apply(Command::PostMessage { message: Box::new(message) }).unwrap();
+    drop(engine);
+    assert_eq!(
+        room.next_actors(8),
+        vec![ids[2]],
+        "answering the request must not also wake another planner"
+    );
+}
+
 /// A batch cannot spend more turns than the budget has left.
 #[tokio::test]
 async fn the_last_batch_narrows_to_what_the_budget_allows() {

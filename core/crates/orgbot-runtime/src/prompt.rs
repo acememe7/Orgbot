@@ -145,6 +145,25 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
          `nothing needs you`, say that.\n",
     );
 
+    if spec.roles.iter().any(|role| role == "coordinator") {
+        out.push_str(
+            "\nCoordinate by writing one concrete plan and creating role-specific tasks \
+             with acceptance criteria. Check the board before creating tasks; extend \
+             the existing plan instead of duplicating another coordinator's work. \
+             Route each task to the teammate whose specialty fits it. Consult the \
+             other coordinator for a bounded decision when their expertise is needed; \
+             do not require both leads to act on every message.\n",
+        );
+        if spec.autonomy.review_only {
+            out.push_str(
+                "You coordinate and review with read-only workspace access. Delegate \
+                 implementation by creating tasks with required_role; do not claim \
+                 implementation tasks or edit project files. Final delivery still \
+                 requires independent approval.\n",
+            );
+        }
+    }
+
     if !spec.autonomy.may_inspect {
         out.push_str("\nYou do not inspect work. That is the inspector's job.\n");
     }

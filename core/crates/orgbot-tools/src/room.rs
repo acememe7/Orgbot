@@ -505,29 +505,36 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
     }
 
     if spec.autonomy.review_only {
-        tools.retain(|tool| review_only_tool_allowed(&tool.name));
+        tools.retain(|tool| review_only_tool_allowed(spec, &tool.name));
     }
     tools
 }
 
-fn review_only_tool_allowed(name: &str) -> bool {
-    matches!(
-        name,
-        "post_message"
-            | "room_status"
-            | "list_tasks"
-            | "claim_task"
-            | "start_task"
-            | "find_prior_work"
-            | "read_prior_artifact"
-            | "search_project_memory"
-            | "use_skill"
-            | "read_artifact"
-            | "release_task"
-            | "record_review"
-            | "add_artifact"
-            | "submit_for_review"
-    )
+fn review_only_tool_allowed(spec: &AgentSpec, name: &str) -> bool {
+    let coordinates = spec.roles.iter().any(|role| role == "coordinator");
+    (coordinates
+        && match name {
+            "create_task" => spec.autonomy.may_create_tasks,
+            "submit_task" => spec.autonomy.may_submit,
+            _ => false,
+        })
+        || matches!(
+            name,
+            "post_message"
+                | "room_status"
+                | "list_tasks"
+                | "claim_task"
+                | "start_task"
+                | "find_prior_work"
+                | "read_prior_artifact"
+                | "search_project_memory"
+                | "use_skill"
+                | "read_artifact"
+                | "release_task"
+                | "record_review"
+                | "add_artifact"
+                | "submit_for_review"
+        )
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> ToolDef {
@@ -546,10 +553,10 @@ fn tool(name: &str, description: &str, input_schema: Value) -> ToolDef {
 pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) -> ToolOutcome {
     if engine
         .agent(actor)
-        .is_some_and(|spec| spec.autonomy.review_only && !review_only_tool_allowed(name))
+        .is_some_and(|spec| spec.autonomy.review_only && !review_only_tool_allowed(spec, name))
     {
         return ToolOutcome::error(format!(
-            "Review-only bots cannot use `{name}`. Use read tools, record_review, or post_message."
+            "Review-only bots cannot use `{name}`. Use the tools allowed by your review and coordination permissions."
         ));
     }
     match name {

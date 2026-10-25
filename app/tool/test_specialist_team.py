@@ -28,7 +28,7 @@ class SpecialistTeamTest(unittest.TestCase):
             {
                 "astra": ("codex", "gpt-6-astra", "security"),
                 "opus": ("anthropic", "claude-opus-5-5", "architect"),
-                "grok": ("grok", "grok-4.7", "coordinator"),
+                "grok": ("grok", "grok-4.7", "support"),
                 "grok-quick": ("grok", "grok-4.7", "engineer"),
                 "deepseek-builder": ("deepseek", "deepseek-flash", "engineer"),
                 "ollama-deepseek": ("ollama", "deepseek-v4.1-flash:1017", "researcher"),
@@ -41,16 +41,21 @@ class SpecialistTeamTest(unittest.TestCase):
         self.assertEqual(
             by_handle["astra"]["powers"],
             {
-                "may_create_tasks": False,
+                "may_create_tasks": True,
                 "may_inspect": True,
-                "may_submit": False,
+                "may_submit": True,
                 "review_only": True,
             },
         )
         self.assertTrue(by_handle["opus"]["powers"]["may_create_tasks"])
         self.assertTrue(by_handle["opus"]["powers"]["may_inspect"])
-        self.assertTrue(by_handle["grok"]["powers"]["may_create_tasks"])
-        self.assertTrue(by_handle["grok"]["powers"]["may_submit"])
+        self.assertTrue(by_handle["opus"]["powers"]["may_submit"])
+        self.assertIn("coordinator", by_handle["astra"]["additional_roles"])
+        self.assertIn("coordinator", by_handle["opus"]["additional_roles"])
+        self.assertEqual(by_handle["grok"]["role"], "support")
+        self.assertNotIn("coordinator", by_handle["grok"].get("additional_roles", []))
+        self.assertFalse(by_handle["grok"]["powers"]["may_create_tasks"])
+        self.assertFalse(by_handle["grok"]["powers"]["may_submit"])
         self.assertTrue(by_handle["ollama-glm"]["powers"]["may_inspect"])
         self.assertEqual(preset["room_limits"], {"max_turns": 0, "parallel_turns": 4})
 

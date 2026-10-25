@@ -779,6 +779,7 @@ impl RoomSession {
                     }
                 };
                 let room = self.orchestrator.engine().room_id();
+                let default_target = self.orchestrator.default_human_target();
                 let engine = self.orchestrator.engine();
                 let parent_author = match reply_to {
                     Some(reply_to) => {
@@ -794,7 +795,12 @@ impl RoomSession {
                     }
                     None => None,
                 };
-                let audience = human_audience(&engine, &body, parent_author.as_ref());
+                let audience = human_audience_with_default(
+                    &engine,
+                    &body,
+                    parent_author.as_ref(),
+                    default_target,
+                );
                 drop(engine);
                 let intent = if audience == Audience::Human {
                     MessageIntent::Answer
@@ -1162,10 +1168,21 @@ fn touches_the_board(event: &orgbot_proto::event::Event) -> bool {
 }
 
 /// Tags direct attention; the room transcript remains visible to everyone.
+#[cfg(test)]
 fn human_audience(
     engine: &orgbot_engine::Engine,
     body: &str,
     parent_author: Option<&Author>,
+) -> Audience {
+    let default_target = default_human_target(engine);
+    human_audience_with_default(engine, body, parent_author, default_target)
+}
+
+fn human_audience_with_default(
+    engine: &orgbot_engine::Engine,
+    body: &str,
+    parent_author: Option<&Author>,
+    default_target: Option<orgbot_proto::AgentId>,
 ) -> Audience {
     let tags: Vec<_> = body
         .split(|c: char| !(c.is_alphanumeric() || matches!(c, '@' | '_' | '-')))
@@ -1181,7 +1198,11 @@ fn human_audience(
                 agents: vec![*agent],
             },
             Some(Author::Human { .. } | Author::System) => Audience::Human,
-            None => Audience::Everyone,
+            None => default_target
+                .map(|agent| Audience::Agents {
+                    agents: vec![agent],
+                })
+                .unwrap_or(Audience::Agents { agents: vec![] }),
         };
     }
     let mut targets = Vec::new();
@@ -1199,6 +1220,35 @@ fn human_audience(
         }
     }
     Audience::Agents { agents: targets }
+}
+
+/// Choose one recipient for an unthreaded human request. An available
+/// coordinator should plan ordinary room work; custom rosters fall back to an
+/// available planner, then any available agent. If the whole roster is
+/// unavailable, keep the request queued for one stable recipient instead of
+/// implicitly broadcasting it.
+#[cfg(test)]
+fn default_human_target(engine: &orgbot_engine::Engine) -> Option<orgbot_proto::AgentId> {
+    let agents: Vec<_> = engine.agents().collect();
+    let available = |agent: &&orgbot_proto::AgentSpec| engine.status(agent.id).is_available();
+    let coordinator = |agent: &&orgbot_proto::AgentSpec| {
+        agent.has_role("coordinator") && agent.autonomy.may_create_tasks
+    };
+    let planner = |agent: &&orgbot_proto::AgentSpec| agent.autonomy.may_create_tasks;
+
+    agents
+        .iter()
+        .find(|agent| available(agent) && coordinator(agent))
+        .or_else(|| {
+            agents
+                .iter()
+                .find(|agent| available(agent) && planner(agent))
+        })
+        .or_else(|| agents.iter().find(|agent| available(agent)))
+        .or_else(|| agents.iter().find(|agent| coordinator(agent)))
+        .or_else(|| agents.iter().find(|agent| planner(agent)))
+        .or_else(|| agents.first())
+        .map(|agent| agent.id)
 }
 
 /// Whether the run loop should keep going or stop.
@@ -1674,11 +1724,47 @@ mod tests {
             session.orchestrator.engine().room().phase,
             RoomPhase::Paused
         );
+        let message = session
+            .orchestrator
+            .engine()
+            .transcript()
+            .last()
+            .cloned()
+            .expect("human message is retained while paused");
+        assert_eq!(
+            message.audience,
+            Audience::Agents {
+                agents: vec![
+                    session
+                        .orchestrator
+                        .engine()
+                        .agent_by_handle("lead")
+                        .unwrap()
+                        .id
+                ]
+            }
+        );
     }
 
     #[test]
     fn human_tags_route_attention_and_ignore_email_addresses() {
         let (mut session, _handle) = session();
+        let worker = orgbot_proto::AgentSpec::new(
+            "worker",
+            "Worker",
+            orgbot_proto::agent::ProviderRef::Scripted {
+                script: "test".into(),
+            },
+        )
+        .with_roles(["writer"]);
+        let worker_id = worker.id;
+        session
+            .orchestrator
+            .engine_mut()
+            .apply(Command::JoinAgent {
+                spec: Box::new(worker),
+            })
+            .unwrap();
         let mut named_agent = session
             .orchestrator
             .engine()
@@ -1689,6 +1775,19 @@ mod tests {
         session.orchestrator.engine_mut().update_agent(named_agent);
         let engine = session.orchestrator.engine();
         let lead = engine.agent_by_handle("lead").unwrap().id;
+        assert_eq!(
+            human_audience(&engine, "Please help with this", None),
+            Audience::Agents { agents: vec![lead] }
+        );
+        let untagged = ChatMessage {
+            author: Author::Human {
+                name: "Alex".into(),
+            },
+            audience: human_audience(&engine, "Please help with this", None),
+            ..ChatMessage::say(engine.room_id(), lead, "Please help with this")
+        };
+        assert!(untagged.wakes(lead, &["coordinator".into()]));
+        assert!(!untagged.wakes(worker_id, &["writer".into()]));
         assert_eq!(
             human_audience(&engine, "@LEAD, please check", None),
             Audience::Agents { agents: vec![lead] }
@@ -1731,7 +1830,7 @@ mod tests {
         );
         assert_eq!(
             human_audience(&engine, "mail foo@lead.example", None),
-            Audience::Everyone
+            Audience::Agents { agents: vec![lead] }
         );
         assert_eq!(
             human_audience(&engine, "follow-up", Some(&Author::Agent { agent: lead })),
@@ -1758,14 +1857,160 @@ mod tests {
     }
 
     #[test]
+    fn untagged_messages_fall_back_to_one_available_planner_without_a_coordinator() {
+        let (mut session, _) = session();
+        let mut lead = session
+            .orchestrator
+            .engine()
+            .agent_by_handle("lead")
+            .unwrap()
+            .clone();
+        lead.roles = vec!["writer".into()];
+        session.orchestrator.engine_mut().update_agent(lead);
+        let planner = orgbot_proto::AgentSpec::new(
+            "planner",
+            "Planner",
+            orgbot_proto::agent::ProviderRef::Scripted {
+                script: "test".into(),
+            },
+        )
+        .with_roles(["builder"])
+        .with_autonomy(orgbot_proto::agent::Autonomy::coordinator());
+        let planner_id = planner.id;
+        session
+            .orchestrator
+            .engine_mut()
+            .apply(Command::JoinAgent {
+                spec: Box::new(planner),
+            })
+            .unwrap();
+
+        let engine = session.orchestrator.engine();
+        assert_eq!(
+            human_audience(&engine, "Please plan the work", None),
+            Audience::Agents {
+                agents: vec![planner_id]
+            }
+        );
+        drop(engine);
+
+        let mut lead = session
+            .orchestrator
+            .engine()
+            .agent_by_handle("lead")
+            .unwrap()
+            .clone();
+        lead.autonomy = orgbot_proto::agent::Autonomy::default();
+        session.orchestrator.engine_mut().update_agent(lead);
+        let mut planner = session
+            .orchestrator
+            .engine()
+            .agent_by_handle("planner")
+            .unwrap()
+            .clone();
+        planner.autonomy = orgbot_proto::agent::Autonomy::default();
+        session.orchestrator.engine_mut().update_agent(planner);
+
+        let engine = session.orchestrator.engine();
+        let first_available = engine.agents().next().unwrap().id;
+        assert_eq!(
+            human_audience(&engine, "Please handle this", None),
+            Audience::Agents {
+                agents: vec![first_available]
+            }
+        );
+    }
+
+    #[test]
+    fn untagged_request_skips_allowance_disabled_coordinator() {
+        let directory = std::env::temp_dir().join(format!(
+            "orgbot-routing-allowance-{}",
+            orgbot_proto::RoomId::new()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let config_path = directory.join("allowances.json");
+        let ledger_path = directory.join("ledger.json");
+        let disabled = orgbot_runtime::allowance::Policy {
+            enabled: false,
+            ..Default::default()
+        };
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&orgbot_runtime::allowance::Config {
+                providers: std::collections::BTreeMap::from([("deepseek".into(), disabled)]),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let environment = std::collections::HashMap::from([
+            (
+                "ORGBOT_ALLOWANCE_CONFIG".into(),
+                config_path.display().to_string(),
+            ),
+            (
+                "ORGBOT_ALLOWANCE_LEDGER".into(),
+                ledger_path.display().to_string(),
+            ),
+        ]);
+        let source = r#"
+            [room]
+            id = "routing-test"
+            name = "Routing test"
+            goal = "Test recipient selection"
+
+            [[bots]]
+            handle = "lead"
+            roles = ["coordinator"]
+            autonomy = "coordinator"
+            provider = { kind = "scripted", script = "fixture" }
+
+            [[bots]]
+            handle = "backup"
+            roles = ["coordinator"]
+            autonomy = "coordinator"
+            provider = { kind = "scripted", script = "fixture" }
+        "#;
+        let mut resolved = RoomConfig::parse(source, "routing.toml")
+            .unwrap()
+            .resolve_with_environment(&environment)
+            .unwrap();
+        resolved.bots[0].spec.provider = orgbot_proto::agent::ProviderRef::DeepSeek {
+            model: "fixture".into(),
+        };
+        resolved.bots[1].spec.provider = orgbot_proto::agent::ProviderRef::Anthropic {
+            model: "fixture".into(),
+        };
+        let (session, _) = RoomSession::build(resolved).unwrap();
+        let expected = session
+            .orchestrator
+            .engine()
+            .agent_by_handle("backup")
+            .unwrap()
+            .id;
+        let target = session.orchestrator.default_human_target();
+        assert_eq!(target, Some(expected));
+        let engine = session.orchestrator.engine();
+        assert_eq!(
+            human_audience_with_default(&engine, "Please handle this", None, target),
+            Audience::Agents {
+                agents: vec![expected]
+            }
+        );
+        drop(engine);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn attachment_import_allowlist_tracks_only_committed_message_files() {
         let (mut session, _handle) = session();
         let id = "att_0123456789abcdef0123456789abcdef".to_string();
-        assert!(!session
-            .committed_attachment_ids
-            .read()
-            .unwrap()
-            .contains(&id));
+        assert!(
+            !session
+                .committed_attachment_ids
+                .read()
+                .unwrap()
+                .contains(&id)
+        );
         let (room, author) = {
             let engine = session.orchestrator.engine();
             (engine.room_id(), engine.agent_by_handle("lead").unwrap().id)
@@ -1788,11 +2033,13 @@ mod tests {
             })
             .unwrap();
         session.broadcast_new_events();
-        assert!(session
-            .committed_attachment_ids
-            .read()
-            .unwrap()
-            .contains(&id));
+        assert!(
+            session
+                .committed_attachment_ids
+                .read()
+                .unwrap()
+                .contains(&id)
+        );
     }
 
     #[test]

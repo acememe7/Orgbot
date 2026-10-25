@@ -311,6 +311,68 @@ fn review_only_bots_get_read_tools_and_cannot_dispatch_mutations() {
 }
 
 #[test]
+fn review_only_coordinator_can_plan_and_deliver_but_cannot_implement() {
+    let mut f = fixture();
+    let mut reviewer = f.engine.agent(f.inspector).unwrap().clone();
+    reviewer.roles.push("coordinator".into());
+    reviewer.autonomy.review_only = true;
+    reviewer.autonomy.may_create_tasks = true;
+    reviewer.autonomy.may_submit = true;
+    f.engine.update_agent(reviewer.clone());
+    let names: Vec<_> = definitions_for(&reviewer)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(names.iter().any(|name| name == "create_task"));
+    assert!(names.iter().any(|name| name == "submit_task"));
+    assert!(!names.iter().any(|name| name == "save_project_memory"));
+
+    let task = id_in(
+        &f.ok(
+            f.inspector,
+            "create_task",
+            json!({
+                "title":"Write the release notes", "brief":"Record the verified changes",
+                "required_role":"writer"
+            }),
+        ),
+        "task",
+    );
+    f.err(f.inspector, "claim_task", json!({"task":task}));
+    f.err(f.inspector, "submit_task", json!({"task":task}));
+    f.ok(f.worker, "claim_task", json!({"task":task}));
+    f.ok(f.worker, "start_task", json!({"task":task}));
+    let artifact = id_in(
+        &f.ok(
+            f.worker,
+            "add_artifact",
+            json!({
+                "task":task, "name":"notes.md", "content":"Verified release changes."
+            }),
+        ),
+        "art",
+    );
+    f.ok(
+        f.worker,
+        "submit_for_review",
+        json!({"task":task,"artifacts":[artifact]}),
+    );
+    f.ok(
+        f.inspector,
+        "record_review",
+        json!({"task":task,"summary":"Verified independently"}),
+    );
+    f.ok(f.inspector, "submit_task", json!({"task":task}));
+
+    reviewer.autonomy.may_create_tasks = false;
+    reviewer.autonomy.may_submit = false;
+    f.engine.update_agent(reviewer);
+    for name in ["create_task", "submit_task"] {
+        assert!(f.err(f.inspector, name, json!({})).contains("Review-only"));
+    }
+}
+
+#[test]
 fn every_tool_schema_rejects_unknown_arguments() {
     let f = fixture();
     for tool in definitions_for(f.engine.agent(f.lead).unwrap()) {

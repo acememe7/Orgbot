@@ -61,6 +61,8 @@ pub struct AgentCliProvider {
     policy: AgentPolicy,
     /// The CLI session id, established on the first turn and resumed after.
     session: Mutex<Option<String>>,
+    /// Last standing system brief applied to this native session.
+    session_system_brief: Mutex<Option<String>>,
     /// The socket handed in on the last request, for diagnostics.
     last_socket: Mutex<Option<String>>,
     /// Whether the room's board is served to the agent as MCP tools.
@@ -90,6 +92,9 @@ struct PersistedSession {
     policy: AgentPolicy,
     mcp: bool,
     session_id: String,
+    /// Missing in older records; causes one brief refresh on resume.
+    #[serde(default)]
+    system_brief: Option<String>,
 }
 
 impl AgentCliProvider {
@@ -130,6 +135,7 @@ impl AgentCliProvider {
             policy,
             mcp,
             session: Mutex::new(None),
+            session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
             timeout,
             session_store: Mutex::new(None),
@@ -149,8 +155,9 @@ impl AgentCliProvider {
             policy: self.policy,
             mcp: self.mcp,
         };
-        if let Some(session_id) = read_session(&store) {
-            *self.session.lock().unwrap() = Some(session_id);
+        if let Some(persisted) = read_session_record(&store) {
+            *self.session.lock().unwrap() = Some(persisted.session_id);
+            *self.session_system_brief.lock().unwrap() = persisted.system_brief;
         }
         *self.session_store.lock().unwrap() = Some(store);
         self
@@ -212,7 +219,7 @@ fn canonical_workdir(workdir: &Path) -> String {
         .into_owned()
 }
 
-fn read_session(store: &SessionStore) -> Option<String> {
+fn read_session_record(store: &SessionStore) -> Option<PersistedSession> {
     use std::os::unix::fs::PermissionsExt;
 
     let metadata = std::fs::symlink_metadata(&store.path).ok()?;
@@ -225,10 +232,19 @@ fn read_session(store: &SessionStore) -> Option<String> {
         && state.workdir == store.workdir
         && state.policy == store.policy
         && state.mcp == store.mcp)
-        .then_some(state.session_id)
+        .then_some(state)
 }
 
-fn write_session(store: &SessionStore, session_id: &str) -> std::io::Result<()> {
+#[cfg(test)]
+fn read_session(store: &SessionStore) -> Option<String> {
+    read_session_record(store).map(|state| state.session_id)
+}
+
+fn write_session(
+    store: &SessionStore,
+    session_id: &str,
+    system_brief: Option<&str>,
+) -> std::io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let parent = store
@@ -244,6 +260,7 @@ fn write_session(store: &SessionStore, session_id: &str) -> std::io::Result<()> 
         policy: store.policy,
         mcp: store.mcp,
         session_id: session_id.to_owned(),
+        system_brief: system_brief.map(str::to_owned),
     };
     let bytes = serde_json::to_vec(&state)
         .map_err(|error| std::io::Error::other(format!("session serialization failed: {error}")))?;
@@ -347,14 +364,13 @@ impl Provider for AgentCliProvider {
         *self.last_socket.lock().unwrap() = request.mcp_socket.clone();
         let resumed = self.session.lock().unwrap().clone();
         let situation = latest_instruction(&request.messages);
-        let prompt = match (&resumed, situation) {
-            // A fresh session gets the full standing brief plus what changed.
-            (None, Some(situation)) => format!("{}\n\n{}", request.system, situation),
-            (None, None) => request.system,
-            // A resumed agent remembers its role; it only needs what changed.
-            (Some(_), Some(situation)) => situation,
-            (Some(_), None) => request.system,
-        };
+        let previous_brief = self.session_system_brief.lock().unwrap().clone();
+        let prompt = compose_prompt(
+            &request.system,
+            situation.as_deref(),
+            resumed.is_some(),
+            previous_brief.as_deref(),
+        );
 
         let mut episode = Episode::default();
         let (claude_config, codex_home) = if self.mcp {
@@ -407,8 +423,12 @@ impl Provider for AgentCliProvider {
 
         // Remember the session for the next turn. A resumed session reports
         // its id again on init; either way the freshest id wins.
-        if let Some(id) = episode.session_id {
+        if let Some(id) = episode.session_id.clone() {
             *self.session.lock().unwrap() = Some(id);
+        }
+        if self.session.lock().unwrap().is_some() {
+            *self.session_system_brief.lock().unwrap() = Some(request.system.clone());
+            self.persist_session_brief(&request.system)?;
         }
 
         let _ = emit(
@@ -516,16 +536,20 @@ impl AgentCliProvider {
                 let previous_session = episode.session_id.clone();
                 ingest_line(provider.cli, &line, sink, episode);
                 if previous_session != episode.session_id {
+                    if let Some(session_id) = episode.session_id.as_deref() {
+                        *provider.session.lock().unwrap() = Some(session_id.to_string());
+                    }
                     if let (Some(store), Some(session_id)) = (
                         provider.session_store.lock().unwrap().clone(),
                         episode.session_id.as_deref(),
                     ) {
-                        write_session(&store, session_id).map_err(|error| {
-                            ProviderError::Process {
+                        let applied_brief = provider.session_system_brief.lock().unwrap().clone();
+                        write_session(&store, session_id, applied_brief.as_deref()).map_err(
+                            |error| ProviderError::Process {
                                 provider: provider.cli.label().to_string(),
                                 detail: format!("could not persist native session state: {error}"),
-                            }
-                        })?;
+                            },
+                        )?;
                     }
                 }
             }
@@ -576,6 +600,43 @@ impl AgentCliProvider {
                 })
             }
         }
+    }
+
+    fn persist_session_brief(&self, system_brief: &str) -> Result<()> {
+        let store = self.session_store.lock().unwrap().clone();
+        let session_id = self.session.lock().unwrap().clone();
+        let (Some(store), Some(session_id)) = (store, session_id) else {
+            return Ok(());
+        };
+        write_session(&store, &session_id, Some(system_brief)).map_err(|error| {
+            ProviderError::Process {
+                provider: self.cli.label().to_string(),
+                detail: format!("could not persist native session brief: {error}"),
+            }
+        })
+    }
+}
+
+fn compose_prompt(
+    system_brief: &str,
+    situation: Option<&str>,
+    resumed: bool,
+    previous_brief: Option<&str>,
+) -> String {
+    let Some(situation) = situation else {
+        return if resumed && previous_brief == Some(system_brief) {
+            "Continue from the current room state.".to_string()
+        } else {
+            system_brief.to_string()
+        };
+    };
+    if !resumed {
+        return format!("{system_brief}\n\n{situation}");
+    }
+    if previous_brief != Some(system_brief) {
+        format!("Updated standing role and operating brief:\n{system_brief}\n\n{situation}")
+    } else {
+        situation.to_string()
     }
 }
 
@@ -1136,6 +1197,78 @@ mod tests {
         episode
     }
 
+    #[cfg(unix)]
+    fn fake_claude_script(
+        binary: &Path,
+        counter: &Path,
+        prompts: &Path,
+        args_log: &Path,
+        fail_on_call: Option<usize>,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut script = r##"#!/bin/sh
+count=0
+if [ -f 'COUNTER_PATH' ]; then read count < 'COUNTER_PATH'; fi
+count=$((count + 1))
+printf '%s\n' "$count" > 'COUNTER_PATH'
+printf '%s\n' '---PROMPT---' >> 'PROMPT_PATH'
+printf '%s\n' '---ARGS---' >> 'ARGS_PATH'
+capture=0
+for arg in "$@"; do
+  if [ "$capture" -eq 1 ]; then printf '%s\n' "$arg" >> 'PROMPT_PATH'; capture=0; fi
+  if [ "$arg" = "-p" ]; then capture=1; fi
+  printf '%s\n' "$arg" >> 'ARGS_PATH'
+done
+printf '%s\n' '---END---' >> 'PROMPT_PATH'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"stable-session"}'
+if [ 'FAIL_ON_CALL' != '0' ] && [ "$count" -eq 'FAIL_ON_CALL' ]; then exit 1; fi
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"continued"}]}}'
+"##
+        .replace("COUNTER_PATH", &counter.to_string_lossy())
+        .replace("PROMPT_PATH", &prompts.to_string_lossy())
+        .replace("ARGS_PATH", &args_log.to_string_lossy())
+        .replace(
+            "FAIL_ON_CALL",
+            &fail_on_call.map_or(0, |call| call).to_string(),
+        );
+        script.push('\n');
+        std::fs::write(binary, script).unwrap();
+        std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn prompt_sections(path: &Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .split("---PROMPT---\n")
+            .skip(1)
+            .map(|section| section.split("---END---").next().unwrap().to_string())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn fake_claude_provider(binary: &Path, session_store: Option<PathBuf>) -> AgentCliProvider {
+        let provider = AgentCliProvider {
+            cli: CliKind::Claude,
+            bin: binary.to_string_lossy().into_owned(),
+            model: "claude-opus-5-5".into(),
+            workdir: PathBuf::new(),
+            policy: AgentPolicy::ReadOnly,
+            session: Mutex::new(None),
+            session_system_brief: Mutex::new(None),
+            last_socket: Mutex::new(None),
+            mcp: false,
+            timeout: Duration::from_secs(5),
+            session_store: Mutex::new(None),
+        };
+        if let Some(path) = session_store {
+            provider.with_session_store(path)
+        } else {
+            provider
+        }
+    }
+
     #[test]
     fn codex_output_yields_text_session_and_usage() {
         let episode = fold(CliKind::Codex, CODEX_RUN);
@@ -1243,6 +1376,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             workdir: PathBuf::new(),
             policy: AgentPolicy::ReadOnly,
             session: Mutex::new(None),
+            session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -1253,13 +1387,16 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             .run_episode("test prompt", None, &None, &mut episode, None, None)
             .await
             .unwrap_err();
-        assert!(matches!(
-            error,
-            ProviderError::RateLimited {
-                retry_after_secs: None,
-                ..
-            }
-        ), "expected the structured quota failure to win over stderr, got: {error:?}");
+        assert!(
+            matches!(
+                error,
+                ProviderError::RateLimited {
+                    retry_after_secs: None,
+                    ..
+                }
+            ),
+            "expected the structured quota failure to win over stderr, got: {error:?}"
+        );
         assert!(error.to_string().contains("weekly limit"));
         assert_eq!(episode.usage.input_tokens, 7);
         assert_eq!(episode.usage.output_tokens, 2);
@@ -1405,7 +1542,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             policy: AgentPolicy::WorkspaceWrite,
             mcp: true,
         };
-        write_session(&store, "session-id").unwrap();
+        write_session(&store, "session-id", None).unwrap();
         assert_eq!(read_session(&store).as_deref(), Some("session-id"));
         assert_eq!(
             std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
@@ -1430,6 +1567,35 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
         mismatched.policy = store.policy;
         mismatched.mcp = false;
         assert!(read_session(&mismatched).is_none());
+
+        let legacy_path = directory.join("legacy.json");
+        let legacy_store = SessionStore {
+            path: legacy_path.clone(),
+            cli: CliKind::Claude,
+            model: "claude-opus-5-5".into(),
+            workdir: canonical_workdir(&PathBuf::new()),
+            policy: AgentPolicy::ReadOnly,
+            mcp: false,
+        };
+        let mut legacy_record = serde_json::to_value(PersistedSession {
+            cli: legacy_store.cli,
+            model: legacy_store.model.clone(),
+            workdir: legacy_store.workdir.clone(),
+            policy: legacy_store.policy,
+            mcp: legacy_store.mcp,
+            session_id: "legacy-session".into(),
+            system_brief: None,
+        })
+        .unwrap();
+        legacy_record
+            .as_object_mut()
+            .unwrap()
+            .remove("system_brief");
+        std::fs::write(&legacy_path, serde_json::to_vec(&legacy_record).unwrap()).unwrap();
+        std::fs::set_permissions(&legacy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let restored = fake_claude_provider(Path::new("/fake/claude"), Some(legacy_path));
+        assert_eq!(restored.session_id().as_deref(), Some("legacy-session"));
+        assert_eq!(*restored.session_system_brief.lock().unwrap(), None);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1519,6 +1685,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             workdir: PathBuf::from("/tmp"),
             policy: store.policy,
             session: Mutex::new(None),
+            session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
             mcp: store.mcp,
             timeout: Duration::from_millis(50),
@@ -1536,6 +1703,12 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             read_session(&store).as_deref(),
             Some("session-before-timeout")
         );
+        assert_eq!(
+            read_session_record(&store)
+                .and_then(|record| record.system_brief)
+                .as_deref(),
+            None
+        );
         let resumed = AgentCliProvider::new(
             store.cli,
             store.model.clone(),
@@ -1548,6 +1721,178 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
         assert_eq!(
             resumed.session_id().as_deref(),
             Some("session-before-timeout")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_first_episode_retries_the_observed_native_session() {
+        let directory = std::env::temp_dir().join(format!(
+            "orgbot-cli-retry-session-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join("fake-claude");
+        let counter = directory.join("counter");
+        let prompts = directory.join("prompts");
+        let args = directory.join("args");
+        fake_claude_script(&binary, &counter, &prompts, &args, Some(1));
+        let provider = fake_claude_provider(&binary, None);
+
+        let first = CompletionRequest::new(
+            "claude-opus-5-5",
+            "stable role brief",
+            vec![Turn::user("first situation")],
+        );
+        assert!(provider.complete(first, None).await.is_err());
+        assert_eq!(provider.session_id().as_deref(), Some("stable-session"));
+
+        let retry = CompletionRequest::new(
+            "claude-opus-5-5",
+            "stable role brief",
+            vec![Turn::user("retry situation")],
+        );
+        provider.complete(retry, None).await.unwrap();
+        let sections = prompt_sections(&prompts);
+        assert_eq!(sections.len(), 2);
+        assert!(sections[0].contains("stable role brief"));
+        assert!(sections[0].contains("first situation"));
+        assert!(sections[1].contains("stable role brief"));
+        assert!(sections[1].contains("retry situation"));
+        assert!(
+            std::fs::read_to_string(&args)
+                .unwrap()
+                .contains("--resume\nstable-session")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_role_brief_change_is_sent_once_across_native_session_restarts() {
+        let directory = std::env::temp_dir().join(format!(
+            "orgbot-cli-role-refresh-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join("fake-claude");
+        let counter = directory.join("counter");
+        let prompts = directory.join("prompts");
+        let args = directory.join("args");
+        let state_path = directory.join("cli-session.json");
+        fake_claude_script(&binary, &counter, &prompts, &args, Some(2));
+
+        let original = fake_claude_provider(&binary, Some(state_path.clone()));
+        original
+            .complete(
+                CompletionRequest::new(
+                    "claude-opus-5-5",
+                    "ROLE V1 UNIQUE",
+                    vec![Turn::user("initial task")],
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(original.session_id().as_deref(), Some("stable-session"));
+        drop(original);
+
+        let updated = fake_claude_provider(&binary, Some(state_path.clone()));
+        assert_eq!(updated.session_id().as_deref(), Some("stable-session"));
+        assert!(
+            updated
+                .complete(
+                    CompletionRequest::new(
+                        "claude-opus-5-5",
+                        "ROLE V2 UNIQUE",
+                        vec![Turn::user("task after role update")],
+                    ),
+                    None,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            read_session_record(&SessionStore {
+                path: state_path.clone(),
+                cli: CliKind::Claude,
+                model: "claude-opus-5-5".into(),
+                workdir: canonical_workdir(&PathBuf::new()),
+                policy: AgentPolicy::ReadOnly,
+                mcp: false,
+            })
+            .and_then(|record| record.system_brief)
+            .as_deref(),
+            Some("ROLE V1 UNIQUE"),
+            "the failed episode must not mark its brief as applied"
+        );
+        drop(updated);
+
+        let retry = fake_claude_provider(&binary, Some(state_path.clone()));
+        assert_eq!(retry.session_id().as_deref(), Some("stable-session"));
+        retry
+            .complete(
+                CompletionRequest::new(
+                    "claude-opus-5-5",
+                    "ROLE V2 UNIQUE",
+                    vec![Turn::user("retry after failed role refresh")],
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            read_session_record(&SessionStore {
+                path: state_path.clone(),
+                cli: CliKind::Claude,
+                model: "claude-opus-5-5".into(),
+                workdir: canonical_workdir(&PathBuf::new()),
+                policy: AgentPolicy::ReadOnly,
+                mcp: false,
+            })
+            .and_then(|record| record.system_brief)
+            .as_deref(),
+            Some("ROLE V2 UNIQUE")
+        );
+        drop(retry);
+
+        let restored = fake_claude_provider(&binary, Some(state_path.clone()));
+        restored
+            .complete(
+                CompletionRequest::new(
+                    "claude-opus-5-5",
+                    "ROLE V2 UNIQUE",
+                    vec![Turn::user("later task")],
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let sections = prompt_sections(&prompts);
+        assert_eq!(sections.len(), 4);
+        assert!(sections[0].contains("ROLE V1 UNIQUE"));
+        assert!(sections[1].contains("Updated standing role and operating brief"));
+        assert!(sections[1].contains("ROLE V2 UNIQUE"));
+        assert!(sections[1].contains("task after role update"));
+        assert!(sections[2].contains("ROLE V2 UNIQUE"));
+        assert!(sections[2].contains("retry after failed role refresh"));
+        assert!(!sections[3].contains("ROLE V2 UNIQUE"));
+        assert!(sections[3].contains("later task"));
+        assert!(
+            std::fs::read_to_string(&args)
+                .unwrap()
+                .matches("--resume\nstable-session")
+                .count()
+                >= 2
         );
         std::fs::remove_dir_all(directory).unwrap();
     }

@@ -1,11 +1,8 @@
-import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:orgbot_app/workspace/workspace_screen.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:orgbot_app/workspace/workspace.dart';
 import 'package:orgbot_app/orgbot/library.dart';
 import 'package:orgbot_app/orgbot/models.dart';
@@ -14,6 +11,8 @@ import 'package:orgbot_app/net/room_client.dart';
 import 'package:orgbot_app/state/room_archive.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   test('command durations are bounded and default to five minutes', () {
     expect(commandTimeoutSeconds({}), 300);
     expect(commandTimeoutSeconds({'timeout_seconds': 1800}), 1800);
@@ -24,7 +23,6 @@ void main() {
       );
     }
   });
-  TestWidgetsFlutterBinding.ensureInitialized();
   testWidgets(
     'private key paste and import preserve PEM newlines without displaying the key',
     (tester) async {
@@ -316,28 +314,6 @@ void main() {
       expect(desktop.toml, contains('root = "/work"'));
       expect(desktop.toml, contains('commands = false'));
       expect(RoomDef.fromJson(room.toJson()).workspace.host, 'example.test');
-    },
-  );
-  test(
-    'library migration secures bot keys and removes only committed legacy copy',
-    () async {
-      final legacy = jsonEncode({
-        'bots': [BotDef(name: 'D', apiKey: 'private-key').toJson()],
-        'rooms': [],
-      });
-      SharedPreferences.setMockInitialValues({'orgbot_library_v1': legacy});
-      FlutterSecureStorage.setMockInitialValues({});
-      final lib = Library();
-      await lib.load();
-      expect(lib.bots.single.apiKey, 'private-key');
-      expect(
-        (await SharedPreferences.getInstance()).getString('orgbot_library_v1'),
-        isNull,
-      );
-      expect(
-        await const FlutterSecureStorage().read(key: 'orgbot_library_v1'),
-        legacy,
-      );
     },
   );
   test('local controls reach the native transport callback', () async {

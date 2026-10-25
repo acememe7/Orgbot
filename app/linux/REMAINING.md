@@ -1,8 +1,14 @@
 # Linux desktop: delivered work and external acceptance
 
-The feature list from 1.6.1 is implemented in the 1.7.0 source. Current evidence
+The feature list from 1.6.1 is implemented; 1.7.1 adds coordinator routing and
+CLI continuity corrections. Current evidence
 and package details are recorded in [DESKTOP_COMPLETION.md](DESKTOP_COMPLETION.md)
 and [VALIDATION.md](VALIDATION.md). The release package and clean native playback checks pass.
+
+The 1.7.1 roster migration runs once when the updated Linux app opens. Existing
+running room services must be stopped and restarted to adopt edited roles and
+the updated engine. This preserves active work instead of interrupting it on
+installation. This update has not been installed on the owner's system.
 
 ## Original feature list
 
@@ -68,7 +74,9 @@ and [VALIDATION.md](VALIDATION.md). The release package and clean native playbac
 
 ## Current completion checks
 
-- Flutter: 264 passed, three external SSH checks skipped; analyzer clean.
-- Rust workspace: 775 passed, one ignored; release engine built.
-- Clean native MP4/WAV controls, package verification and final scoped Astra
-  review passed; evidence is recorded in [VALIDATION.md](VALIDATION.md).
+- Flutter: 270 passed, three external SSH checks skipped; analyzer clean.
+- Rust workspace: 782 passed, one ignored; release engine built. Python: six
+  preset checks passed.
+- 1.7.1 package extraction, old-roster migration and native Team view passed.
+  The native MP4/WAV checks are historical 1.7.0 evidence; that UI is unchanged.
+  Evidence is recorded in [VALIDATION.md](VALIDATION.md).

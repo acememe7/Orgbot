@@ -70,7 +70,7 @@ void main() {
     await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
     final reloaded = Library(saver: library.saver);
-    await reloaded.load();
+    await tester.runAsync(reloaded.load);
     expect(reloaded.userName, 'Alex');
     expect(reloaded.userProfile, contains('geography'));
     await tester.pumpWidget(const SizedBox.shrink());
@@ -117,7 +117,7 @@ void main() {
         });
         await tester.pumpAndSettle();
         final loaded = Library(saver: library.saver);
-        await loaded.load();
+        await tester.runAsync(loaded.load);
         expect(loaded.rooms.single.workspace.path, dir.path);
         final text = TextEditingController(text: 'Please check');
         text.selection = const TextSelection.collapsed(offset: 0);

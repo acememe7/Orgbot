@@ -400,6 +400,56 @@ impl Orchestrator {
         self.next_actors(1).first().copied()
     }
 
+    /// Select one recipient for a new unthreaded human request using the same
+    /// eligibility rules as the scheduler. Read the allowance ledger once for
+    /// the whole roster, before callers borrow the room engine to post it.
+    /// When every bot is temporarily unavailable, retain a stable recipient
+    /// so the message remains queued for a later scheduler pass.
+    pub fn default_human_target(&self) -> Option<AgentId> {
+        if self.rotation.is_empty() {
+            return None;
+        }
+        let engine = self.engine.borrow();
+        let routing = crate::allowance::routing(self.allowances.as_ref());
+        let eligible = |agent: &AgentId| {
+            self.bots.get(agent).is_some_and(|bot| bot.available())
+                && engine.status(*agent).is_available()
+                && engine
+                    .agent(*agent)
+                    .is_some_and(|spec| routing.get(&spec.provider.backend()) != Some(&None))
+        };
+        let agents = self
+            .rotation
+            .iter()
+            .filter(|agent| eligible(agent))
+            .filter_map(|agent| engine.agent(*agent).map(|spec| (*agent, spec)))
+            .collect::<Vec<_>>();
+        let roster = self
+            .rotation
+            .iter()
+            .filter_map(|agent| engine.agent(*agent).map(|spec| (*agent, spec)))
+            .collect::<Vec<_>>();
+        let coordinator = agents
+            .iter()
+            .find(|(_, spec)| spec.has_role("coordinator") && spec.autonomy.may_create_tasks);
+        let planner = agents
+            .iter()
+            .find(|(_, spec)| spec.autonomy.may_create_tasks);
+        let fallback_coordinator = roster
+            .iter()
+            .find(|(_, spec)| spec.has_role("coordinator") && spec.autonomy.may_create_tasks);
+        let fallback_planner = roster
+            .iter()
+            .find(|(_, spec)| spec.autonomy.may_create_tasks);
+        coordinator
+            .or(planner)
+            .or_else(|| agents.first())
+            .map(|(id, _)| *id)
+            .or_else(|| fallback_coordinator.map(|(id, _)| *id))
+            .or_else(|| fallback_planner.map(|(id, _)| *id))
+            .or_else(|| roster.first().map(|(id, _)| *id))
+    }
+
     /// Up to `limit` bots that should act now, in turn order.
     ///
     /// Round-robin from wherever the last batch left off, so a chatty bot
@@ -420,7 +470,6 @@ impl Orchestrator {
         let mut chosen = Vec::new();
         // Work an earlier bot in this batch is expected to take.
         let mut earmarked: BTreeSet<TaskId> = BTreeSet::new();
-        let mut planner_taken = false;
         let mut deliveries = engine.awaiting_delivery().len();
         // Bots sharing a backend share its rate limit, so starting several at
         // once turns concurrency into 429s rather than throughput. The turns
@@ -432,6 +481,23 @@ impl Orchestrator {
         let mut candidates = (0..self.rotation.len())
             .map(|offset| self.rotation[(self.cursor + offset) % self.rotation.len()])
             .collect::<Vec<_>>();
+        candidates.retain(|agent| {
+            self.bots.get(agent).is_some_and(|bot| bot.available())
+                && engine.status(*agent).is_available()
+                && engine
+                    .agent(*agent)
+                    .is_some_and(|spec| routing.get(&spec.provider.backend()) != Some(&None))
+        });
+        let coordinator_available = candidates.iter().any(|agent| {
+            engine.agent(*agent).is_some_and(|spec| {
+                spec.autonomy.may_create_tasks
+                    && spec.roles.iter().any(|role| role == "coordinator")
+            })
+        });
+        // Answering the request already provides the planning turn.
+        let mut planner_taken = candidates
+            .iter()
+            .any(|agent| self.has_unanswered_message(&engine, *agent));
         candidates.sort_by_key(|agent| {
             let backend = engine
                 .agent(*agent)
@@ -443,9 +509,6 @@ impl Orchestrator {
             if chosen.len() >= limit {
                 break;
             }
-            if self.bots.get(&agent).is_some_and(|bot| !bot.available()) {
-                continue;
-            }
             let Some(reason) = self.wake_reason(&engine, agent) else {
                 continue;
             };
@@ -453,9 +516,6 @@ impl Orchestrator {
                 .agent(agent)
                 .map(|spec| spec.provider.backend())
                 .unwrap_or_default();
-            if routing.get(&backend) == Some(&None) {
-                continue;
-            }
             if !backend.is_empty() {
                 let running = in_flight.entry(backend.clone()).or_default();
                 if *running >= per_backend {
@@ -473,7 +533,12 @@ impl Orchestrator {
                     earmarked.insert(task);
                 }
                 Wake::Planning => {
-                    if planner_taken {
+                    if planner_taken
+                        || (coordinator_available
+                            && !engine.agent(agent).is_some_and(|spec| {
+                                spec.roles.iter().any(|role| role == "coordinator")
+                            }))
+                    {
                         continue;
                     }
                     planner_taken = true;

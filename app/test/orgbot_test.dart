@@ -5,6 +5,8 @@ import 'package:orgbot_app/orgbot/library.dart';
 import 'package:orgbot_app/orgbot/models.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   test('bots and rooms round-trip through json', () {
     final bot = BotDef(
       name: 'Writer',
@@ -51,7 +53,7 @@ void main() {
     lib.addRoom(
       RoomDef(name: 'r', goal: 'g', bots: [RoomSlot(lib.bots.first.id)]),
     );
-    await Future<void>.delayed(Duration.zero); // let persist() settle
+    await lib.save();
 
     final reloaded = Library(saver: saver);
     await reloaded.load();

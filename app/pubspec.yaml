@@ -83,6 +83,7 @@ flutter:
   assets:
     - assets/logo.png
     - assets/fonts/OFL.txt
+    - tool/specialist-team.json
     # Playbooks the bots can reach for. Shipped with the app because a phone
     # has no CLI whose skills folder it could inherit, which is how every
     # bot on this device ended up with none.
