@@ -1,3 +1,57 @@
+# OrgBots desktop refinement 1.6.1 — 2026-10-25
+
+## Delivered and checked
+
+- [x] Compact desktop spacing, neutral light/dark surfaces, flat conversation
+  rows, readable text and action contrast, restrained controls and page headers.
+  Desktop changes use explicit desktop paths; Android keeps its existing UI.
+- [x] Collapsible session sidebar (also Ctrl+B), tools rail, project preview,
+  MCP and skills lists, and routine system notices. Error notices stay visible.
+  Tools start collapsed; the opened inspector is resizable.
+- [x] Retain drafts when switching pages, and selected previews when closing
+  tools or resizing between desktop and narrow layouts. Stale asynchronous Git
+  responses cannot overwrite a newer project/view selection.
+- [x] Reuse unchanged transcript views, suppress irrelevant whole-library
+  notifications, and lazily build integration lists. These remove redundant
+  work; no measured frame-rate or CPU improvement is claimed.
+- [x] No user library migration, credential changes or live inference in this
+  pass. CLI and API access remain available; Android OAuth is unchanged.
+
+## Verification and artifact
+
+- [x] Final Flutter suite: 243 passed, three external SSH checks skipped.
+  Analysis: no issues. Focused tests include retained navigation/drafts,
+  collapsed tools, 375/800px layouts, 1.6x text scaling, light/dark contrast,
+  transcript keys/scrolling, Git response ordering and notification filtering.
+- [x] Native release inspected in isolated Xvfb/D-Bus/data/keyring at 1440×920,
+  800×920 and 375×920. Checked light/dark screens, Team, Connections, MCP/skill
+  expansion, text preview and retention across window breakpoints.
+  Xvfb uses software rendering and does not establish desktop GPU performance.
+- [x] Linux release and packaging fixtures pass. All 26 extracted bundle files
+  match the build and all six native binaries/libraries resolve dependencies.
+  Rust engine is unchanged from the validated 1.6.0 release below.
+- [x] Final scoped Astra source/visual/artifact/inventory review approved. All
+  required corrections resolved. Staged credential-pattern scan: zero findings
+  across 18 owned files; diff checks pass.
+
+Package: `app/orgbot_1.6.1_amd64.deb`, Ubuntu 24.04/amd64, glibc >=2.39.
+Size: 13,718,414 bytes.
+SHA-256: `f849743cb04ee3523191ee30c1f6685b4224773525daaed3be7de1e92e701ecb`.
+Engine SHA-256: `92164b0d5435a9bef807fd5c1868fa98f4cc76825938e278d56f96b03a7bc782`.
+Temporary evidence: `/tmp/orgbots-polish-*.log`,
+`/tmp/orgbots-polish-artifact.json` and `/tmp/orgbots-polish-shots/`.
+
+## Remaining work and acceptance
+
+See [REMAINING.md](REMAINING.md) for the prioritized gaps. This pass does not
+establish live paid-model collaboration, multi-day endurance, Wayland/GPU frame
+timing, comprehensive screen-reader acceptance or Android device acceptance.
+Active agents consume provider allowance; distributing tasks does not guarantee
+fewer total tokens. No paid provider requests were made during validation.
+System installation remains for the owner.
+
+---
+
 # OrgBots desktop sessions 1.6.0 — 2026-10-25
 
 This section supersedes the 1.5.2 behavior and roster recorded below.

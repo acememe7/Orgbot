@@ -380,6 +380,7 @@ class Transcript extends StatefulWidget {
     super.key,
     required this.store,
     required this.controller,
+    this.desktop = false,
     this.attachmentRoot,
     this.onOpenAttachment,
     this.onReply,
@@ -387,6 +388,7 @@ class Transcript extends StatefulWidget {
 
   final RoomStore store;
   final ScrollController controller;
+  final bool desktop;
   final String? attachmentRoot;
   final void Function(ChatFile)? onOpenAttachment;
   final ValueChanged<ChatMessage>? onReply;
@@ -400,6 +402,7 @@ class _TranscriptState extends State<Transcript>
   final _center = UniqueKey();
   String? _boundary;
   List<ChatMessage> _messages = [];
+  Map<String, int> _messageIndices = const {};
   bool _following = true;
   bool _interacting = false;
   bool _scheduled = false;
@@ -414,7 +417,9 @@ class _TranscriptState extends State<Transcript>
     super.initState();
     final messages = widget.store.messages;
     final confirmed = messages.where((m) => !widget.store.isPending(m));
-    if (confirmed.isNotEmpty) _boundary = confirmed.last.id;
+    if (!widget.desktop && confirmed.isNotEmpty) {
+      _boundary = confirmed.last.id;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted &&
           _following &&
@@ -466,15 +471,20 @@ class _TranscriptState extends State<Transcript>
     super.build(context);
     final store = widget.store;
     // Retain the last complete transcript while a reconnect replays its journal.
-    if (!store.isReplaying || _messages.isEmpty) _messages = store.messages;
+    if (!store.isReplaying || _messages.isEmpty) {
+      final current = store.messages;
+      if (!identical(current, _messages)) {
+        _messages = current;
+        _messageIndices = {
+          for (var i = 0; i < current.length; i++) current[i].id: i,
+        };
+      }
+    }
     final messages = _messages;
     final boundary = messages.indexWhere((m) => m.id == _boundary);
     final split = boundary + 1;
     final composing = store.activity.where((a) => a.streaming).toList();
     final scheme = Theme.of(context).colorScheme;
-    final indices = {
-      for (var i = 0; i < messages.length; i++) messages[i].id: i,
-    };
 
     SliverChildBuilderDelegate children(
       int count,
@@ -484,19 +494,30 @@ class _TranscriptState extends State<Transcript>
       return SliverChildBuilderDelegate(
         (context, i) {
           final message = messages[index(i)];
-          return _Bubble(
-            key: ValueKey(message.id),
+          final bubble = _Bubble(
+            key: widget.desktop ? null : ValueKey(message.id),
             message: message,
             store: store,
+            desktop: widget.desktop,
             pending: store.isPending(message),
             attachmentRoot: widget.attachmentRoot,
             onOpenAttachment: widget.onOpenAttachment,
             onReply: widget.onReply,
           );
+          return widget.desktop
+              ? Align(
+                  key: ValueKey(message.id),
+                  alignment: Alignment.center,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 920),
+                    child: bubble,
+                  ),
+                )
+              : bubble;
         },
         childCount: count,
         findChildIndexCallback: (key) {
-          final i = indices[(key as ValueKey<String>).value];
+          final i = _messageIndices[(key as ValueKey<String>).value];
           return i == null ? null : childIndex(i);
         },
       );
@@ -529,13 +550,16 @@ class _TranscriptState extends State<Transcript>
                     child: CustomScrollView(
                       controller: widget.controller,
                       center: _center,
-                      anchor: 1,
+                      anchor: widget.desktop ? 0 : 1,
                       physics: _TranscriptPhysics(
                         follow: () => _following && !_interacting,
                       ),
                       slivers: [
                         SliverPadding(
-                          padding: const EdgeInsets.symmetric(horizontal: 20),
+                          padding: EdgeInsets.symmetric(
+                            horizontal: widget.desktop ? 24 : 20,
+                            vertical: widget.desktop ? 12 : 0,
+                          ),
                           sliver: _AnchoredSliverList(
                             hold: () => !_following,
                             delegate: children(
@@ -547,7 +571,10 @@ class _TranscriptState extends State<Transcript>
                         ),
                         SliverPadding(
                           key: _center,
-                          padding: const EdgeInsets.symmetric(horizontal: 20),
+                          padding: EdgeInsets.symmetric(
+                            horizontal: widget.desktop ? 24 : 20,
+                            vertical: widget.desktop ? 12 : 0,
+                          ),
                           sliver: _AnchoredSliverList(
                             hold: () => !_following,
                             delegate: children(
@@ -755,6 +782,7 @@ class _Bubble extends StatelessWidget {
     super.key,
     required this.message,
     required this.store,
+    this.desktop = false,
     this.pending = false,
     this.attachmentRoot,
     this.onOpenAttachment,
@@ -763,6 +791,7 @@ class _Bubble extends StatelessWidget {
 
   final ChatMessage message;
   final RoomStore store;
+  final bool desktop;
 
   /// Sent, but the room has not confirmed it yet.
   final bool pending;
@@ -776,6 +805,9 @@ class _Bubble extends StatelessWidget {
     final author = message.author;
 
     if (author.isSystem) {
+      if (desktop) {
+        return _SystemNotice(message: message);
+      }
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 7),
         child: Center(
@@ -813,6 +845,97 @@ class _Bubble extends StatelessWidget {
           );
 
     final time = message.sentAt.dateTime.toLocal();
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            if (isHuman)
+              Icon(Icons.person_outline, size: desktop ? 17 : 19, color: color)
+            else
+              BotAvatar(handle: name, radius: desktop ? 10 : 12),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                displayName == null || displayName.isEmpty ? name : displayName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                  color: color,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            if (pending)
+              Text(
+                'Pending',
+                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+              )
+            else if (message.sentAt.millis > 0)
+              Text(
+                '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}',
+                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+              ),
+            if (!pending && onReply != null)
+              IconButton(
+                tooltip: 'Reply to $name',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.reply, size: 18),
+                onPressed: () => onReply!(message),
+              ),
+          ],
+        ),
+        if (message.replyTo != null)
+          Container(
+            margin: const EdgeInsets.only(top: 8),
+            padding: const EdgeInsets.fromLTRB(10, 4, 6, 4),
+            decoration: BoxDecoration(
+              border: Border(left: BorderSide(color: scheme.primary, width: 2)),
+            ),
+            child: Text(
+              parent == null
+                  ? 'Reply to earlier message'
+                  : '${parent.author.isHuman ? parent.author.name ?? 'You' : store.handleFor(parent.author.agentId)}: ${parent.body}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
+            ),
+          ),
+        SizedBox(height: desktop ? 7 : 10),
+        Opacity(
+          opacity: pending ? 0.7 : 1,
+          child: MessageText(text: message.body),
+        ),
+        for (final file in message.files)
+          AttachmentTile(
+            file: file,
+            root: attachmentRoot,
+            onOpen: onOpenAttachment == null
+                ? null
+                : () => onOpenAttachment!(file),
+          ),
+      ],
+    );
+    if (desktop) {
+      final row = Padding(
+        padding: const EdgeInsets.fromLTRB(12, 3, 10, 6),
+        child: content,
+      );
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: isHuman
+            ? DecoratedBox(
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerLow.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                child: row,
+              )
+            : row,
+      );
+    }
     return Container(
       margin: const EdgeInsets.only(bottom: 20),
       padding: isHuman
@@ -825,86 +948,73 @@ class _Bubble extends StatelessWidget {
             ? Border.all(color: scheme.outlineVariant.withValues(alpha: 0.6))
             : null,
       ),
+      child: content,
+    );
+  }
+}
+
+class _SystemNotice extends StatefulWidget {
+  const _SystemNotice({required this.message});
+
+  final ChatMessage message;
+
+  @override
+  State<_SystemNotice> createState() => _SystemNoticeState();
+}
+
+class _SystemNoticeState extends State<_SystemNotice> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              if (isHuman)
-                Icon(Icons.person_outline, size: 19, color: color)
-              else
-                BotAvatar(handle: name, radius: 12),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  displayName == null || displayName.isEmpty
-                      ? name
-                      : displayName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 13,
-                    color: color,
-                  ),
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(6),
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.info_outline,
+                      size: 17,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        widget.message.body,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    Icon(
+                      _expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 18,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ],
                 ),
-              ),
-              const SizedBox(width: 8),
-              if (pending)
-                Text(
-                  'Pending',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                )
-              else if (message.sentAt.millis > 0)
-                Text(
-                  '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-              if (!pending && onReply != null)
-                IconButton(
-                  tooltip: 'Reply to $name',
-                  visualDensity: VisualDensity.compact,
-                  icon: const Icon(Icons.reply, size: 18),
-                  onPressed: () => onReply!(message),
-                ),
-            ],
-          ),
-          if (message.replyTo != null)
-            Container(
-              margin: const EdgeInsets.only(top: 8),
-              padding: const EdgeInsets.fromLTRB(10, 4, 6, 4),
-              decoration: BoxDecoration(
-                border: Border(
-                  left: BorderSide(color: scheme.primary, width: 2),
-                ),
-              ),
-              child: Text(
-                parent == null
-                    ? 'Reply to earlier message'
-                    : '${parent.author.isHuman ? parent.author.name ?? 'You' : store.handleFor(parent.author.agentId)}: ${parent.body}',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
               ),
             ),
-          const SizedBox(height: 10),
-          Opacity(
-            opacity: pending ? 0.7 : 1,
-            child: MessageText(text: message.body),
           ),
-          for (final file in message.files)
-            AttachmentTile(
-              file: file,
-              root: attachmentRoot,
-              onOpen: onOpenAttachment == null
-                  ? null
-                  : () => onOpenAttachment!(file),
+          if (_expanded)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(35, 0, 12, 12),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: SelectableText(widget.message.body),
+              ),
             ),
         ],
       ),
@@ -1156,6 +1266,7 @@ class Composer extends StatelessWidget {
     this.busy = false,
     this.busyLabel = 'Preparing attachments…',
     this.focusNode,
+    this.desktop = false,
     this.replyTo,
     this.replyAuthor,
     this.onCancelReply,
@@ -1171,6 +1282,7 @@ class Composer extends StatelessWidget {
   final bool busy;
   final String busyLabel;
   final FocusNode? focusNode;
+  final bool desktop;
   final ChatMessage? replyTo;
   final String? replyAuthor;
   final VoidCallback? onCancelReply;
@@ -1178,13 +1290,13 @@ class Composer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-      padding: const EdgeInsets.all(6),
+    final composer = Container(
+      margin: EdgeInsets.fromLTRB(desktop ? 24 : 16, 8, desktop ? 24 : 16, 12),
+      padding: EdgeInsets.all(desktop ? 4 : 6),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(desktop ? 10 : 18),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.8)),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1275,7 +1387,7 @@ class Composer extends StatelessWidget {
             children: [
               if (onAttach != null || mentions.isNotEmpty)
                 PopupMenuButton<String>(
-                  tooltip: 'Add to message',
+                  tooltip: desktop ? 'Add files or mention' : 'Add to message',
                   enabled: !busy,
                   icon: const Icon(Icons.add_rounded, size: 24),
                   itemBuilder: (_) => [
@@ -1345,7 +1457,7 @@ class Composer extends StatelessWidget {
                         onSend();
                       }
                     },
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       hintText: 'Message or @mention a teammate…',
                       filled: false,
                       border: InputBorder.none,
@@ -1354,7 +1466,7 @@ class Composer extends StatelessWidget {
                       disabledBorder: InputBorder.none,
                       contentPadding: EdgeInsets.symmetric(
                         horizontal: 6,
-                        vertical: 12,
+                        vertical: desktop ? 8 : 12,
                       ),
                     ),
                   ),
@@ -1364,7 +1476,9 @@ class Composer extends StatelessWidget {
               ValueListenableBuilder<TextEditingValue>(
                 valueListenable: controller,
                 builder: (context, value, _) => Tooltip(
-                  message: 'Send message',
+                  message: desktop
+                      ? 'Send message · Ctrl+Enter'
+                      : 'Send message',
                   child: FilledButton(
                     onPressed:
                         busy ||
@@ -1372,11 +1486,18 @@ class Composer extends StatelessWidget {
                         ? null
                         : onSend,
                     style: FilledButton.styleFrom(
-                      minimumSize: const Size(44, 44),
-                      shape: const CircleBorder(),
-                      padding: const EdgeInsets.all(12),
+                      minimumSize: Size.square(desktop ? 40 : 44),
+                      shape: desktop
+                          ? RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            )
+                          : const CircleBorder(),
+                      padding: EdgeInsets.all(desktop ? 10 : 12),
                     ),
-                    child: const Icon(Icons.arrow_upward_rounded, size: 20),
+                    child: Icon(
+                      desktop ? Icons.send_rounded : Icons.arrow_upward_rounded,
+                      size: desktop ? 18 : 20,
+                    ),
                   ),
                 ),
               ),
@@ -1385,6 +1506,14 @@ class Composer extends StatelessWidget {
         ],
       ),
     );
+    return desktop
+        ? Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 968),
+              child: composer,
+            ),
+          )
+        : composer;
   }
 }
 

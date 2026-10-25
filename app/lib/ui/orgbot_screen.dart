@@ -43,6 +43,8 @@ class _OrgBotScreenState extends State<OrgBotScreen>
     with SingleTickerProviderStateMixin {
   int _tab = 0;
   String? _selectedRoomId;
+  bool _sidebarCollapsed = false;
+  final _visitedDesktopPages = <int>{0};
   final _pages = PageController();
   final _search = List.generate(2, (_) => TextEditingController());
   late final AnimationController _desktopPageFade;
@@ -75,6 +77,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
     if (!_desktopClis) HapticFeedback.selectionClick();
     setState(() {
       _tab = index;
+      _visitedDesktopPages.add(index);
     });
     if (_desktopClis) {
       if (_pages.hasClients) _pages.jumpToPage(index);
@@ -236,253 +239,361 @@ class _OrgBotScreenState extends State<OrgBotScreen>
 
   Widget _desktop(Library lib, Credentials? credentials) {
     final scheme = Theme.of(context).colorScheme;
-    final compact = MediaQuery.sizeOf(context).width < 760;
+    final narrow = MediaQuery.sizeOf(context).width < 760;
+    final compact = narrow || _sidebarCollapsed;
     final selected = lib.rooms
         .where((r) => r.id == _selectedRoomId)
         .firstOrNull;
-    return Scaffold(
-      body: SafeArea(
-        child: Row(
-          children: [
-            SizedBox(
-              width: compact ? 64 : 224,
-              child: compact
-                  ? Material(
-                      color: scheme.surfaceContainerLow,
-                      child: Column(
-                        children: [
-                          const SizedBox(height: 20),
-                          IconButton(
-                            tooltip: 'Your profile',
-                            onPressed: _profile,
-                            icon: const BrandMark(size: 26),
+    void toggleSidebar() =>
+        setState(() => _sidebarCollapsed = !_sidebarCollapsed);
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyB, control: true):
+            toggleSidebar,
+      },
+      child: Scaffold(
+        body: SafeArea(
+          child: Row(
+            children: [
+              SizedBox(
+                width: compact ? 64 : 232,
+                child: Material(
+                  color: scheme.surfaceContainerLow,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      SizedBox(
+                        height: 64,
+                        child: Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: compact ? 8 : 16,
                           ),
-                          IconButton(
-                            tooltip: 'New session',
-                            onPressed: lib.loaded ? _newRoom : null,
-                            icon: const Icon(Icons.add),
-                          ),
-                          Expanded(
-                            child: ListView(
-                              children: [
-                                for (final room in lib.rooms)
-                                  IconButton(
-                                    tooltip: room.name,
-                                    onPressed: () => _runRoom(room),
-                                    icon: Icon(
-                                      _selectedRoomId == room.id && _tab == 0
-                                          ? Icons.chat_bubble
-                                          : Icons.chat_bubble_outline,
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: 'Team',
-                            onPressed: () => _selectTab(1),
-                            icon: const Icon(Icons.people_outline),
-                          ),
-                          IconButton(
-                            tooltip: 'Connections & tools',
-                            onPressed: () => _selectTab(2),
-                            icon: const Icon(Icons.tune),
-                          ),
-                          const SizedBox(height: 14),
-                        ],
-                      ),
-                    )
-                  : Material(
-                      color: scheme.surfaceContainerLow,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 24, 12, 24),
-                            child: Row(
-                              children: [
-                                const BrandMark(size: 28),
+                          child: Row(
+                            children: [
+                              if (!compact) ...[
+                                const BrandMark(size: 24),
                                 const SizedBox(width: 10),
                                 const Expanded(
                                   child: Text(
                                     'OrgBots',
                                     style: TextStyle(
-                                      fontSize: 20,
+                                      fontSize: 17,
                                       fontWeight: FontWeight.w600,
+                                      letterSpacing: -.4,
                                     ),
-                                  ),
-                                ),
-                                IconButton(
-                                  tooltip: 'Your profile',
-                                  onPressed: lib.loaded ? _profile : null,
-                                  icon: const Icon(
-                                    Icons.account_circle_outlined,
-                                    size: 20,
                                   ),
                                 ),
                               ],
-                            ),
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            child: OutlinedButton.icon(
-                              onPressed: lib.loaded ? _newRoom : null,
-                              icon: const Icon(Icons.add, size: 18),
-                              label: const Text('New session'),
-                            ),
-                          ),
-                          const SizedBox(height: 20),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 20),
-                            child: Text(
-                              'Sessions',
-                              style: TextStyle(
-                                color: scheme.onSurfaceVariant,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Expanded(
-                            child: !lib.loaded
-                                ? const Center(
-                                    child: CircularProgressIndicator(),
-                                  )
-                                : ListView.builder(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                    ),
-                                    itemCount: lib.rooms.length,
-                                    itemBuilder: (context, i) {
-                                      final room = lib.rooms[i];
-                                      final session = lib.sessions[room.id];
-                                      return ListTile(
-                                        dense: true,
-                                        selected:
-                                            _tab == 0 &&
-                                            selected?.id == room.id,
-                                        selectedTileColor: scheme
-                                            .primaryContainer
-                                            .withValues(alpha: .45),
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            8,
-                                          ),
-                                        ),
-                                        title: Text(
-                                          room.name,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                        subtitle: Text(
-                                          session?.store?.runStateLabel ??
-                                              'Saved',
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                        onTap: () => _runRoom(room),
-                                        trailing: IconButton(
-                                          tooltip: 'Session settings',
-                                          icon: const Icon(
-                                            Icons.more_horiz,
-                                            size: 18,
-                                          ),
-                                          onPressed: () => _roomDialog(room),
-                                        ),
-                                      );
-                                    },
+                              if (!narrow)
+                                IconButton(
+                                  key: const ValueKey('toggle-sidebar'),
+                                  tooltip: compact
+                                      ? 'Expand sidebar (Ctrl+B)'
+                                      : 'Collapse sidebar (Ctrl+B)',
+                                  onPressed: toggleSidebar,
+                                  icon: Icon(
+                                    compact
+                                        ? Icons.menu_open
+                                        : Icons.chevron_left,
+                                    size: 19,
                                   ),
+                                )
+                              else
+                                IconButton(
+                                  tooltip: 'Your profile',
+                                  onPressed: _profile,
+                                  icon: const BrandMark(size: 24),
+                                ),
+                            ],
                           ),
-                          const Divider(height: 1),
-                          for (final entry in [
-                            (1, Icons.people_outline, 'Team'),
-                            (2, Icons.tune, 'Connections & tools'),
-                          ])
-                            ListTile(
-                              selected: _tab == entry.$1,
-                              leading: Icon(entry.$2, size: 20),
-                              title: Text(
-                                entry.$3,
-                                style: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                      Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: compact ? 10 : 16,
+                        ),
+                        child: compact
+                            ? IconButton(
+                                tooltip: 'New session',
+                                onPressed: lib.loaded ? _newRoom : null,
+                                icon: const Icon(Icons.add, size: 20),
+                              )
+                            : OutlinedButton.icon(
+                                onPressed: lib.loaded ? _newRoom : null,
+                                icon: const Icon(Icons.add, size: 16),
+                                label: const Text('New session'),
                               ),
-                              onTap: () => _selectTab(entry.$1),
+                      ),
+                      const SizedBox(height: 24),
+                      if (!compact)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 0, 16, 8),
+                          child: Text(
+                            'Sessions',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                              color: scheme.onSurfaceVariant,
                             ),
-                          const SizedBox(height: 10),
+                          ),
+                        ),
+                      Expanded(
+                        child: !lib.loaded
+                            ? const Center(
+                                child: SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                ),
+                              )
+                            : ListView.builder(
+                                key: const PageStorageKey('desktop-sessions'),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                ),
+                                itemCount: lib.rooms.length,
+                                itemBuilder: (context, i) {
+                                  final room = lib.rooms[i];
+                                  final session = lib.sessions[room.id];
+                                  final active =
+                                      _tab == 0 && selected?.id == room.id;
+                                  final state =
+                                      session?.store?.runStateLabel ?? 'Saved';
+                                  if (compact) {
+                                    return Padding(
+                                      padding: const EdgeInsets.only(bottom: 4),
+                                      child: IconButton(
+                                        tooltip: room.name,
+                                        isSelected: active,
+                                        style: IconButton.styleFrom(
+                                          backgroundColor: active
+                                              ? scheme.primaryContainer
+                                              : Colors.transparent,
+                                        ),
+                                        onPressed: () => _runRoom(room),
+                                        icon: const Icon(
+                                          Icons.chat_bubble_outline,
+                                          size: 18,
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                  return Padding(
+                                    padding: const EdgeInsets.only(bottom: 3),
+                                    child: ListTile(
+                                      selected: active,
+                                      contentPadding: const EdgeInsets.only(
+                                        left: 12,
+                                        right: 2,
+                                      ),
+                                      selectedTileColor:
+                                          scheme.primaryContainer,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      title: Text(
+                                        room.name,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: active
+                                              ? FontWeight.w600
+                                              : FontWeight.w500,
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        state,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: scheme.onSurfaceVariant,
+                                        ),
+                                      ),
+                                      onTap: () => _runRoom(room),
+                                      trailing: IconButton(
+                                        tooltip: 'Session settings',
+                                        icon: const Icon(
+                                          Icons.more_horiz,
+                                          size: 17,
+                                        ),
+                                        onPressed: () => _roomDialog(room),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Divider(color: scheme.outlineVariant),
+                      ),
+                      const SizedBox(height: 8),
+                      for (final entry in [
+                        (1, Icons.people_outline, 'Team'),
+                        (2, Icons.tune, 'Connections & tools'),
+                      ])
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: compact
+                              ? IconButton(
+                                  tooltip: entry.$3,
+                                  onPressed: () => _selectTab(entry.$1),
+                                  isSelected: _tab == entry.$1,
+                                  icon: Icon(entry.$2, size: 19),
+                                )
+                              : ListTile(
+                                  selected: _tab == entry.$1,
+                                  selectedTileColor: scheme.primaryContainer
+                                      .withValues(alpha: .55),
+                                  leading: Icon(entry.$2, size: 18),
+                                  minLeadingWidth: 18,
+                                  horizontalTitleGap: 10,
+                                  title: Text(
+                                    entry.$3,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(fontSize: 13),
+                                  ),
+                                  onTap: () => _selectTab(entry.$1),
+                                ),
+                        ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(8, 4, 8, 10),
+                        child: compact
+                            ? IconButton(
+                                tooltip: 'Your profile',
+                                onPressed: lib.loaded ? _profile : null,
+                                icon: const Icon(
+                                  Icons.account_circle_outlined,
+                                  size: 19,
+                                ),
+                              )
+                            : ListTile(
+                                onTap: lib.loaded ? _profile : null,
+                                leading: const Icon(
+                                  Icons.account_circle_outlined,
+                                  size: 18,
+                                ),
+                                minLeadingWidth: 18,
+                                horizontalTitleGap: 10,
+                                title: Text(
+                                  lib.userName,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 13),
+                                ),
+                                trailing: const Icon(
+                                  Icons.settings_outlined,
+                                  size: 15,
+                                ),
+                              ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              VerticalDivider(width: 1, color: scheme.outlineVariant),
+              Expanded(
+                child: Column(
+                  children: [
+                    if (lib.error != null)
+                      MaterialBanner(
+                        content: Text(lib.error!),
+                        actions: [
+                          TextButton(
+                            onPressed: lib.loaded ? lib.save : lib.load,
+                            child: const Text('Retry'),
+                          ),
+                        ],
+                      ),
+                    Expanded(
+                      child: IndexedStack(
+                        index: _tab,
+                        children: [
+                          selected != null
+                              ? EngineRoomScreen(
+                                  key: ObjectKey(selected),
+                                  room: selected,
+                                  library: lib,
+                                  embedded: true,
+                                  desktopLayout: true,
+                                )
+                              : Center(
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(
+                                      maxWidth: 500,
+                                    ),
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(32),
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            'Your workspace.',
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.headlineLarge,
+                                          ),
+                                          const SizedBox(height: 12),
+                                          Text(
+                                            'Open a session or start something new with your team.',
+                                            style: TextStyle(
+                                              color: scheme.onSurfaceVariant,
+                                              height: 1.6,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 24),
+                                          FilledButton.icon(
+                                            onPressed: lib.loaded
+                                                ? _newRoom
+                                                : null,
+                                            icon: const Icon(
+                                              Icons.add,
+                                              size: 18,
+                                            ),
+                                            label: const Text('New session'),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                          for (final page in [1, 2])
+                            !_visitedDesktopPages.contains(page)
+                                ? const SizedBox.shrink()
+                                : Center(
+                                    child: ConstrainedBox(
+                                      constraints: const BoxConstraints(
+                                        maxWidth: 1120,
+                                      ),
+                                      child: Column(
+                                        children: [
+                                          _pageHeader(page, lib),
+                                          Expanded(
+                                            child: page == 1
+                                                ? _botsList(lib)
+                                                : _CliSetup(
+                                                    credentials: credentials,
+                                                  ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
                         ],
                       ),
                     ),
-            ),
-            VerticalDivider(width: 1, color: scheme.outlineVariant),
-            Expanded(
-              child: Column(
-                children: [
-                  if (lib.error != null)
-                    MaterialBanner(
-                      content: Text(lib.error!),
-                      actions: [
-                        TextButton(
-                          onPressed: lib.loaded ? lib.save : lib.load,
-                          child: const Text('Retry'),
-                        ),
-                      ],
-                    ),
-                  Expanded(
-                    child: _tab == 0 && selected != null
-                        ? EngineRoomScreen(
-                            key: ObjectKey(selected),
-                            room: selected,
-                            library: lib,
-                            embedded: true,
-                          )
-                        : _tab == 0
-                        ? Center(
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 480),
-                              child: Padding(
-                                padding: const EdgeInsets.all(32),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      'A place to do the work.',
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.headlineLarge,
-                                    ),
-                                    const SizedBox(height: 16),
-                                    Text(
-                                      'Open a session to continue with your team, project files and saved context.',
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.bodyLarge,
-                                    ),
-                                    const SizedBox(height: 24),
-                                    FilledButton.icon(
-                                      onPressed: lib.loaded ? _newRoom : null,
-                                      icon: const Icon(Icons.add),
-                                      label: const Text('New session'),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          )
-                        : Column(
-                            children: [
-                              _pageHeader(_tab, lib),
-                              Expanded(
-                                child: _tab == 1
-                                    ? _botsList(lib)
-                                    : _CliSetup(credentials: credentials),
-                              ),
-                            ],
-                          ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -491,10 +602,12 @@ class _OrgBotScreenState extends State<OrgBotScreen>
   Widget _pageHeader(int page, Library lib) {
     final scheme = Theme.of(context).colorScheme;
     final title = page == 2
-        ? (_desktopClis ? 'Setup' : 'Accounts')
+        ? (_desktopClis ? 'Connections & tools' : 'Accounts')
         : ['Rooms', 'Team'][page];
     return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 10, 24, 20),
+      padding: _desktopClis
+          ? const EdgeInsets.fromLTRB(28, 26, 28, 20)
+          : const EdgeInsets.fromLTRB(24, 10, 24, 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -503,7 +616,9 @@ class _OrgBotScreenState extends State<OrgBotScreen>
               Expanded(
                 child: Text(
                   title,
-                  style: Theme.of(context).textTheme.headlineLarge,
+                  style: _desktopClis
+                      ? Theme.of(context).textTheme.titleLarge
+                      : Theme.of(context).textTheme.headlineLarge,
                 ),
               ),
               if (page < 2)
@@ -514,26 +629,31 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                       : page == 0
                       ? _newRoom
                       : _newBot,
-                  style: IconButton.styleFrom(minimumSize: const Size(46, 46)),
+                  style: IconButton.styleFrom(
+                    minimumSize: Size.square(_desktopClis ? 38 : 46),
+                  ),
                   icon: const Icon(Icons.add_rounded, size: 24),
                 ),
             ],
           ),
-          const SizedBox(height: 8),
-          Text(
-            switch (page) {
-              0 =>
-                '${lib.rooms.length} ${lib.rooms.length == 1 ? 'room' : 'rooms'} · ${lib.bots.length} ${lib.bots.length == 1 ? 'teammate' : 'teammates'}',
-              1 => '${lib.bots.length} teammates, each with a role.',
-              2 when _desktopClis => 'Agent CLIs available to this workspace.',
-              _ => 'Subscriptions and API access, saved on this device.',
-            },
-            style: TextStyle(
-              fontSize: 13,
-              height: 1.4,
-              color: scheme.onSurfaceVariant,
+          if (!_desktopClis) ...[
+            const SizedBox(height: 8),
+            Text(
+              switch (page) {
+                0 =>
+                  '${lib.rooms.length} ${lib.rooms.length == 1 ? 'room' : 'rooms'} · ${lib.bots.length} ${lib.bots.length == 1 ? 'teammate' : 'teammates'}',
+                1 => '${lib.bots.length} teammates, each with a role.',
+                2 when _desktopClis =>
+                  'Agent CLIs available to this workspace.',
+                _ => 'Subscriptions and API access, saved on this device.',
+              },
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.4,
+                color: scheme.onSurfaceVariant,
+              ),
             ),
-          ),
+          ],
           if (page < 2) ...[
             const SizedBox(height: 22),
             TextField(
@@ -1505,8 +1625,10 @@ class _CliSetupState extends State<_CliSetup> {
     listenable: widget.credentials ?? Listenable.merge([]),
     builder: (context, _) => ListView(
       key: const ValueKey('cli-setup'),
-      padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+      padding: const EdgeInsets.fromLTRB(28, 0, 28, 24),
       children: [
+        Text('Agent CLIs', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
         for (final cli in CliKind.values)
           _CliStatusTile(key: ValueKey('cli-${cli.name}'), cli: cli),
         Align(
@@ -1518,7 +1640,7 @@ class _CliSetupState extends State<_CliSetup> {
           ),
         ),
         const SizedBox(height: 14),
-        Text('API access', style: Theme.of(context).textTheme.titleLarge),
+        Text('API access', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
         for (final provider in [ProviderKind.deepseek, ProviderKind.ollama])
           _ApiKeySetupTile(
@@ -1553,7 +1675,7 @@ class _ApiKeySetupTile extends StatelessWidget {
     padding: const EdgeInsets.only(bottom: 8),
     child: Material(
       color: Theme.of(context).colorScheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(16),
+      borderRadius: BorderRadius.circular(8),
       child: ListTile(
         title: Text('${provider.label} API'),
         subtitle: Text(saved ? 'API key saved securely' : 'No API key saved'),
@@ -1586,14 +1708,25 @@ class _CliStatusTile extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final status = findCli(cli);
     return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.only(bottom: 1),
       child: Material(
-        color: scheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(20),
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
         child: ListTile(
           title: Text(_cliLabel(cli)),
-          subtitle: Text(status.path ?? status.problem ?? 'Unavailable'),
-          trailing: Text(status.available ? 'Installed' : 'Missing'),
+          subtitle: Text(
+            status.path ?? status.problem ?? 'Unavailable',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+          ),
+          trailing: Text(
+            status.available ? 'Installed' : 'Missing',
+            style: TextStyle(
+              fontSize: 12,
+              color: status.available ? scheme.primary : scheme.error,
+            ),
+          ),
         ),
       ),
     );

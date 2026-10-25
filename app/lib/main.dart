@@ -12,9 +12,9 @@ import 'ui/orgbot_screen.dart';
 
 void main() => runApp(const OrgBotApp());
 
-ThemeData orgBotTheme(Brightness brightness) {
+ThemeData orgBotTheme(Brightness brightness, {bool desktop = false}) {
   final dark = brightness == Brightness.dark;
-  final scheme = ColorScheme.fromSeed(
+  var scheme = ColorScheme.fromSeed(
     seedColor: const Color(0xFF65B8AB),
     brightness: brightness,
     surface: dark ? const Color(0xFF101214) : const Color(0xFFF5F3EF),
@@ -30,7 +30,31 @@ ThemeData orgBotTheme(Brightness brightness) {
     surfaceContainerLow: dark ? const Color(0xFF1A1E21) : Colors.white,
     outlineVariant: dark ? const Color(0xFF343B3F) : const Color(0xFFD7DFDA),
   );
-  return ThemeData(
+  if (desktop) {
+    scheme = scheme.copyWith(
+      surface: dark ? const Color(0xFF191C1D) : const Color(0xFFFAF9F6),
+      surfaceContainerLow: dark
+          ? const Color(0xFF202425)
+          : const Color(0xFFF0EFEB),
+      surfaceContainerHighest: dark
+          ? const Color(0xFF2D3333)
+          : const Color(0xFFE7E9E4),
+      primary: dark ? const Color(0xFFA1C4B8) : const Color(0xFF315F53),
+      primaryContainer: dark
+          ? const Color(0xFF30443E)
+          : const Color(0xFFE0E8E0),
+      onPrimary: dark ? const Color(0xFF172821) : const Color(0xFFFAF9F6),
+      onPrimaryContainer: dark
+          ? const Color(0xFFDCE9E1)
+          : const Color(0xFF284C40),
+      onSurface: dark ? const Color(0xFFE7EAE6) : const Color(0xFF292F2C),
+      onSurfaceVariant: dark
+          ? const Color(0xFFA7B0AA)
+          : const Color(0xFF626D65),
+      outlineVariant: dark ? const Color(0xFF39413E) : const Color(0xFFD8DDD5),
+    );
+  }
+  final theme = ThemeData(
     useMaterial3: true,
     fontFamily: 'Inter',
     splashFactory: InkSparkle.splashFactory,
@@ -151,6 +175,113 @@ ThemeData orgBotTheme(Brightness brightness) {
       ),
     ),
   );
+  if (!desktop) return theme;
+  final shape = RoundedRectangleBorder(borderRadius: BorderRadius.circular(8));
+  return theme.copyWith(
+    visualDensity: VisualDensity.compact,
+    splashFactory: InkRipple.splashFactory,
+    appBarTheme: theme.appBarTheme.copyWith(toolbarHeight: 56),
+    iconTheme: theme.iconTheme.copyWith(size: 19),
+    iconButtonTheme: IconButtonThemeData(
+      style: IconButton.styleFrom(
+        minimumSize: const Size(36, 36),
+        padding: const EdgeInsets.all(8),
+        shape: shape,
+      ),
+    ),
+    listTileTheme: ListTileThemeData(
+      dense: true,
+      minVerticalPadding: 10,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+      shape: shape,
+      selectedTileColor: scheme.primaryContainer,
+      selectedColor: scheme.onPrimaryContainer,
+    ),
+    inputDecorationTheme: theme.inputDecorationTheme.copyWith(
+      fillColor: scheme.surfaceContainerLow,
+      isDense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(8),
+        borderSide: BorderSide.none,
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(8),
+        borderSide: BorderSide.none,
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(8),
+        borderSide: BorderSide(color: scheme.primary),
+      ),
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(40, 38),
+        shape: shape,
+      ),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        minimumSize: const Size(40, 36),
+        shape: shape,
+        side: BorderSide(color: scheme.outlineVariant),
+      ),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(
+        minimumSize: const Size(36, 36),
+        shape: shape,
+      ),
+    ),
+    segmentedButtonTheme: SegmentedButtonThemeData(
+      style: ButtonStyle(
+        shape: WidgetStatePropertyAll(shape),
+        side: WidgetStatePropertyAll(BorderSide(color: scheme.outlineVariant)),
+        backgroundColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.selected)
+              ? scheme.primaryContainer
+              : Colors.transparent,
+        ),
+        foregroundColor: WidgetStatePropertyAll(scheme.onSurface),
+      ),
+    ),
+    textTheme: theme.textTheme
+        .copyWith(
+          headlineLarge: const TextStyle(
+            fontFamily: 'Inter',
+            fontSize: 28,
+            height: 1.2,
+            fontWeight: FontWeight.w600,
+            letterSpacing: -.8,
+          ),
+          titleLarge: const TextStyle(
+            fontFamily: 'Inter',
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+            letterSpacing: -.5,
+          ),
+          titleMedium: const TextStyle(
+            fontFamily: 'Inter',
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+            letterSpacing: -.2,
+          ),
+          bodyMedium: const TextStyle(
+            fontFamily: 'Inter',
+            fontSize: 14,
+            height: 1.5,
+          ),
+          labelLarge: const TextStyle(
+            fontFamily: 'Inter',
+            fontSize: 13,
+            fontWeight: FontWeight.w500,
+          ),
+        )
+        .apply(bodyColor: scheme.onSurface, displayColor: scheme.onSurface),
+    dialogTheme: theme.dialogTheme.copyWith(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    ),
+  );
 }
 
 class OrgBotApp extends StatefulWidget {
@@ -208,10 +339,10 @@ class _OrgBotAppState extends State<OrgBotApp> {
 
   @override
   Widget build(BuildContext context) => MaterialApp(
-    title: 'OrgBot',
+    title: 'OrgBots',
     debugShowCheckedModeBanner: false,
-    theme: orgBotTheme(Brightness.light),
-    darkTheme: orgBotTheme(Brightness.dark),
+    theme: orgBotTheme(Brightness.light, desktop: canRunAgentClis),
+    darkTheme: orgBotTheme(Brightness.dark, desktop: canRunAgentClis),
     themeMode: ThemeMode.system,
     home: OrgBotScreen(library: _library, credentials: _credentials),
   );

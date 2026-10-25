@@ -12,11 +12,20 @@ class DesktopProjectPane extends StatefulWidget {
     required this.projectPath,
     this.roomId,
     this.onProjectSelected,
+    @visibleForTesting this.initialRootForTesting,
+    @visibleForTesting this.gitOutputForTesting,
   });
 
   final String? projectPath;
   final String? roomId;
   final ValueChanged<String>? onProjectSelected;
+
+  @visibleForTesting
+  final String? initialRootForTesting;
+
+  @visibleForTesting
+  final Future<String> Function(String root, List<String> args)?
+  gitOutputForTesting;
 
   @override
   State<DesktopProjectPane> createState() => _DesktopProjectPaneState();
@@ -92,17 +101,29 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
   String? _previewText;
   Uint8List? _previewBytes;
   String? _thumbnail;
-  String? _error;
+  String? _browseError;
+  String? _previewError;
   String? _gitError;
   String _gitView = 'status';
   String _gitOutput = '';
   bool _loading = false;
+  bool _gitLoading = false;
+  bool _previewOpen = false;
+  bool _previewLoading = false;
   bool _truncated = false;
   bool _showGit = false;
+  int _listGeneration = 0;
+  int _previewGeneration = 0;
+  int _gitGeneration = 0;
 
   @override
   void initState() {
     super.initState();
+    final testRoot = widget.initialRootForTesting;
+    if (testRoot != null) {
+      _root = testRoot;
+      _current = testRoot;
+    }
     final path = widget.projectPath?.trim();
     if (path != null && path.isNotEmpty) {
       unawaited(_setRoot(path).then<void>((_) {}));
@@ -115,6 +136,9 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
     if (oldWidget.projectPath != widget.projectPath) {
       final path = widget.projectPath?.trim();
       if (path == null || path.isEmpty) {
+        _listGeneration++;
+        _previewGeneration++;
+        _invalidateGit();
         setState(() {
           _root = null;
           _current = null;
@@ -122,7 +146,11 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
           _selected = null;
           _previewBytes = null;
           _previewText = null;
+          _previewError = null;
+          _browseError = null;
+          _previewOpen = false;
         });
+        unawaited(_removeThumbnail());
       } else {
         unawaited(_setRoot(path).then<void>((_) {}));
       }
@@ -143,29 +171,38 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
         if (accepted && mounted) widget.onProjectSelected?.call(_root!);
       }
     } catch (error) {
-      if (mounted) setState(() => _error = '$error');
+      if (mounted) setState(() => _browseError = '$error');
     }
   }
 
   Future<bool> _setRoot(String path) async {
+    final generation = ++_listGeneration;
+    _previewGeneration++;
+    final hadRoot = _root != null;
+    _invalidateGit();
+    if (mounted && hadRoot) setState(() {});
     try {
       final canonical = await Directory(path).resolveSymbolicLinks();
       if (!await Directory(canonical).exists()) {
         throw const FileSystemException('Choose an existing project folder.');
       }
-      if (!mounted) return false;
+      if (!mounted || generation != _listGeneration) return false;
       setState(() {
         _root = canonical;
         _current = canonical;
         _selected = null;
         _previewText = null;
         _previewBytes = null;
-        _error = null;
+        _previewError = null;
+        _previewOpen = false;
+        _browseError = null;
       });
       await _refresh();
-      return _error == null;
+      return _browseError == null;
     } catch (error) {
-      if (mounted) setState(() => _error = '$error');
+      if (mounted && generation == _listGeneration) {
+        setState(() => _browseError = '$error');
+      }
       return false;
     }
   }
@@ -174,9 +211,10 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
     final root = _root;
     final current = _current;
     if (root == null || current == null) return;
+    final generation = ++_listGeneration;
     setState(() {
       _loading = true;
-      _error = null;
+      _browseError = null;
     });
     try {
       final canonical = await Directory(current).resolveSymbolicLinks();
@@ -211,82 +249,133 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
             ? byType
             : a.name.toLowerCase().compareTo(b.name.toLowerCase());
       });
-      if (!mounted) return;
+      if (!mounted || generation != _listGeneration) return;
       setState(() {
         _current = canonical;
         _entries = entities;
         _truncated = truncated;
       });
     } catch (error) {
-      if (mounted) setState(() => _error = '$error');
+      if (mounted && generation == _listGeneration) {
+        setState(() => _browseError = '$error');
+      }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && generation == _listGeneration) {
+        setState(() => _loading = false);
+      }
     }
   }
 
   Future<void> _select(_ProjectEntry entry) async {
     if (entry.symlink || (!entry.directory && !entry.regularFile)) return;
+    final selection = ++_previewGeneration;
     if (entry.directory) {
-      final canonical = await Directory(entry.path).resolveSymbolicLinks();
-      _ensureWithinRoot(_root!, canonical);
-      setState(() {
-        _current = canonical;
-        _selected = null;
-        _previewText = null;
-        _previewBytes = null;
-      });
-      await _removeThumbnail();
-      await _refresh();
+      try {
+        final canonical = await Directory(entry.path).resolveSymbolicLinks();
+        _ensureWithinRoot(_root!, canonical);
+        if (!mounted || selection != _previewGeneration) return;
+        setState(() {
+          _current = canonical;
+          _selected = null;
+          _previewText = null;
+          _previewBytes = null;
+          _previewError = null;
+          _previewOpen = false;
+          _previewLoading = false;
+        });
+        await _removeThumbnail();
+        await _refresh();
+      } catch (error) {
+        if (mounted && selection == _previewGeneration) {
+          setState(() => _browseError = '$error');
+        }
+      }
       return;
     }
     try {
       final canonical = await File(entry.path).resolveSymbolicLinks();
       _ensureWithinRoot(_root!, canonical);
+      if (!mounted || selection != _previewGeneration) return;
       setState(() {
         _selected = canonical;
-        _previewText = null;
-        _previewBytes = null;
-        _error = null;
+        _previewOpen = true;
       });
-      await _removeThumbnail();
-      final ext = _extension(canonical);
-      if (_imageExtensions.contains(ext) ||
-          _videoExtensions.contains(ext) ||
-          _textExtensions.contains(ext)) {
-        final bytes = await DesktopFiles.readProjectFile(_root!, canonical);
-        if (_imageExtensions.contains(ext)) {
-          if (mounted) setState(() => _previewBytes = bytes);
-        } else if (_videoExtensions.contains(ext)) {
-          final thumbnail = await DesktopFiles.makeVideoThumbnailFromBytes(
-            bytes,
-          );
-          if (mounted) {
-            setState(() {
-              _previewBytes = bytes;
-              _thumbnail = thumbnail;
-            });
+      await _loadPreview(canonical, selection);
+    } catch (error) {
+      if (mounted && selection == _previewGeneration) {
+        setState(() => _previewError = '$error');
+      }
+    }
+  }
+
+  Future<void> _loadPreview(String path, int generation) async {
+    final root = _root;
+    if (root == null) return;
+    setState(() {
+      _previewText = null;
+      _previewBytes = null;
+      _previewError = null;
+      _previewLoading = true;
+    });
+    await _removeThumbnail();
+    if (!mounted || generation != _previewGeneration) return;
+    try {
+      final ext = _extension(path);
+      if (!_imageExtensions.contains(ext) &&
+          !_videoExtensions.contains(ext) &&
+          !_textExtensions.contains(ext)) {
+        setState(() {
+          _previewError = 'No internal preview is available for this file.';
+          _previewLoading = false;
+        });
+        return;
+      }
+      final bytes = await DesktopFiles.readProjectFile(root, path);
+      if (!mounted || generation != _previewGeneration) return;
+      if (_imageExtensions.contains(ext)) {
+        setState(() {
+          _previewBytes = bytes;
+          _previewLoading = false;
+        });
+      } else if (_videoExtensions.contains(ext)) {
+        final thumbnail = await DesktopFiles.makeVideoThumbnailFromBytes(bytes);
+        if (!mounted || generation != _previewGeneration) {
+          if (thumbnail != null) {
+            final output = File(thumbnail);
+            if (await output.exists()) {
+              await output.parent.delete(recursive: true);
+            }
           }
-        } else {
-          final preview = DesktopFiles.textPreview(bytes);
-          if (mounted) {
-            setState(() {
-              _previewText = preview;
-              if (preview == null) {
-                _error = 'Text preview is limited to 512 KiB.';
-              }
-            });
-          }
+          return;
         }
+        setState(() {
+          _previewBytes = bytes;
+          _thumbnail = thumbnail;
+          _previewLoading = false;
+        });
       } else {
-        if (mounted) {
-          setState(
-            () => _error = 'No internal preview is available for this file.',
-          );
-        }
+        final preview = DesktopFiles.textPreview(bytes);
+        setState(() {
+          _previewText = preview;
+          _previewError = preview == null
+              ? 'Text preview is limited to 512 KiB.'
+              : null;
+          _previewLoading = false;
+        });
       }
     } catch (error) {
-      if (mounted) setState(() => _error = '$error');
+      if (mounted && generation == _previewGeneration) {
+        setState(() {
+          _previewError = '$error';
+          _previewLoading = false;
+        });
+      }
     }
+  }
+
+  void _togglePreview() {
+    if (_selected == null) return;
+    setState(() => _previewOpen = !_previewOpen);
   }
 
   Future<void> _openSelected() async {
@@ -296,7 +385,7 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
       _ensureWithinRoot(_root!, await File(path).resolveSymbolicLinks());
       await DesktopFiles.openWith(path);
     } catch (error) {
-      if (mounted) setState(() => _error = '$error');
+      if (mounted) setState(() => _previewError = '$error');
     }
   }
 
@@ -308,12 +397,26 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
     if (await file.exists()) await file.parent.delete(recursive: true);
   }
 
+  void _invalidateGit() {
+    _gitGeneration++;
+    _gitLoading = false;
+    _gitError = null;
+    _gitOutput = '';
+  }
+
+  bool _isCurrentGitRequest(int generation, String root, String view) =>
+      mounted &&
+      generation == _gitGeneration &&
+      _root == root &&
+      _gitView == view;
+
   Future<void> _loadGit(String view) async {
     final root = _root;
     if (root == null) return;
+    final generation = ++_gitGeneration;
     setState(() {
       _gitView = view;
-      _loading = true;
+      _gitLoading = true;
       _gitError = null;
       _gitOutput = '';
     });
@@ -341,16 +444,22 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
       ],
     };
     try {
-      final output = await DesktopFiles.boundedGitOutput(root, args);
-      if (mounted) {
+      final output =
+          await (widget.gitOutputForTesting?.call(root, args) ??
+              DesktopFiles.boundedGitOutput(root, args));
+      if (_isCurrentGitRequest(generation, root, view)) {
         setState(
           () => _gitOutput = output.trim().isEmpty ? 'No changes.' : output,
         );
       }
     } catch (error) {
-      if (mounted) setState(() => _gitError = '$error');
+      if (_isCurrentGitRequest(generation, root, view)) {
+        setState(() => _gitError = '$error');
+      }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (_isCurrentGitRequest(generation, root, view)) {
+        setState(() => _gitLoading = false);
+      }
     }
   }
 
@@ -374,8 +483,21 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
           children: [
             Icon(Icons.folder_open_outlined, size: 42, color: scheme.primary),
             const SizedBox(height: 12),
-            Text('Choose a project folder to browse files and Git history.'),
+            const Text(
+              'Choose a project folder to browse files and Git history.',
+            ),
             const SizedBox(height: 12),
+            if (_browseError != null) ...[
+              SizedBox(
+                width: 360,
+                child: Text(
+                  _browseError!,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: scheme.error),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
             FilledButton.icon(
               onPressed: _chooseRoot,
               icon: const Icon(Icons.folder_open),
@@ -395,11 +517,18 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
           children: [
             _header(scheme),
             Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
               child: Row(
                 children: [
                   Expanded(
                     child: SegmentedButton<bool>(
+                      style: ButtonStyle(
+                        visualDensity: VisualDensity.compact,
+                        minimumSize: const WidgetStatePropertyAll(Size(0, 34)),
+                        padding: const WidgetStatePropertyAll(
+                          EdgeInsets.symmetric(horizontal: 10),
+                        ),
+                      ),
                       segments: const [
                         ButtonSegment(
                           value: false,
@@ -423,25 +552,35 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
                       },
                     ),
                   ),
+                  if (!_showGit && _selected != null) ...[
+                    const SizedBox(width: 8),
+                    IconButton(
+                      tooltip: _previewOpen ? 'Hide preview' : 'Show preview',
+                      onPressed: _togglePreview,
+                      icon: Icon(
+                        _previewOpen
+                            ? Icons.vertical_split_outlined
+                            : Icons.visibility_outlined,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
             Expanded(
               child: _showGit
                   ? _gitPanel(scheme)
-                  : wide
+                  : wide && _previewOpen
                   ? Row(
                       children: [
-                        Expanded(child: files),
-                        Expanded(child: preview),
+                        Expanded(flex: 5, child: files),
+                        const VerticalDivider(width: 1),
+                        Expanded(flex: 6, child: preview),
                       ],
                     )
-                  : Column(
-                      children: [
-                        Expanded(child: files),
-                        Expanded(child: preview),
-                      ],
-                    ),
+                  : !wide && _previewOpen
+                  ? preview
+                  : files,
             ),
           ],
         );
@@ -458,11 +597,14 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
           Icon(Icons.folder_copy_outlined, size: 18, color: scheme.primary),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
-              current,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelLarge,
+            child: Tooltip(
+              message: current,
+              child: Text(
+                current,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
             ),
           ),
           IconButton(
@@ -472,7 +614,7 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
           ),
           IconButton(
             tooltip: 'Refresh',
-            onPressed: _loading
+            onPressed: (_showGit ? _gitLoading : _loading)
                 ? null
                 : _showGit
                 ? () => _loadGit(_gitView)
@@ -501,41 +643,78 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
                 },
         ),
       if (_loading) const LinearProgressIndicator(minHeight: 2),
-      if (_error != null)
+      if (_browseError != null)
         Padding(
-          padding: const EdgeInsets.all(12),
-          child: Text(_error!, style: TextStyle(color: scheme.error)),
+          padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _browseError!,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: scheme.error),
+                ),
+              ),
+              TextButton(onPressed: _refresh, child: const Text('Retry')),
+            ],
+          ),
         ),
       Expanded(
         child: ListView.builder(
           itemCount: _entries.length + (_truncated ? 1 : 0),
           itemBuilder: (context, index) {
             if (index == _entries.length) {
-              return const ListTile(
-                title: Text('Showing the first 500 entries.'),
+              return const SizedBox(
+                height: 36,
+                child: Center(child: Text('Showing first 500 entries')),
               );
             }
             final entry = _entries[index];
-            return ListTile(
-              dense: true,
-              selected: entry.path == _selected,
-              leading: Icon(
-                entry.symlink
-                    ? Icons.link_off
-                    : entry.directory
-                    ? Icons.folder_outlined
-                    : Icons.insert_drive_file_outlined,
+            return Tooltip(
+              message: entry.symlink
+                  ? '${entry.name} · Symlink not followed'
+                  : entry.path,
+              child: InkWell(
+                onTap: _loading || entry.symlink ? null : () => _select(entry),
+                child: Container(
+                  height: 38,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  color: entry.path == _selected
+                      ? scheme.secondaryContainer.withValues(alpha: .55)
+                      : null,
+                  child: Row(
+                    children: [
+                      Icon(
+                        entry.symlink
+                            ? Icons.link_off
+                            : entry.directory
+                            ? Icons.folder_outlined
+                            : Icons.insert_drive_file_outlined,
+                        size: 18,
+                        color: entry.symlink
+                            ? scheme.onSurfaceVariant
+                            : scheme.primary,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          entry.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
+                      ),
+                      if (entry.symlink)
+                        Icon(
+                          Icons.block,
+                          size: 14,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                    ],
+                  ),
+                ),
               ),
-              title: Text(
-                entry.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              subtitle: entry.symlink
-                  ? const Text('Symlink not followed')
-                  : null,
-              enabled: !entry.symlink && (entry.directory || entry.regularFile),
-              onTap: _loading ? null : () => _select(entry),
             );
           },
         ),
@@ -547,11 +726,28 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
     final path = _selected;
     final ext = path == null ? '' : _extension(path);
     Widget body;
-    if (path == null) {
+    if (_previewLoading) {
+      body = const Center(child: CircularProgressIndicator(strokeWidth: 2));
+    } else if (_previewError != null) {
       body = Center(
-        child: Text(
-          'Select a file to preview or open it.',
-          style: TextStyle(color: scheme.onSurfaceVariant),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.warning_amber_outlined, color: scheme.error),
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Text(_previewError!, textAlign: TextAlign.center),
+            ),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              onPressed: path == null
+                  ? null
+                  : () => _loadPreview(path, ++_previewGeneration),
+              icon: const Icon(Icons.refresh, size: 16),
+              label: const Text('Retry'),
+            ),
+          ],
         ),
       );
     } else if (_imageExtensions.contains(ext) && _previewBytes != null) {
@@ -597,15 +793,27 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
       children: [
         Container(
           alignment: Alignment.centerLeft,
-          padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
+          padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+          ),
           child: Row(
             children: [
+              IconButton(
+                tooltip: 'Hide preview',
+                visualDensity: VisualDensity.compact,
+                onPressed: _togglePreview,
+                icon: const Icon(Icons.close, size: 18),
+              ),
               Expanded(
-                child: Text(
-                  path?.split(Platform.pathSeparator).last ?? 'Preview',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleSmall,
+                child: Tooltip(
+                  message: path ?? '',
+                  child: Text(
+                    path?.split(Platform.pathSeparator).last ?? '',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
                 ),
               ),
               if (path != null)
@@ -617,21 +825,8 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
             ],
           ),
         ),
-        if (_error != null)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Text(_error!, style: TextStyle(color: scheme.error)),
-          ),
         Expanded(
-          child: Container(
-            margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-            decoration: BoxDecoration(
-              color: scheme.surfaceContainerLow,
-              border: Border.all(color: scheme.outlineVariant),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: body,
-          ),
+          child: Padding(padding: const EdgeInsets.all(8), child: body),
         ),
       ],
     );
@@ -642,9 +837,7 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
     children: [
       Icon(Icons.insert_drive_file_outlined, size: 42, color: scheme.primary),
       const SizedBox(height: 8),
-      const Text('No internal preview for this file.'),
-      const SizedBox(height: 4),
-      const Text('Use Open With to launch a desktop application.'),
+      const Text('No internal preview'),
     ],
   );
 
@@ -662,7 +855,7 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
           onSelectionChanged: (selection) => _loadGit(selection.first),
         ),
       ),
-      if (_loading) const LinearProgressIndicator(minHeight: 2),
+      if (_gitLoading) const LinearProgressIndicator(minHeight: 2),
       if (_gitError != null)
         Padding(
           padding: const EdgeInsets.all(12),
@@ -673,7 +866,7 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
           padding: const EdgeInsets.all(14),
           child: SelectableText(
             _gitOutput.isEmpty && _gitError == null
-                ? 'Loading Git…'
+                ? (_gitLoading ? 'Loading Git…' : 'No Git output.')
                 : _gitOutput,
             style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
           ),

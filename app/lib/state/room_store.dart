@@ -128,6 +128,9 @@ class RoomStore extends ChangeNotifier {
   /// turns — so without this your own text sits invisible until the current
   /// turn ends, which reads as the app having swallowed it.
   final List<ChatMessage> _pending = [];
+  List<ChatMessage>? _messagesView;
+
+  void _invalidateMessages() => _messagesView = null;
 
   /// The highest log position applied so far.
   ///
@@ -176,7 +179,7 @@ class RoomStore extends ChangeNotifier {
   /// The transcript, oldest first, with anything you have said but the room
   /// has not confirmed yet shown at the end.
   List<ChatMessage> get messages =>
-      List.unmodifiable([..._messages, ..._pending]);
+      _messagesView ??= List.unmodifiable([..._messages, ..._pending]);
 
   /// Whether `message` is still awaiting confirmation from the room.
   bool isPending(ChatMessage message) =>
@@ -201,6 +204,7 @@ class RoomStore extends ChangeNotifier {
         files: files,
       ),
     );
+    _invalidateMessages();
     notifyListeners();
   }
 
@@ -216,7 +220,10 @@ class RoomStore extends ChangeNotifier {
             arrived.files.map((f) => f.id).toList(),
           ),
     );
-    if (index >= 0) _pending.removeAt(index);
+    if (index >= 0) {
+      _pending.removeAt(index);
+      _invalidateMessages();
+    }
   }
 
   /// Bots whose backend is currently failing, with the reason.
@@ -386,6 +393,7 @@ class RoomStore extends ChangeNotifier {
     // A fresh snapshot replaces everything; the transcript is rebuilt from the
     // event tail that follows.
     _messages.clear();
+    _invalidateMessages();
     _artifacts.clear();
     _handoffs.clear();
     notifyListeners();
@@ -414,6 +422,7 @@ class RoomStore extends ChangeNotifier {
           final message = ChatMessage.fromJson(json);
           _confirmPending(message);
           _messages.add(message);
+          _invalidateMessages();
           final activity = _activity[message.author.agentId];
           if (activity != null) {
             activity.lastError = null;

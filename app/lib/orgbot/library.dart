@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models.dart';
 import 'credentials.dart';
+import '../protocol/models.dart' show ChatMessage;
 import '../state/engine_room_controller.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
@@ -57,18 +58,45 @@ class MemorySaver implements Saver {
 class Library extends ChangeNotifier {
   bool _disposed = false;
   final Map<String, EngineRoomController> sessions = {};
+  final Map<String, VoidCallback> _sessionListeners = {};
+  final Map<String, _SessionSummary> _sessionSummaries = {};
 
   EngineRoomController session(RoomDef room) =>
       sessions.putIfAbsent(room.id, () {
         final session = EngineRoomController(room: room, library: this);
-        session.addListener(notifyListeners);
+        _sessionSummaries[room.id] = _summary(session);
+        void changed() {
+          final next = _summary(session);
+          if (_sessionSummaries[room.id] == next) return;
+          _sessionSummaries[room.id] = next;
+          if (!_disposed) notifyListeners();
+        }
+
+        _sessionListeners[room.id] = changed;
+        session.addListener(changed);
         return session;
       });
+
+  static _SessionSummary _summary(EngineRoomController session) {
+    final messages = session.store?.messages ?? const <ChatMessage>[];
+    final latest = messages.isEmpty ? null : messages.last;
+    return (
+      phase: session.phase,
+      isActive: session.store?.isActive ?? false,
+      runStateLabel: session.store?.runStateLabel ?? '',
+      error: session.error,
+      storeError: session.store?.lastError,
+      latestMessageId: latest?.id,
+      latestMessageBody: latest?.body,
+    );
+  }
 
   Future<void> stopRoom(String id) async {
     final session = sessions.remove(id);
     if (session != null) {
-      session.removeListener(notifyListeners);
+      final listener = _sessionListeners.remove(id);
+      if (listener != null) session.removeListener(listener);
+      _sessionSummaries.remove(id);
       await session.stop();
       session.dispose();
     }
@@ -78,11 +106,14 @@ class Library extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    for (final session in sessions.values) {
-      session.removeListener(notifyListeners);
-      session.dispose();
+    for (final entry in sessions.entries) {
+      final listener = _sessionListeners[entry.key];
+      if (listener != null) entry.value.removeListener(listener);
+      entry.value.dispose();
     }
     sessions.clear();
+    _sessionListeners.clear();
+    _sessionSummaries.clear();
     super.dispose();
   }
 
@@ -230,3 +261,13 @@ class Library extends ChangeNotifier {
     _persist();
   }
 }
+
+typedef _SessionSummary = ({
+  RoomLaunch phase,
+  bool isActive,
+  String runStateLabel,
+  String? error,
+  String? storeError,
+  String? latestMessageId,
+  String? latestMessageBody,
+});

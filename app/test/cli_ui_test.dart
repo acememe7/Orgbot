@@ -121,7 +121,7 @@ void main() {
       await tester.tap(find.text('Connections & tools').first);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
-      expect(find.text('Setup'), findsOneWidget);
+      expect(find.text('Connections & tools'), findsNWidgets(2));
       expect(find.text('Codex CLI'), findsOneWidget);
       expect(find.text('Claude Code'), findsOneWidget);
       expect(find.text('Grok CLI'), findsOneWidget);

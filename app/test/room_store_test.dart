@@ -577,4 +577,71 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(store.agents.first.status, AgentStatus.working);
   });
+
+  test('message view is stable until transcript content changes', () async {
+    final client = FakeClient();
+    final store = RoomStore(client);
+    addTearDown(store.dispose);
+    final empty = store.messages;
+    expect(identical(store.messages, empty), isTrue);
+
+    store.addPending('Alex', 'pending note');
+    final pending = store.messages;
+    expect(identical(pending, store.messages), isTrue);
+    expect(pending.single.body, 'pending note');
+
+    client.emit({
+      'type': 'snapshot',
+      'room': {
+        'id': 'room_1',
+        'spec': {'name': 'Room', 'goal': ''},
+      },
+      'roster': [
+        {
+          'id': 'bot_a',
+          'handle': 'iris',
+          'display_name': 'Iris',
+          'roles': [],
+          'status': 'idle',
+        },
+      ],
+      'tasks': [],
+      'head': 0,
+    });
+    await Future<void>.delayed(Duration.zero);
+    final reset = store.messages;
+    expect(identical(reset, pending), isFalse);
+    expect(reset.single.body, 'pending note');
+    final awaitingEcho = reset;
+
+    client.emit(
+      event({
+        'event': 'message_posted',
+        'message': {
+          'id': 'msg_1',
+          'author': {'kind': 'human', 'name': 'Alex'},
+          'body': 'pending note',
+          'intent': 'ask',
+          'sent_at': 1,
+        },
+      }),
+    );
+    await Future<void>.delayed(Duration.zero);
+    final confirmed = store.messages;
+    expect(identical(confirmed, store.messages), isTrue);
+    expect(identical(confirmed, awaitingEcho), isFalse);
+    expect(identical(confirmed, reset), isFalse);
+    expect(confirmed.single.id, 'msg_1');
+
+    var notifications = 0;
+    store.addListener(() => notifications++);
+    client.emit({
+      'type': 'stream',
+      'agent': 'bot_a',
+      'event': {'type': 'text_delta', 'text': 'activity only'},
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(notifications, 1);
+    expect(identical(store.messages, confirmed), isTrue);
+  });
 }
