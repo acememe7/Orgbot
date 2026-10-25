@@ -15,6 +15,8 @@ import 'package:orgbot_app/state/engine_room_controller.dart';
 import 'package:orgbot_app/state/room_store.dart';
 import 'package:orgbot_app/ui/engine_room_screen.dart';
 import 'package:orgbot_app/ui/orgbot_screen.dart';
+import 'package:orgbot_app/workspace/workspace_screen.dart';
+import 'package:orgbot_app/orgbot/room_check.dart';
 import 'room_chat_ui_test.dart' show FakeClient, seeded, event;
 
 class PreviewRoom extends EngineRoomController {
@@ -99,6 +101,7 @@ void main() {
       final room = library.addRoom(
         RoomDef(
           name: 'Aether research',
+          path: Directory.systemTemp.path,
           goal:
               'Understand how researchers collect and evaluate their sources.',
           bots: [RoomSlot(bot.id)],
@@ -170,6 +173,10 @@ void main() {
         app(EngineRoomScreen(room: room, library: library)),
       );
       await tester.pumpAndSettle();
+      final filesPage = tester.widget<TabBarView>(
+        find.byType(TabBarView).last,
+      ).children[2] as WorkspaceFilesScreen;
+      expect(filesPage.config.path, Directory(expandHome(room.path)).absolute.path);
       await capture('chat-dark');
       await tester.drag(find.byType(CustomScrollView), const Offset(0, 300));
       await tester.pumpAndSettle();
@@ -200,7 +207,13 @@ void main() {
       }
       tester.view.physicalSize = const Size(390, 844);
       await tester.pumpWidget(
-        app(OrgBotScreen(library: library, credentials: credentials)),
+        app(
+          OrgBotScreen(
+            library: library,
+            credentials: credentials,
+            desktopClis: false,
+          ),
+        ),
       );
       await tester.pumpAndSettle();
       await capture('rooms-dark');
@@ -208,7 +221,7 @@ void main() {
       await tester.pumpAndSettle();
       await capture('team-dark');
       await tester.tap(find.byTooltip('New bot'));
-      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 400));
       await capture('editor-dark');
       expect(tester.takeException(), isNull);
       await tester.tap(find.byType(CloseButton));
@@ -225,7 +238,11 @@ void main() {
       await tester.pumpAndSettle();
       await tester.pumpWidget(
         app(
-          OrgBotScreen(library: library, credentials: credentials),
+          OrgBotScreen(
+            library: library,
+            credentials: credentials,
+            desktopClis: false,
+          ),
           brightness: Brightness.light,
         ),
       );
@@ -235,7 +252,11 @@ void main() {
         tester.view.physicalSize = const Size(360, 780);
         await tester.pumpWidget(
           app(
-            OrgBotScreen(library: library, credentials: credentials),
+            OrgBotScreen(
+              library: library,
+              credentials: credentials,
+              desktopClis: false,
+            ),
             brightness: brightness,
             scale: 1.6,
           ),
@@ -245,7 +266,7 @@ void main() {
         await tester.tap(find.text('Bots'));
         await tester.pumpAndSettle();
         await tester.tap(find.byTooltip('New bot'));
-        await tester.pumpAndSettle();
+        await tester.pump(const Duration(milliseconds: 400));
         await capture('editor-large');
         expect(tester.takeException(), isNull);
         await tester.tap(find.byType(CloseButton));

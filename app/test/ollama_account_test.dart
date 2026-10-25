@@ -224,7 +224,9 @@ void main() {
         return HttpResponse(200, '{"data":[{"id":"deepseek-chat"}]}');
       };
       await tester.pumpWidget(
-        MaterialApp(home: OrgBotScreen(library: library)),
+        MaterialApp(
+          home: OrgBotScreen(library: library, desktopClis: false),
+        ),
       );
       await tester.tap(find.text('Bots'));
       await tester.pumpAndSettle();

@@ -15,8 +15,10 @@ import 'package:flutter/material.dart';
 
 import '../orgbot/library.dart';
 import '../orgbot/models.dart' as defs;
+import '../engine/agent_cli.dart';
 import '../state/engine_room_controller.dart';
 import '../workspace/workspace_screen.dart';
+import '../workspace/workspace.dart';
 import '../workspace/attachments.dart';
 import '../protocol/models.dart' show ChatFile;
 import '../orgbot/room_check.dart';
@@ -486,7 +488,13 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
                       ],
                     ),
                     WorkspaceFilesScreen(
-                      config: widget.room.workspace,
+                      config: canRunAgentClis
+                          ? WorkspaceConfig(
+                              path: Directory(
+                                expandHome(widget.room.path),
+                              ).absolute.path,
+                            )
+                          : widget.room.workspace,
                       roomId: widget.room.id,
                       embedded: true,
                     ),
@@ -617,43 +625,48 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
       width: double.infinity,
       color: tone.withValues(alpha: 0.12),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 220),
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(
-                blocking ? Icons.error_outline : Icons.info_outline,
-                size: 15,
-                color: tone,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  blocking
-                      ? 'This room cannot finish its work'
-                      : 'Worth knowing about this room',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
+              Row(
+                children: [
+                  Icon(
+                    blocking ? Icons.error_outline : Icons.info_outline,
+                    size: 15,
                     color: tone,
                   ),
-                ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      blocking
+                          ? 'This room cannot finish its work'
+                          : 'Worth knowing about this room',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: tone,
+                      ),
+                    ),
+                  ),
+                ],
               ),
+              for (final issue in _controller.issues) ...[
+                const SizedBox(height: 5),
+                Text(
+                  '${issue.summary}  ${issue.fix}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    height: 1.35,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
             ],
           ),
-          for (final issue in _controller.issues) ...[
-            const SizedBox(height: 5),
-            Text(
-              '${issue.summary}  ${issue.fix}',
-              style: TextStyle(
-                fontSize: 11,
-                height: 1.35,
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ],
+        ),
       ),
     );
   }

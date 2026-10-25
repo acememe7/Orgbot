@@ -94,7 +94,11 @@ void main() {
           ),
           child: child!,
         ),
-        home: OrgBotScreen(library: library, credentials: credentials),
+        home: OrgBotScreen(
+          library: library,
+          credentials: credentials,
+          desktopClis: false,
+        ),
       );
       await tester.pumpWidget(app(false));
       await tester.pumpAndSettle();

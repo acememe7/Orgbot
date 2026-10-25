@@ -5,11 +5,60 @@
 // parsing of each CLI's event stream.
 //
 // ignore_for_file: prefer_interpolation_to_compose_strings
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:orgbot_app/engine/agent_cli.dart';
 import 'package:orgbot_app/orgbot/models.dart';
 
 void main() {
+  group('CLI discovery', () {
+    test('matches the core search order and supported home directories', () async {
+      if (Platform.isWindows) return;
+      final root = await Directory.systemTemp.createTemp('orgbot-cli-test-');
+      try {
+        final local = await _executable(root, 'home/.local/bin/grok');
+        final npm = await _executable(root, 'home/.npm-global/bin/grok');
+        final grok = await _executable(root, 'home/.grok/bin/grok');
+        final bun = await _executable(root, 'home/.bun/bin/grok');
+        final pathBinary = await _executable(root, 'path-bin/grok');
+        final home = '${root.path}/home';
+
+        expect(findCli(CliKind.grok, path: '', home: home).path, local.path);
+        expect(
+          findCli(CliKind.grok, path: pathBinary.parent.path, home: home).path,
+          pathBinary.path,
+        );
+
+        await local.delete();
+        expect(findCli(CliKind.grok, path: '', home: home).path, npm.path);
+
+        await npm.delete();
+        expect(findCli(CliKind.grok, path: '', home: home).path, grok.path);
+
+        await grok.delete();
+        expect(findCli(CliKind.grok, path: '', home: home).available, isFalse);
+        expect(bun.existsSync(), isTrue);
+
+      } finally {
+        await root.delete(recursive: true);
+      }
+    });
+
+    test('does not treat an executable directory as a CLI binary', () async {
+      if (Platform.isWindows) return;
+      final root = await Directory.systemTemp.createTemp('orgbot-cli-test-');
+      try {
+        final binaryDirectory = Directory('${root.path}/codex');
+        await binaryDirectory.create();
+        final status = findCli(CliKind.codex, path: root.path, home: '');
+        expect(status.available, isFalse);
+      } finally {
+        await root.delete(recursive: true);
+      }
+    });
+  });
+
   group('argv', () {
     test('a fresh codex session asks for JSON and skips the git check', () {
       final args = buildArgs(cli: CliKind.codex, prompt: 'hello');
@@ -172,6 +221,17 @@ not json either
       );
     });
   });
+}
+
+Future<File> _executable(Directory root, String relativePath) async {
+  final file = File('${root.path}/$relativePath');
+  await file.parent.create(recursive: true);
+  await file.writeAsString('#!/bin/sh\nexit 0\n');
+  final result = await Process.run('chmod', ['+x', file.path]);
+  if (result.exitCode != 0) {
+    throw StateError('Could not make the CLI fixture executable.');
+  }
+  return file;
 }
 
 /// Captured from a real `grok -p ... --output-format streaming-messages-json`

@@ -113,7 +113,7 @@ class _ObjectivesPaneState extends State<ObjectivesPane> {
                 const SizedBox(height: 16),
                 _CriticalPath(digest: digest, store: store),
               ],
-              const SizedBox(height: 14),
+              const SizedBox(height: 12),
               _UtilizationStrip(utilization: digest.utilization),
               if (digest.spend.isNotEmpty) ...[
                 const SizedBox(height: 14),
@@ -675,42 +675,56 @@ class _Empty extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Center(
-      child: Padding(
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
         padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.flag_outlined, size: 34, color: scheme.onSurfaceVariant),
-            const SizedBox(height: 12),
-            Text(
-              hasTasks
-                  ? 'No objectives yet'
-                  : 'Nothing on the board yet',
-              style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              hasTasks
-                  ? 'The room is working, but has not grouped its work into '
-                      'outcomes yet.'
-                  : 'Objectives appear here as the room takes on work.',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 12.5,
-                height: 1.4,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            minHeight: constraints.maxHeight.isFinite &&
+                    constraints.maxHeight > 64
+                ? constraints.maxHeight - 64
+                : 0,
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.flag_outlined,
+                size: 34,
                 color: scheme.onSurfaceVariant,
               ),
-            ),
-            if (hasTasks && onShowAllRecords != null) ...[
               const SizedBox(height: 14),
-              TextButton.icon(
-                onPressed: onShowAllRecords,
-                icon: const Icon(Icons.list_alt_outlined, size: 18),
-                label: const Text('Show the full board'),
+              Text(
+                hasTasks ? 'No objectives yet' : 'Nothing on the board yet',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14,
+                ),
               ),
+              const SizedBox(height: 6),
+              Text(
+                hasTasks
+                    ? 'The room is working, but has not grouped its work into '
+                        'outcomes yet.'
+                    : 'Objectives appear here as the room takes on work.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  height: 1.4,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+              if (hasTasks && onShowAllRecords != null) ...[
+                const SizedBox(height: 14),
+                TextButton.icon(
+                  onPressed: onShowAllRecords,
+                  icon: const Icon(Icons.list_alt_outlined, size: 18),
+                  label: const Text('Show the full board'),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );

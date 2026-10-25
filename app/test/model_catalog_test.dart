@@ -25,17 +25,19 @@ Available models:
   - grok-4.5
 ''';
     final list = await ModelCatalog.load(ProviderKind.grok);
-    // The CLI may be absent in CI, in which case the fallback is correct too;
-    // when it is present the parse must find both models.
-    if (list.source == ModelSource.live) {
-      expect(list.options.map((o) => o.id), containsAll(['grok-4.6', 'grok-4.5']));
-      expect(list.options.firstWhere((o) => o.id == 'grok-4.6').note, 'Default');
-    }
+    expect(
+      list.options.map((o) => o.id),
+      containsAll(['grok-4.6', 'grok-4.5']),
+    );
+    expect(list.options.firstWhere((o) => o.id == 'grok-4.6').note, 'Default');
   });
 
   test('claude offers aliases that follow the subscription', () async {
     final list = await ModelCatalog.load(ProviderKind.anthropic);
-    expect(list.options.map((o) => o.id), containsAll(['opus', 'sonnet', 'haiku']));
+    expect(
+      list.options.map((o) => o.id),
+      containsAll(['opus', 'sonnet', 'haiku']),
+    );
     // An empty id means "let the plan decide", which must stay available.
     expect(list.options.any((o) => o.id.isEmpty), isTrue);
   });
@@ -56,16 +58,25 @@ Available models:
   });
 
   test('a subscription backend defaults to the provider choosing', () {
-    for (final p in [ProviderKind.anthropic, ProviderKind.codex, ProviderKind.grok]) {
-      expect(ModelCatalog.defaultFor(p), isEmpty,
-          reason: '$p should let the plan pick unless told otherwise');
+    for (final p in [
+      ProviderKind.anthropic,
+      ProviderKind.codex,
+      ProviderKind.grok,
+    ]) {
+      expect(
+        ModelCatalog.defaultFor(p),
+        isEmpty,
+        reason: '$p should let the plan pick unless told otherwise',
+      );
     }
     expect(ModelCatalog.defaultFor(ProviderKind.deepseek), 'deepseek-chat');
   });
 
   test('an unknown id still renders as itself', () {
-    expect(ModelCatalog.labelFor(ProviderKind.deepseek, 'some-private-model'),
-        'some-private-model');
+    expect(
+      ModelCatalog.labelFor(ProviderKind.deepseek, 'some-private-model'),
+      'some-private-model',
+    );
     expect(ModelCatalog.labelFor(ProviderKind.anthropic, ''), 'default model');
   });
 

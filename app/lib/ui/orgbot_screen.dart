@@ -25,7 +25,13 @@ import '../orgbot/roles.dart';
 class OrgBotScreen extends StatefulWidget {
   final Library library;
   final Credentials? credentials;
-  const OrgBotScreen({super.key, required this.library, this.credentials});
+  final bool? desktopClis;
+  const OrgBotScreen({
+    super.key,
+    required this.library,
+    this.credentials,
+    this.desktopClis,
+  });
 
   @override
   State<OrgBotScreen> createState() => _OrgBotScreenState();
@@ -35,6 +41,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
   int _tab = 0;
   final _pages = PageController();
   final _search = List.generate(2, (_) => TextEditingController());
+  bool get _desktopClis => widget.desktopClis ?? canRunAgentClis;
   @override
   void dispose() {
     _pages.dispose();
@@ -129,6 +136,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
           bottomNavigationBar: WorkspaceNavigation(
             selected: _tab,
             onSelected: _selectTab,
+            desktop: _desktopClis,
           ),
           body: Center(
             child: ConstrainedBox(
@@ -166,7 +174,9 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                                             0 => _roomsList(lib),
                                             1 => _botsList(lib),
                                             _ =>
-                                              credentials == null
+                                              _desktopClis
+                                                  ? const _CliSetup()
+                                                  : credentials == null
                                                   ? const Center(
                                                       child: Text(
                                                         'Accounts are unavailable.',
@@ -196,7 +206,9 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
 
   Widget _pageHeader(int page, Library lib) {
     final scheme = Theme.of(context).colorScheme;
-    final title = ['Rooms', 'Team', 'Accounts'][page];
+    final title = page == 2
+        ? (_desktopClis ? 'Setup' : 'Accounts')
+        : ['Rooms', 'Team'][page];
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 10, 24, 20),
       child: Column(
@@ -229,6 +241,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
               0 =>
                 '${lib.rooms.length} ${lib.rooms.length == 1 ? 'room' : 'rooms'} · ${lib.bots.length} ${lib.bots.length == 1 ? 'teammate' : 'teammates'}',
               1 => '${lib.bots.length} teammates, each with a role.',
+              2 when _desktopClis => 'Agent CLIs available to this workspace.',
               _ => 'Subscriptions and API access, saved on this device.',
             },
             style: TextStyle(
@@ -455,6 +468,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
       context: context,
       builder: (context) => _BotEditor(
         existing: existing,
+        desktopClis: _desktopClis,
         onSave: (bot) async {
           if (existing == null) {
             widget.library.addBot(bot);
@@ -760,7 +774,8 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                             : defaultMaxTurns,
                         decoration: const InputDecoration(
                           labelText: 'Turn budget',
-                          helperText: 'Pauses the room when spent, so it never '
+                          helperText:
+                              'Pauses the room when spent, so it never '
                               'runs up a bill unwatched. You will be told.',
                         ),
                         items: [
@@ -970,6 +985,62 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
   }
 }
 
+class _CliSetup extends StatefulWidget {
+  const _CliSetup();
+
+  @override
+  State<_CliSetup> createState() => _CliSetupState();
+}
+
+class _CliSetupState extends State<_CliSetup> {
+  @override
+  Widget build(BuildContext context) => ListView(
+    key: const ValueKey('cli-setup'),
+    padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+    children: [
+      for (final cli in CliKind.values)
+        _CliStatusTile(key: ValueKey('cli-${cli.name}'), cli: cli),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: OutlinedButton.icon(
+          onPressed: () => setState(() {}),
+          icon: const Icon(Icons.refresh),
+          label: const Text('Refresh'),
+        ),
+      ),
+    ],
+  );
+}
+
+class _CliStatusTile extends StatelessWidget {
+  const _CliStatusTile({super.key, required this.cli});
+  final CliKind cli;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final status = findCli(cli);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(20),
+        child: ListTile(
+          title: Text(_cliLabel(cli)),
+          subtitle: Text(status.path ?? status.problem ?? 'Unavailable'),
+          trailing: Text(status.available ? 'Installed' : 'Missing'),
+        ),
+      ),
+    );
+  }
+}
+
+String _cliLabel(CliKind cli) => switch (cli) {
+  CliKind.codex => 'Codex CLI',
+  CliKind.claude => 'Claude Code',
+  CliKind.grok => 'Grok CLI',
+};
+
 /// The bot editor.
 ///
 /// Split out of the screen because it has real state of its own: the model
@@ -977,8 +1048,13 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
 /// arrives after the dialog is already on screen.
 class _BotEditor extends StatefulWidget {
   final BotDef? existing;
+  final bool desktopClis;
   final Future<void> Function(BotDef) onSave;
-  const _BotEditor({required this.existing, required this.onSave});
+  const _BotEditor({
+    required this.existing,
+    required this.onSave,
+    required this.desktopClis,
+  });
 
   @override
   State<_BotEditor> createState() => _BotEditorState();
@@ -1013,9 +1089,7 @@ class _BotEditorState extends State<_BotEditor> {
     _handle = TextEditingController(text: b?.handle ?? '');
     _persona = TextEditingController(text: b?.persona ?? '');
     _key = TextEditingController(text: b?.apiKey ?? '');
-    _provider =
-        b?.provider ??
-        (canRunAgentClis ? ProviderKind.anthropic : ProviderKind.codex);
+    _provider = b?.provider ?? ProviderKind.codex;
     _role = b?.role ?? Roles.defaultKey;
     _powers = b?.powers;
     _model = b?.model ?? '';
@@ -1034,6 +1108,7 @@ class _BotEditorState extends State<_BotEditor> {
 
   Future<void> _loadModels({bool refresh = false}) async {
     final provider = _provider;
+    if (widget.desktopClis && !_isSupportedDesktopProvider) return;
     setState(() {
       _loadingModels = true;
       _models = null;
@@ -1042,6 +1117,7 @@ class _BotEditorState extends State<_BotEditor> {
       provider,
       apiKey: _key.text.trim(),
       refresh: refresh,
+      canRunClis: widget.desktopClis,
     );
     if (!mounted || provider != _provider) return;
     setState(() {
@@ -1061,6 +1137,11 @@ class _BotEditorState extends State<_BotEditor> {
       }
     });
   }
+
+  bool get _isSupportedDesktopProvider =>
+      _provider == ProviderKind.anthropic ||
+      _provider == ProviderKind.codex ||
+      _provider == ProviderKind.grok;
 
   void _changeProvider(ProviderKind next) {
     setState(() {
@@ -1158,41 +1239,64 @@ class _BotEditorState extends State<_BotEditor> {
                 children: [_rolePicker(scheme)],
               ),
               FormSection(
-                title: 'Model & account',
+                title: widget.desktopClis ? 'Model & CLI' : 'Model & account',
                 children: [
                   DropdownButtonFormField<ProviderKind>(
                     initialValue: _provider,
                     isExpanded: true,
                     decoration: const InputDecoration(labelText: 'Provider'),
-                    items: ProviderKind.values
-                        // Offer what could actually run here. A provider whose
-                        // only sign-in is a CLI cannot be set up on a phone —
-                        // but it can already be signed in, because `orgbot
-                        // pair` carries a desktop sign-in across, and the
-                        // engine then calls the provider's API directly. That
-                        // is how Claude gets onto a phone; hiding it whenever
-                        // there was no CLI hid an account that was already
-                        // there and working.
-                        .where(
-                          (k) =>
-                              k.cli == null ||
-                              canRunAgentClis ||
-                              k.signsInOnDevice ||
-                              ModelCatalog.credentials?.isSignedIn(k) == true,
-                        )
-                        .map(
-                          (k) => DropdownMenuItem(
-                            value: k,
-                            child: Text(
-                              k.label,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        )
-                        .toList(),
+                    items:
+                        (widget.desktopClis
+                                ? [
+                                    ProviderKind.codex,
+                                    ProviderKind.anthropic,
+                                    ProviderKind.grok,
+                                    if (!_isSupportedDesktopProvider) _provider,
+                                  ]
+                                : ProviderKind.values
+                                  // Offer what could actually run here. A provider whose
+                                  // only sign-in is a CLI cannot be set up on a phone —
+                                  // but it can already be signed in, because `orgbot
+                                  // pair` carries a desktop sign-in across, and the
+                                  // engine then calls the provider's API directly. That
+                                  // is how Claude gets onto a phone; hiding it whenever
+                                  // there was no CLI hid an account that was already
+                                  // there and working.
+                                  .where(
+                                    (k) =>
+                                        k.cli == null ||
+                                        widget.desktopClis ||
+                                        k.signsInOnDevice ||
+                                        ModelCatalog.credentials?.isSignedIn(
+                                              k,
+                                            ) ==
+                                            true,
+                                  ))
+                            .map(
+                              (k) => DropdownMenuItem(
+                                value: k,
+                                child: Text(
+                                  widget.desktopClis &&
+                                          !_isSupportedDesktopProviderFor(k)
+                                      ? '${k.label} (unavailable here)'
+                                      : widget.desktopClis
+                                      ? _cliLabel(k.cli!)
+                                      : k.label,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            )
+                            .toList(),
                     onChanged: (v) => _changeProvider(v ?? _provider),
                   ),
+                  if (widget.desktopClis && !_isSupportedDesktopProvider)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 8),
+                      child: Text(
+                        'Choose a CLI above to use this bot in Linux.',
+                      ),
+                    ),
                   const SizedBox(height: 10),
                   _authRow(scheme),
                   if (_provider != ProviderKind.scripted) ...[
@@ -1232,6 +1336,11 @@ class _BotEditorState extends State<_BotEditor> {
       ],
     );
   }
+
+  bool _isSupportedDesktopProviderFor(ProviderKind kind) =>
+      kind == ProviderKind.anthropic ||
+      kind == ProviderKind.codex ||
+      kind == ProviderKind.grok;
 
   /// The job the bot holds, grouped the way an organisation is.
   Widget _rolePicker(ColorScheme scheme) {
@@ -1329,6 +1438,16 @@ class _BotEditorState extends State<_BotEditor> {
 
   /// Sign-in status, or a key field — never both.
   Widget _authRow(ColorScheme scheme) {
+    if (_provider == ProviderKind.scripted) {
+      return Text(
+        'The demo bot follows a fixed script, so you can try a room before '
+        'setting anything up.',
+        style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+      );
+    }
+    if (widget.desktopClis && !_isSupportedDesktopProvider) {
+      return const Text('Choose a CLI above to use this bot in Linux.');
+    }
     if (_provider.needsApiKey) {
       final saved = ModelCatalog.credentials?.isSignedIn(_provider) == true;
       if (saved && _key.text.isEmpty && !_replaceKey) {
@@ -1363,11 +1482,15 @@ class _BotEditorState extends State<_BotEditor> {
         onEditingComplete: () => _loadModels(refresh: true),
       );
     }
-    if (_provider == ProviderKind.scripted) {
-      return Text(
-        'The demo bot follows a fixed script, so you can try a room before '
-        'setting anything up.',
-        style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+    if (widget.desktopClis && _provider.cli != null) {
+      final cli = _provider.cli!;
+      final status = findCli(cli);
+      return StatusPill(
+        color: status.available ? scheme.tertiary : Colors.orange,
+        label: status.available
+            ? '${cli.binary} found · sign-in not verified'
+            : '${cli.binary} not found',
+        icon: status.available ? Icons.terminal : Icons.error_outline,
       );
     }
 
@@ -1392,12 +1515,11 @@ class _BotEditorState extends State<_BotEditor> {
     }
 
     final cli = _provider.cli!;
-    final status = findCli(cli);
-    if (status.available) {
+    if (widget.desktopClis) {
       return StatusPill(
-        color: scheme.tertiary,
-        label: 'Signed in via ${cli.binary} — no API key needed',
-        icon: Icons.verified_user_outlined,
+        color: Colors.orange,
+        label: '${cli.binary} not found',
+        icon: Icons.error_outline,
       );
     }
     // Not signed in, and no CLI to sign in with. Where the provider offers a
@@ -1415,8 +1537,7 @@ class _BotEditorState extends State<_BotEditor> {
           _provider.signsInOnDevice
               ? 'Open Sign in and approve ${_provider.label} with the account '
                     'you already pay for. No API key, and nothing to install.'
-              : '${status.problem}\n'
-                    'Install ${cli.binary} and sign in with it, or bring a '
+              : '${cli.binary} runs on Linux only. Install it and sign in, or bring a '
                     'sign-in from a machine that has it — run `orgbot pair` '
                     'there and import it from Sign in.',
           style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
@@ -1546,7 +1667,11 @@ class _BotEditorState extends State<_BotEditor> {
         ],
         const SizedBox(height: 6),
         Text(
-          list.source == ModelSource.live
+          widget.desktopClis && _provider.cli != null
+              ? (findCli(_provider.cli!).available
+                    ? 'Models via ${_provider.cli!.binary} CLI.'
+                    : '${_provider.cli!.binary} CLI not found.')
+              : list.source == ModelSource.live
               ? 'Loaded from ${_provider.label}.'
               : list.problem ?? 'Could not load the model list. Try again.',
           style: TextStyle(
@@ -1562,7 +1687,12 @@ class _BotEditorState extends State<_BotEditor> {
 
   Future<void> _save() async {
     if (_saving) return;
-    if (_provider.needsApiKey &&
+    final keepingUnavailable =
+        widget.desktopClis &&
+        !_isSupportedDesktopProvider &&
+        _provider == widget.existing?.provider;
+    if (!keepingUnavailable &&
+        _provider.needsApiKey &&
         _key.text.trim().isEmpty &&
         ModelCatalog.credentials?.isSignedIn(_provider) != true) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1580,9 +1710,10 @@ class _BotEditorState extends State<_BotEditor> {
       ).showSnackBar(const SnackBar(content: Text('Give the bot a name')));
       return;
     }
-    if ((_custom ||
+    if (!keepingUnavailable &&
+        (_custom ||
             _provider == ProviderKind.ollama ||
-            (!canRunAgentClis && _provider != ProviderKind.scripted)) &&
+            (!widget.desktopClis && _provider != ProviderKind.scripted)) &&
         _resolvedModel.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Enter a model id, or pick one above')),
@@ -1607,6 +1738,8 @@ class _BotEditorState extends State<_BotEditor> {
           model: _resolvedModel,
           apiKey: _provider.needsApiKey && credentials == null
               ? _key.text.trim()
+              : widget.desktopClis && _provider == widget.existing?.provider
+              ? widget.existing?.apiKey ?? ''
               : '',
           role: _role,
           powers: _powers,

@@ -3,6 +3,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'ui/polish.dart';
+import 'engine/agent_cli.dart';
 import 'orgbot/credentials.dart';
 import 'orgbot/library.dart';
 import 'orgbot/model_catalog.dart';
@@ -165,7 +166,7 @@ class _OrgBotAppState extends State<OrgBotApp> {
   @override
   void initState() {
     super.initState();
-    ModelCatalog.credentials = _credentials;
+    ModelCatalog.credentials = canRunAgentClis ? null : _credentials;
     _initialize();
     BackgroundRooms.channel.setMethodCallHandler((call) async {
       if (call.method == 'pauseAll') {
@@ -183,9 +184,9 @@ class _OrgBotAppState extends State<OrgBotApp> {
     // rather than be discovered in the morning.
     unawaited(RoomStore.attentions.start());
     try {
-      await _credentials.load();
+      if (!canRunAgentClis) await _credentials.load();
       await _library.load();
-      await _library.shareExistingKeys(_credentials);
+      if (!canRunAgentClis) await _library.shareExistingKeys(_credentials);
     } catch (_) {
       _library.reportError(
         'An account could not be saved. Your existing keys were kept.',
@@ -208,6 +209,9 @@ class _OrgBotAppState extends State<OrgBotApp> {
     theme: orgBotTheme(Brightness.light),
     darkTheme: orgBotTheme(Brightness.dark),
     themeMode: ThemeMode.system,
-    home: OrgBotScreen(library: _library, credentials: _credentials),
+    home: OrgBotScreen(
+      library: _library,
+      credentials: canRunAgentClis ? null : _credentials,
+    ),
   );
 }

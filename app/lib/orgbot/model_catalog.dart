@@ -73,9 +73,8 @@ class ModelList {
 
 /// Loads and caches the models each provider offers.
 class ModelCatalog {
-  /// Cached per provider for the life of the process: a CLI call or an HTTP
-  /// round trip is too slow to repeat every time a dropdown is built.
-  static final Map<ProviderKind, ModelList> _cache = {};
+  /// Cached per provider and CLI/API path for the life of the process.
+  static final Map<(ProviderKind, bool), ModelList> _cache = {};
 
   /// Overridable for tests: runs a command and returns its stdout.
   static Future<String> Function(String bin, List<String> args)? runner;
@@ -86,22 +85,27 @@ class ModelCatalog {
   /// Discard cached lists so the next lookup goes back to the source.
   static void invalidate() => _cache.clear();
 
-  /// A paired sign-in, when one has been imported. Consulted before the
-  /// local CLIs, because a phone has none of those but may well be signed in.
+  /// A paired sign-in, when one has been imported. Used on phones, which have
+  /// no local agent CLIs.
   static Credentials? credentials;
 
-  /// The models `kind` offers, from the machine or from a paired sign-in.
+  /// The models `kind` offers, from the machine or from a phone sign-in.
   static Future<ModelList> load(
     ProviderKind kind, {
     String apiKey = '',
     bool refresh = false,
+    bool? canRunClis,
   }) async {
-    await credentials?.load();
+    final useClis = canRunClis ?? canRunAgentClis;
+    // Desktop subscription catalogs come from local CLIs. Do not touch the
+    // phone OAuth store on that path; API-key providers still need it.
+    if (!useClis || kind.needsApiKey) await credentials?.load();
     if (apiKey.trim().isEmpty && kind.needsApiKey) {
       apiKey = credentials?.forProvider(kind)?.token ?? '';
     }
-    final cached = _cache[kind];
-    final paired = credentials?.forProvider(kind);
+    final cacheKey = (kind, useClis);
+    final cached = _cache[cacheKey];
+    final paired = useClis ? null : credentials?.forProvider(kind);
     if (!refresh &&
         !kind.needsApiKey &&
         cached?.source == ModelSource.live &&
@@ -109,41 +113,48 @@ class ModelCatalog {
       return cached!;
     }
 
-    // A paired sign-in carries the model list the desktop's own CLI reported,
-    // which is the real list — and the only one available on a phone.
+    // On a phone, a paired sign-in carries the desktop CLI's model list.
     if (!refresh &&
         !kind.needsApiKey &&
         paired != null &&
         !paired.needsRenewal &&
         paired.models.isNotEmpty) {
       final list = ModelList(paired.models, ModelSource.live);
-      _cache[kind] = list;
+      _cache[cacheKey] = list;
       return list;
     }
 
     ModelList result;
     try {
-      result = await _loadLive(kind, apiKey);
+      result = await _loadLive(kind, apiKey, canRunClis: useClis);
     } catch (e) {
-      result = ModelList(fallbackFor(kind), ModelSource.fallback, e.toString());
+      result = ModelList(
+        fallbackFor(kind, canRunClis: useClis),
+        ModelSource.fallback,
+        e.toString(),
+      );
     }
     if (result.options.isEmpty && result.source == ModelSource.live) {
       result = ModelList(
-        fallbackFor(kind),
+        fallbackFor(kind, canRunClis: useClis),
         ModelSource.fallback,
         result.problem,
       );
     }
-    _cache[kind] = result;
+    _cache[cacheKey] = result;
     return result;
   }
 
-  static Future<ModelList> _loadLive(ProviderKind kind, String apiKey) async {
-    // A signed-in subscription can ask the provider directly, which is the
-    // only route on a phone and the more current one anywhere.
-    final signedIn = credentials?.forProvider(kind) != null;
-    var token = await credentials?.freshToken(kind, auth: deviceAuth);
-    if (signedIn && kind.signsInOnDevice) {
+  static Future<ModelList> _loadLive(
+    ProviderKind kind,
+    String apiKey, {
+    required bool canRunClis,
+  }) async {
+    final credential = canRunClis ? null : credentials?.forProvider(kind);
+    var token = canRunClis
+        ? null
+        : await credentials?.freshToken(kind, auth: deviceAuth);
+    if (credential != null && kind.signsInOnDevice) {
       for (var attempt = 0; attempt < 2; attempt++) {
         if (token == null) break;
         try {
@@ -167,14 +178,27 @@ class ModelCatalog {
     }
     switch (kind) {
       case ProviderKind.codex:
-        return token == null ? _fromCodexCache() : _fromCodexApi(token);
+        return token == null
+            ? canRunClis
+                  ? _fromCodexCache(canRunClis: true)
+                  : ModelList(
+                      fallbackFor(ProviderKind.codex, canRunClis: false),
+                      ModelSource.fallback,
+                      'Sign in on this device to load Codex models.',
+                    )
+            : _fromCodexApi(token);
       case ProviderKind.grok:
-        return token == null ? _fromGrokCli() : _fromGrokApi(token);
+        return token == null
+            ? canRunClis
+                  ? _fromGrokCli(canRunClis: true)
+                  : ModelList(
+                      fallbackFor(ProviderKind.grok, canRunClis: false),
+                      ModelSource.fallback,
+                      'Sign in on this device to load Grok models.',
+                    )
+            : _fromGrokApi(token);
       case ProviderKind.anthropic:
-        return ModelList(
-          claudeModels(viaCli: canRunAgentClis),
-          ModelSource.live,
-        );
+        return ModelList(claudeModels(viaCli: canRunClis), ModelSource.live);
       case ProviderKind.deepseek:
       case ProviderKind.ollama:
         return _fromApi(kind, apiKey);
@@ -218,11 +242,11 @@ class ModelCatalog {
         ];
 
   /// Read the model list the Codex CLI keeps at ~/.codex/models_cache.json.
-  static Future<ModelList> _fromCodexCache() async {
+  static Future<ModelList> _fromCodexCache({required bool canRunClis}) async {
     final home = Platform.environment['HOME'] ?? '';
     if (home.isEmpty) {
       return ModelList(
-        fallbackFor(ProviderKind.codex),
+        fallbackFor(ProviderKind.codex, canRunClis: canRunClis),
         ModelSource.fallback,
         'no HOME to find the Codex cache in',
       );
@@ -230,7 +254,7 @@ class ModelCatalog {
     final file = File('$home/.codex/models_cache.json');
     if (!file.existsSync()) {
       return ModelList(
-        fallbackFor(ProviderKind.codex),
+        fallbackFor(ProviderKind.codex, canRunClis: canRunClis),
         ModelSource.fallback,
         'sign in with `codex` to populate its model list',
       );
@@ -238,7 +262,7 @@ class ModelCatalog {
     final root = jsonDecode(await file.readAsString());
     if (root is! Map || root['models'] is! List) {
       return ModelList(
-        fallbackFor(ProviderKind.codex),
+        fallbackFor(ProviderKind.codex, canRunClis: canRunClis),
         ModelSource.fallback,
         'the Codex model cache is not in the expected shape',
       );
@@ -266,11 +290,13 @@ class ModelCatalog {
 
   /// Ask the Grok CLI what it can run. Its output is a plain list with the
   /// default marked by an asterisk.
-  static Future<ModelList> _fromGrokCli() async {
-    final status = findCli(CliKind.grok);
+  static Future<ModelList> _fromGrokCli({required bool canRunClis}) async {
+    final status = runner == null
+        ? findCli(CliKind.grok)
+        : const CliStatus('grok', null);
     if (!status.available) {
       return ModelList(
-        fallbackFor(ProviderKind.grok),
+        fallbackFor(ProviderKind.grok, canRunClis: canRunClis),
         ModelSource.fallback,
         status.problem,
       );
@@ -324,7 +350,7 @@ class ModelCatalog {
     final models = root is Map ? root['models'] : null;
     if (models is! List) {
       return ModelList(
-        fallbackFor(ProviderKind.codex),
+        fallbackFor(ProviderKind.codex, canRunClis: false),
         ModelSource.fallback,
         'unexpected response shape',
       );
@@ -373,7 +399,7 @@ class ModelCatalog {
     final data = root is Map ? root['data'] : null;
     if (data is! List) {
       return ModelList(
-        fallbackFor(ProviderKind.grok),
+        fallbackFor(ProviderKind.grok, canRunClis: false),
         ModelSource.fallback,
         'unexpected response shape',
       );
@@ -403,7 +429,7 @@ class ModelCatalog {
     }
     if (response.status != 200) {
       return ModelList(
-        fallbackFor(kind),
+        fallbackFor(kind, canRunClis: false),
         ModelSource.fallback,
         response.status == 403
             ? 'The account could not access this model catalog (HTTP 403). Its sign-in is still saved.'
@@ -499,13 +525,14 @@ class ModelCatalog {
   // ---- fallbacks ----------------------------------------------------------
 
   /// The built-in list used when a live lookup is not possible.
-  static List<ModelOption> fallbackFor(ProviderKind kind) {
+  static List<ModelOption> fallbackFor(ProviderKind kind, {bool? canRunClis}) {
+    final useClis = canRunClis ?? canRunAgentClis;
     switch (kind) {
       case ProviderKind.anthropic:
-        return claudeModels(viaCli: canRunAgentClis);
+        return claudeModels(viaCli: useClis);
       case ProviderKind.codex:
       case ProviderKind.grok:
-        if (Platform.isAndroid || Platform.isIOS) return const [];
+        if (!useClis) return const [];
         return const [ModelOption('', 'Subscription default')];
       case ProviderKind.deepseek:
       case ProviderKind.ollama:
@@ -534,7 +561,8 @@ class ModelCatalog {
     if (id.isEmpty) {
       return kind == ProviderKind.scripted ? 'demo' : 'default model';
     }
-    for (final option in (_cache[kind]?.options ?? fallbackFor(kind))) {
+    for (final option
+        in (_cache[(kind, canRunAgentClis)]?.options ?? fallbackFor(kind))) {
       if (option.id == id) return option.label;
     }
     return id;

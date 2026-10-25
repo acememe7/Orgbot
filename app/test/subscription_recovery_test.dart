@@ -99,6 +99,71 @@ void main() {
   );
 
   test(
+    'desktop catalog ignores a saved phone sign-in and uses Grok CLI',
+    () async {
+      final expired = jwt(DateTime.now().subtract(const Duration(hours: 1)));
+      final credentials = await signedIn(
+        token: expired,
+        expiry: DateTime.now(),
+      );
+      final transport = FakeTransport({
+        tokenUrl: [
+          const HttpResponse(
+            200,
+            '{"access_token":"renewed","expires_in":600}',
+          ),
+        ],
+      });
+      ModelCatalog.deviceAuth = authWith(transport);
+      var httpCalls = 0;
+      ModelCatalog.httpGet = (_, _) async {
+        httpCalls++;
+        return const HttpResponse(200, '{"data":[{"id":"phone-model"}]}');
+      };
+      var cliCalls = 0;
+      ModelCatalog.runner = (bin, args) async {
+        cliCalls++;
+        expect(bin, 'grok');
+        expect(args, ['models']);
+        return '* grok-4.6 (default)\n- grok-4.5\n';
+      };
+
+      final list = await ModelCatalog.load(
+        ProviderKind.grok,
+        refresh: true,
+        canRunClis: true,
+      );
+
+      expect(list.source, ModelSource.live);
+      expect(list.options.map((option) => option.id), ['grok-4.6', 'grok-4.5']);
+      expect(transport.calls, isEmpty);
+      expect(httpCalls, 0);
+      expect(
+        credentials.forProvider(ProviderKind.grok)?.token == expired,
+        isTrue,
+      );
+      expect(cliCalls, 1);
+
+      // Phone renewal clears cached catalogs. Returning to desktop must still
+      // load from its CLI rather than reuse the phone's API result.
+      final phoneList = await ModelCatalog.load(
+        ProviderKind.grok,
+        refresh: true,
+        canRunClis: false,
+      );
+      expect(phoneList.options.single.id, 'phone-model');
+      expect(transport.calls, hasLength(1));
+      expect(httpCalls, 1);
+      final desktopAgain = await ModelCatalog.load(
+        ProviderKind.grok,
+        canRunClis: true,
+      );
+      expect(desktopAgain.options.first.id, 'grok-4.6');
+      expect(cliCalls, 2);
+    },
+  );
+
+  test(
     'a rejected access token renews once and loads subscription models',
     () async {
       final credentials = await signedIn(
@@ -125,7 +190,11 @@ void main() {
           '{"data":[{"id":"grok-4.6","name":"Grok 4.6"}]}',
         );
       };
-      final list = await ModelCatalog.load(ProviderKind.grok, refresh: true);
+      final list = await ModelCatalog.load(
+        ProviderKind.grok,
+        refresh: true,
+        canRunClis: false,
+      );
       expect(list.source, ModelSource.live);
       expect(list.options.single.id, 'grok-4.6');
       expect(calls, 2);
@@ -140,7 +209,10 @@ void main() {
       final credentials = await signedIn();
       ModelCatalog.httpGet = (_, _) async =>
           const HttpResponse(403, '{"code":"permission-denied"}');
-      final denied = await ModelCatalog.load(ProviderKind.grok);
+      final denied = await ModelCatalog.load(
+        ProviderKind.grok,
+        canRunClis: false,
+      );
       expect(denied.problem, contains('HTTP 403'));
       expect(denied.problem, isNot(contains('expired')));
       expect(credentials.isSignedIn(ProviderKind.grok), isTrue);
@@ -150,7 +222,10 @@ void main() {
           tokenUrl: [const HttpResponse(503, '{}')],
         }),
       );
-      final offline = await ModelCatalog.load(ProviderKind.grok);
+      final offline = await ModelCatalog.load(
+        ProviderKind.grok,
+        canRunClis: false,
+      );
       expect(offline.source, ModelSource.fallback);
       expect(credentials.isSignedIn(ProviderKind.grok), isTrue);
       ModelCatalog.deviceAuth = authWith(
@@ -158,7 +233,10 @@ void main() {
           tokenUrl: [const HttpResponse(400, '{"error":"invalid_grant"}')],
         }),
       );
-      final revoked = await ModelCatalog.load(ProviderKind.grok);
+      final revoked = await ModelCatalog.load(
+        ProviderKind.grok,
+        canRunClis: false,
+      );
       expect(revoked.source, ModelSource.needsSignIn);
       expect(revoked.options, isEmpty);
       expect(credentials.isSignedIn(ProviderKind.grok), isFalse);
@@ -175,7 +253,9 @@ void main() {
     library.addBot(
       BotDef(name: 'Teo', handle: 'teo', provider: ProviderKind.grok),
     );
-    await tester.pumpWidget(MaterialApp(home: OrgBotScreen(library: library)));
+    await tester.pumpWidget(
+      MaterialApp(home: OrgBotScreen(library: library, desktopClis: false)),
+    );
     await tester.tap(find.text('Bots'));
     await tester.pumpAndSettle();
     await tester.tap(find.textContaining('@teo'));

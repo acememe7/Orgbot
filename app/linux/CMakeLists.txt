@@ -72,7 +72,16 @@ set_target_properties(${BINARY_NAME}
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
+# JNI is pulled in by path_provider_android; Linux uses path_provider_linux.
+set(CMAKE_DISABLE_FIND_PACKAGE_JNI TRUE)
 include(flutter/generated_plugins.cmake)
+
+# Flutter copies plugins into the bundle without CMake's install RPATH rewrite.
+foreach(plugin ${FLUTTER_PLUGIN_LIST})
+  set_target_properties(${plugin}_plugin PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH "$ORIGIN")
+endforeach()
 
 # The secure-storage plugin vendors older nlohmann headers. New Clang versions
 # deprecate their literal syntax; keep our own code's warnings as errors.

@@ -178,13 +178,10 @@ fn policy_flags(cli: CliKind, policy: AgentPolicy) -> (&'static str, &'static st
         (CliKind::Codex, AgentPolicy::ReadOnly) => "read-only",
         (CliKind::Codex, AgentPolicy::WorkspaceWrite) => "workspace-write",
         (CliKind::Codex, AgentPolicy::FullAccess) => "danger-full-access",
-        // Not "plan": plan mode blocks *every* tool, including the room
-        // board — and the board is not a file operation, it is the bot's job.
-        // A read-only bot should still be able to claim, inspect and submit;
-        // what it must not do is change the project, and `default` refuses
-        // that in a headless session because nothing can approve it. The room
-        // tools come through because they are allow-listed explicitly.
-        (CliKind::Claude | CliKind::Grok, AgentPolicy::ReadOnly) => "default",
+        // Claude's CLI accepts `dontAsk`, which denies actions needing approval;
+        // Grok retains its existing default permission mode.
+        (CliKind::Claude, AgentPolicy::ReadOnly) => "dontAsk",
+        (CliKind::Grok, AgentPolicy::ReadOnly) => "default",
         (CliKind::Claude | CliKind::Grok, AgentPolicy::WorkspaceWrite) => "acceptEdits",
         (CliKind::Claude | CliKind::Grok, AgentPolicy::FullAccess) => "bypassPermissions",
     };
@@ -818,12 +815,18 @@ fn build_args(
     // is allowed explicitly rather than by loosening the sandbox generally.
     if mcp {
         match cli {
-            CliKind::Claude | CliKind::Grok => {
+            CliKind::Claude => {
                 // Both the bare server name and an explicit wildcard: the
                 // CLIs differ on which form matches a whole server, and an
                 // unmatched rule is simply ignored.
                 cmd.arg("--allowedTools")
                     .arg(ROOM_TOOL_PATTERN)
+                    .arg(ROOM_TOOL_WILDCARD);
+            }
+            CliKind::Grok => {
+                cmd.arg("--allow")
+                    .arg(ROOM_TOOL_PATTERN)
+                    .arg("--allow")
                     .arg(ROOM_TOOL_WILDCARD);
             }
             // codex routes MCP approvals through --approve-for-me, set above.
@@ -988,13 +991,10 @@ mod tests {
             policy_flags(CliKind::Codex, AgentPolicy::FullAccess),
             ("-s", "danger-full-access")
         );
-        // Deliberately not "plan". Plan mode blocks every tool, including
-        // the room board, so a read-only bot could see its tools, be refused
-        // on every call, and sit there reporting that it is blocked. Read-only
-        // means "do not change the project", not "do nothing".
+        // dontAsk rejects actions requiring approval; room MCP rules remain explicit.
         assert_eq!(
             policy_flags(CliKind::Claude, AgentPolicy::ReadOnly),
-            ("--permission-mode", "default")
+            ("--permission-mode", "dontAsk")
         );
         assert_ne!(
             policy_flags(CliKind::Grok, AgentPolicy::ReadOnly).1,
@@ -1005,5 +1005,62 @@ mod tests {
             policy_flags(CliKind::Grok, AgentPolicy::FullAccess),
             ("--permission-mode", "bypassPermissions")
         );
+    }
+
+    #[test]
+    fn grok_mcp_rules_are_passed_as_separate_options() {
+        for resumed in [None, Some("previous-session")] {
+            for policy in [AgentPolicy::ReadOnly, AgentPolicy::FullAccess] {
+                let mut cmd = Command::new("grok");
+                build_args(
+                    &mut cmd,
+                    CliKind::Grok,
+                    "test",
+                    resumed,
+                    "",
+                    policy,
+                    None,
+                    true,
+                );
+                let args: Vec<_> = cmd
+                    .as_std()
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect();
+                assert_eq!(args.iter().filter(|arg| *arg == "--allow").count(), 2);
+                assert!(args
+                    .windows(2)
+                    .any(|pair| pair == ["--allow", ROOM_TOOL_PATTERN]));
+                assert!(args
+                    .windows(2)
+                    .any(|pair| pair == ["--allow", ROOM_TOOL_WILDCARD]));
+            }
+        }
+    }
+
+    #[test]
+    fn claude_read_only_mcp_uses_dont_ask_with_explicit_tools() {
+        let mut cmd = Command::new("claude");
+        build_args(
+            &mut cmd,
+            CliKind::Claude,
+            "test",
+            None,
+            "",
+            AgentPolicy::ReadOnly,
+            None,
+            true,
+        );
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--permission-mode", "dontAsk"]));
+        assert!(args
+            .windows(3)
+            .any(|triple| { triple == ["--allowedTools", ROOM_TOOL_PATTERN, ROOM_TOOL_WILDCARD] }));
     }
 }

@@ -177,6 +177,45 @@ void main() {
     }
   });
 
+  test('desktop CLI rooms ignore saved phone OAuth credentials', () async {
+    SharedPreferences.setMockInitialValues({});
+    FlutterSecureStorage.setMockInitialValues({});
+    final credentials = Credentials();
+    addTearDown(credentials.dispose);
+    const providers = [
+      ProviderKind.codex,
+      ProviderKind.anthropic,
+      ProviderKind.grok,
+    ];
+    await credentials.importBundle(
+      jsonEncode({
+        'version': 1,
+        'providers': [
+          for (final provider in providers)
+            {'provider': provider.key, 'token': 'phone-fixture-only'},
+        ],
+      }),
+    );
+    final file = buildRoomFile(
+      room(),
+      [
+        for (final provider in providers)
+          BotDef(name: provider.key, provider: provider),
+      ],
+      credentials: credentials,
+      canRunClis: true,
+    );
+    expect(file.skipped, isEmpty);
+    expect(file.environment, isEmpty);
+    expect(RegExp('kind = "cli_agent"').allMatches(file.toml), hasLength(3));
+    expect(RegExp('mcp = true').allMatches(file.toml), hasLength(3));
+    expect(
+      RegExp('workdir = "/tmp/project"').allMatches(file.toml),
+      hasLength(3),
+    );
+    expect(file.toml, isNot(contains('phone-fixture-only')));
+  });
+
   test('the role decides the permissions written into the file', () {
     final reviewer = buildRoomFile(room(), [
       BotDef(name: 'q', handle: 'q', role: 'reviewer'),

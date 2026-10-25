@@ -110,10 +110,13 @@ class WorkspaceNavigation extends StatelessWidget {
     super.key,
     required this.selected,
     required this.onSelected,
+    this.desktop = false,
   });
   final int selected;
   final ValueChanged<int> onSelected;
+  final bool desktop;
   static const labels = ['Rooms', 'Bots', 'Accounts'];
+  static const desktopLabels = ['Rooms', 'Bots', 'Setup'];
   static const icons = [
     Icons.chat_bubble_outline_rounded,
     Icons.people_outline_rounded,
@@ -155,12 +158,12 @@ class WorkspaceNavigation extends StatelessWidget {
               ),
               Row(
                 children: [
-                  for (var i = 0; i < labels.length; i++)
+                  for (var i = 0; i < desktopLabels.length; i++)
                     Expanded(
                       child: Semantics(
                         selected: selected == i,
                         button: true,
-                        label: labels[i],
+                        label: desktop ? desktopLabels[i] : labels[i],
                         onTap: () => onSelected(i),
                         child: ExcludeSemantics(
                           child: InkWell(
@@ -182,7 +185,7 @@ class WorkspaceNavigation extends StatelessWidget {
                                 ),
                                 const SizedBox(height: 4),
                                 Text(
-                                  labels[i],
+                                  desktop ? desktopLabels[i] : labels[i],
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(

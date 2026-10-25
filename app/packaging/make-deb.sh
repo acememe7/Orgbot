@@ -10,12 +10,26 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NAME=orgbot
-VERSION=${1:-1.0.0}
+VERSION=${1:-$(<packaging/version)}
 BUNDLE=build/linux/x64/release/bundle
+
+if [[ ! "$VERSION" =~ ^[0-9][A-Za-z0-9.+:~-]*$ ]]; then
+  echo "invalid Debian package version: $VERSION" >&2
+  exit 1
+fi
 
 if [ ! -x "$BUNDLE/orgbot_app" ]; then
   echo "missing $BUNDLE/orgbot_app — build first:" >&2
   echo "  flutter build linux --release" >&2
+  exit 1
+fi
+
+# The room engine is required at runtime; reject an incomplete package before
+# allocating or copying the package staging tree.
+ENGINE=${ORGBOT_ENGINE:-../core/target/release/orgbot}
+if [ ! -x "$ENGINE" ]; then
+  echo "missing room engine at $ENGINE — build it first:" >&2
+  echo "  (cd ../core && cargo build --release)" >&2
   exit 1
 fi
 
@@ -32,14 +46,8 @@ chmod 755 "$STAGE/usr/lib/$NAME/orgbot_app"
 # The engine the app runs rooms on. Installed as orgbot-engine so it cannot be
 # confused with the app's own /usr/bin/orgbot launcher, which is what
 # findEngine() looks for first.
-ENGINE=${ORGBOT_ENGINE:-../core/target/release/orgbot}
-if [ -x "$ENGINE" ]; then
-  install -m755 "$ENGINE" "$STAGE/usr/lib/$NAME/orgbot-engine"
-  ln -s "/usr/lib/$NAME/orgbot-engine" "$STAGE/usr/bin/orgbot-engine"
-else
-  echo "warning: engine not found at $ENGINE — rooms will not run." >&2
-  echo "  build it with: (cd ../core && cargo build --release)" >&2
-fi
+install -m755 "$ENGINE" "$STAGE/usr/lib/$NAME/orgbot-engine"
+ln -s "/usr/lib/$NAME/orgbot-engine" "$STAGE/usr/bin/orgbot-engine"
 install -m644 packaging/orgbot.desktop "$STAGE/usr/share/applications/orgbot.desktop"
 install -m644 assets/logo.png "$STAGE/usr/share/icons/hicolor/256x256/apps/$NAME.png"
 ln -s "/usr/lib/$NAME/orgbot_app" "$STAGE/usr/bin/$NAME"
@@ -51,17 +59,26 @@ INSTALLED_KB=$(du -sk "$STAGE/usr" | cut -f1)
 # Ubuntu 24.04 renamed libgtk-3-0 to libgtk-3-0t64 for the 64-bit time_t
 # transition, so a hardcoded "libgtk-3-0" refuses to install there — and it
 # quietly omits transitive libraries such as pango and harfbuzz.
-DEPENDS="libgtk-3-0t64 | libgtk-3-0, libglib2.0-0t64 | libglib2.0-0, zlib1g"
-if command -v dpkg-shlibdeps >/dev/null 2>&1; then
-  ( cd "$STAGE" && mkdir -p debian \
-      && printf 'Source: %s\n\nPackage: %s\nArchitecture: amd64\n' "$NAME" "$NAME" > debian/control )
-  # -l adds the bundled Flutter libraries to the search path; they ship inside
-  # this package, so there is no distro package to depend on for them.
-  COMPUTED=$(cd "$STAGE" && dpkg-shlibdeps -l"$STAGE/usr/lib/$NAME/lib" \
-      --ignore-missing-info -O "usr/lib/$NAME/orgbot_app" 2>/dev/null \
-      | sed 's/^shlibs:Depends=//')
-  rm -rf "$STAGE/debian"
-  [ -n "$COMPUTED" ] && DEPENDS="$COMPUTED"
+command -v dpkg-shlibdeps >/dev/null 2>&1 || {
+  echo "dpkg-shlibdeps is required to calculate package dependencies (install dpkg-dev)." >&2
+  exit 1
+}
+( cd "$STAGE" && mkdir -p debian \
+    && printf 'Source: %s\n\nPackage: %s\nArchitecture: amd64\n' "$NAME" "$NAME" > debian/control )
+# Scan the app, engine, and every bundled shared object: dynamically loaded
+# Flutter plugins do not appear in the app executable's DT_NEEDED entries.
+SHLIBDEPS_BINS=("usr/lib/$NAME/orgbot_app" "usr/lib/$NAME/orgbot-engine")
+while IFS= read -r -d '' library; do
+  SHLIBDEPS_BINS+=("${library#"$STAGE/"}")
+done < <(find "$STAGE/usr/lib/$NAME" -type f \
+  \( -name '*.so' -o -name '*.so.*' \) -print0)
+DEPENDS=$(cd "$STAGE" && dpkg-shlibdeps \
+  -l"$STAGE/usr/lib/$NAME/lib" -O "${SHLIBDEPS_BINS[@]}" \
+  | sed -n 's/^shlibs:Depends=//p')
+rm -rf "$STAGE/debian"
+if [ -z "$DEPENDS" ]; then
+  echo "dpkg-shlibdeps did not report package dependencies." >&2
+  exit 1
 fi
 
 cat > "$STAGE/DEBIAN/control" <<CONTROL
@@ -73,11 +90,11 @@ Architecture: amd64
 Installed-Size: $INSTALLED_KB
 Depends: $DEPENDS
 Maintainer: OrgBot <theaeceme@gmail.com>
-Description: A group chat of AI bots working a shared task board
+Description: Codex, Claude, and Grok CLI agents sharing tasks
  Bots hold different roles, pick up tasks, hand work off to one another, wait
  on those handoffs, get their work inspected, and submit it - in one room you
- can watch and talk to. Bots can be backed by Claude, DeepSeek, or any
- OpenAI-compatible endpoint, and a single room can mix providers.
+ can watch and talk to. Codex, Claude, and Grok CLIs use their existing local
+ sessions and work together in the room's shared project folder.
 CONTROL
 
 dpkg-deb --build --root-owner-group "$STAGE" "${NAME}_${VERSION}_amd64.deb" >/dev/null

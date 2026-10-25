@@ -65,23 +65,22 @@ class CliStatus {
 /// Find a CLI binary on PATH and in the usual per-user install locations.
 ///
 /// `which` is not used: these CLIs are commonly installed under ~/.local/bin
-/// or a version manager's shims, which a non-login shell's PATH may not carry.
-CliStatus findCli(CliKind cli) {
+/// or ~/.npm-global/bin or ~/.grok/bin, which a non-login shell's PATH may not
+/// carry. Keep this order aligned with the Rust core's `locate` implementation.
+CliStatus findCli(CliKind cli, {String? path, String? home}) {
   if (!canRunAgentClis) {
     return const CliStatus(null,
         'Agent CLIs run on desktop only — this platform cannot start one.');
   }
-  final home = Platform.environment['HOME'] ?? '';
+  final searchHome = home ?? Platform.environment['HOME'] ?? '';
   final candidates = <String>[
-    for (final dir in (Platform.environment['PATH'] ?? '').split(':'))
+    for (final dir in (path ?? Platform.environment['PATH'] ?? '').split(':'))
       if (dir.isNotEmpty) '$dir/${cli.binary}',
-    if (home.isNotEmpty) ...[
-      '$home/.local/bin/${cli.binary}',
-      '$home/.bun/bin/${cli.binary}',
-      '$home/.npm-global/bin/${cli.binary}',
-      '$home/bin/${cli.binary}',
+    if (searchHome.isNotEmpty) ...[
+      '$searchHome/.local/bin/${cli.binary}',
+      '$searchHome/.npm-global/bin/${cli.binary}',
+      '$searchHome/.grok/bin/${cli.binary}',
     ],
-    '/usr/local/bin/${cli.binary}',
   ];
   for (final candidate in candidates) {
     if (_isExecutable(candidate)) return CliStatus(candidate, null);
@@ -94,9 +93,11 @@ bool _isExecutable(String path) {
   try {
     final file = File(path);
     if (!file.existsSync()) return false;
+    final stat = file.statSync();
+    if (stat.type != FileSystemEntityType.file) return false;
     // A readable regular file that the OS will exec. `stat` is cheap and
     // avoids spawning anything just to test presence.
-    return file.statSync().mode & 0x49 != 0; // any execute bit
+    return stat.mode & 0x49 != 0; // any execute bit
   } catch (_) {
     return false;
   }

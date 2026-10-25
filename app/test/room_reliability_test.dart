@@ -45,7 +45,9 @@ void main() {
     library.addBot(
       BotDef(name: 'Iris', handle: 'iris', provider: ProviderKind.codex),
     );
-    await tester.pumpWidget(MaterialApp(home: OrgBotScreen(library: library)));
+    await tester.pumpWidget(
+      MaterialApp(home: OrgBotScreen(library: library, desktopClis: false)),
+    );
     await tester.tap(find.text('Bots'));
     await tester.pumpAndSettle();
     await tester.tap(find.textContaining('@iris'));
