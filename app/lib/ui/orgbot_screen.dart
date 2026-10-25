@@ -37,14 +37,29 @@ class OrgBotScreen extends StatefulWidget {
   State<OrgBotScreen> createState() => _OrgBotScreenState();
 }
 
-class _OrgBotScreenState extends State<OrgBotScreen> {
+class _OrgBotScreenState extends State<OrgBotScreen>
+    with SingleTickerProviderStateMixin {
   int _tab = 0;
   final _pages = PageController();
   final _search = List.generate(2, (_) => TextEditingController());
+  late final AnimationController _desktopPageFade;
   bool get _desktopClis => widget.desktopClis ?? canRunAgentClis;
+
+  @override
+  void initState() {
+    super.initState();
+    _desktopPageFade = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 110),
+      value: 1,
+    );
+    widget.library.load();
+  }
+
   @override
   void dispose() {
     _pages.dispose();
+    _desktopPageFade.dispose();
     for (final search in _search) {
       search.dispose();
     }
@@ -54,11 +69,18 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
   void _selectTab(int index) {
     if (_tab == index) return;
     FocusManager.instance.primaryFocus?.unfocus();
-    HapticFeedback.selectionClick();
+    if (!_desktopClis) HapticFeedback.selectionClick();
     setState(() {
       _tab = index;
     });
-    if (MediaQuery.disableAnimationsOf(context)) {
+    if (_desktopClis) {
+      _pages.jumpToPage(index);
+      if (MediaQuery.disableAnimationsOf(context)) {
+        _desktopPageFade.value = 1;
+      } else {
+        _desktopPageFade.forward(from: 0);
+      }
+    } else if (MediaQuery.disableAnimationsOf(context)) {
       _pages.jumpToPage(index);
     } else {
       _pages.animateToPage(
@@ -67,12 +89,6 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
         curve: Curves.easeOutCubic,
       );
     }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    widget.library.load();
   }
 
   @override
@@ -154,45 +170,55 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                       ],
                     ),
                   Expanded(
-                    child: PageView(
-                      controller: _pages,
-                      physics: const NeverScrollableScrollPhysics(),
-                      children: [
-                        for (var i = 0; i < 3; i++)
-                          RetainedPage(
-                            child: TickerMode(
-                              enabled: _tab == i,
-                              child: Column(
-                                children: [
-                                  _pageHeader(i, lib),
-                                  Expanded(
-                                    child: !lib.loaded
-                                        ? const Center(
-                                            child: CircularProgressIndicator(),
-                                          )
-                                        : switch (i) {
-                                            0 => _roomsList(lib),
-                                            1 => _botsList(lib),
-                                            _ =>
-                                              _desktopClis
-                                                  ? const _CliSetup()
-                                                  : credentials == null
-                                                  ? const Center(
-                                                      child: Text(
-                                                        'Accounts are unavailable.',
+                    child: FadeTransition(
+                      opacity: _desktopClis
+                          ? _desktopPageFade
+                          : const AlwaysStoppedAnimation(1),
+                      child: PageView(
+                        controller: _pages,
+                        physics: const NeverScrollableScrollPhysics(),
+                        children: [
+                          for (var i = 0; i < 3; i++)
+                            RetainedPage(
+                              child: TickerMode(
+                                enabled: _tab == i,
+                                child: Column(
+                                  children: [
+                                    _pageHeader(i, lib),
+                                    Expanded(
+                                      child: !lib.loaded
+                                          ? const Center(
+                                              child:
+                                                  CircularProgressIndicator(),
+                                            )
+                                          : switch (i) {
+                                              0 => _roomsList(lib),
+                                              1 => _botsList(lib),
+                                              _ =>
+                                                _desktopClis
+                                                    ? _CliSetup(
+                                                        credentials:
+                                                            credentials,
+                                                      )
+                                                    : credentials == null
+                                                    ? const Center(
+                                                        child: Text(
+                                                          'Accounts are unavailable.',
+                                                        ),
+                                                      )
+                                                    : SignInScreen(
+                                                        credentials:
+                                                            credentials,
+                                                        embedded: true,
                                                       ),
-                                                    )
-                                                  : SignInScreen(
-                                                      credentials: credentials,
-                                                      embedded: true,
-                                                    ),
-                                          },
-                                  ),
-                                ],
+                                            },
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ],
@@ -369,16 +395,29 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
       );
     }
     final scheme = Theme.of(context).colorScheme;
+    final compactDesktop =
+        _desktopClis && MediaQuery.sizeOf(context).width >= 760;
     return ListView.separated(
       key: const PageStorageKey('team-list'),
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
       itemCount: bots.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 10),
+      separatorBuilder: (_, _) => compactDesktop
+          ? Divider(height: 1, color: scheme.outlineVariant)
+          : const SizedBox(height: 10),
       itemBuilder: (context, i) {
         final b = bots[i];
         final handle = b.handle.isEmpty ? b.name : b.handle;
         final needsKey =
             b.needsKey && credentials?.isSignedIn(b.provider) != true;
+        if (compactDesktop) {
+          return _desktopBotRow(
+            b,
+            handle: handle,
+            needsKey: needsKey,
+            scheme: scheme,
+            library: lib,
+          );
+        }
         return PressSurface(
           key: ValueKey(b.id),
           padding: const EdgeInsets.all(16),
@@ -416,7 +455,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                     const SizedBox(height: 12),
                     Text(
                       needsKey
-                          ? 'Add a ${b.provider.label} key in Accounts'
+                          ? 'Add a ${b.provider.label} key in ${_desktopClis ? 'Setup' : 'Accounts'}'
                           : ModelCatalog.labelFor(b.provider, b.model),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -461,6 +500,97 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
     );
   }
 
+  Widget _desktopBotRow(
+    BotDef bot, {
+    required String handle,
+    required bool needsKey,
+    required ColorScheme scheme,
+    required Library library,
+  }) => Semantics(
+    label:
+        '${bot.name}, ${bot.roleDef.label}, ${ModelCatalog.labelFor(bot.provider, bot.model)}',
+    button: true,
+    child: Material(
+      color: Colors.transparent,
+      child: InkWell(
+        key: ValueKey('desktop-bot-${bot.id}'),
+        onTap: () => _botDialog(bot),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: [
+              Expanded(
+                flex: 3,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      bot.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '@$handle · ${bot.roleDef.label}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 20),
+              Expanded(
+                flex: 2,
+                child: Text(
+                  needsKey
+                      ? '${bot.provider.label} · API key needed'
+                      : ModelCatalog.labelFor(bot.provider, bot.model),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: needsKey ? scheme.error : scheme.secondary,
+                  ),
+                ),
+              ),
+              PopupMenuButton<String>(
+                tooltip: 'Bot options',
+                padding: EdgeInsets.zero,
+                icon: Icon(
+                  Icons.more_horiz,
+                  size: 20,
+                  color: scheme.onSurfaceVariant,
+                ),
+                onSelected: (value) {
+                  if (value == 'edit') {
+                    _botDialog(bot);
+                  } else {
+                    library.removeBot(bot.id);
+                  }
+                },
+                itemBuilder: (_) => [
+                  const PopupMenuItem(value: 'edit', child: Text('Edit bot')),
+                  const PopupMenuItem(
+                    value: 'delete',
+                    child: Text('Remove bot'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+
   void _newBot() => _botDialog(null);
 
   Future<void> _botDialog(BotDef? existing) async {
@@ -481,6 +611,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
           }
         },
       ),
+      durationMilliseconds: _desktopClis ? 140 : null,
     );
   }
 
@@ -730,8 +861,24 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
     final goal = TextEditingController(text: existing?.goal ?? '');
     final path = TextEditingController(text: existing?.path);
     var workspace = existing?.workspace.copy() ?? WorkspaceConfig();
-    var maxTurns = existing?.maxTurns ?? defaultMaxTurns;
-    var parallelTurns = existing?.parallelTurns ?? defaultParallelTurns;
+    final desktopRoom = _desktopClis;
+    final defaultTurns = desktopRoom ? desktopDefaultMaxTurns : defaultMaxTurns;
+    final defaultParallel = desktopRoom
+        ? desktopDefaultParallelTurns
+        : defaultParallelTurns;
+    var maxTurns = existing?.maxTurns ?? defaultTurns;
+    var parallelTurns = existing?.parallelTurns ?? defaultParallel;
+    final turnChoices = desktopRoom
+        ? desktopTurnBudgetChoices
+        : turnBudgetChoices;
+    final availableTurnChoices = {
+      if (!turnChoices.contains(maxTurns)) maxTurns,
+      ...turnChoices,
+    }.toList();
+    final availableParallelChoices = {
+      if (!parallelTurnChoices.contains(parallelTurns)) parallelTurns,
+      ...parallelTurnChoices,
+    }.toList();
     final selected = <String, String>{
       for (final slot in existing?.bots ?? <RoomSlot>[]) slot.botId: '',
     }; // botId -> role
@@ -769,26 +916,27 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                       // stopped and waited, sometimes for hours, for someone
                       // to notice.
                       DropdownButtonFormField<int>(
-                        initialValue: turnBudgetChoices.contains(maxTurns)
-                            ? maxTurns
-                            : defaultMaxTurns,
+                        initialValue: maxTurns,
                         decoration: const InputDecoration(
                           labelText: 'Turn budget',
                           helperText:
-                              'Pauses the room when spent, so it never '
-                              'runs up a bill unwatched. You will be told.',
+                              'Provider allowance is used while agents work; '
+                              'viewing an idle room does not. This pauses on '
+                              'turns, not an exact token cap.',
                         ),
                         items: [
-                          for (final choice in turnBudgetChoices)
+                          for (final choice in availableTurnChoices)
                             DropdownMenuItem(
                               value: choice,
                               child: Text(
-                                choice == 0 ? 'No limit' : '$choice turns',
+                                choice == 0
+                                    ? 'No limit'
+                                    : '$choice turns${turnChoices.contains(choice) ? '' : ' · saved'}',
                               ),
                             ),
                         ],
                         onChanged: (value) =>
-                            setLocal(() => maxTurns = value ?? defaultMaxTurns),
+                            setLocal(() => maxTurns = value ?? defaultTurns),
                       ),
                       const SizedBox(height: 12),
                       // The room used to give one bot a turn at a time, so
@@ -796,10 +944,7 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                       // were in it, and seating more could not make the work
                       // finish sooner.
                       DropdownButtonFormField<int>(
-                        initialValue:
-                            parallelTurnChoices.contains(parallelTurns)
-                            ? parallelTurns
-                            : defaultParallelTurns,
+                        initialValue: parallelTurns,
                         decoration: const InputDecoration(
                           labelText: 'Bots working at once',
                           helperText:
@@ -810,16 +955,16 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
                               'as much per hour as one.',
                         ),
                         items: [
-                          for (final choice in parallelTurnChoices)
+                          for (final choice in availableParallelChoices)
                             DropdownMenuItem(
                               value: choice,
                               child: Text(
-                                choice == 1 ? 'One at a time' : '$choice bots',
+                                '${choice == 1 ? 'One at a time' : '$choice bots'}${parallelTurnChoices.contains(choice) ? '' : ' · saved'}',
                               ),
                             ),
                         ],
                         onChanged: (value) => setLocal(
-                          () => parallelTurns = value ?? defaultParallelTurns,
+                          () => parallelTurns = value ?? defaultParallel,
                         ),
                       ),
                       const SizedBox(height: 12),
@@ -986,29 +1131,154 @@ class _OrgBotScreenState extends State<OrgBotScreen> {
 }
 
 class _CliSetup extends StatefulWidget {
-  const _CliSetup();
+  const _CliSetup({required this.credentials});
+
+  final Credentials? credentials;
 
   @override
   State<_CliSetup> createState() => _CliSetupState();
 }
 
 class _CliSetupState extends State<_CliSetup> {
+  final TextEditingController _apiKey = TextEditingController();
+
   @override
-  Widget build(BuildContext context) => ListView(
-    key: const ValueKey('cli-setup'),
-    padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-    children: [
-      for (final cli in CliKind.values)
-        _CliStatusTile(key: ValueKey('cli-${cli.name}'), cli: cli),
-      Align(
-        alignment: Alignment.centerLeft,
-        child: OutlinedButton.icon(
-          onPressed: () => setState(() {}),
-          icon: const Icon(Icons.refresh),
-          label: const Text('Refresh'),
+  void initState() {
+    super.initState();
+    widget.credentials?.load();
+  }
+
+  @override
+  void dispose() {
+    _apiKey.dispose();
+    super.dispose();
+  }
+
+  Future<void> _editApiKey(ProviderKind provider) async {
+    final credentials = widget.credentials;
+    if (credentials == null) return;
+    _apiKey.clear();
+    final formKey = GlobalKey<FormState>();
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('${provider.label} API key'),
+        content: Form(
+          key: formKey,
+          child: TextFormField(
+            controller: _apiKey,
+            autofocus: true,
+            obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: const InputDecoration(labelText: 'API key'),
+            validator: (value) => value == null || value.trim().isEmpty
+                ? 'Enter an API key.'
+                : null,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.pop(context, true);
+              }
+            },
+            child: const Text('Save key'),
+          ),
+        ],
+      ),
+    );
+    if (accepted == true) {
+      try {
+        await credentials.saveApiKey(provider, _apiKey.text);
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not save that API key.')),
+          );
+        }
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: widget.credentials ?? Listenable.merge([]),
+    builder: (context, _) => ListView(
+      key: const ValueKey('cli-setup'),
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+      children: [
+        for (final cli in CliKind.values)
+          _CliStatusTile(key: ValueKey('cli-${cli.name}'), cli: cli),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton.icon(
+            onPressed: () => setState(() {}),
+            icon: const Icon(Icons.refresh),
+            label: const Text('Refresh CLI status'),
+          ),
+        ),
+        const SizedBox(height: 14),
+        Text('API access', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 8),
+        for (final provider in [ProviderKind.deepseek, ProviderKind.ollama])
+          _ApiKeySetupTile(
+            provider: provider,
+            saved:
+                widget.credentials?.forProvider(provider)?.kind ==
+                CredentialKind.apiKey,
+            onEdit: () => _editApiKey(provider),
+            onRemove: () => widget.credentials?.forget(provider),
+          ),
+      ],
+    ),
+  );
+}
+
+class _ApiKeySetupTile extends StatelessWidget {
+  const _ApiKeySetupTile({
+    required this.provider,
+    required this.saved,
+    required this.onEdit,
+    required this.onRemove,
+  });
+
+  final ProviderKind provider;
+  final bool saved;
+  final VoidCallback onEdit;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 8),
+    child: Material(
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(16),
+      child: ListTile(
+        title: Text('${provider.label} API'),
+        subtitle: Text(saved ? 'API key saved securely' : 'No API key saved'),
+        trailing: Wrap(
+          spacing: 4,
+          children: [
+            TextButton(
+              onPressed: onEdit,
+              child: Text(saved ? 'Change' : 'Add'),
+            ),
+            if (saved)
+              IconButton(
+                tooltip: 'Remove ${provider.label} API key',
+                onPressed: onRemove,
+                icon: const Icon(Icons.delete_outline),
+              ),
+          ],
         ),
       ),
-    ],
+    ),
   );
 }
 
@@ -1141,7 +1411,9 @@ class _BotEditorState extends State<_BotEditor> {
   bool get _isSupportedDesktopProvider =>
       _provider == ProviderKind.anthropic ||
       _provider == ProviderKind.codex ||
-      _provider == ProviderKind.grok;
+      _provider == ProviderKind.grok ||
+      _provider == ProviderKind.deepseek ||
+      _provider == ProviderKind.ollama;
 
   void _changeProvider(ProviderKind next) {
     setState(() {
@@ -1239,7 +1511,9 @@ class _BotEditorState extends State<_BotEditor> {
                 children: [_rolePicker(scheme)],
               ),
               FormSection(
-                title: widget.desktopClis ? 'Model & CLI' : 'Model & account',
+                title: widget.desktopClis
+                    ? 'Model & access'
+                    : 'Model & account',
                 children: [
                   DropdownButtonFormField<ProviderKind>(
                     initialValue: _provider,
@@ -1251,6 +1525,8 @@ class _BotEditorState extends State<_BotEditor> {
                                     ProviderKind.codex,
                                     ProviderKind.anthropic,
                                     ProviderKind.grok,
+                                    ProviderKind.deepseek,
+                                    ProviderKind.ollama,
                                     if (!_isSupportedDesktopProvider) _provider,
                                   ]
                                 : ProviderKind.values
@@ -1279,8 +1555,10 @@ class _BotEditorState extends State<_BotEditor> {
                                   widget.desktopClis &&
                                           !_isSupportedDesktopProviderFor(k)
                                       ? '${k.label} (unavailable here)'
-                                      : widget.desktopClis
+                                      : widget.desktopClis && k.cli != null
                                       ? _cliLabel(k.cli!)
+                                      : widget.desktopClis && k.needsApiKey
+                                      ? '${k.label} API'
                                       : k.label,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
@@ -1340,7 +1618,9 @@ class _BotEditorState extends State<_BotEditor> {
   bool _isSupportedDesktopProviderFor(ProviderKind kind) =>
       kind == ProviderKind.anthropic ||
       kind == ProviderKind.codex ||
-      kind == ProviderKind.grok;
+      kind == ProviderKind.grok ||
+      kind == ProviderKind.deepseek ||
+      kind == ProviderKind.ollama;
 
   /// The job the bot holds, grouped the way an organisation is.
   Widget _rolePicker(ColorScheme scheme) {
@@ -1406,13 +1686,17 @@ class _BotEditorState extends State<_BotEditor> {
   /// What the role is allowed to do, and a way to override it.
   Widget _powerChips(ColorScheme scheme, RoleDef role) {
     final powers = _powers ?? role.powers;
-    Widget chip(String label, bool on, RolePowers Function(bool) apply) =>
-        FilterChip(
-          label: Text(label, style: const TextStyle(fontSize: 11)),
-          selected: on,
-          visualDensity: VisualDensity.compact,
-          onSelected: (v) => setState(() => _powers = apply(v)),
-        );
+    Widget chip(
+      String label,
+      bool on,
+      RolePowers Function(bool) apply, {
+      bool enabled = true,
+    }) => FilterChip(
+      label: Text(label, style: const TextStyle(fontSize: 11)),
+      selected: on,
+      visualDensity: VisualDensity.compact,
+      onSelected: enabled ? (v) => setState(() => _powers = apply(v)) : null,
+    );
     return Wrap(
       spacing: 6,
       runSpacing: 4,
@@ -1421,6 +1705,7 @@ class _BotEditorState extends State<_BotEditor> {
           'Creates tasks',
           powers.mayCreateTasks,
           (v) => powers.copyWith(mayCreateTasks: v),
+          enabled: !powers.reviewOnly,
         ),
         chip(
           'Inspects work',
@@ -1431,6 +1716,19 @@ class _BotEditorState extends State<_BotEditor> {
           'Delivers',
           powers.maySubmit,
           (v) => powers.copyWith(maySubmit: v),
+          enabled: !powers.reviewOnly,
+        ),
+        chip(
+          'Review only',
+          powers.reviewOnly,
+          (v) => v
+              ? powers.copyWith(
+                  reviewOnly: true,
+                  mayInspect: true,
+                  mayCreateTasks: false,
+                  maySubmit: false,
+                )
+              : powers.copyWith(reviewOnly: false),
         ),
       ],
     );
@@ -1445,11 +1743,10 @@ class _BotEditorState extends State<_BotEditor> {
         style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
       );
     }
-    if (widget.desktopClis && !_isSupportedDesktopProvider) {
-      return const Text('Choose a CLI above to use this bot in Linux.');
-    }
     if (_provider.needsApiKey) {
-      final saved = ModelCatalog.credentials?.isSignedIn(_provider) == true;
+      final saved =
+          ModelCatalog.credentials?.forProvider(_provider)?.kind ==
+          CredentialKind.apiKey;
       if (saved && _key.text.isEmpty && !_replaceKey) {
         return Row(
           children: [
@@ -1457,7 +1754,7 @@ class _BotEditorState extends State<_BotEditor> {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                'Using your saved ${_provider.label} key',
+                'API key saved securely',
                 style: const TextStyle(fontSize: 13),
               ),
             ),
@@ -1488,10 +1785,13 @@ class _BotEditorState extends State<_BotEditor> {
       return StatusPill(
         color: status.available ? scheme.tertiary : Colors.orange,
         label: status.available
-            ? '${cli.binary} found · sign-in not verified'
+            ? '${cli.binary} installed'
             : '${cli.binary} not found',
         icon: status.available ? Icons.terminal : Icons.error_outline,
       );
+    }
+    if (widget.desktopClis && !_isSupportedDesktopProvider) {
+      return const Text('Choose a supported provider above.');
     }
 
     // A signed-in subscription works everywhere, including a phone with
@@ -1572,7 +1872,9 @@ class _BotEditorState extends State<_BotEditor> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            list.problem ?? 'No models available yet.',
+            widget.desktopClis && list.source == ModelSource.needsKey
+                ? 'Add an API key in Setup to load models.'
+                : list.problem ?? 'No models available yet.',
             style: TextStyle(fontSize: 12, color: Colors.orange),
           ),
           const SizedBox(height: 6),
@@ -1672,7 +1974,7 @@ class _BotEditorState extends State<_BotEditor> {
                     ? 'Models via ${_provider.cli!.binary} CLI.'
                     : '${_provider.cli!.binary} CLI not found.')
               : list.source == ModelSource.live
-              ? 'Loaded from ${_provider.label}.'
+              ? 'Loaded from ${_provider.label}${_provider.needsApiKey ? ' API' : ''}.'
               : list.problem ?? 'Could not load the model list. Try again.',
           style: TextStyle(
             fontSize: 11,
@@ -1687,10 +1989,17 @@ class _BotEditorState extends State<_BotEditor> {
 
   Future<void> _save() async {
     if (_saving) return;
+    final credentials = ModelCatalog.credentials;
     final keepingUnavailable =
         widget.desktopClis &&
         !_isSupportedDesktopProvider &&
         _provider == widget.existing?.provider;
+    if (widget.desktopClis && _provider.needsApiKey && credentials == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Secure API key storage is unavailable.')),
+      );
+      return;
+    }
     if (!keepingUnavailable &&
         _provider.needsApiKey &&
         _key.text.trim().isEmpty &&
@@ -1698,7 +2007,7 @@ class _BotEditorState extends State<_BotEditor> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Add your ${_provider.label} key in Accounts or enter it here.',
+            'Add your ${_provider.label} key in ${widget.desktopClis ? 'Setup' : 'Accounts'} or enter it here.',
           ),
         ),
       );
@@ -1722,7 +2031,6 @@ class _BotEditorState extends State<_BotEditor> {
     }
     setState(() => _saving = true);
     try {
-      final credentials = ModelCatalog.credentials;
       if (_provider.needsApiKey &&
           credentials != null &&
           _key.text.trim().isNotEmpty) {
@@ -1736,7 +2044,10 @@ class _BotEditorState extends State<_BotEditor> {
           persona: _persona.text.trim(),
           provider: _provider,
           model: _resolvedModel,
-          apiKey: _provider.needsApiKey && credentials == null
+          apiKey:
+              _provider.needsApiKey &&
+                  credentials == null &&
+                  !widget.desktopClis
               ? _key.text.trim()
               : widget.desktopClis && _provider == widget.existing?.provider
               ? widget.existing?.apiKey ?? ''

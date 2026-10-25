@@ -15,9 +15,9 @@
 //! and can correct itself. A bare `InvalidArgument` wastes a turn.
 
 use orgbot_engine::{Command, Engine, EngineError};
-use orgbot_proto::graph::{Lineage, TaskKind, TaskOrigin};
 use orgbot_proto::agent::AgentSpec;
 use orgbot_proto::artifact::{ArtifactBody, PART_CHARS};
+use orgbot_proto::graph::{Lineage, TaskKind, TaskOrigin};
 use orgbot_proto::handoff::{HandoffKind, Recipient};
 use orgbot_proto::review::{Finding, Severity};
 use orgbot_proto::task::{BlockReason, Priority};
@@ -358,7 +358,10 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             schema::object(
                 vec![
                     ("title", schema::string("A one-line summary.")),
-                    ("brief", schema::string("The full instruction for whoever takes it.")),
+                    (
+                        "brief",
+                        schema::string("The full instruction for whoever takes it."),
+                    ),
                     (
                         "acceptance_criteria",
                         schema::string_array("Checkable conditions for approval."),
@@ -378,7 +381,10 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                         "depends_on",
                         schema::string_array("Task ids that must be submitted first."),
                     ),
-                    ("open", schema::boolean("Publish immediately. Defaults to true.")),
+                    (
+                        "open",
+                        schema::boolean("Publish immediately. Defaults to true."),
+                    ),
                     (
                         "anyway",
                         schema::string(
@@ -445,7 +451,10 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                                         ),
                                     ),
                                     ("summary", schema::string("What is wrong.")),
-                                    ("locus", schema::string("Where — an artifact or a criterion.")),
+                                    (
+                                        "locus",
+                                        schema::string("Where — an artifact or a criterion."),
+                                    ),
                                     ("suggestion", schema::string("What to do about it.")),
                                 ],
                                 &["severity", "summary"],
@@ -475,7 +484,29 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
         ));
     }
 
+    if spec.autonomy.review_only {
+        tools.retain(|tool| review_only_tool_allowed(&tool.name));
+    }
     tools
+}
+
+fn review_only_tool_allowed(name: &str) -> bool {
+    matches!(
+        name,
+        "post_message"
+            | "room_status"
+            | "list_tasks"
+            | "claim_task"
+            | "start_task"
+            | "find_prior_work"
+            | "read_prior_artifact"
+            | "use_skill"
+            | "read_artifact"
+            | "release_task"
+            | "record_review"
+            | "add_artifact"
+            | "submit_for_review"
+    )
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> ToolDef {
@@ -492,6 +523,14 @@ fn tool(name: &str, description: &str, input_schema: Value) -> ToolDef {
 /// [`ToolOutcome`] flagged as an error, so the model reads the correction and
 /// takes another turn.
 pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) -> ToolOutcome {
+    if engine
+        .agent(actor)
+        .is_some_and(|spec| spec.autonomy.review_only && !review_only_tool_allowed(name))
+    {
+        return ToolOutcome::error(format!(
+            "Review-only bots cannot use `{name}`. Use read tools, record_review, or post_message."
+        ));
+    }
     match name {
         "post_message" => post_message(engine, actor, input),
         "room_status" => room_status(engine, actor),
@@ -563,7 +602,9 @@ fn string_list(input: &Value, field: &str) -> Vec<String> {
 /// Parse an id, explaining the expected shape on failure.
 fn parse_id<T: std::str::FromStr>(raw: &str, field: &str, prefix: &str) -> Result<T, String> {
     raw.parse().map_err(|_| {
-        format!("`{field}` is not a valid id. Expected something like `{prefix}_1a2b3c…`, got `{raw}`.")
+        format!(
+            "`{field}` is not a valid id. Expected something like `{prefix}_1a2b3c…`, got `{raw}`."
+        )
     })
 }
 
@@ -669,7 +710,7 @@ fn post_message(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
                 None => {
                     return ToolOutcome::error(format!(
                         "There is no bot with handle `{handle}`. Call room_status to see who is here."
-                    ))
+                    ));
                 }
             }
         }
@@ -753,11 +794,12 @@ fn room_status(engine: &Engine, actor: AgentId) -> ToolOutcome {
     let claimable = engine.claimable_by(actor);
     if !claimable.is_empty() {
         out.push_str("\nYou could take:\n");
-        out.push_str(&render_tasks(engine, claimable.into_iter().take(10).collect()));
+        out.push_str(&render_tasks(
+            engine,
+            claimable.into_iter().take(10).collect(),
+        ));
     }
-    out.push_str(
-        "\nThat is the board compacted. Call list_tasks for the full set.\n",
-    );
+    out.push_str("\nThat is the board compacted. Call list_tasks for the full set.\n");
     ToolOutcome::ok(out)
 }
 
@@ -777,7 +819,10 @@ fn render_tasks(engine: &Engine, ids: Vec<TaskId>) -> String {
             .unwrap_or_else(|| " unassigned".to_string());
         out.push_str(&format!(
             "  {} [{}]{} — {}",
-            task.id, task.state.as_str(), owner, task.title
+            task.id,
+            task.state.as_str(),
+            owner,
+            task.title
         ));
         if !task.blocked_on.is_empty() {
             out.push_str(&format!(" (blocked on {} thing(s))", task.blocked_on.len()));
@@ -830,7 +875,7 @@ fn task_origin(input: &Value) -> Result<TaskOrigin, String> {
             return Err(format!(
                 "`{other}` is not a kind of work. Use one of: objective, task, \
                  subtask, review, remediation, evidence, recovery, continuation."
-            ))
+            ));
         }
     };
 
@@ -871,7 +916,7 @@ fn task_origin(input: &Value) -> Result<TaskOrigin, String> {
                 "an objective is a top-level outcome, so it cannot belong to \
                  another task. Drop `of`, or pick a different kind."
                     .into(),
-            )
+            );
         }
     }
     Ok(TaskOrigin { kind, lineage })
@@ -958,7 +1003,7 @@ fn add_artifact(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
     ) {
         (Ok(task), Ok(name), Ok(content)) => (task, name.to_string(), content.to_string()),
         (Err(message), _, _) | (_, Err(message), _) | (_, _, Err(message)) => {
-            return ToolOutcome::error(message)
+            return ToolOutcome::error(message);
         }
     };
     let body = match optional_str(input, "kind").unwrap_or("text") {
@@ -967,7 +1012,7 @@ fn add_artifact(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
             Err(error) => {
                 return ToolOutcome::error(format!(
                     "`content` is not valid JSON ({error}). Either fix it or set kind to \"text\"."
-                ))
+                ));
             }
         },
         "patch" => ArtifactBody::Patch { diff: content },
@@ -980,7 +1025,10 @@ fn add_artifact(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
         author: actor,
         name: name.clone(),
         body,
-        authority_bearing: input.get("exact").and_then(|v| v.as_bool()).unwrap_or(false),
+        authority_bearing: input
+            .get("exact")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     }) {
         Ok(events) => {
             let id = events
@@ -1042,8 +1090,7 @@ fn find_prior_work(engine: &Engine, input: &Value) -> ToolOutcome {
     let hits = engine.archive().search(query);
     if hits.is_empty() {
         return ToolOutcome::ok(
-            "No earlier room did anything like this. It is new work; carry on."
-                .to_string(),
+            "No earlier room did anything like this. It is new work; carry on.".to_string(),
         );
     }
     let mut out = format!(
@@ -1123,7 +1170,8 @@ fn use_skill(engine: &Engine, input: &Value) -> ToolOutcome {
 }
 
 fn read_artifact(engine: &Engine, input: &Value) -> ToolOutcome {
-    let id = match required_str(input, "artifact").and_then(|raw| parse_id(raw, "artifact", "art")) {
+    let id = match required_str(input, "artifact").and_then(|raw| parse_id(raw, "artifact", "art"))
+    {
         Ok(id) => id,
         Err(message) => return ToolOutcome::error(message),
     };
@@ -1208,7 +1256,7 @@ fn offer_handoff(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutc
             None => {
                 return ToolOutcome::error(format!(
                     "There is no bot with handle `{handle}`. Call room_status to see who is here."
-                ))
+                ));
             }
         }
     } else if let Some(role) = optional_str(input, "to_role") {
@@ -1309,10 +1357,7 @@ fn accept_handoff(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOut
         Ok(handoff) => handoff,
         Err(message) => return ToolOutcome::error(message),
     };
-    match engine.apply(Command::AcceptHandoff {
-        handoff,
-        by: actor,
-    }) {
+    match engine.apply(Command::AcceptHandoff { handoff, by: actor }) {
         Ok(_) => {
             let brief = engine
                 .handoff(handoff)
@@ -1390,9 +1435,9 @@ fn block_on(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
         Ok(events) => {
             // A circular wait is resolved on the spot; tell the bot, because it
             // changes what it should do next.
-            let broke_a_deadlock = events.iter().any(|e| {
-                matches!(e.event, orgbot_proto::Event::DeadlockDetected { .. })
-            });
+            let broke_a_deadlock = events
+                .iter()
+                .any(|e| matches!(e.event, orgbot_proto::Event::DeadlockDetected { .. }));
             if broke_a_deadlock {
                 ToolOutcome::ok(
                     "Blocked — but this created a circular wait, which the room has just \
@@ -1435,7 +1480,11 @@ fn record_review(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutc
         .cloned()
         .unwrap_or_default()
     {
-        let severity = match raw.get("severity").and_then(Value::as_str).unwrap_or("note") {
+        let severity = match raw
+            .get("severity")
+            .and_then(Value::as_str)
+            .unwrap_or("note")
+        {
             "minor" => Severity::Minor,
             "major" => Severity::Major,
             "critical" => Severity::Critical,

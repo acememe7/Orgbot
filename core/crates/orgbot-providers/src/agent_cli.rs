@@ -172,6 +172,25 @@ fn is_executable(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+fn remove_app_credentials(
+    command: &mut Command,
+    inherited_names: impl IntoIterator<Item = std::ffi::OsString>,
+) {
+    command
+        .env_remove("ORGBOT_ROOM_TOKEN")
+        .env_remove("DEEPSEEK_API_KEY");
+    for name in inherited_names {
+        if is_orgbot_api_key(&name) {
+            command.env_remove(name);
+        }
+    }
+}
+
+fn is_orgbot_api_key(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    name.starts_with("ORGBOT_") && name.ends_with("_API_KEY")
+}
+
 /// The sandbox/permission flag this CLI expects for a policy.
 fn policy_flags(cli: CliKind, policy: AgentPolicy) -> (&'static str, &'static str) {
     let value = match (cli, policy) {
@@ -329,6 +348,7 @@ impl AgentCliProvider {
             mcp_config,
             self.mcp,
         );
+        remove_app_credentials(&mut cmd, std::env::vars_os().map(|(name, _)| name));
         if !self.workdir.as_os_str().is_empty() {
             cmd.current_dir(&self.workdir);
         }
@@ -586,17 +606,27 @@ fn write_grok_home(socket: &str) -> Result<std::path::PathBuf> {
 }
 
 fn write_codex_home(socket: &str) -> Result<std::path::PathBuf> {
-    write_agent_home(socket, ".codex", "codex", |config, relay, socket| {
-        config.push_str("\n[mcp_servers.orgbot_room]\n");
-        config.push_str(&format!(
-            "command = {}\n",
-            serde_json::to_string(&relay.to_string_lossy()).unwrap()
-        ));
-        config.push_str(&format!(
-            "args = [\"room-mcp\", \"--socket\", \"{socket}\" ]\n"
-        ));
-    })
+    write_agent_home(socket, ".codex", "codex", append_codex_room_server)
 }
+
+fn append_codex_room_server(config: &mut String, relay: &Path, socket: &str) {
+    config.push_str("\n[mcp_servers.orgbot_room]\n");
+    config.push_str(&format!(
+        "command = {}\n",
+        serde_json::to_string(&relay.to_string_lossy()).unwrap()
+    ));
+    config.push_str(&format!(
+        "args = [\"room-mcp\", \"--socket\", \"{socket}\" ]\n"
+    ));
+    // Codex normally asks the headless user to approve MCP calls. Keep the
+    // approval exception scoped to this local room bridge; global approval
+    // remains `never` in the invocation arguments.
+    config.push_str("default_tools_approval_mode = \"approve\"\n");
+}
+
+// This grants auto-approval only to OrgBot's guarded local board bridge. Any
+// other inherited Codex MCP integrations retain their own CLI configuration;
+// the provider does not claim to block arbitrary remote mutations through them.
 
 /// Build a throwaway config home for a CLI that manages MCP through config.
 ///
@@ -721,7 +751,6 @@ fn build_args(
     mcp: bool,
 ) {
     let (policy_flag, policy_value) = policy_flags(cli, policy);
-    let _ = policy_flag;
     if let Some(path) = mcp_config {
         // Only Claude Code accepts a per-run MCP config today; the other
         // CLIs ignore it (their attach story is config-managed).
@@ -735,17 +764,10 @@ fn build_args(
                 .arg("--json")
                 .arg("--skip-git-repo-check")
                 .arg(prompt);
-            if mcp && policy == AgentPolicy::WorkspaceWrite {
-                // Headless codex refuses MCP tool calls under a plain sandbox;
-                // --approve-for-me routes them through automatic review (and
-                // implies the workspace-write sandbox, so -s must not be set).
-                cmd.arg("--approve-for-me");
-            } else {
-                cmd.arg("-s")
-                    .arg(policy_value)
-                    .arg("-c")
-                    .arg("approval_policy=\"never\"");
-            }
+            cmd.arg(policy_flag)
+                .arg(policy_value)
+                .arg("-c")
+                .arg("approval_policy=\"never\"");
         }
         (CliKind::Codex, Some(session)) => {
             // `codex exec resume` does not take a sandbox flag (the resumed
@@ -755,6 +777,8 @@ fn build_args(
                 .arg("resume")
                 .arg("--json")
                 .arg("--skip-git-repo-check")
+                .arg("-c")
+                .arg("approval_policy=\"never\"")
                 .arg(session)
                 .arg(prompt);
         }
@@ -829,7 +853,7 @@ fn build_args(
                     .arg("--allow")
                     .arg(ROOM_TOOL_WILDCARD);
             }
-            // codex routes MCP approvals through --approve-for-me, set above.
+            // Codex's local room-server approval is set only in its overlay.
             CliKind::Codex => {}
         }
     }
@@ -923,9 +947,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_mcp_keeps_the_requested_filesystem_policy() {
+    fn codex_mcp_keeps_sandbox_and_never_approval_for_every_policy() {
         for (policy, expected) in [
             (AgentPolicy::ReadOnly, "read-only"),
+            (AgentPolicy::WorkspaceWrite, "workspace-write"),
             (AgentPolicy::FullAccess, "danger-full-access"),
         ] {
             let mut cmd = Command::new("codex");
@@ -945,7 +970,101 @@ mod tests {
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect();
             assert!(args.windows(2).any(|pair| pair == ["-s", expected]));
+            assert!(args.windows(2).any(|pair| pair == ["-c", "approval_policy=\"never\""]));
             assert!(!args.iter().any(|arg| arg == "--approve-for-me"));
+        }
+    }
+
+    #[test]
+    fn codex_resume_does_not_enable_automatic_review_for_any_policy() {
+        for policy in [
+            AgentPolicy::ReadOnly,
+            AgentPolicy::WorkspaceWrite,
+            AgentPolicy::FullAccess,
+        ] {
+            let mut cmd = Command::new("codex");
+            build_args(
+                &mut cmd,
+                CliKind::Codex,
+                "test",
+                Some("prior-session"),
+                "",
+                policy,
+                None,
+                true,
+            );
+            let args: Vec<_> = cmd
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert!(args.windows(2).any(|pair| pair == ["-c", "approval_policy=\"never\""]));
+            assert!(!args.iter().any(|arg| arg == "-s"));
+            assert!(!args.iter().any(|arg| arg == "--approve-for-me"));
+            assert!(!args.iter().any(|arg| arg == "--full-auto"));
+            let override_index = args.iter().position(|arg| arg == "-c").unwrap();
+            let session_index = args.iter().position(|arg| arg == "prior-session").unwrap();
+            let prompt_index = args.iter().position(|arg| arg == "test").unwrap();
+            assert!(override_index < session_index && session_index < prompt_index);
+        }
+    }
+
+    #[test]
+    fn codex_room_approval_override_is_scoped_to_the_local_server() {
+        let mut config = "[mcp_servers.external]\nurl = \"https://example.invalid\"\n".to_string();
+        append_codex_room_server(&mut config, Path::new("/usr/bin/orgbot"), "/tmp/room.sock");
+
+        let (external, room) = config
+            .split_once("[mcp_servers.orgbot_room]")
+            .expect("the guarded room server is configured");
+        assert!(!external.contains("default_tools_approval_mode"));
+        assert!(room.contains("default_tools_approval_mode = \"approve\""));
+        assert!(room.contains("args = [\"room-mcp\", \"--socket\", \"/tmp/room.sock\" ]"));
+        assert!(!config.contains("approval_policy"));
+        assert!(config.contains("[mcp_servers.external]"));
+    }
+
+    #[test]
+    fn spawned_cli_strips_app_secrets_but_keeps_native_cli_environment() {
+        let mut cmd = Command::new("codex");
+        cmd.env("PATH", "/native/bin:/usr/bin")
+            .env("ANTHROPIC_API_KEY", "native-anthropic-placeholder")
+            .env("OPENAI_API_KEY", "native-openai-placeholder")
+            .env("ORGBOT_CLI_TURN_TIMEOUT_SECS", "600");
+        let app_names = [
+            "ORGBOT_ROOM_TOKEN",
+            "DEEPSEEK_API_KEY",
+            "ORGBOT_DEEPSEEK_TWO_API_KEY",
+            "ORGBOT_OLLAMA_API_KEY",
+        ]
+        .map(std::ffi::OsString::from);
+        remove_app_credentials(&mut cmd, app_names);
+
+        let environment: std::collections::HashMap<_, _> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for removed in [
+            "ORGBOT_ROOM_TOKEN",
+            "DEEPSEEK_API_KEY",
+            "ORGBOT_DEEPSEEK_TWO_API_KEY",
+            "ORGBOT_OLLAMA_API_KEY",
+        ] {
+            assert_eq!(environment.get(removed), Some(&None), "{removed} is removed");
+        }
+        for kept in [
+            "PATH",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "ORGBOT_CLI_TURN_TIMEOUT_SECS",
+        ] {
+            assert!(environment.get(kept).is_some_and(Option::is_some), "{kept} remains");
         }
     }
 

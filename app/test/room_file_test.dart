@@ -24,6 +24,37 @@ RoomDef room({List<String> tasks = const []}) => RoomDef(
 void main() {
   _roleTableTests();
 
+  test('review-only permissions survive edits and use a read-only CLI', () {
+    final powers = RolePowers.fromJson({
+      'review_only': true,
+      'may_inspect': true,
+    }).copyWith(maySubmit: false);
+    expect(powers.toJson()['review_only'], isTrue);
+    expect(RolePowers.fromJson({}).reviewOnly, isFalse);
+    final bot = BotDef(
+      name: 'Astra',
+      provider: ProviderKind.codex,
+      model: 'gpt-6-astra',
+      role: 'security',
+      powers: powers,
+    );
+    final restored = BotDef.fromJson(bot.toJson());
+    final file = buildRoomFile(room(), [restored], canRunClis: true);
+    expect(file.toml, contains('review_only = true'));
+    expect(file.toml, contains('policy = "read_only"'));
+    expect(file.toml, contains('max_turns_per_task = 4'));
+    expect(file.toml, contains('max_open_handoffs = 2'));
+    final worker = buildRoomFile(room(), [
+      BotDef(name: 'Builder'),
+    ], canRunClis: true);
+    expect(worker.toml, contains('policy = "workspace_write"'));
+    expect(worker.toml, contains('max_turns_per_task = 6'));
+    final phone = buildRoomFile(room(), [
+      BotDef(name: 'Demo', provider: ProviderKind.scripted),
+    ], canRunClis: false);
+    expect(phone.toml, isNot(contains('max_turns_per_task')));
+  });
+
   // Concurrency is a rate multiplier, not only a speed-up: a room running four
   // at a time draws about four times as fast as one at a time. A default that
   // quadruples someone's consumption is a decision taken on their behalf.

@@ -154,6 +154,9 @@ pub struct Autonomy {
     pub may_submit: bool,
     /// Whether the bot may create new tasks on the board.
     pub may_create_tasks: bool,
+    /// Restricts claims and delegated ownership to review work.
+    #[serde(default)]
+    pub review_only: bool,
 }
 
 impl Default for Autonomy {
@@ -164,6 +167,7 @@ impl Default for Autonomy {
             may_inspect: false,
             may_submit: false,
             may_create_tasks: false,
+            review_only: false,
         }
     }
 }
@@ -347,6 +351,21 @@ mod tests {
             !a.may_submit,
             "inspection and delivery stay separate duties"
         );
+    }
+
+    #[test]
+    fn old_autonomy_config_defaults_review_only_to_false() {
+        let autonomy: Autonomy = serde_json::from_value(serde_json::json!({
+            "max_turns_per_task": 24,
+            "max_open_handoffs": 4,
+            "may_inspect": true,
+            "may_submit": false,
+            "may_create_tasks": false
+        }))
+        .unwrap();
+
+        assert!(autonomy.may_inspect);
+        assert!(!autonomy.review_only);
     }
 
     #[test]

@@ -166,6 +166,10 @@ class RoomSlot {
 /// misbehaving room and an unbounded bill.
 const int defaultMaxTurns = 2000;
 
+/// Conservative defaults for a room started with local desktop CLIs.
+const int desktopDefaultMaxTurns = 100;
+const List<int> desktopTurnBudgetChoices = [100, 250, 500, 2000, 0];
+
 /// Turn budgets offered in the UI. `0` means no limit.
 const List<int> turnBudgetChoices = [500, 2000, 5000, 20000, 0];
 
@@ -184,6 +188,9 @@ const List<int> turnBudgetChoices = [500, 2000, 5000, 20000, 0];
 /// improvement over taking turns one at a time and leaves the larger step as
 /// something chosen, by someone who can see what the room has drawn.
 const int defaultParallelTurns = 2;
+
+/// Desktop rooms start one agent at a time; higher concurrency remains opt-in.
+const int desktopDefaultParallelTurns = 1;
 
 /// Concurrency settings offered in the UI.
 ///

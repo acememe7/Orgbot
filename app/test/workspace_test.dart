@@ -280,7 +280,7 @@ void main() {
     },
   );
   test(
-    'workspace adapts Android tool context without changing Linux CLI room files',
+    'explicit workspace descriptions reach phone and desktop engines',
     () {
       final bot = BotDef(name: 'Demo', provider: ProviderKind.scripted);
       final room = RoomDef(
@@ -312,7 +312,9 @@ void main() {
         canRunClis: true,
         workspace: description,
       );
-      expect(desktop.toml, isNot(contains('[workspace]')));
+      expect(desktop.toml, contains('[workspace]'));
+      expect(desktop.toml, contains('root = "/work"'));
+      expect(desktop.toml, contains('commands = false'));
       expect(RoomDef.fromJson(room.toJson()).workspace.host, 'example.test');
     },
   );

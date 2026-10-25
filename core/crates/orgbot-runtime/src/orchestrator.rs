@@ -113,6 +113,23 @@ impl Orchestrator {
             _ => return Err("Room memory was written by a newer app".into()),
         };
         engine.configure_saved_room(spec);
+        let configured_handles: BTreeSet<_> = providers
+            .iter()
+            .map(|(agent, _)| agent.handle.as_str())
+            .collect();
+        let removed: Vec<_> = engine
+            .agents()
+            .filter(|agent| !configured_handles.contains(agent.handle.as_str()))
+            .map(|agent| agent.id)
+            .collect();
+        for agent in removed {
+            engine
+                .apply(Command::LeaveAgent {
+                    agent,
+                    reason: "removed from the configured team".into(),
+                })
+                .map_err(|error| error.to_string())?;
+        }
         let memory: BTreeMap<AgentId, crate::bot::BotMemory> = if version == 1 {
             serde_json::from_value(value["bots"].clone()).map_err(|e| e.to_string())?
         } else {

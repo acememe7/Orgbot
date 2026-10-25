@@ -166,7 +166,9 @@ class _OrgBotAppState extends State<OrgBotApp> {
   @override
   void initState() {
     super.initState();
-    ModelCatalog.credentials = canRunAgentClis ? null : _credentials;
+    // Keep encrypted API keys available to Linux model discovery and bot
+    // setup. Desktop initialization still skips loading/renewing OAuth.
+    ModelCatalog.credentials = _credentials;
     _initialize();
     BackgroundRooms.channel.setMethodCallHandler((call) async {
       if (call.method == 'pauseAll') {
@@ -184,7 +186,9 @@ class _OrgBotAppState extends State<OrgBotApp> {
     // rather than be discovered in the morning.
     unawaited(RoomStore.attentions.start());
     try {
-      if (!canRunAgentClis) await _credentials.load();
+      // Loading the local store makes saved API keys available on Linux. This
+      // is a keystore read only; desktop model discovery never renews OAuth.
+      await _credentials.load();
       await _library.load();
       if (!canRunAgentClis) await _library.shareExistingKeys(_credentials);
     } catch (_) {
@@ -209,9 +213,6 @@ class _OrgBotAppState extends State<OrgBotApp> {
     theme: orgBotTheme(Brightness.light),
     darkTheme: orgBotTheme(Brightness.dark),
     themeMode: ThemeMode.system,
-    home: OrgBotScreen(
-      library: _library,
-      credentials: canRunAgentClis ? null : _credentials,
-    ),
+    home: OrgBotScreen(library: _library, credentials: _credentials),
   );
 }

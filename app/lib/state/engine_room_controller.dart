@@ -217,7 +217,16 @@ class EngineRoomController extends ChangeNotifier {
         bots,
         credentials: ModelCatalog.credentials,
         workspace: workspace == null
-            ? null
+            ? !runsInProcess &&
+                      room.path.trim().isNotEmpty &&
+                      bots.any((bot) => bot.provider.needsApiKey)
+                  ? {
+                      'label': 'Project files',
+                      'root': Directory(expandHome(room.path)).absolute.path,
+                      'writable': true,
+                      'commands': false,
+                    }
+                  : null
             : {
                 ...workspace!.description,
                 if (restoring)

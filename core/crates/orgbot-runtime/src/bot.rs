@@ -118,7 +118,10 @@ impl Bot {
     }
 
     pub fn attach_workspace(&mut self, workspace: crate::workspace::Workspace) {
-        self.tools.extend(workspace.definitions());
+        self.tools
+            .extend(workspace.definitions().into_iter().filter(|tool| {
+                !self.spec.autonomy.review_only || !is_workspace_write_tool(&tool.name)
+            }));
         self.workspace = Some(workspace);
     }
 
@@ -129,7 +132,9 @@ impl Bot {
     /// tools arrive already named for the server they came from, so nothing
     /// here can shadow a board tool.
     pub fn attach_mcp_servers(&mut self, servers: Arc<crate::mcp_client::McpClient>) {
-        self.tools.extend(servers.tools());
+        if !self.spec.autonomy.review_only {
+            self.tools.extend(servers.tools());
+        }
         self.mcp_servers = Some(servers);
     }
 
@@ -282,12 +287,12 @@ impl Bot {
                     let _ = engine.with(|engine| {
                         let task = engine.active_tasks_of(self.spec.id).first().copied();
                         engine.apply(Command::ReportError {
-                        agent: self.spec.id,
-                        task,
-                        error: error.to_string(),
-                        // A model that does not exist, or a credential the
-                        // backend refuses, will answer the same way next turn.
-                        permanent: !error.is_retryable(),
+                            agent: self.spec.id,
+                            task,
+                            error: error.to_string(),
+                            // A model that does not exist, or a credential the
+                            // backend refuses, will answer the same way next turn.
+                            permanent: !error.is_retryable(),
                         })
                     });
                     return Err(error);
@@ -321,16 +326,28 @@ impl Bot {
                     .as_ref()
                     .is_some_and(|servers| servers.owns(name))
                 {
-                    // Safe to unwrap: `owns` is only true when it is set.
-                    let servers = self.mcp_servers.clone().expect("checked above");
-                    servers.call(name, input).await
+                    if self.spec.autonomy.review_only {
+                        orgbot_tools::ToolOutcome::error(
+                            "Review-only bots cannot call external MCP tools.",
+                        )
+                    } else {
+                        // Safe to unwrap: `owns` is only true when it is set.
+                        let servers = self.mcp_servers.clone().expect("checked above");
+                        servers.call(name, input).await
+                    }
                 } else if name.starts_with("workspace_") {
-                    match &self.workspace {
-                        Some(workspace) => workspace.call(self.spec.id, name, input).await,
-                        None => orgbot_tools::ToolOutcome {
-                            content: "No workspace attached".into(),
-                            is_error: true,
-                        },
+                    if self.spec.autonomy.review_only && is_workspace_write_tool(name) {
+                        orgbot_tools::ToolOutcome::error(
+                            "Review-only bots cannot change workspace files or run commands.",
+                        )
+                    } else {
+                        match &self.workspace {
+                            Some(workspace) => workspace.call(self.spec.id, name, input).await,
+                            None => orgbot_tools::ToolOutcome {
+                                content: "No workspace attached".into(),
+                                is_error: true,
+                            },
+                        }
                     }
                 } else {
                     engine.with(|engine| orgbot_tools::dispatch(engine, self.spec.id, name, input))
@@ -356,8 +373,11 @@ impl Bot {
         engine.with(|engine| {
             if let Some(said) = &report.said {
                 if !posted_to_chat {
-                    let message =
-                        orgbot_proto::ChatMessage::say(engine.room_id(), self.spec.id, said.clone());
+                    let message = orgbot_proto::ChatMessage::say(
+                        engine.room_id(),
+                        self.spec.id,
+                        said.clone(),
+                    );
                     let _ = engine.apply(Command::PostMessage {
                         message: Box::new(message),
                     });
@@ -434,6 +454,13 @@ impl Bot {
     }
 }
 
+fn is_workspace_write_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "workspace_import_attachment" | "workspace_write" | "workspace_mkdir" | "workspace_run"
+    )
+}
+
 /// Retry only the current API response. Nothing from an incomplete response
 /// reaches history or tool execution, and prior tool results remain in request.
 async fn complete_api(
@@ -447,12 +474,20 @@ async fn complete_api(
     let mut attempt = 0;
     loop {
         match provider.complete(request.clone(), sink.clone()).await {
-            Err(error) if attempt < MAX_RETRIES && error.is_retryable()
-                && !matches!(error, ProviderError::RateLimited { .. }) => {
+            Err(error)
+                if attempt < MAX_RETRIES
+                    && error.is_retryable()
+                    && !matches!(error, ProviderError::RateLimited { .. }) =>
+            {
                 attempt += 1;
                 tracing::warn!(provider = provider.name(), attempt, %error, "reconnecting interrupted model response");
                 if let Some(tx) = &sink {
-                    let _ = tx.send(StreamEvent::Retry { attempt, max_retries: MAX_RETRIES }).await;
+                    let _ = tx
+                        .send(StreamEvent::Retry {
+                            attempt,
+                            max_retries: MAX_RETRIES,
+                        })
+                        .await;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
             }
@@ -562,9 +597,12 @@ const MAX_HISTORY_CHARS: usize = 240_000;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp_client::{McpServerSpec, McpTransport};
+    use orgbot_engine::Engine;
     use orgbot_providers::types::Role;
     use orgbot_providers::ScriptedProvider;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn spec() -> AgentSpec {
         AgentSpec::new(
@@ -612,6 +650,229 @@ mod tests {
         }
         bot.trim_history();
         assert_eq!(bot.history_len(), 10);
+    }
+
+    #[tokio::test]
+    async fn review_only_bots_cannot_write_or_run_workspace_tools() {
+        use crate::workspace::{Workspace, WorkspaceSpec};
+        use orgbot_engine::Engine;
+        use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            orgbot_providers::types::CompletionResponse {
+                model: "test".into(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "write1".into(),
+                    name: "workspace_write".into(),
+                    input: json!({"path":"report.md", "content":"changed"}),
+                }],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+            orgbot_providers::types::CompletionResponse {
+                model: "test".into(),
+                content: vec![ContentBlock::text("review complete")],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ]));
+        let mut spec = spec();
+        spec.autonomy.review_only = true;
+        let mut room = Engine::new(RoomSpec {
+            name: "review-only".into(),
+            goal: "inspect safely".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+        });
+        room.apply(Command::JoinAgent {
+            spec: Box::new(spec.clone()),
+        })
+        .unwrap();
+        room.apply(Command::StartRoom).unwrap();
+        let engine = SharedEngine::new(room);
+        let mut bot = Bot::new(spec, provider);
+        let (tx, mut calls) = mpsc::channel(2);
+        bot.attach_workspace(Workspace::new(
+            WorkspaceSpec {
+                label: "test".into(),
+                root: "/work".into(),
+                writable: true,
+                commands: true,
+            },
+            tx,
+        ));
+
+        let listed: Vec<_> = bot.tools.iter().map(|tool| tool.name.as_str()).collect();
+        assert!(listed.contains(&"workspace_read"));
+        for blocked in ["workspace_write", "workspace_mkdir", "workspace_run"] {
+            assert!(!listed.contains(&blocked));
+        }
+
+        let report = bot.take_turn(&engine, None).await.unwrap();
+        assert_eq!(report.tool_errors, 1);
+        assert!(
+            calls.try_recv().is_err(),
+            "blocked mutation never reaches the workspace"
+        );
+        assert_eq!(report.said.as_deref(), Some("review complete"));
+    }
+
+    async fn local_mcp_server() -> (McpServerSpec, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = calls.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut stream = BufReader::new(stream);
+                let mut request_line = String::new();
+                if stream.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                    continue;
+                }
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if stream.read_line(&mut line).await.unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0; length];
+                if stream.read_exact(&mut body).await.is_err() {
+                    continue;
+                }
+                let Ok(request) = serde_json::from_slice::<serde_json::Value>(&body) else {
+                    continue;
+                };
+                let id = request.get("id").cloned();
+                let result = match request.get("method").and_then(|v| v.as_str()) {
+                    Some("initialize") => json!({
+                        "protocolVersion":"2025-06-18",
+                        "capabilities":{},
+                        "serverInfo":{"name":"test-mcp","version":"1"}
+                    }),
+                    Some("tools/list") => json!({"tools":[{
+                        "name":"mutate",
+                        "description":"A test-only external mutation",
+                        "inputSchema":{"type":"object"}
+                    }]}),
+                    Some("tools/call") => {
+                        observed_calls.fetch_add(1, Ordering::SeqCst);
+                        json!({"content":[{"type":"text","text":"called external MCP mutation"}]})
+                    }
+                    _ => json!({}),
+                };
+                let response = id.map(|id| json!({"jsonrpc":"2.0", "id":id, "result":result}));
+                let response_body = response.map_or_else(String::new, |v| v.to_string());
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    response_body.len(), response_body
+                );
+                let _ = stream.get_mut().write_all(reply.as_bytes()).await;
+                let _ = stream.get_mut().flush().await;
+            }
+        });
+        (
+            McpServerSpec {
+                name: "external".into(),
+                transport: McpTransport::Http {
+                    url: format!("http://{address}/mcp"),
+                    headers: Default::default(),
+                },
+            },
+            calls,
+            server,
+        )
+    }
+
+    fn mcp_call_provider() -> Arc<dyn Provider> {
+        Arc::new(ScriptedProvider::new(vec![
+            CompletionResponse {
+                model: "test".into(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "mcp1".into(),
+                    name: "external__mutate".into(),
+                    input: json!({}),
+                }],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+            CompletionResponse {
+                model: "test".into(),
+                content: vec![ContentBlock::text("turn complete")],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ]))
+    }
+
+    async fn mcp_test_engine(spec: &AgentSpec) -> SharedEngine {
+        use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+        let mut room = Engine::new(RoomSpec {
+            name: "mcp-review-gate".into(),
+            goal: "verify external MCP access".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+        });
+        room.apply(Command::JoinAgent {
+            spec: Box::new(spec.clone()),
+        })
+        .unwrap();
+        room.apply(Command::StartRoom).unwrap();
+        SharedEngine::new(room)
+    }
+
+    #[tokio::test]
+    async fn review_only_bots_cannot_advertise_or_call_external_mcp_tools() {
+        let (server_spec, calls, server) = local_mcp_server().await;
+        let mut spec = spec();
+        spec.autonomy.review_only = true;
+        let client = Arc::new(crate::mcp_client::McpClient::connect(&[server_spec]).await);
+        let mut bot = Bot::new(spec.clone(), mcp_call_provider());
+        bot.attach_mcp_servers(client);
+        assert!(
+            !bot.tools.iter().any(|tool| tool.name == "external__mutate"),
+            "review-only tools must not advertise external MCP capabilities"
+        );
+
+        let report = bot
+            .take_turn(&mcp_test_engine(&spec).await, None)
+            .await
+            .unwrap();
+        assert_eq!(report.tool_errors, 1);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "dispatch must not reach server"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn ordinary_bots_keep_external_mcp_tools() {
+        let (server_spec, calls, server) = local_mcp_server().await;
+        let spec = spec();
+        let client = Arc::new(crate::mcp_client::McpClient::connect(&[server_spec]).await);
+        let mut bot = Bot::new(spec.clone(), mcp_call_provider());
+        bot.attach_mcp_servers(client);
+        assert!(bot.tools.iter().any(|tool| tool.name == "external__mutate"));
+
+        let report = bot
+            .take_turn(&mcp_test_engine(&spec).await, None)
+            .await
+            .unwrap();
+        assert_eq!(report.tool_errors, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
     }
 
     #[test]
@@ -786,30 +1047,68 @@ mod mcp_tests {
         struct Disconnects(AtomicUsize);
         #[async_trait]
         impl Provider for Disconnects {
-            fn name(&self) -> &str { "disconnected" }
-            async fn complete(&self, _: CompletionRequest, _: Option<mpsc::Sender<StreamEvent>>) -> Result<CompletionResponse, ProviderError> {
+            fn name(&self) -> &str {
+                "disconnected"
+            }
+            async fn complete(
+                &self,
+                _: CompletionRequest,
+                _: Option<mpsc::Sender<StreamEvent>>,
+            ) -> Result<CompletionResponse, ProviderError> {
                 self.0.fetch_add(1, Ordering::SeqCst);
-                Err(ProviderError::StreamInterrupted { provider: "test".into(), message: "peer disconnected".into() })
+                Err(ProviderError::StreamInterrupted {
+                    provider: "test".into(),
+                    message: "peer disconnected".into(),
+                })
             }
         }
         let backend = Arc::new(Disconnects::default());
         let provider: Arc<dyn Provider> = backend.clone();
-        let result = super::complete_api(&provider, CompletionRequest::new("test", "test", vec![]), None).await;
-        assert!(matches!(result, Err(ProviderError::StreamInterrupted { .. })));
-        assert_eq!(backend.0.load(Ordering::SeqCst), 3, "stop after two retries");
+        let result = super::complete_api(
+            &provider,
+            CompletionRequest::new("test", "test", vec![]),
+            None,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ProviderError::StreamInterrupted { .. })
+        ));
+        assert_eq!(
+            backend.0.load(Ordering::SeqCst),
+            3,
+            "stop after two retries"
+        );
 
         backend.0.store(0, Ordering::SeqCst);
-        let spec = AgentSpec::new("worker", "Worker", ProviderRef::Scripted { script: "test".into() });
+        let spec = AgentSpec::new(
+            "worker",
+            "Worker",
+            ProviderRef::Scripted {
+                script: "test".into(),
+            },
+        );
         let engine = SharedEngine::new(engine_with(&spec));
         let mut bot = Bot::new(spec, provider);
         let interrupt = bot.input_interrupt.clone();
         let (tx, mut rx) = mpsc::channel(8);
         let running = tokio::spawn(async move { bot.take_turn(&engine, Some(tx)).await });
-        assert!(matches!(rx.recv().await.unwrap(), StreamEvent::Retry { attempt: 1, .. }));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            StreamEvent::Retry { attempt: 1, .. }
+        ));
         interrupt.cancel();
-        let report = tokio::time::timeout(std::time::Duration::from_millis(300), running).await.unwrap().unwrap().unwrap();
+        let report = tokio::time::timeout(std::time::Duration::from_millis(300), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         assert_eq!(report.stop_reason, StopReason::Other("human_input".into()));
-        assert_eq!(backend.0.load(Ordering::SeqCst), 1, "cancel the pending retry immediately");
+        assert_eq!(
+            backend.0.load(Ordering::SeqCst),
+            1,
+            "cancel the pending retry immediately"
+        );
     }
 
     #[tokio::test]
@@ -826,13 +1125,22 @@ mod mcp_tests {
             stop_reason: StopReason::ToolUse,
             usage: Usage::default(),
         }]));
-        let spec = AgentSpec::new("writer", "Writer", ProviderRef::Scripted { script: "x".into() });
+        let spec = AgentSpec::new(
+            "writer",
+            "Writer",
+            ProviderRef::Scripted { script: "x".into() },
+        );
         let engine = SharedEngine::new(engine_with(&spec));
         let mut bot = Bot::new(spec, provider.clone());
         let token = bot.input_interrupt.clone();
         let (tx, mut calls) = mpsc::channel(2);
         bot.attach_workspace(Workspace::new(
-            WorkspaceSpec { label: "test".into(), root: "/work".into(), writable: true, commands: false },
+            WorkspaceSpec {
+                label: "test".into(),
+                root: "/work".into(),
+                writable: true,
+                commands: false,
+            },
             tx,
         ));
         let mut running = tokio::spawn(async move {
@@ -842,20 +1150,41 @@ mod mcp_tests {
         let call = calls.recv().await.unwrap();
         assert_eq!(call.name, "workspace_write");
         token.cancel();
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut running).await.is_err(),
-            "input must not drop the pending write");
-        call.reply.send(orgbot_tools::ToolOutcome { content: "write committed once".into(), is_error: false }).unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut running)
+                .await
+                .is_err(),
+            "input must not drop the pending write"
+        );
+        call.reply
+            .send(orgbot_tools::ToolOutcome {
+                content: "write committed once".into(),
+                is_error: false,
+            })
+            .unwrap();
         let (mut bot, engine, result) = running.await.unwrap();
         let report = result.unwrap();
         assert_eq!(report.stop_reason, StopReason::Other("human_input".into()));
         assert_eq!(report.tool_calls, 1);
-        assert_eq!(provider.requests().len(), 1, "no second API call before processing input");
-        assert_eq!(bot.last_seen(), orgbot_proto::Seq::ZERO, "interrupted requests remain actionable");
-        assert!(matches!(&bot.history.last().unwrap().content[0], ContentBlock::ToolResult { content, .. } if content == "write committed once"));
+        assert_eq!(
+            provider.requests().len(),
+            1,
+            "no second API call before processing input"
+        );
+        assert_eq!(
+            bot.last_seen(),
+            orgbot_proto::Seq::ZERO,
+            "interrupted requests remain actionable"
+        );
+        assert!(
+            matches!(&bot.history.last().unwrap().content[0], ContentBlock::ToolResult { content, .. } if content == "write committed once")
+        );
         bot.input_interrupt = tokio_util::sync::CancellationToken::new();
         bot.take_turn(&engine, None).await.unwrap();
         assert!(calls.try_recv().is_err(), "the write must not be replayed");
-        assert!(serde_json::to_string(&provider.requests()[1].messages).unwrap().contains("write committed once"));
+        assert!(serde_json::to_string(&provider.requests()[1].messages)
+            .unwrap()
+            .contains("write committed once"));
     }
 
     #[tokio::test]
@@ -874,8 +1203,7 @@ mod mcp_tests {
         bot.attach_mcp(mcp_rx, "/tmp/unused.sock".into());
         bot.input_interrupt.cancel(); // MCP tool loops must still finish safely.
 
-        let bot_task =
-            tokio::spawn(async move { (bot.take_turn(&engine, None).await, engine) });
+        let bot_task = tokio::spawn(async move { (bot.take_turn(&engine, None).await, engine) });
 
         // The episode is now blocked inside complete(); the room bridge must
         // answer MCP calls and act on the engine while it waits.

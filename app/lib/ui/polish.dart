@@ -143,7 +143,7 @@ class WorkspaceNavigation extends StatelessWidget {
             children: [
               AnimatedAlign(
                 alignment: Alignment(selected - 1.0, 0),
-                duration: motionDuration(context, 320),
+                duration: motionDuration(context, desktop ? 100 : 320),
                 curve: Curves.easeOutCubic,
                 child: FractionallySizedBox(
                   widthFactor: 1 / 3,
@@ -174,7 +174,10 @@ class WorkspaceNavigation extends StatelessWidget {
                               children: [
                                 AnimatedScale(
                                   scale: selected == i ? 1 : 0.92,
-                                  duration: motionDuration(context, 220),
+                                  duration: motionDuration(
+                                    context,
+                                    desktop ? 100 : 220,
+                                  ),
                                   child: Icon(
                                     icons[i],
                                     size: 22,
@@ -237,59 +240,110 @@ class RoomTabs extends StatelessWidget {
         color: scheme.surfaceContainerLow,
         borderRadius: BorderRadius.circular(16),
       ),
-      child: AnimatedBuilder(
-        animation: controller.animation!,
-        builder: (context, _) => Stack(
-          children: [
-            Align(
-              alignment: Alignment(-1 + 2 * controller.animation!.value / 3, 0),
-              child: FractionallySizedBox(
-                widthFactor: 0.25,
-                heightFactor: 1,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(12),
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: AnimatedBuilder(
+              animation: controller.animation!,
+              builder: (context, _) => Align(
+                alignment: Alignment(
+                  -1 + 2 * controller.animation!.value / 3,
+                  0,
+                ),
+                child: FractionallySizedBox(
+                  widthFactor: 0.25,
+                  heightFactor: 1,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
                 ),
               ),
             ),
-            Row(
-              children: [
-                for (var i = 0; i < labels.length; i++)
-                  Expanded(
-                    child: Semantics(
-                      selected: controller.index == i,
-                      button: true,
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(12),
-                        onTap: () => controller.animateTo(
-                          i,
-                          duration: motionDuration(context, 320),
-                          curve: Curves.easeOutCubic,
-                        ),
-                        child: Center(
-                          child: Text(
-                            labels[i],
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: controller.index == i
-                                  ? FontWeight.w600
-                                  : FontWeight.w400,
-                              color: controller.index == i
-                                  ? scheme.onSurface
-                                  : scheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ),
-                      ),
+          ),
+          RepaintBoundary(child: _RoomTabLabels(controller: controller)),
+        ],
+      ),
+    );
+  }
+}
+
+class _RoomTabLabels extends StatefulWidget {
+  const _RoomTabLabels({required this.controller});
+
+  final TabController controller;
+
+  @override
+  State<_RoomTabLabels> createState() => _RoomTabLabelsState();
+}
+
+class _RoomTabLabelsState extends State<_RoomTabLabels> {
+  late int _selected = widget.controller.index;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_updateSelection);
+  }
+
+  @override
+  void didUpdateWidget(_RoomTabLabels oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller == widget.controller) return;
+    oldWidget.controller.removeListener(_updateSelection);
+    _selected = widget.controller.index;
+    widget.controller.addListener(_updateSelection);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_updateSelection);
+    super.dispose();
+  }
+
+  void _updateSelection() {
+    final selected = widget.controller.index;
+    if (selected == _selected) return;
+    setState(() => _selected = selected);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Row(
+      children: [
+        for (var i = 0; i < RoomTabs.labels.length; i++)
+          Expanded(
+            child: Semantics(
+              selected: _selected == i,
+              button: true,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => widget.controller.animateTo(
+                  i,
+                  duration: motionDuration(context, 320),
+                  curve: Curves.easeOutCubic,
+                ),
+                child: Center(
+                  child: Text(
+                    RoomTabs.labels[i],
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: _selected == i
+                          ? FontWeight.w600
+                          : FontWeight.w400,
+                      color: _selected == i
+                          ? scheme.onSurface
+                          : scheme.onSurfaceVariant,
                     ),
                   ),
-              ],
+                ),
+              ),
             ),
-          ],
-        ),
-      ),
+          ),
+      ],
     );
   }
 }
@@ -297,12 +351,13 @@ class RoomTabs extends StatelessWidget {
 Future<T?> showEditor<T>({
   required BuildContext context,
   required WidgetBuilder builder,
+  int? durationMilliseconds,
 }) => showGeneralDialog<T>(
   context: context,
   barrierDismissible: true,
   barrierLabel: 'Close editor',
   barrierColor: Colors.black54,
-  transitionDuration: motionDuration(context, 320),
+  transitionDuration: motionDuration(context, durationMilliseconds ?? 320),
   pageBuilder: (context, _, _) => builder(context),
   transitionBuilder: (context, animation, _, child) {
     final curved = animation.drive(CurveTween(curve: Curves.easeOutCubic));

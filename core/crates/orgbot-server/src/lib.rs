@@ -16,6 +16,7 @@
 
 pub mod bodies;
 pub mod config;
+pub mod local_workspace;
 pub mod pair;
 pub mod protocol;
 pub mod runner;
@@ -129,7 +130,12 @@ pub async fn serve_room_with_readiness(
             return Err(error.into());
         }
     };
-    let (session, handle) = RoomSession::build(resolved)?;
+    let workspace_spec = resolved.workspace.clone();
+    let (mut session, handle) = RoomSession::build(resolved)?;
+    let workspace_host = match workspace_spec {
+        Some(spec) => Some(local_workspace::LocalWorkspaceHost::attach(spec, &mut session).await?),
+        None => None,
+    };
 
     let state = ws::AppState {
         session: handle,
@@ -159,6 +165,13 @@ pub async fn serve_room_with_readiness(
         }
     }
     let _session = RunningSession(tokio::spawn(session.run()));
+    struct RunningWorkspace(tokio::task::JoinHandle<()>);
+    impl Drop for RunningWorkspace {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _workspace = workspace_host.map(RunningWorkspace);
     let local = listener.local_addr().unwrap_or(addr);
     report(Ok(local));
     tracing::info!(%addr, "serving room; connect a client to ws://{addr}/ws");

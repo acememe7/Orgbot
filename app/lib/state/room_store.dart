@@ -297,28 +297,47 @@ class RoomStore extends ChangeNotifier {
           // It must clear the indicator, never start another "thinking" state.
           final streamEvent = message['event'] as Map?;
           if (streamEvent?['type'] == 'done') {
-            _activity[agentId]?.streaming = false;
-            _activity[agentId]?.retryStatus = null;
-            notifyListeners();
+            final activity = _activity[agentId];
+            if (activity != null &&
+                (activity.streaming || activity.retryStatus != null)) {
+              activity.streaming = false;
+              activity.retryStatus = null;
+              notifyListeners();
+            }
             return;
           }
           // Exactly one bot holds a turn at a time, so a delta from this one
           // means every other is no longer composing. Without clearing them
           // the flags accumulate and the room claims nine bots are thinking.
+          var changed = false;
+          final retryStatus = streamEvent?['type'] == 'retry'
+              ? 'Reconnecting (${streamEvent?['attempt']}/${streamEvent?['max_retries']})'
+              : null;
           for (final entry in _activity.entries) {
-            entry.value.streaming = entry.key == agentId;
-            entry.value.retryStatus = null;
+            final streaming = entry.key == agentId;
+            if (entry.value.streaming != streaming) {
+              entry.value.streaming = streaming;
+              changed = true;
+            }
+            final retry = entry.key == agentId ? retryStatus : null;
+            if (entry.value.retryStatus != retry) {
+              entry.value.retryStatus = retry;
+              changed = true;
+            }
           }
+          final existed = _activity.containsKey(agentId);
           final activity = _activity.putIfAbsent(
             agentId,
             () => BotActivity(_agents[agentId]!),
           );
-          activity.streaming = true;
-          if (streamEvent?['type'] == 'retry') {
-            activity.retryStatus =
-                'Reconnecting (${streamEvent?['attempt']}/${streamEvent?['max_retries']})';
+          if (!existed) {
+            changed = true;
           }
-          notifyListeners();
+          activity.streaming = true;
+          activity.retryStatus = retryStatus;
+          if (changed) {
+            notifyListeners();
+          }
         }
       case 'closed':
         _closedReason = message['reason'] as String?;

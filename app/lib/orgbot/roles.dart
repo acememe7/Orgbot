@@ -23,30 +23,41 @@ class RolePowers {
   /// May deliver approved work. This is the final, irreversible step.
   final bool maySubmit;
 
+  /// May inspect and review, but cannot implement or mutate workspace files.
+  final bool reviewOnly;
+
   const RolePowers({
     this.mayCreateTasks = false,
     this.mayInspect = false,
     this.maySubmit = false,
+    this.reviewOnly = false,
   });
 
-  RolePowers copyWith({bool? mayCreateTasks, bool? mayInspect, bool? maySubmit}) =>
-      RolePowers(
-        mayCreateTasks: mayCreateTasks ?? this.mayCreateTasks,
-        mayInspect: mayInspect ?? this.mayInspect,
-        maySubmit: maySubmit ?? this.maySubmit,
-      );
+  RolePowers copyWith({
+    bool? mayCreateTasks,
+    bool? mayInspect,
+    bool? maySubmit,
+    bool? reviewOnly,
+  }) => RolePowers(
+    mayCreateTasks: mayCreateTasks ?? this.mayCreateTasks,
+    mayInspect: mayInspect ?? this.mayInspect,
+    maySubmit: maySubmit ?? this.maySubmit,
+    reviewOnly: reviewOnly ?? this.reviewOnly,
+  );
 
   Map<String, Object?> toJson() => {
-        'may_create_tasks': mayCreateTasks,
-        'may_inspect': mayInspect,
-        'may_submit': maySubmit,
-      };
+    'may_create_tasks': mayCreateTasks,
+    'may_inspect': mayInspect,
+    'may_submit': maySubmit,
+    'review_only': reviewOnly,
+  };
 
   factory RolePowers.fromJson(Map<String, Object?> json) => RolePowers(
-        mayCreateTasks: json['may_create_tasks'] as bool? ?? false,
-        mayInspect: json['may_inspect'] as bool? ?? false,
-        maySubmit: json['may_submit'] as bool? ?? false,
-      );
+    mayCreateTasks: json['may_create_tasks'] as bool? ?? false,
+    mayInspect: json['may_inspect'] as bool? ?? false,
+    maySubmit: json['may_submit'] as bool? ?? false,
+    reviewOnly: json['review_only'] as bool? ?? false,
+  );
 }
 
 /// Which part of an organisation a role belongs to, used to group the picker.

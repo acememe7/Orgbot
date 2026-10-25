@@ -100,7 +100,7 @@ RoomFile buildRoomFile(
     ..writeln('max_parallel_turns = ' + room.parallelTurns.toString())
     ..writeln();
 
-  if (!runsClis && workspace != null) {
+  if (workspace != null) {
     buffer
       ..writeln('[workspace]')
       ..writeln('label = ' + _s(workspace['label'] as String))
@@ -137,7 +137,13 @@ RoomFile buildRoomFile(
       ..writeln('[bots.autonomy]')
       ..writeln('may_create_tasks = ' + powers.mayCreateTasks.toString())
       ..writeln('may_inspect = ' + powers.mayInspect.toString())
-      ..writeln('may_submit = ' + powers.maySubmit.toString());
+      ..writeln('may_submit = ' + powers.maySubmit.toString())
+      ..writeln('review_only = ${powers.reviewOnly}');
+    if (runsClis) {
+      buffer
+        ..writeln('max_turns_per_task = ${powers.reviewOnly ? 4 : 6}')
+        ..writeln('max_open_handoffs = 2');
+    }
 
     final paired = credentials?.forProvider(bot.provider);
     final cli = bot.provider.cli;
@@ -193,7 +199,9 @@ RoomFile buildRoomFile(
         // The board as MCP tools, on top of the CLI's own memories, skills
         // and MCP servers.
         ..writeln('mcp = true')
-        ..writeln('policy = "workspace_write"');
+        ..writeln(
+          'policy = "${powers.reviewOnly ? 'read_only' : 'workspace_write'}"',
+        );
     } else if (bot.provider.needsApiKey) {
       final key = bot.apiKey.trim().isNotEmpty
           ? bot.apiKey.trim()
@@ -247,9 +255,7 @@ RoomFile buildRoomFile(
   // Without this the engine matches roles by name exactly, and work sits
   // stranded whenever the one bot holding a role is busy — which is how a
   // sixteen-bot room ended up with nine bots free and nothing moving.
-  final held = <String>{
-    for (final bot in bots) Roles.byKey(bot.role).key,
-  };
+  final held = <String>{for (final bot in bots) Roles.byKey(bot.role).key};
   for (final key in held) {
     final role = Roles.byKey(key);
     if (role.capabilities.isEmpty && role.fallbacks.isEmpty) continue;
@@ -261,7 +267,8 @@ RoomFile buildRoomFile(
       ..writeln('name = ' + _s(role.key));
     if (role.capabilities.isNotEmpty) {
       buffer.writeln(
-          'capabilities = [' + role.capabilities.map(_s).join(', ') + ']');
+        'capabilities = [' + role.capabilities.map(_s).join(', ') + ']',
+      );
     }
     if (present.isNotEmpty) {
       buffer.writeln('fallbacks = [' + present.map(_s).join(', ') + ']');

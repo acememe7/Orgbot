@@ -235,6 +235,99 @@ void main() {
     store.dispose();
   });
   test(
+    'unchanged stream frames do not notify but visible transitions do',
+    () async {
+      final client = FakeClient();
+      final store = RoomStore(client);
+      addTearDown(store.dispose);
+      client.emit({
+        'type': 'snapshot',
+        'roster': [
+          {
+            'id': 'bot_a',
+            'handle': 'iris',
+            'display_name': 'Iris',
+            'roles': [],
+            'status': 'idle',
+          },
+        ],
+        'tasks': [],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      var notifications = 0;
+      store.addListener(() => notifications++);
+      client.emit({
+        'type': 'stream',
+        'agent': 'bot_a',
+        'event': {'type': 'text_delta', 'text': 'first'},
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(notifications, 1);
+      for (var i = 0; i < 20; i++) {
+        client.emit({
+          'type': 'stream',
+          'agent': 'bot_a',
+          'event': {'type': 'text_delta', 'text': 'delta $i'},
+        });
+      }
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        notifications,
+        1,
+        reason: 'plain deltas do not change visible state',
+      );
+
+      client.emit({
+        'type': 'stream',
+        'agent': 'bot_a',
+        'event': {'type': 'retry', 'attempt': 1, 'max_retries': 2},
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(notifications, 2);
+      client.emit({
+        'type': 'stream',
+        'agent': 'bot_a',
+        'event': {'type': 'retry', 'attempt': 1, 'max_retries': 2},
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(notifications, 2, reason: 'the same retry status is not a change');
+
+      client.emit({
+        'type': 'stream',
+        'agent': 'bot_a',
+        'event': {'type': 'text_delta', 'text': 'resumed'},
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(notifications, 3, reason: 'resuming clears the retry status');
+      client.emit({
+        'type': 'stream',
+        'agent': 'bot_a',
+        'event': {'type': 'done'},
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(notifications, 4);
+
+      client.emit(
+        event({
+          'event': 'message_posted',
+          'message': {
+            'id': 'msg_1',
+            'room': 'room_1',
+            'author': {'kind': 'human', 'name': 'You'},
+            'audience': {'kind': 'everyone'},
+            'intent': 'say',
+            'body': 'ordinary message',
+            'sent_at': 0,
+          },
+        }),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(notifications, 5, reason: 'ordinary room events still notify');
+      expect(store.messages.single.body, 'ordinary message');
+    },
+  );
+  test(
     'replacement snapshot replays history without duplicates or resync loops',
     () async {
       final client = FakeClient();

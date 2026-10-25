@@ -25,8 +25,11 @@ use orgbot_engine::eligibility::{LeaseState, Reason};
 use orgbot_engine::engine::Engine;
 use orgbot_engine::{Command, EngineError};
 use orgbot_proto::agent::{Autonomy, ProviderRef};
+use orgbot_proto::artifact::ArtifactBody;
 use orgbot_proto::event::{Event, EventEnvelope};
-use orgbot_proto::graph::{DependencyState, TaskOrigin};
+use orgbot_proto::graph::{DependencyState, TaskKind, TaskOrigin};
+use orgbot_proto::handoff::{HandoffKind, Recipient};
+use orgbot_proto::roles::{RoleSpec, RoleTable};
 use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
 use orgbot_proto::task::{BlockReason, Priority, TaskState};
 use orgbot_proto::{AgentId, AgentSpec, TaskId, Timestamp};
@@ -110,6 +113,33 @@ impl Room {
         task
     }
 
+    fn open_with(
+        &mut self,
+        title: &str,
+        required_role: Option<&str>,
+        origin: TaskOrigin,
+    ) -> TaskId {
+        let events = self.apply(Command::CreateTask {
+            title: title.into(),
+            brief: format!("do: {title}"),
+            by: Some(self.lead),
+            required_role: required_role.map(str::to_owned),
+            priority: Priority::Normal,
+            acceptance_criteria: vec![],
+            depends_on: vec![],
+            origin,
+        });
+        let task = events
+            .iter()
+            .find_map(|event| match &event.event {
+                Event::TaskCreated { task } => Some(task.id),
+                _ => None,
+            })
+            .expect("task created");
+        self.apply(Command::OpenTask { task });
+        task
+    }
+
     fn tick(&mut self) {
         let _ = self.engine.apply(Command::Tick {
             now: Timestamp::now(),
@@ -131,6 +161,160 @@ impl Room {
     fn advertised(&self, agent: AgentId) -> Vec<TaskId> {
         self.engine.claimable_by(agent)
     }
+}
+
+#[test]
+fn review_only_bots_are_limited_by_kind_and_explicit_review_roles() {
+    let mut r = room();
+    let mut reviewer = r.engine.agent(r.qa).unwrap().clone();
+    reviewer.autonomy.review_only = true;
+    r.engine.update_agent(reviewer);
+    r.engine.set_roles(RoleTable::new(vec![
+        RoleSpec::new("reviewer").able_to(["review", "audit", "security"])
+    ]));
+
+    let ordinary = r.open_with("ordinary untyped work", None, TaskOrigin::plain());
+    assert_eq!(r.reason(ordinary, r.qa), Reason::ReviewOnly);
+    assert!(!r.advertised(r.qa).contains(&ordinary));
+    assert!(matches!(
+        r.engine.apply(Command::ClaimTask {
+            task: ordinary,
+            by: r.qa
+        }),
+        Err(EngineError::NotPermitted { .. })
+    ));
+
+    let review = r.open_with(
+        "inspect the deliverable",
+        None,
+        TaskOrigin {
+            kind: TaskKind::Review,
+            ..TaskOrigin::plain()
+        },
+    );
+    assert_eq!(r.reason(review, r.qa), Reason::ReadyNow);
+    r.apply(Command::ClaimTask {
+        task: review,
+        by: r.qa,
+    });
+
+    let role_locked_review = r.open_with(
+        "review task requiring the writer role",
+        Some("writer"),
+        TaskOrigin {
+            kind: TaskKind::Review,
+            ..TaskOrigin::plain()
+        },
+    );
+    assert_eq!(r.reason(role_locked_review, r.qa), Reason::RoleMismatch);
+
+    let security = r.open_with(
+        "check the security boundary",
+        Some("security"),
+        TaskOrigin::plain(),
+    );
+    assert_eq!(r.reason(security, r.qa), Reason::ReadyNow);
+}
+
+#[test]
+fn review_only_bot_cannot_receive_ordinary_work_by_delegation() {
+    let mut r = room();
+    let mut reviewer = r.engine.agent(r.qa).unwrap().clone();
+    reviewer.autonomy.review_only = true;
+    r.engine.update_agent(reviewer);
+    let task = r.open_with("ordinary untyped work", None, TaskOrigin::plain());
+    r.apply(Command::ClaimTask { task, by: r.a });
+    r.apply(Command::StartTask { task, by: r.a });
+    let offered = r.apply(Command::OfferHandoff {
+        task,
+        from: r.a,
+        to: Recipient::Agent { agent: r.qa },
+        kind: HandoffKind::Delegate,
+        brief: "take over this implementation".into(),
+        expects: vec![],
+        context: vec![],
+        blocks_sender: None,
+        timeout_ms: None,
+    });
+    let handoff = offered
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::HandoffOffered { handoff } => Some(handoff.id),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(
+        r.engine.apply(Command::AcceptHandoff { handoff, by: r.qa }),
+        Err(EngineError::NotPermitted { .. })
+    ));
+    assert_eq!(r.engine.task(task).unwrap().assignee, Some(r.a));
+}
+
+#[test]
+fn changing_an_assignee_to_review_only_releases_ordinary_work() {
+    let mut r = room();
+    let task = r.open_with("implementation in progress", None, TaskOrigin::plain());
+    r.apply(Command::ClaimTask { task, by: r.qa });
+    r.apply(Command::StartTask { task, by: r.qa });
+
+    let mut reviewer = r.engine.agent(r.qa).unwrap().clone();
+    reviewer.autonomy.review_only = true;
+    r.engine.update_agent(reviewer);
+
+    assert_eq!(r.state(task), TaskState::Ready);
+    assert_eq!(r.engine.task(task).unwrap().assignee, None);
+    assert!(r.engine.claimable_by(r.a).contains(&task));
+}
+
+#[test]
+fn review_only_artifacts_and_submission_require_assigned_review_work() {
+    let mut r = room();
+    let mut reviewer = r.engine.agent(r.qa).unwrap().clone();
+    reviewer.autonomy.review_only = true;
+    r.engine.update_agent(reviewer);
+
+    let ordinary = r.open_with("ordinary implementation", None, TaskOrigin::plain());
+    assert!(matches!(
+        r.engine.apply(Command::AddArtifact {
+            task: ordinary,
+            author: r.qa,
+            name: "report.md".into(),
+            body: ArtifactBody::Text { text: "report".into() },
+            authority_bearing: false,
+        }),
+        Err(EngineError::NotPermitted { .. })
+    ));
+
+    let review = r.open_with(
+        "review assignment",
+        Some("reviewer"),
+        TaskOrigin {
+            kind: TaskKind::Review,
+            ..TaskOrigin::plain()
+        },
+    );
+    r.apply(Command::ClaimTask { task: review, by: r.qa });
+    r.apply(Command::StartTask { task: review, by: r.qa });
+    let artifact = r
+        .apply(Command::AddArtifact {
+            task: review,
+            author: r.qa,
+            name: "review.md".into(),
+            body: ArtifactBody::Text { text: "findings".into() },
+            authority_bearing: false,
+        })
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::ArtifactAdded { artifact } => Some(artifact.id),
+            _ => None,
+        })
+        .unwrap();
+    r.apply(Command::SubmitForReview {
+        task: review,
+        by: r.qa,
+        artifacts: vec![artifact],
+    });
+    assert_eq!(r.state(review), TaskState::InReview);
 }
 
 // -------------------------------------------------- the layers cannot differ
@@ -207,7 +391,10 @@ fn a_stale_projection_does_not_make_blocked_work_claimable() {
             by: r.a,
         })
         .expect_err("the claim must be refused too");
-    assert!(matches!(err, EngineError::DependencyNotMet { .. }), "{err:?}");
+    assert!(
+        matches!(err, EngineError::DependencyNotMet { .. }),
+        "{err:?}"
+    );
 }
 
 /// TEST 11 — work waiting its turn is never offered.
@@ -375,9 +562,7 @@ fn a_holder_with_no_recorded_claim_is_given_one_rather_than_stripped() {
     r.engine.task_mut(task).unwrap().lease_expires_at = None;
 
     assert_eq!(
-        r.engine
-            .evaluate_claim(task, r.b, Timestamp::now())
-            .lease,
+        r.engine.evaluate_claim(task, r.b, Timestamp::now()).lease,
         LeaseState::Missing
     );
 
@@ -402,8 +587,7 @@ fn every_task_a_faulted_bot_held_comes_back_exactly_once() {
     }
     // The bot stops and its claims lapse.
     for task in [first, second] {
-        r.engine.task_mut(task).unwrap().lease_expires_at =
-            Some(Timestamp::now().plus_millis(-1));
+        r.engine.task_mut(task).unwrap().lease_expires_at = Some(Timestamp::now().plus_millis(-1));
     }
 
     r.tick();
@@ -412,7 +596,10 @@ fn every_task_a_faulted_bot_held_comes_back_exactly_once() {
         assert_eq!(r.engine.task(task).unwrap().assignee, None);
     }
     // And exactly one bot ends up with each, with no double ownership.
-    r.apply(Command::ClaimTask { task: first, by: r.b });
+    r.apply(Command::ClaimTask {
+        task: first,
+        by: r.b,
+    });
     r.apply(Command::ClaimTask {
         task: second,
         by: r.b,
@@ -746,7 +933,11 @@ fn a_room_carrying_work_that_cannot_move_raises_it_exactly_once() {
     let again = r.engine.apply(Command::Tick {
         now: Timestamp::now(),
     });
-    assert_eq!(count(&again.unwrap()), 0, "a standing problem is raised once");
+    assert_eq!(
+        count(&again.unwrap()),
+        0,
+        "a standing problem is raised once"
+    );
 }
 
 /// A wait that can still end on its own is not raised at all.
@@ -855,7 +1046,11 @@ fn work_no_bot_could_ever_take_is_raised() {
     let health = r.engine.health();
     assert_eq!(health.starved, vec![("embedded".to_string(), 1)]);
     assert!(!health.is_ok());
-    assert!(health.summary().contains("embedded"), "{}", health.summary());
+    assert!(
+        health.summary().contains("embedded"),
+        "{}",
+        health.summary()
+    );
 }
 
 /// Letting go of a task lets go of the claim on it.
@@ -880,7 +1075,10 @@ fn releasing_a_task_releases_its_claim_too() {
 
     let record = r.engine.task(task).unwrap();
     assert_eq!(record.assignee, None);
-    assert_eq!(record.lease_expires_at, None, "the claim went with the holder");
+    assert_eq!(
+        record.lease_expires_at, None,
+        "the claim went with the holder"
+    );
     assert!(r.engine.health().is_ok(), "{}", r.engine.health().report());
 }
 
@@ -1013,7 +1211,11 @@ fn a_leftover_claim_on_unheld_work_is_cleaned_up() {
         "and be able to say it is clear again: {}",
         r.engine.health().report()
     );
-    assert_eq!(r.state(task), TaskState::Ready, "without disturbing the work");
+    assert_eq!(
+        r.state(task),
+        TaskState::Ready,
+        "without disturbing the work"
+    );
 }
 
 /// A board stays readable however long the room runs.
@@ -1075,11 +1277,8 @@ fn the_board_itself_survives_the_tidying() {
     });
 
     for index in 0..4_200 {
-        let message = orgbot_proto::ChatMessage::say(
-            r.engine.room_id(),
-            r.a,
-            format!("noise {index}"),
-        );
+        let message =
+            orgbot_proto::ChatMessage::say(r.engine.room_id(), r.a, format!("noise {index}"));
         r.apply(Command::PostMessage {
             message: Box::new(message),
         });
@@ -1100,11 +1299,8 @@ fn the_board_itself_survives_the_tidying() {
 fn what_a_bot_has_not_seen_is_still_there_to_be_read() {
     let mut r = room();
     for index in 0..3_500 {
-        let message = orgbot_proto::ChatMessage::say(
-            r.engine.room_id(),
-            r.a,
-            format!("said {index}"),
-        );
+        let message =
+            orgbot_proto::ChatMessage::say(r.engine.room_id(), r.a, format!("said {index}"));
         r.apply(Command::PostMessage {
             message: Box::new(message),
         });

@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use orgbot_proto::roles::{RoleSpec, RoleTable};
 use orgbot_proto::agent::{AgentPolicy, Autonomy, CliKind, ProviderRef};
+use orgbot_proto::roles::{RoleSpec, RoleTable};
 use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
 use orgbot_proto::task::Priority;
 use orgbot_proto::{AgentSpec, TaskId};
@@ -411,6 +411,8 @@ pub fn expand_home(path: &str) -> String {
 #[derive(Debug)]
 pub struct ResolvedRoom {
     pub state_path: Option<std::path::PathBuf>,
+    /// Optional local workspace exposed through the runtime tool channel.
+    pub workspace: Option<orgbot_runtime::workspace::WorkspaceSpec>,
     /// The room spec.
     pub spec: RoomSpec,
     /// What each role can do and who may cover for it.
@@ -479,7 +481,13 @@ impl RoomConfig {
                     section.handle
                 )));
             }
-            let reference = section.provider.to_ref();
+            let autonomy = section.autonomy.resolve()?;
+            let mut reference = section.provider.to_ref();
+            if autonomy.review_only {
+                if let ProviderRef::CliAgent { policy, .. } = &mut reference {
+                    *policy = AgentPolicy::ReadOnly;
+                }
+            }
             let provider = build(&reference).map_err(|error| {
                 ConfigError::Invalid(format!("bot `{}`: {error}", section.handle))
             })?;
@@ -491,7 +499,7 @@ impl RoomConfig {
                 roles: section.roles.clone(),
                 persona: section.persona.clone(),
                 tools: Vec::new(),
-                autonomy: section.autonomy.resolve()?,
+                autonomy,
                 ..AgentSpec::new(section.handle.clone(), section.handle.clone(), reference)
             };
             bots.push(ResolvedBot { spec, provider });
@@ -527,6 +535,7 @@ impl RoomConfig {
             bots,
             tasks,
             state_path: self.room.state_path.clone(),
+            workspace: self.workspace.clone(),
         })
     }
 }
@@ -778,6 +787,48 @@ mod tests {
                 assert!(!mcp);
             }
             other => panic!("expected CliAgent ref, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_only_forces_read_only_before_building_cli_provider() {
+        for policy in ["workspace_write", "full_access"] {
+            let config = RoomConfig::parse(
+                &format!(
+                    r#"
+                [room]
+                name = "review"
+                goal = "inspect"
+                [[bots]]
+                handle = "astra"
+                autonomy = {{ review_only = true, may_inspect = true }}
+                provider = {{ kind = "cli_agent", cli = "codex", policy = "{policy}" }}
+                "#
+                ),
+                "test.toml",
+            )
+            .unwrap();
+            let resolved = config
+                .resolve_using(|reference| {
+                    assert!(matches!(
+                        reference,
+                        ProviderRef::CliAgent {
+                            policy: AgentPolicy::ReadOnly,
+                            ..
+                        }
+                    ));
+                    orgbot_providers::build(&ProviderRef::Scripted {
+                        script: String::new(),
+                    })
+                })
+                .unwrap();
+            assert!(matches!(
+                resolved.bots[0].spec.provider,
+                ProviderRef::CliAgent {
+                    policy: AgentPolicy::ReadOnly,
+                    ..
+                }
+            ));
         }
     }
 }

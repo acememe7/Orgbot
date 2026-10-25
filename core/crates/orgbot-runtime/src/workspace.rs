@@ -1,12 +1,12 @@
-//! Device-owned workspace tools. The Android host performs file/SSH I/O;
-//! neither credentials nor an executable command runner enter the room model.
+//! Workspace tools are hosted by the device or local server; neither credentials
+//! nor an executable command runner enter the room model.
 use std::sync::Arc;
 
 use orgbot_proto::AgentId;
 use orgbot_providers::types::ToolDef;
 use orgbot_tools::ToolOutcome;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +44,7 @@ pub struct Workspace {
     /// Every clone of a `Workspace` shares this, which is what makes it a
     /// room-wide queue rather than a per-bot one.
     pub gate: Arc<tokio::sync::Mutex<()>>,
+    supports_attachment_import: bool,
 }
 
 impl Workspace {
@@ -53,7 +54,18 @@ impl Workspace {
             spec,
             tx,
             gate: Arc::new(tokio::sync::Mutex::new(())),
+            supports_attachment_import: true,
         }
+    }
+
+    /// Construct a workspace whose host cannot import conversation attachments.
+    pub fn new_without_attachment_import(
+        spec: WorkspaceSpec,
+        tx: mpsc::Sender<WorkspaceCall>,
+    ) -> Self {
+        let mut workspace = Self::new(spec, tx);
+        workspace.supports_attachment_import = false;
+        workspace
     }
 
     pub fn definitions(&self) -> Vec<ToolDef> {
@@ -72,7 +84,9 @@ impl Workspace {
             ),
         ];
         if self.spec.writable {
-            tools.push(tool("workspace_import_attachment", "Copy a user-attached original file into the selected working directory. Pass its attachment id from the conversation. Returns a new unique relative path; never overwrites another file. Use this when extracted text/images are insufficient, or for other file formats.", json!({"id":{"type":"string"}}), json!(["id"])));
+            if self.supports_attachment_import {
+                tools.push(tool("workspace_import_attachment", "Copy a user-attached original file into the selected working directory. Pass its attachment id from the conversation. Returns a new unique relative path; never overwrites another file. Use this when extracted text/images are insufficient, or for other file formats.", json!({"id":{"type":"string"}}), json!(["id"])));
+            }
             tools.push(tool("workspace_write", "Atomically create or replace a UTF-8 file (up to 1 MiB). Parent directory must exist.", json!({"path":{"type":"string"},"content":{"type":"string"}}), json!(["path","content"])));
             tools.push(tool(
                 "workspace_mkdir",
@@ -89,7 +103,7 @@ impl Workspace {
 
     pub fn instruction(&self) -> String {
         format!(
-            "\n\nCOMPUTER: {}. Working directory: {}. Use workspace_* tools for actual computer work. All paths must be relative to this root. File writes allowed: {}. Shell commands available: {}. You are an API model running in the Android app; no local CLI is installed. Do not claim files were changed or commands ran without successful tool results. Preserve existing user files; ask before destructive operations. Workspace reads reconnect automatically to the trusted computer. After an interrupted command or write, inspect its effects using workspace_read, workspace_list, or a read-only shell command before deciding what remains. Never blindly repeat a mutation or tell others the computer is unavailable without checking it. This computer may already carry playbooks written for it — look in .agents/skills, .claude/skills, .codex/skills or ~/.codex/skills with workspace_list, and read a SKILL.md with workspace_read when its name matches your work. Prefer one written for this machine over a general approach; it knows things about this setup that you do not.",
+            "\n\nCOMPUTER: {}. Working directory: {}. Use workspace_* tools for actual computer work. All paths must be relative to this root. File writes allowed: {}. Shell commands available: {}. You are an API model; do not claim files were changed or commands ran without successful tool results. Preserve existing user files; ask before destructive operations. After an interrupted write, inspect its effects using workspace_read or workspace_list before deciding what remains. Never blindly repeat a mutation or tell others the computer is unavailable without checking it. This workspace may already carry playbooks written for it — look in .agents/skills, .claude/skills, .codex/skills or ~/.codex/skills with workspace_list, and read a SKILL.md with workspace_read when its name matches your work. Prefer one written for this machine over a general approach; it knows things about this setup that you do not.",
             self.spec.label,
             self.spec.root,
             self.spec.writable,
@@ -191,13 +205,13 @@ mod tests {
     use super::*;
     use crate::Orchestrator;
     use orgbot_proto::{
-        AgentSpec,
         agent::ProviderRef,
         room::{CompletionRule, RoomLimits, RoomSpec},
+        AgentSpec,
     };
     use orgbot_providers::{
-        ScriptedProvider,
         types::{CompletionResponse, ContentBlock, StopReason, Usage},
+        ScriptedProvider,
     };
     use std::sync::Arc;
 
@@ -238,12 +252,10 @@ mod tests {
             },
             tx,
         );
-        assert!(
-            !workspace
-                .definitions()
-                .iter()
-                .any(|tool| tool.name == "workspace_run" || tool.name == "workspace_write")
-        );
+        assert!(!workspace
+            .definitions()
+            .iter()
+            .any(|tool| tool.name == "workspace_run" || tool.name == "workspace_write"));
         room.attach_workspace(workspace.clone());
         room.start().unwrap();
         let _ = agent;
@@ -282,10 +294,8 @@ mod tests {
         assert_eq!(report.tool_errors, 0);
         let requests = provider.requests();
         assert!(requests[0].system.contains("SSH test computer"));
-        assert!(
-            serde_json::to_string(&requests[1].messages)
-                .unwrap()
-                .contains("actual file from the selected server")
-        );
+        assert!(serde_json::to_string(&requests[1].messages)
+            .unwrap()
+            .contains("actual file from the selected server"));
     }
 }

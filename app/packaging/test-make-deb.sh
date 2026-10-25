@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SOURCE=$(cd "$(dirname "$0")" && pwd)
+VERSION=$(<"$SOURCE/version")
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 APP="$TMP/app"
@@ -37,15 +38,15 @@ if ORGBOT_ENGINE="$TMP/missing-engine" "$APP/packaging/make-deb.sh" >"$TMP/out" 
   exit 1
 fi
 rg -q 'missing room engine' "$TMP/err"
-test ! -e "$APP/orgbot_1.5.1_amd64.deb"
+test ! -e "$APP/orgbot_${VERSION}_amd64.deb"
 test -z "$(ls -A "$TMP/staging")"
 
 printf '#!/bin/sh\nexit 0\n' > "$TMP/orgbot-engine"
 chmod +x "$TMP/orgbot-engine"
 ORGBOT_ENGINE="$TMP/orgbot-engine" "$APP/packaging/make-deb.sh" >/dev/null
-rg -q '^Version: 1\.5\.1$' "$TMP/control"
+rg -Fqx "Version: $VERSION" "$TMP/control"
 rg -q '^Depends: libgtk-3-0t64, libsecret-1-0$' "$TMP/control"
-rg -q '^Description: Codex, Claude, and Grok CLI agents sharing tasks$' "$TMP/control"
+rg -q '^Description: CLI and API agents working together in shared rooms$' "$TMP/control"
 rg -q '^usr/lib/orgbot/orgbot-engine$' "$SHLIBDEPS_ARGS_FILE"
 rg -q '^usr/lib/orgbot/lib/libplugin\.so$' "$SHLIBDEPS_ARGS_FILE"
 rg -q '^usr/lib/orgbot/orgbot_app$' "$SHLIBDEPS_ARGS_FILE"

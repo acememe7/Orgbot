@@ -11,12 +11,14 @@ library;
 import 'widgets/objectives_pane.dart';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../orgbot/library.dart';
 import '../orgbot/models.dart' as defs;
 import '../engine/agent_cli.dart';
 import '../state/engine_room_controller.dart';
+import '../state/room_archive.dart';
 import '../workspace/workspace_screen.dart';
 import '../workspace/workspace.dart';
 import '../workspace/attachments.dart';
@@ -59,6 +61,10 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   late final RoomAttachments _attachments;
   List<ChatFile> _files = [];
   String? _attachmentRoot;
+  bool _checkingFreshRoom = false;
+  bool _needsStartConfirmation = false;
+  String? _startCheckError;
+  bool _startRequested = false;
 
   /// Below this the rail becomes a tab rather than a column.
   static const double _wide = 1000;
@@ -67,6 +73,8 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   void initState() {
     super.initState();
     _controller = widget.library.session(widget.room);
+    _needsStartConfirmation = canRunAgentClis && _desktopStartable;
+    _checkingFreshRoom = _needsStartConfirmation;
     _attachments = RoomAttachments(widget.room.id);
     if (Platform.isAndroid) {
       _preparingAttachments = true;
@@ -78,8 +86,55 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
         mounted && await trustWorkspaceHost(context, host, type, key);
     _controller.addListener(_onChange);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _controller.start();
+      if (!mounted) return;
+      if (!canRunAgentClis) {
+        unawaited(_controller.start());
+      } else if (_desktopStartable) {
+        unawaited(_checkFreshRoomHistory());
+      }
     });
+  }
+
+  bool get _desktopStartable => const [
+    RoomLaunch.idle,
+    RoomLaunch.closed,
+    RoomLaunch.failed,
+  ].contains(_controller.phase);
+
+  Future<void> _checkFreshRoomHistory() async {
+    setState(() => _checkingFreshRoom = true);
+    try {
+      final state = await RoomArchive.stateFile(widget.room.id);
+      if (!mounted) return;
+      final hasSavedHistory = await state.exists();
+      if (!mounted) return;
+      if (hasSavedHistory) {
+        // The controller restores saved frames as a paused room; it does not
+        // replay model or tool calls.
+        setState(() => _needsStartConfirmation = false);
+        unawaited(_controller.start());
+      } else {
+        setState(() => _needsStartConfirmation = true);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _startCheckError = error.toString();
+          _needsStartConfirmation = true;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _checkingFreshRoom = false);
+    }
+  }
+
+  void _startFreshRoom() {
+    if (_startRequested || !_needsStartConfirmation) return;
+    setState(() {
+      _startRequested = true;
+      _needsStartConfirmation = false;
+    });
+    unawaited(_controller.start());
   }
 
   void _onChange() {
@@ -213,11 +268,64 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
       appBar: _appBar(store),
       body: store != null
           ? _room(store, wide)
+          : _checkingFreshRoom
+          ? _freshRoomStart()
+          : _needsStartConfirmation
+          ? _freshRoomStart()
           : switch (_controller.phase) {
               RoomLaunch.failed => _failure(),
               RoomLaunch.running when store != null => _room(store, wide),
               _ => _starting(),
             },
+    );
+  }
+
+  Widget _freshRoomStart() {
+    final scheme = Theme.of(context).colorScheme;
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 460),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.play_circle_outline, size: 42, color: scheme.primary),
+              const SizedBox(height: 14),
+              Text(
+                'Ready to start this room?',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'Provider subscription or API allowance is used while agents '
+                'work. Viewing an idle room does not use it. The turn limit '
+                'pauses the room by turn count; it is not an exact token cap.',
+                textAlign: TextAlign.center,
+              ),
+              if (_checkingFreshRoom) ...[
+                const SizedBox(height: 12),
+                const Text('Checking saved room history…'),
+              ],
+              if (_startCheckError != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Could not check saved history: $_startCheckError',
+                  style: TextStyle(color: scheme.error),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+              const SizedBox(height: 20),
+              FilledButton.icon(
+                key: const ValueKey('start-fresh-room'),
+                onPressed: _checkingFreshRoom ? null : _startFreshRoom,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Start room'),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -464,9 +572,12 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
                                       alignment: Alignment.centerLeft,
                                       child: TextButton.icon(
                                         onPressed: () => setState(
-                                            () => _showAllRecords = false),
-                                        icon: const Icon(Icons.arrow_back,
-                                            size: 18),
+                                          () => _showAllRecords = false,
+                                        ),
+                                        icon: const Icon(
+                                          Icons.arrow_back,
+                                          size: 18,
+                                        ),
                                         label: const Text('Back to objectives'),
                                       ),
                                     ),
@@ -481,8 +592,8 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
                                 )
                               : ObjectivesPane(
                                   store: store,
-                                  onShowAllRecords: () => setState(
-                                      () => _showAllRecords = true),
+                                  onShowAllRecords: () =>
+                                      setState(() => _showAllRecords = true),
                                 ),
                         ),
                       ],
@@ -511,108 +622,113 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
 
   Widget _roomMemory(RoomStore store) {
     final scheme = Theme.of(context).colorScheme;
-    return ListView(
-      padding: const EdgeInsets.all(20),
-      children: [
-        Text('Room memory', style: Theme.of(context).textTheme.titleLarge),
-        const SizedBox(height: 6),
-        Text(
-          '${store.messages.length} messages · ${store.tasks.length} tasks · ${store.artifacts.length} artifacts saved with this room.',
-          style: TextStyle(color: scheme.onSurfaceVariant),
-        ),
-        if (widget.room.goal.isNotEmpty) ...[
-          const SizedBox(height: 24),
-          Text('Goal', style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 6),
-          SelectableText(widget.room.goal),
-        ],
+    final messages = store.messages;
+    final tasks = store.tasks;
+    final artifacts = store.artifacts;
+    final header = <Widget>[
+      Text('Room memory', style: Theme.of(context).textTheme.titleLarge),
+      const SizedBox(height: 6),
+      Text(
+        '${messages.length} messages · ${tasks.length} tasks · ${artifacts.length} artifacts saved with this room.',
+        style: TextStyle(color: scheme.onSurfaceVariant),
+      ),
+      if (widget.room.goal.isNotEmpty) ...[
         const SizedBox(height: 24),
-        TextField(
-          controller: _memory,
-          minLines: 4,
-          maxLines: 10,
-          maxLength: 6000,
-          decoration: const InputDecoration(
-            labelText: 'Pinned notes',
-            alignLabelWithHint: true,
-            hintText:
-                'Decisions, context and preferences the team should retain.',
-          ),
+        Text('Goal', style: Theme.of(context).textTheme.labelLarge),
+        const SizedBox(height: 6),
+        SelectableText(widget.room.goal),
+      ],
+      const SizedBox(height: 24),
+      TextField(
+        controller: _memory,
+        minLines: 4,
+        maxLines: 10,
+        maxLength: 6000,
+        decoration: const InputDecoration(
+          labelText: 'Pinned notes',
+          alignLabelWithHint: true,
+          hintText:
+              'Decisions, context and preferences the team should retain.',
         ),
-        Align(
-          alignment: Alignment.centerRight,
-          child: FilledButton(
-            onPressed: _savingMemory
-                ? null
-                : () async {
-                    setState(() => _savingMemory = true);
-                    widget.room.memory = _memory.text.trim();
-                    await widget.library.save();
-                    if (mounted) {
-                      setState(() => _savingMemory = false);
-                      if (widget.library.error == null) {
-                        if (_controller.isRunning) {
-                          _controller.say(
-                            widget.library.userName,
-                            'Update the pinned memory for this room: ${widget.room.memory.isEmpty ? '(No pinned notes.)' : widget.room.memory}',
-                          );
-                        }
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Room notes saved')),
+      ),
+      Align(
+        alignment: Alignment.centerRight,
+        child: FilledButton(
+          onPressed: _savingMemory
+              ? null
+              : () async {
+                  setState(() => _savingMemory = true);
+                  widget.room.memory = _memory.text.trim();
+                  await widget.library.save();
+                  if (mounted) {
+                    setState(() => _savingMemory = false);
+                    if (widget.library.error == null) {
+                      if (_controller.isRunning) {
+                        _controller.say(
+                          widget.library.userName,
+                          'Update the pinned memory for this room: ${widget.room.memory.isEmpty ? '(No pinned notes.)' : widget.room.memory}',
                         );
                       }
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Room notes saved')),
+                      );
                     }
-                  },
-            child: Text(_savingMemory ? 'Saving…' : 'Save notes'),
-          ),
+                  }
+                },
+          child: Text(_savingMemory ? 'Saving…' : 'Save notes'),
         ),
-        const SizedBox(height: 24),
-        Text('Saved artifacts', style: Theme.of(context).textTheme.titleMedium),
-        const SizedBox(height: 8),
-        if (store.artifacts.isEmpty)
-          Text(
-            'Reports and other outputs will appear here.',
-            style: TextStyle(color: scheme.onSurfaceVariant),
-          ),
-        for (final artifact in store.artifacts)
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.description_outlined),
-            title: Text(artifact['name'] as String? ?? 'Artifact'),
-            subtitle: Text(
-              '@${store.handleFor(artifact['author'] as String?)}',
-            ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              final body = artifact['body'] as Map? ?? {};
-              final text =
-                  (body['text'] ??
-                          body['diff'] ??
-                          body['url'] ??
-                          body['path'] ??
-                          const JsonEncoder.withIndent(
-                            '  ',
-                          ).convert(body['value']))
-                      .toString();
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => Scaffold(
-                    appBar: AppBar(
-                      title: Text(artifact['name'] as String? ?? 'Artifact'),
-                    ),
-                    body: SelectionArea(
-                      child: SingleChildScrollView(
-                        padding: const EdgeInsets.all(20),
-                        child: MessageText(text: text),
-                      ),
+      ),
+      const SizedBox(height: 24),
+      Text('Saved artifacts', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height: 8),
+      if (artifacts.isEmpty)
+        Text(
+          'Reports and other outputs will appear here.',
+          style: TextStyle(color: scheme.onSurfaceVariant),
+        ),
+    ];
+    return ListView.builder(
+      padding: const EdgeInsets.all(20),
+      itemCount: header.length + artifacts.length,
+      itemBuilder: (context, index) {
+        if (index < header.length) return header[index];
+        final artifact = artifacts[index - header.length];
+        return ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.description_outlined),
+          title: Text(artifact['name'] as String? ?? 'Artifact'),
+          subtitle: Text('@${store.handleFor(artifact['author'] as String?)}'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () {
+            final body = artifact['body'] as Map? ?? {};
+            final text =
+                (body['text'] ??
+                        body['diff'] ??
+                        body['url'] ??
+                        body['path'] ??
+                        const JsonEncoder.withIndent(
+                          '  ',
+                        ).convert(body['value']))
+                    .toString();
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => Scaffold(
+                  appBar: AppBar(
+                    title: Text(artifact['name'] as String? ?? 'Artifact'),
+                  ),
+                  body: SelectionArea(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.all(20),
+                      child: MessageText(text: text),
                     ),
                   ),
                 ),
-              );
-            },
-          ),
-      ],
+              ),
+            );
+          },
+        );
+      },
     );
   }
 

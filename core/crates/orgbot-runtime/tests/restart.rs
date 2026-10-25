@@ -212,6 +212,71 @@ async fn a_reopened_room_waits_to_be_told_to_carry_on() {
     );
 }
 
+#[tokio::test]
+async fn replacing_the_team_releases_old_claims_without_deleting_history() {
+    let (mut room, old, task) = started();
+    room.step_many(1, None).await;
+    let head = room.engine().head();
+    let replacement = spec("new_worker");
+    let reopened = Orchestrator::restore(
+        room.checkpoint(),
+        room_spec(),
+        vec![(replacement.clone(), claiming())],
+    )
+    .unwrap();
+    let engine = reopened.engine();
+    assert!(engine.agent_by_handle(&old.handle).is_none());
+    assert!(engine.agent_by_handle(&replacement.handle).is_some());
+    assert_eq!(engine.task(task).unwrap().assignee, None);
+    assert_eq!(engine.task(task).unwrap().state, TaskState::Ready);
+    assert!(
+        engine.head() > head,
+        "old history remains, with departure events appended"
+    );
+    assert_eq!(engine.room().phase, orgbot_proto::room::RoomPhase::Paused);
+    assert!(engine.health().is_ok(), "{}", engine.health().report());
+}
+
+#[tokio::test]
+async fn tightening_cli_policy_discards_previous_conversation_context() {
+    use orgbot_proto::agent::{AgentPolicy, CliKind};
+    let mut room = Orchestrator::new(room_spec());
+    let mut worker = spec("reviewer");
+    worker.provider = ProviderRef::CliAgent {
+        cli: CliKind::Codex,
+        model: "test".into(),
+        workdir: ".".into(),
+        policy: AgentPolicy::WorkspaceWrite,
+        mcp: false,
+    };
+    room.seat(worker.clone(), claiming()).unwrap();
+    room.start().unwrap();
+    open_task(&mut room.engine_mut(), "old work");
+    room.step_many(1, None).await;
+    let saved = room.checkpoint();
+    let same = Orchestrator::restore(
+        saved.clone(),
+        room_spec(),
+        vec![(worker.clone(), claiming())],
+    )
+    .unwrap();
+    let key = worker.id.to_string();
+    assert!(!same.checkpoint()["bots"][&key]["history"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    if let ProviderRef::CliAgent { policy, .. } = &mut worker.provider {
+        *policy = AgentPolicy::ReadOnly;
+    }
+    worker.autonomy.review_only = true;
+    worker.autonomy.may_inspect = true;
+    let tightened = Orchestrator::restore(saved, room_spec(), vec![(worker, claiming())]).unwrap();
+    assert!(tightened.checkpoint()["bots"][&key]["history"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
 /// Nothing is lost and nothing is duplicated across the restart.
 #[tokio::test]
 async fn the_board_is_the_same_board_after_a_restart() {

@@ -13,19 +13,21 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orgbot_proto::agent::AgentStatus;
 use orgbot_proto::artifact::{Artifact, ArtifactBody};
-use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope, Seq};
-use orgbot_proto::handoff::{Handoff, HandoffKind, HandoffState, HandoffTransition, Recipient};
-use orgbot_proto::review::{Finding, Review, Verdict};
-use orgbot_proto::room::{Room, RoomPhase, RoomSpec};
 use orgbot_proto::convergence::{self, Convergence};
-use orgbot_proto::text;
 use orgbot_proto::decision::{Answer, Decision, DecisionLog, Governance, Request, Settled};
+use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope, Seq};
+use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness, TaskKind, TaskOrigin};
+use orgbot_proto::handoff::{Handoff, HandoffKind, HandoffState, HandoffTransition, Recipient};
+use orgbot_proto::ids::DecisionId;
+use orgbot_proto::review::{Finding, Review, Verdict};
 use orgbot_proto::roles::{Eligibility as RoleFit, RoleTable};
+use orgbot_proto::room::{Room, RoomPhase, RoomSpec};
 use orgbot_proto::skill::Skill;
 use orgbot_proto::spend::{Spend, TokenUsage};
-use orgbot_proto::ids::DecisionId;
-use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness, TaskKind, TaskOrigin};
-use orgbot_proto::task::{DEFAULT_LEASE_MILLIS, BlockReason, Priority, Task, TaskState, TaskTransition};
+use orgbot_proto::task::{
+    BlockReason, Priority, Task, TaskState, TaskTransition, DEFAULT_LEASE_MILLIS,
+};
+use orgbot_proto::text;
 use orgbot_proto::{
     AgentId, AgentSpec, ArtifactId, ChatMessage, HandoffId, RoomId, TaskId, Timestamp,
 };
@@ -253,7 +255,23 @@ impl Engine {
             self.error_streak.remove(&spec.id);
         }
         self.handles.insert(spec.handle.clone(), spec.id);
+        let review_only = spec.autonomy.review_only;
+        let agent = spec.id;
         self.specs.insert(spec.id, spec);
+        if review_only {
+            let out_of_scope: Vec<_> = self
+                .tasks
+                .values()
+                .filter(|task| {
+                    task.assignee == Some(agent)
+                        && !review_only_task(task.kind, task.required_role.as_deref())
+                })
+                .map(|task| task.id)
+                .collect();
+            for task in out_of_scope {
+                self.try_release(task, "the assignee is now restricted to review work".into());
+            }
+        }
     }
 
     /// Open a new room.
@@ -379,11 +397,9 @@ impl Engine {
 
     /// How well `agent` matches work requiring `required`.
     pub fn eligibility(&self, agent: AgentId, required: Option<&str>) -> RoleFit {
-        self.specs
-            .get(&agent)
-            .map_or(RoleFit::No, |spec| {
-                self.roles.eligibility(&spec.roles, required)
-            })
+        self.specs.get(&agent).map_or(RoleFit::No, |spec| {
+            self.roles.eligibility(&spec.roles, required)
+        })
     }
 
     /// Every question this room has put to the operator, and every answer.
@@ -478,14 +494,15 @@ impl Engine {
             .filter(|task| task.assignee == Some(agent) && !task.state.is_terminal())
             .peekable();
         held.peek().is_some()
-            && held.all(|task| !task.readiness().is_progressing() || task.state == TaskState::Blocked)
+            && held
+                .all(|task| !task.readiness().is_progressing() || task.state == TaskState::Blocked)
     }
 
     /// Whether this bot is holding something it is inspecting.
     fn holds_a_review(&self, agent: AgentId) -> bool {
-        self.tasks.values().any(|task| {
-            task.assignee == Some(agent) && task.kind == TaskKind::Review
-        })
+        self.tasks
+            .values()
+            .any(|task| task.assignee == Some(agent) && task.kind == TaskKind::Review)
     }
 
     pub fn tasks(&self) -> impl Iterator<Item = &Task> {
@@ -595,7 +612,10 @@ impl Engine {
             };
             return base(
                 reason,
-                format!("it is {}, and will not be worked again", record.state.as_str()),
+                format!(
+                    "it is {}, and will not be worked again",
+                    record.state.as_str()
+                ),
             );
         }
 
@@ -769,6 +789,17 @@ impl Engine {
         let Some(record) = self.tasks.get(&task) else {
             return result;
         };
+        if spec.autonomy.review_only
+            && !review_only_task(record.kind, record.required_role.as_deref())
+        {
+            result.eligible = false;
+            result.reason = Reason::ReviewOnly;
+            result.detail = format!(
+                "{} may only claim review tasks or tasks explicitly requiring review, reviewer, audit, or security",
+                spec.handle
+            );
+            return result;
+        }
         let fit = self
             .roles
             .eligibility(&spec.roles, record.required_role.as_deref());
@@ -796,6 +827,10 @@ impl Engine {
     /// bots that cannot be given work.
     fn refusal(&self, task: TaskId, agent: AgentId, verdict: Eligibility) -> EngineError {
         match verdict.reason {
+            Reason::ReviewOnly => EngineError::NotPermitted {
+                agent,
+                action: "claim work outside review-only scope".into(),
+            },
             Reason::RoleMismatch => EngineError::RoleMismatch {
                 task,
                 agent,
@@ -892,7 +927,9 @@ impl Engine {
             .values()
             .filter(|t| self.evaluate_claim(t.id, agent, now).eligible)
             .map(|t| {
-                let fit = self.roles.eligibility(&spec.roles, t.required_role.as_deref());
+                let fit = self
+                    .roles
+                    .eligibility(&spec.roles, t.required_role.as_deref());
                 (t, fit)
             })
             .collect();
@@ -925,9 +962,9 @@ impl Engine {
     /// may only be re-emitted by whoever produced it, because a second author
     /// can only produce something that looks right.
     pub fn may_replace(&self, artifact: ArtifactId, agent: AgentId) -> bool {
-        self.artifacts.get(&artifact).is_none_or(|record| {
-            !record.authority_bearing || record.author == agent
-        })
+        self.artifacts
+            .get(&artifact)
+            .is_none_or(|record| !record.authority_bearing || record.author == agent)
     }
 
     /// Live work that looks like the same thing as `title`.
@@ -1038,7 +1075,10 @@ impl Engine {
         }
         let mut ranked: Vec<(String, Spend)> = totals.into_iter().collect();
         ranked.sort_by(|(a_name, a), (b_name, b)| {
-            b.usage.total().cmp(&a.usage.total()).then(a_name.cmp(b_name))
+            b.usage
+                .total()
+                .cmp(&a.usage.total())
+                .then(a_name.cmp(b_name))
         });
         ranked
     }
@@ -1101,7 +1141,10 @@ impl Engine {
                 self.roles
                     .eligibility(&spec.roles, record.required_role.as_deref())
                     .is_eligible()
-                    || self.roles.eligibility(&spec.roles, Some("review")).is_eligible()
+                    || self
+                        .roles
+                        .eligibility(&spec.roles, Some("review"))
+                        .is_eligible()
                     || spec.roles.iter().any(|role| role == "reviewer")
             })
             .filter(|spec| self.status(spec.id) != AgentStatus::Offline)
@@ -1109,9 +1152,8 @@ impl Engine {
             .collect();
 
         // Least loaded first, then by id so the choice is stable across runs.
-        candidates.sort_by(|(a_id, a_load), (b_id, b_load)| {
-            a_load.cmp(b_load).then(a_id.cmp(b_id))
-        });
+        candidates
+            .sort_by(|(a_id, a_load), (b_id, b_load)| a_load.cmp(b_load).then(a_id.cmp(b_id)));
         candidates.first().map(|(id, _)| *id)
     }
 
@@ -1156,10 +1198,11 @@ impl Engine {
             let Some(role) = task.required_role.as_deref().filter(|r| !r.is_empty()) else {
                 continue;
             };
-            if usable
-                .iter()
-                .any(|spec| self.roles.eligibility(&spec.roles, Some(role)).is_eligible())
-            {
+            if usable.iter().any(|spec| {
+                self.roles
+                    .eligibility(&spec.roles, Some(role))
+                    .is_eligible()
+            }) {
                 continue;
             }
             match missing.iter_mut().find(|(name, _)| name == role) {
@@ -1187,9 +1230,11 @@ impl Engine {
             let Some(role) = task.required_role.as_deref().filter(|r| !r.is_empty()) else {
                 continue;
             };
-            let covered = free
-                .iter()
-                .any(|spec| self.roles.eligibility(&spec.roles, Some(role)).is_eligible());
+            let covered = free.iter().any(|spec| {
+                self.roles
+                    .eligibility(&spec.roles, Some(role))
+                    .is_eligible()
+            });
             if covered {
                 continue;
             }
@@ -1458,7 +1503,9 @@ impl Engine {
                 let mut events = self.set_phase(RoomPhase::Running, "resumed")?;
                 // Resuming is the owner's retry action. Released work stays on
                 // the board; no tool operation or old bot response is replayed.
-                let faulted: Vec<_> = self.statuses.iter()
+                let faulted: Vec<_> = self
+                    .statuses
+                    .iter()
                     .filter_map(|(id, status)| (*status == AgentStatus::Faulted).then_some(*id))
                     .collect();
                 for agent in faulted {
@@ -1590,9 +1637,7 @@ impl Engine {
                 authorization,
             } => self.set_authorization(task, authorization),
 
-            Command::AnswerDecision { decision, answer } => {
-                self.answer_decision(decision, answer)
-            }
+            Command::AnswerDecision { decision, answer } => self.answer_decision(decision, answer),
 
             Command::RecordTurn { agent, usage } => self.record_turn(agent, usage),
             Command::ReportError {
@@ -1919,11 +1964,7 @@ impl Engine {
     /// gathering proof does not add another top-level card. Raised once: a
     /// hold restated in different words should not produce a second identical
     /// errand.
-    fn raise_evidence_for(
-        &mut self,
-        task: TaskId,
-        finding: &str,
-    ) -> Result<Vec<EventEnvelope>> {
+    fn raise_evidence_for(&mut self, task: TaskId, finding: &str) -> Result<Vec<EventEnvelope>> {
         let title = format!("Evidence: {finding}");
         let already = self.tasks.values().any(|record| {
             record.lineage.parent == Some(task)
@@ -2048,8 +2089,7 @@ impl Engine {
             // A claim is a lease, not a deed. Without one, a bot that crashes
             // holds the work for the rest of the run and the board says only
             // that it is assigned.
-            record.lease_expires_at =
-                Some(Timestamp::now().plus_millis(DEFAULT_LEASE_MILLIS));
+            record.lease_expires_at = Some(Timestamp::now().plus_millis(DEFAULT_LEASE_MILLIS));
             record.stood_in = fit.is_stand_in();
         }
         Ok(events)
@@ -2092,6 +2132,7 @@ impl Engine {
         artifacts: Vec<ArtifactId>,
     ) -> Result<Vec<EventEnvelope>> {
         self.require_assignee(task, by)?;
+        self.require_review_only_assignment(task, by)?;
         for artifact in &artifacts {
             if !self.artifacts.contains_key(artifact) {
                 return Err(EngineError::UnknownArtifact {
@@ -2208,7 +2249,8 @@ impl Engine {
     }
 
     fn accept_handoff(&mut self, handoff: HandoffId, by: AgentId) -> Result<Vec<EventEnvelope>> {
-        let roles = self.require_agent(by)?.roles.clone();
+        let recipient = self.require_agent(by)?;
+        let roles = recipient.roles.clone();
         let offer = self
             .handoffs
             .get(&handoff)
@@ -2225,10 +2267,15 @@ impl Engine {
                     action: "accept a delegation after the work entered review or finished".into(),
                 });
             }
-            if !self
-                .require_agent(by)?
-                .can_take(task.required_role.as_deref())
+            if recipient.autonomy.review_only
+                && !review_only_task(task.kind, task.required_role.as_deref())
             {
+                return Err(EngineError::NotPermitted {
+                    agent: by,
+                    action: "accept a delegation outside review-only scope".into(),
+                });
+            }
+            if !recipient.can_take(task.required_role.as_deref()) {
                 return Err(EngineError::RoleMismatch {
                     task: task.id,
                     agent: by,
@@ -2358,6 +2405,7 @@ impl Engine {
         authority_bearing: bool,
     ) -> Result<Vec<EventEnvelope>> {
         self.require_agent(author)?;
+        self.require_review_only_assignment(task, author)?;
         let revision = self.require_task(task)?.revision;
         let mut artifact = Artifact::new(task, author, name, body);
         artifact.revision = revision;
@@ -2372,6 +2420,27 @@ impl Engine {
         Ok(vec![self.emit(Event::ArtifactAdded {
             artifact: Box::new(artifact),
         })])
+    }
+
+    /// Review-only bots can report and submit work only on a task they were
+    /// allowed to claim as review work. The claim gate is shared, but these
+    /// mutation commands also need their own check because callers can issue
+    /// engine commands without going through the tool list.
+    fn require_review_only_assignment(&self, task: TaskId, agent: AgentId) -> Result<()> {
+        let spec = self.require_agent(agent)?;
+        if !spec.autonomy.review_only {
+            return Ok(());
+        }
+        let record = self.require_task(task)?;
+        if record.assignee != Some(agent)
+            || !review_only_task(record.kind, record.required_role.as_deref())
+        {
+            return Err(EngineError::NotPermitted {
+                agent,
+                action: "report work outside an assigned review task".into(),
+            });
+        }
+        Ok(())
     }
 
     fn record_review(
@@ -2720,10 +2789,9 @@ impl Engine {
             .map(|task| task.id)
             .collect();
         for task in orphaned {
-            events.extend(self.try_release(
-                task,
-                "the bot holding it is no longer in this room".into(),
-            ));
+            events.extend(
+                self.try_release(task, "the bot holding it is no longer in this room".into()),
+            );
         }
 
         // 5. Held by a bot that has stopped reporting progress. A faulted bot
@@ -2873,8 +2941,7 @@ impl Engine {
     fn renew_lease(&mut self, task: TaskId) {
         if let Some(record) = self.tasks.get_mut(&task) {
             if record.assignee.is_some() && !record.state.is_terminal() {
-                record.lease_expires_at =
-                    Some(Timestamp::now().plus_millis(DEFAULT_LEASE_MILLIS));
+                record.lease_expires_at = Some(Timestamp::now().plus_millis(DEFAULT_LEASE_MILLIS));
             }
         }
     }
@@ -3114,6 +3181,14 @@ impl Engine {
         self.log.push(envelope.clone());
         envelope
     }
+}
+
+fn review_only_task(kind: TaskKind, required_role: Option<&str>) -> bool {
+    kind == TaskKind::Review
+        || matches!(
+            required_role,
+            Some("review" | "reviewer" | "audit" | "security")
+        )
 }
 
 /// Alias kept so the `set_phase` signature reads clearly.

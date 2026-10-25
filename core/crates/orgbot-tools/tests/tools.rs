@@ -135,6 +135,132 @@ fn each_role_sees_exactly_the_extra_tool_it_needs() {
 }
 
 #[test]
+fn review_only_bots_get_read_tools_and_cannot_dispatch_mutations() {
+    let mut f = fixture();
+    let mut reviewer = f.engine.agent(f.inspector).unwrap().clone();
+    reviewer.autonomy.review_only = true;
+    f.engine.update_agent(reviewer.clone());
+
+    let names: Vec<_> = definitions_for(&reviewer)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    for allowed in [
+        "room_status",
+        "list_tasks",
+        "read_artifact",
+        "record_review",
+        "add_artifact",
+        "submit_for_review",
+    ] {
+        assert!(
+            names.iter().any(|name| name == allowed),
+            "missing {allowed}"
+        );
+    }
+    for blocked in [
+        "offer_handoff",
+        "accept_handoff",
+        "create_task",
+        "submit_task",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == blocked),
+            "offered {blocked}"
+        );
+        let outcome = f.call(f.inspector, blocked, json!({}));
+        assert!(outcome.is_error, "dispatch must reject {blocked}");
+        assert!(outcome.content.contains("Review-only"));
+    }
+
+    let message = f.call(
+        f.inspector,
+        "post_message",
+        json!({"body":"Review underway"}),
+    );
+    assert!(
+        !message.is_error,
+        "reviewers must still send actionable messages"
+    );
+
+    let ordinary = f.make(json!({"title":"implementation", "brief":"ordinary task"}));
+    let not_assigned = f.call(
+        f.inspector,
+        "add_artifact",
+        json!({"task":ordinary, "name":"report.md", "content":"not allowed"}),
+    );
+    assert!(
+        not_assigned.is_error,
+        "unassigned ordinary-task artifact refused"
+    );
+
+    let review_task = id_in(
+        &f.ok(
+            f.lead,
+            "create_task",
+            json!({
+                "title":"review-only proof",
+                "brief":"inspect the implementation and report findings",
+                "kind":"review",
+                "of":ordinary,
+                "required_role":"reviewer",
+            }),
+        ),
+        "task",
+    );
+    f.ok(f.inspector, "claim_task", json!({"task":review_task}));
+    f.ok(f.inspector, "start_task", json!({"task":review_task}));
+    let artifact = id_in(
+        &f.ok(
+            f.inspector,
+            "add_artifact",
+            json!({"task":review_task, "name":"review.md", "content":"Checked criteria and recorded findings."}),
+        ),
+        "art",
+    );
+    f.ok(
+        f.inspector,
+        "submit_for_review",
+        json!({"task":review_task, "artifacts":[artifact]}),
+    );
+    let self_review = f.call(
+        f.inspector,
+        "record_review",
+        json!({"task":review_task, "summary":"self approval"}),
+    );
+    assert!(
+        self_review.is_error,
+        "reviewer cannot approve its own report"
+    );
+
+    let second_reviewer = AgentSpec::new(
+        "qa-second",
+        "Independent Reviewer",
+        ProviderRef::Scripted {
+            script: "test".into(),
+        },
+    )
+    .with_roles(["reviewer"])
+    .with_autonomy(Autonomy::inspector());
+    let second_reviewer_id = second_reviewer.id;
+    f.engine
+        .apply(Command::JoinAgent {
+            spec: Box::new(second_reviewer),
+        })
+        .unwrap();
+    let review = f.ok(
+        second_reviewer_id,
+        "record_review",
+        json!({"task":review_task, "summary":"independent review confirms the report"}),
+    );
+    assert!(
+        review.contains("approved"),
+        "review remained actionable: {review}"
+    );
+    f.ok(f.lead, "submit_task", json!({"task":review_task}));
+}
+
+#[test]
 fn every_tool_schema_rejects_unknown_arguments() {
     let f = fixture();
     for tool in definitions_for(f.engine.agent(f.lead).unwrap()) {
@@ -430,10 +556,7 @@ fn reviewing_your_own_work_explains_the_rule() {
         "record_review",
         json!({"task": task, "summary": "looks fine to me"}),
     );
-    assert!(
-        message.contains("different bot"),
-        "got: {message}"
-    );
+    assert!(message.contains("different bot"), "got: {message}");
 }
 
 #[test]
@@ -527,7 +650,10 @@ fn room_status_shows_the_roster_the_goal_and_the_board() {
 
     let status = f.ok(worker, "room_status", json!({}));
     assert!(status.contains("ship the release notes"), "the goal");
-    assert!(status.contains("@lead") && status.contains("@qa"), "the roster");
+    assert!(
+        status.contains("@lead") && status.contains("@qa"),
+        "the roster"
+    );
     assert!(status.contains("← you"), "which bot is reading it");
     assert!(status.contains("write the notes"), "the board");
 }
@@ -594,7 +720,10 @@ fn a_review_without_a_subject_is_refused_with_instructions() {
         "create_task",
         json!({ "title": "review the notes", "brief": "check them", "kind": "review" }),
     );
-    assert!(told.contains("`of`"), "the refusal should say how to fix it: {told}");
+    assert!(
+        told.contains("`of`"),
+        "the refusal should say how to fix it: {told}"
+    );
 }
 
 #[test]
@@ -620,7 +749,10 @@ fn a_review_attaches_to_the_task_it_reviews() {
         .expect("the review exists");
     assert_eq!(review.lineage.review_of.unwrap().to_string(), subject);
     assert_eq!(review.lineage.parent.unwrap().to_string(), subject);
-    assert!(!review.kind.is_headline(), "a review is not a headline card");
+    assert!(
+        !review.kind.is_headline(),
+        "a review is not a headline card"
+    );
 }
 
 /// However deep it sits, attached work knows which outcome it serves — so
@@ -688,7 +820,11 @@ fn one_objective_with_work_under_it_is_one_headline() {
 
     let headlines = f.engine.tasks().filter(|t| t.kind.is_headline()).count();
     assert_eq!(headlines, 1, "seven records, one outcome");
-    assert_eq!(f.engine.tasks().count(), 7, "and all seven are still tracked");
+    assert_eq!(
+        f.engine.tasks().count(),
+        7,
+        "and all seven are still tracked"
+    );
 }
 
 /// An objective belongs to nothing, by definition.
@@ -761,7 +897,11 @@ fn a_long_artifact_is_handed_over_in_named_parts() {
     let artifact = id_in(&told, "art");
 
     let read = f.ok(f.worker, "read_artifact", json!({ "artifact": artifact }));
-    assert!(read.contains("BEGIN PART 1/3"), "got: {}", &read[..read.len().min(200)]);
+    assert!(
+        read.contains("BEGIN PART 1/3"),
+        "got: {}",
+        &read[..read.len().min(200)]
+    );
     assert!(
         read.contains("not the whole document"),
         "a partial read must say so"
@@ -867,7 +1007,10 @@ fn work_that_already_exists_is_pointed_at_rather_than_duplicated() {
         }),
     );
     assert!(told.contains("already exists"), "{told}");
-    assert!(told.contains("B3-C"), "it should name the existing task: {told}");
+    assert!(
+        told.contains("B3-C"),
+        "it should name the existing task: {told}"
+    );
     assert!(told.contains("supersede"), "and say what to do: {told}");
 }
 
@@ -991,13 +1134,27 @@ fn reading_past_the_last_part_is_refused_not_answered_with_the_last_part() {
     let artifact = artifact_of(&mut f, 12_000, "the deployment runbook"); // two parts at 8k
 
     let first = f.ok(worker, "read_artifact", json!({"artifact": artifact}));
-    assert!(first.contains("TRANSPORT part_index=1 total_parts=2"), "{first}");
+    assert!(
+        first.contains("TRANSPORT part_index=1 total_parts=2"),
+        "{first}"
+    );
 
-    let second = f.ok(worker, "read_artifact", json!({"artifact": artifact, "part": 2}));
-    assert!(second.contains("TRANSPORT part_index=2 total_parts=2"), "{second}");
+    let second = f.ok(
+        worker,
+        "read_artifact",
+        json!({"artifact": artifact, "part": 2}),
+    );
+    assert!(
+        second.contains("TRANSPORT part_index=2 total_parts=2"),
+        "{second}"
+    );
     assert!(second.contains("is_final_part=true"));
 
-    let past = f.err(worker, "read_artifact", json!({"artifact": artifact, "part": 3}));
+    let past = f.err(
+        worker,
+        "read_artifact",
+        json!({"artifact": artifact, "part": 3}),
+    );
     assert!(past.contains("PART_OUT_OF_RANGE"), "{past}");
     assert!(past.contains("requested=3"), "{past}");
     assert!(past.contains("total_parts=2"), "{past}");
@@ -1016,8 +1173,16 @@ fn a_part_number_sent_as_a_string_is_honoured_not_discarded() {
     let worker = f.worker;
     let artifact = artifact_of(&mut f, 12_000, "the migration plan");
 
-    let one = f.ok(worker, "read_artifact", json!({"artifact": artifact, "part": "1"}));
-    let two = f.ok(worker, "read_artifact", json!({"artifact": artifact, "part": "2"}));
+    let one = f.ok(
+        worker,
+        "read_artifact",
+        json!({"artifact": artifact, "part": "1"}),
+    );
+    let two = f.ok(
+        worker,
+        "read_artifact",
+        json!({"artifact": artifact, "part": "2"}),
+    );
 
     assert!(one.contains("part_index=1"), "{one}");
     assert!(
@@ -1030,7 +1195,11 @@ fn a_part_number_sent_as_a_string_is_honoured_not_discarded() {
     );
 
     // And out of range is still refused when it arrives as a string.
-    let past = f.err(worker, "read_artifact", json!({"artifact": artifact, "part": "9"}));
+    let past = f.err(
+        worker,
+        "read_artifact",
+        json!({"artifact": artifact, "part": "9"}),
+    );
     assert!(past.contains("PART_OUT_OF_RANGE"), "{past}");
 }
 
@@ -1042,8 +1211,19 @@ fn an_unusable_part_argument_is_refused_rather_than_defaulted() {
     let worker = f.worker;
     let artifact = artifact_of(&mut f, 12_000, "the incident timeline");
 
-    for bad in [json!(0), json!(-1), json!("two"), json!(1.5), json!(true), json!([2])] {
-        let out = f.call(worker, "read_artifact", json!({"artifact": artifact, "part": bad}));
+    for bad in [
+        json!(0),
+        json!(-1),
+        json!("two"),
+        json!(1.5),
+        json!(true),
+        json!([2]),
+    ] {
+        let out = f.call(
+            worker,
+            "read_artifact",
+            json!({"artifact": artifact, "part": bad}),
+        );
         assert!(
             out.is_error,
             "part={bad} should be refused, got: {}",
@@ -1059,7 +1239,11 @@ fn an_unusable_part_argument_is_refused_rather_than_defaulted() {
     // An absent part is not an error: it means the first.
     let default = f.ok(worker, "read_artifact", json!({"artifact": artifact}));
     assert!(default.contains("part_index=1"), "{default}");
-    let null = f.ok(worker, "read_artifact", json!({"artifact": artifact, "part": null}));
+    let null = f.ok(
+        worker,
+        "read_artifact",
+        json!({"artifact": artifact, "part": null}),
+    );
     assert!(null.contains("part_index=1"), "{null}");
 }
 
@@ -1077,8 +1261,15 @@ fn each_part_carries_transport_owned_identity_a_reader_can_check() {
     let mut digests = Vec::new();
     let mut reassembled = 0usize;
     for part in 1..=3 {
-        let out = f.ok(worker, "read_artifact", json!({"artifact": artifact, "part": part}));
-        assert!(out.contains(&format!("part_index={part} total_parts=3")), "{out}");
+        let out = f.ok(
+            worker,
+            "read_artifact",
+            json!({"artifact": artifact, "part": part}),
+        );
+        assert!(
+            out.contains(&format!("part_index={part} total_parts=3")),
+            "{out}"
+        );
         assert!(out.contains("artifact_sha256="), "{out}");
         let digest = out
             .split("chunk_sha256=")
@@ -1100,7 +1291,10 @@ fn each_part_carries_transport_owned_identity_a_reader_can_check() {
             "only the last part may claim to be the last: {out}"
         );
     }
-    assert_eq!(reassembled, 20_000, "the parts account for the whole document");
+    assert_eq!(
+        reassembled, 20_000,
+        "the parts account for the whole document"
+    );
     digests.sort();
     digests.dedup();
     assert_eq!(digests.len(), 3, "no two parts may present the same digest");
@@ -1151,7 +1345,11 @@ fn a_bot_can_load_a_playbook_by_name() {
     let mut f = fixture();
     with_skills(
         &mut f,
-        vec![("ponytail", "the laziest thing that works", "Question the task.")],
+        vec![(
+            "ponytail",
+            "the laziest thing that works",
+            "Question the task.",
+        )],
     );
     let out = f.ok(f.worker, "use_skill", json!({"skill": "ponytail"}));
     assert!(out.contains("Question the task."), "{out}");
@@ -1162,7 +1360,9 @@ fn a_bot_can_load_a_playbook_by_name() {
 fn asking_for_a_skill_is_not_case_sensitive() {
     let mut f = fixture();
     with_skills(&mut f, vec![("ponytail", "d", "body text")]);
-    assert!(f.ok(f.worker, "use_skill", json!({"skill": "Ponytail"})).contains("body text"));
+    assert!(f
+        .ok(f.worker, "use_skill", json!({"skill": "Ponytail"}))
+        .contains("body text"));
 }
 
 /// A refusal names what there is, so the next call succeeds.
@@ -1171,7 +1371,10 @@ fn asking_for_a_skill_that_is_not_there_says_what_is() {
     let mut f = fixture();
     with_skills(&mut f, vec![("ponytail", "d", "b"), ("skillops", "d", "b")]);
     let out = f.err(f.worker, "use_skill", json!({"skill": "nonesuch"}));
-    assert!(out.contains("ponytail") && out.contains("skillops"), "{out}");
+    assert!(
+        out.contains("ponytail") && out.contains("skillops"),
+        "{out}"
+    );
 }
 
 #[test]

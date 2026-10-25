@@ -13,7 +13,14 @@ use crate::session::RoomSession;
 
 /// Run a resolved room to completion, printing a live transcript.
 pub async fn run_headless(resolved: ResolvedRoom, quiet: bool) -> anyhow::Result<RunOutcome> {
-    let (session, handle) = RoomSession::build(resolved)?;
+    let workspace_spec = resolved.workspace.clone();
+    let (mut session, handle) = RoomSession::build(resolved)?;
+    let _workspace_host = match workspace_spec {
+        Some(spec) => {
+            Some(crate::local_workspace::LocalWorkspaceHost::attach(spec, &mut session).await?)
+        }
+        None => None,
+    };
     let mut events = handle.subscribe();
 
     // Render events on a background task so printing never backs up the room.
