@@ -178,6 +178,9 @@ fn resolve_env_references(
 /// The `[room]` section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomSection {
+    /// Explicit project identity used to isolate shared desktop memory.
+    #[serde(default)]
+    pub project_id: Option<String>,
     /// Private local checkpoint used by the app; never a workspace/SSH path.
     #[serde(default)]
     pub state_path: Option<std::path::PathBuf>,
@@ -493,6 +496,10 @@ pub fn expand_home(path: &str) -> String {
 /// A room file, parsed and validated into runnable pieces.
 #[derive(Debug)]
 pub struct ResolvedRoom {
+    pub allowances: Option<orgbot_runtime::allowance::Allowances>,
+    pub project_id: Option<String>,
+    pub memory_root: Option<std::path::PathBuf>,
+    pub memory_projects: Vec<String>,
     pub state_path: Option<std::path::PathBuf>,
     /// Optional local workspace exposed through the runtime tool channel.
     pub workspace: Option<orgbot_runtime::workspace::WorkspaceSpec>,
@@ -666,6 +673,29 @@ impl RoomConfig {
         };
 
         Ok(ResolvedRoom {
+            allowances: orgbot_runtime::allowance::Allowances::from_environment(environment)
+                .map_err(ConfigError::Invalid)?,
+            memory_projects: {
+                let raw = environment
+                    .and_then(|env| env.get("ORGBOT_MEMORY_PROJECTS").cloned())
+                    .or_else(|| std::env::var("ORGBOT_MEMORY_PROJECTS").ok());
+                match raw {
+                    Some(raw) if raw.len() <= 65536 => serde_json::from_str::<Vec<String>>(&raw)
+                        .map_err(|_| {
+                            ConfigError::Invalid("Memory project list is invalid".into())
+                        })?,
+                    Some(_) => {
+                        return Err(ConfigError::Invalid(
+                            "Memory project list is too large".into(),
+                        ))
+                    }
+                    None => Vec::new(),
+                }
+            },
+            project_id: self.room.project_id.clone(),
+            memory_root: environment
+                .and_then(|env| env.get("ORGBOT_MEMORY_ROOT").map(std::path::PathBuf::from))
+                .or_else(|| std::env::var_os("ORGBOT_MEMORY_ROOT").map(std::path::PathBuf::from)),
             roles: RoleTable::new(self.roles.clone()),
             skills: self.load_skills(),
             mcp: resolve_mcp_environment(&self.mcp, environment)?,
@@ -981,18 +1011,14 @@ mod tests {
         );
         assert_eq!(command, "private-command-value");
         assert_eq!(args, &["private-argument-value"]);
-        assert!(
-            resolved.bots[0]
-                .spec
-                .persona
-                .contains("reviewer assigned by OrgBots")
-        );
-        assert!(
-            resolved.bots[0]
-                .spec
-                .persona
-                .contains("nested Luna worker limits")
-        );
+        assert!(resolved.bots[0]
+            .spec
+            .persona
+            .contains("reviewer assigned by OrgBots"));
+        assert!(resolved.bots[0]
+            .spec
+            .persona
+            .contains("nested Luna worker limits"));
     }
 
     #[test]

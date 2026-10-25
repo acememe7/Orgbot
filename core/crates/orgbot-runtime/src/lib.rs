@@ -31,6 +31,8 @@
 // See the note in orgbot-proto on `missing_docs` and data-carrier variants.
 #![warn(missing_debug_implementations, rust_2018_idioms, unreachable_pub)]
 
+pub mod allowance;
+pub mod attachments;
 pub mod bot;
 pub mod mcp;
 pub mod mcp_client;
@@ -39,7 +41,6 @@ pub mod prompt;
 pub mod relay;
 pub mod shared;
 pub mod workspace;
-pub mod attachments;
 
 pub use bot::{Bot, TurnReport};
 pub use mcp::{room_tools_for, McpCall, McpSession};

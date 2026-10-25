@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 /// Something went wrong talking to a model backend.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    /// A local allowance or cooldown prevents a new request.
+    #[error("{provider} is waiting: {message}")]
+    Allowance {
+        provider: String,
+        message: String,
+        retry_after_secs: u64,
+    },
     /// No usable credential was found.
     #[error("no credential for {provider}: {detail}")]
     MissingCredential {
@@ -98,7 +105,10 @@ impl ProviderError {
     /// bot: a 429 or a 503 is worth another attempt, a 400 never is.
     pub const fn is_retryable(&self) -> bool {
         match self {
-            Self::RateLimited { .. } | Self::Transport { .. } | Self::StreamInterrupted { .. } => true,
+            Self::Allowance { .. }
+            | Self::RateLimited { .. }
+            | Self::Transport { .. }
+            | Self::StreamInterrupted { .. } => true,
             Self::Upstream { status, .. } => *status >= 500,
             _ => false,
         }
@@ -107,6 +117,9 @@ impl ProviderError {
     /// How long to wait before retrying, when the backend said.
     pub const fn retry_after_secs(&self) -> Option<u64> {
         match self {
+            Self::Allowance {
+                retry_after_secs, ..
+            } => Some(*retry_after_secs),
             Self::RateLimited {
                 retry_after_secs, ..
             } => *retry_after_secs,
@@ -128,7 +141,8 @@ fn transport_detail(error: &reqwest::Error) -> String {
         "response stream interrupted"
     } else {
         "request failed"
-    }.to_string();
+    }
+    .to_string();
     let mut cause = error.source();
     for _ in 0..6 {
         let Some(next) = cause else { break };
@@ -160,12 +174,14 @@ pub struct ErrorReport {
 impl From<&ProviderError> for ErrorReport {
     fn from(error: &ProviderError) -> Self {
         let (provider, kind) = match error {
+            ProviderError::Allowance { provider, .. } => (provider.clone(), "allowance"),
             ProviderError::MissingCredential { provider, .. } => (provider.clone(), "credential"),
             ProviderError::Unauthorized { provider, .. } => (provider.clone(), "unauthorized"),
             ProviderError::RateLimited { provider, .. } => (provider.clone(), "rate_limited"),
             ProviderError::BadRequest { provider, .. } => (provider.clone(), "bad_request"),
             ProviderError::Upstream { provider, .. } => (provider.clone(), "upstream"),
-            ProviderError::Transport { provider, .. } | ProviderError::StreamInterrupted { provider, .. } => (provider.clone(), "transport"),
+            ProviderError::Transport { provider, .. }
+            | ProviderError::StreamInterrupted { provider, .. } => (provider.clone(), "transport"),
             ProviderError::Decode { provider, .. } => (provider.clone(), "decode"),
             ProviderError::Process { provider, .. } => (provider.clone(), "process"),
             ProviderError::Unsupported(_) => ("unknown".to_string(), "unsupported"),
@@ -213,14 +229,31 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0; 1024];
             stream.read(&mut request).await.unwrap();
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\npartial").await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\npartial",
+                )
+                .await
+                .unwrap();
         });
         let url = format!("http://{address}/?access_token=SECRET_NOT_TO_LOG");
-        let source = reqwest::get(&url).await.unwrap().bytes().await.unwrap_err().with_url(url.parse().unwrap());
-        let error = ProviderError::Transport { provider: "codex".into(), source };
+        let source = reqwest::get(&url)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap_err()
+            .with_url(url.parse().unwrap());
+        let error = ProviderError::Transport {
+            provider: "codex".into(),
+            source,
+        };
         let text = error.to_string();
         assert!(text.contains("response stream interrupted"), "{text}");
-        assert!(text.contains("end of file") || text.contains("body"), "underlying cause: {text}");
+        assert!(
+            text.contains("end of file") || text.contains("body"),
+            "underlying cause: {text}"
+        );
         assert!(!text.contains("SECRET_NOT_TO_LOG"));
         assert!(!text.contains("http://"));
         server.await.unwrap();

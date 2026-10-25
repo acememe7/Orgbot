@@ -328,6 +328,9 @@ struct Episode {
     session_id: Option<String>,
     /// Token accounting, when the CLI reports it.
     usage: Usage,
+    /// A structured provider failure reported on stdout, preferred over
+    /// incidental diagnostics from stderr.
+    structured_error: Option<String>,
 }
 
 #[async_trait]
@@ -544,6 +547,9 @@ impl AgentCliProvider {
                     provider: self.cli.label().to_string(),
                     detail: format!("waiting for exit: {error}"),
                 })?;
+                if let Some(message) = episode.structured_error.as_deref() {
+                    return Err(classify_cli_error(self.cli, message));
+                }
                 if !exit.success() {
                     let stderr = String::from_utf8_lossy(&stderr_bytes);
                     let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
@@ -610,6 +616,15 @@ fn ingest_codex_line(value: &Value, episode: &mut Episode) {
                 episode.usage = usage_from_json(usage);
             }
         }
+        "turn.failed" => {
+            if let Some(message) = value
+                .get("error")
+                .and_then(|error| error.as_str().or_else(|| error.get("message")?.as_str()))
+                .or_else(|| value.get("message").and_then(Value::as_str))
+            {
+                episode.structured_error = bounded_error_message(message);
+            }
+        }
         "item.completed" => {
             let Some(item) = value.get("item") else {
                 return;
@@ -641,6 +656,22 @@ fn ingest_messages_line(value: &Value, episode: &mut Episode) {
     if let Some(id) = value.get("session_id").and_then(Value::as_str) {
         episode.session_id = Some(id.to_string());
     }
+    if value.get("type").and_then(Value::as_str) == Some("result") {
+        if value.get("is_error").and_then(Value::as_bool) == Some(true) {
+            let message = value.get("result").and_then(Value::as_str).or_else(|| {
+                value
+                    .get("error")
+                    .and_then(|error| error.as_str().or_else(|| error.get("message")?.as_str()))
+            });
+            if let Some(message) = message {
+                episode.structured_error = bounded_error_message(message);
+            }
+        }
+        if let Some(usage) = value.get("usage") {
+            episode.usage = usage_from_json(usage);
+        }
+        return;
+    }
     if value.get("type").and_then(Value::as_str) != Some("assistant") {
         return;
     }
@@ -662,6 +693,39 @@ fn ingest_messages_line(value: &Value, episode: &mut Episode) {
     }
     if let Some(usage) = message.get("usage") {
         episode.usage = usage_from_json(usage);
+    }
+}
+
+fn bounded_error_message(message: &str) -> Option<String> {
+    let message = message.trim();
+    (!message.is_empty()).then(|| message.chars().take(2_000).collect())
+}
+
+fn classify_cli_error(cli: CliKind, message: &str) -> ProviderError {
+    let normalized = message.to_ascii_lowercase();
+    let rate_limited = [
+        "rate limit",
+        "rate-limit",
+        "rate limited",
+        "rate-limited",
+        "too many requests",
+        "quota",
+        "weekly limit",
+        "usage limit",
+    ]
+    .iter()
+    .any(|phrase| normalized.contains(phrase));
+    if rate_limited {
+        ProviderError::RateLimited {
+            provider: cli.label().to_string(),
+            message: message.to_string(),
+            retry_after_secs: None,
+        }
+    } else {
+        ProviderError::Process {
+            provider: cli.label().to_string(),
+            detail: format!("CLI reported an error: {message}"),
+        }
     }
 }
 
@@ -1057,6 +1121,13 @@ mod tests {
 {"type":"assistant","message":{"id":"msg_0","type":"message","role":"assistant","model":"grok-4.6","content":[{"type":"thinking","thinking":"inner"},{"type":"text","text":"probe-ok"}]}}
 "#;
 
+    const CLAUDE_QUOTA_FAILURE: &str = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"partial output"}],"usage":{"input_tokens":19,"output_tokens":4}}}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your weekly limit · resets 11pm (Africa/Lagos)"}
+"#;
+
+    const CODEX_RATE_LIMIT_FAILURE: &str = r#"{"type":"turn.failed","error":{"message":"Rate limit exceeded. Try again later."}}
+"#;
+
     fn fold(cli: CliKind, run: &str) -> Episode {
         let mut episode = Episode::default();
         for line in run.lines() {
@@ -1098,6 +1169,101 @@ mod tests {
             episode.session_id.as_deref(),
             Some("01a067dc-92a1-7513-89d6-df5767f0ceda")
         );
+    }
+
+    #[test]
+    fn structured_cli_failures_are_parsed_without_losing_usage() {
+        let claude = fold(CliKind::Claude, CLAUDE_QUOTA_FAILURE);
+        assert!(
+            claude
+                .structured_error
+                .as_deref()
+                .unwrap()
+                .contains("weekly limit")
+        );
+        assert_eq!(claude.usage.input_tokens, 19);
+        assert_eq!(claude.usage.output_tokens, 4);
+
+        let codex = fold(CliKind::Codex, CODEX_RATE_LIMIT_FAILURE);
+        assert_eq!(
+            codex.structured_error.as_deref(),
+            Some("Rate limit exceeded. Try again later.")
+        );
+    }
+
+    #[test]
+    fn explicit_cli_quota_messages_are_retryable_without_guessed_delay() {
+        for message in [
+            "You've hit your weekly limit · resets 11pm (Africa/Lagos)",
+            "rate-limit exceeded",
+            "too many requests for this account",
+        ] {
+            assert!(matches!(
+                classify_cli_error(CliKind::Claude, message),
+                ProviderError::RateLimited {
+                    retry_after_secs: None,
+                    ..
+                }
+            ));
+        }
+        assert!(matches!(
+            classify_cli_error(CliKind::Claude, "MCP server issuer unavailable"),
+            ProviderError::Process { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn structured_error_overrides_exit_success_and_incidental_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "orgbot-cli-error-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join("fake-claude");
+        std::fs::write(
+            &binary,
+            r##"#!/bin/sh
+printf '%s\n' 'MCP issuer warning: incidental stderr' >&2
+printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"weekly limit reached","usage":{"input_tokens":7,"output_tokens":2}}'
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let provider = AgentCliProvider {
+            cli: CliKind::Claude,
+            bin: binary.to_string_lossy().into_owned(),
+            model: "claude-opus-5-5".into(),
+            workdir: PathBuf::new(),
+            policy: AgentPolicy::ReadOnly,
+            session: Mutex::new(None),
+            last_socket: Mutex::new(None),
+            mcp: false,
+            timeout: Duration::from_secs(5),
+            session_store: Mutex::new(None),
+        };
+        let mut episode = Episode::default();
+        let error = provider
+            .run_episode("test prompt", None, &None, &mut episode, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ProviderError::RateLimited {
+                retry_after_secs: None,
+                ..
+            }
+        ), "expected the structured quota failure to win over stderr, got: {error:?}");
+        assert!(error.to_string().contains("weekly limit"));
+        assert_eq!(episode.usage.input_tokens, 7);
+        assert_eq!(episode.usage.output_tokens, 2);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

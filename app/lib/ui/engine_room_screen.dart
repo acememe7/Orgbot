@@ -30,6 +30,7 @@ import 'brand.dart';
 import 'room_widgets.dart';
 import 'polish.dart';
 import 'desktop_project_pane.dart';
+import 'widgets/memory_pane.dart';
 
 /// Runs a saved room on the engine and shows it.
 class EngineRoomScreen extends StatefulWidget {
@@ -975,48 +976,74 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
           style: TextStyle(color: scheme.onSurfaceVariant),
         ),
     ];
-    return ListView.builder(
-      padding: const EdgeInsets.all(20),
-      itemCount: header.length + artifacts.length,
-      itemBuilder: (context, index) {
-        if (index < header.length) return header[index];
-        final artifact = artifacts[index - header.length];
-        return ListTile(
-          contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.description_outlined),
-          title: Text(artifact['name'] as String? ?? 'Artifact'),
-          subtitle: Text('@${store.handleFor(artifact['author'] as String?)}'),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () {
-            final body = artifact['body'] as Map? ?? {};
-            final text =
-                (body['text'] ??
-                        body['diff'] ??
-                        body['url'] ??
-                        body['path'] ??
-                        const JsonEncoder.withIndent(
-                          '  ',
-                        ).convert(body['value']))
-                    .toString();
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => Scaffold(
-                  appBar: AppBar(
-                    title: Text(artifact['name'] as String? ?? 'Artifact'),
-                  ),
-                  body: SelectionArea(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.all(20),
-                      child: MessageText(text: text),
-                    ),
-                  ),
+    return DefaultTabController(
+      length: 2,
+      child: Column(
+        children: [
+          const Material(
+            child: TabBar(
+              tabs: [
+                Tab(text: 'Room notes & artifacts'),
+                Tab(text: 'Project memory'),
+              ],
+            ),
+          ),
+          Expanded(
+            child: TabBarView(
+              children: [
+                ListView.builder(
+                  padding: const EdgeInsets.all(20),
+                  itemCount: header.length + artifacts.length,
+                  itemBuilder: (context, index) {
+                    if (index < header.length) return header[index];
+                    final artifact = artifacts[index - header.length];
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.description_outlined),
+                      title: Text(artifact['name'] as String? ?? 'Artifact'),
+                      subtitle: Text(
+                        '@${store.handleFor(artifact['author'] as String?)}',
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () {
+                        final body = artifact['body'] as Map? ?? {};
+                        final text =
+                            (body['text'] ??
+                                    body['diff'] ??
+                                    body['url'] ??
+                                    body['path'] ??
+                                    const JsonEncoder.withIndent(
+                                      '  ',
+                                    ).convert(body['value']))
+                                .toString();
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => Scaffold(
+                              appBar: AppBar(
+                                title: Text(
+                                  artifact['name'] as String? ?? 'Artifact',
+                                ),
+                              ),
+                              body: SelectionArea(
+                                child: SingleChildScrollView(
+                                  padding: const EdgeInsets.all(20),
+                                  child: MessageText(text: text),
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
                 ),
-              ),
-            );
-          },
-        );
-      },
+                ProjectMemoryPanel(controller: _controller),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 

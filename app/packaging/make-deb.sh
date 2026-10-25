@@ -88,7 +88,7 @@ Section: devel
 Priority: optional
 Architecture: amd64
 Installed-Size: $INSTALLED_KB
-Depends: $DEPENDS
+Depends: $DEPENDS, libsecret-tools, ffmpeg, gstreamer1.0-libav, gstreamer1.0-plugins-good
 Maintainer: OrgBot <theaeceme@gmail.com>
 Description: CLI and API agents working together in shared rooms
  Bots hold different roles, pick up tasks, hand work off to one another, wait

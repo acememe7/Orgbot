@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:orgbot_app/orgbot/desktop_integrations.dart';
+import 'package:orgbot_app/orgbot/integration_registry.dart';
 import 'package:orgbot_app/ui/desktop_integrations_view.dart';
 import 'package:orgbot_app/ui/desktop_project_pane.dart';
 
@@ -87,7 +88,12 @@ void main() {
           '${skills.path}/skill-${i.toString().padLeft(3, '0')}/SKILL.md',
         ).writeAsString('fixture');
       }
-      snapshot = await DesktopIntegrations.discover(homeDirectory: home.path);
+      snapshot = await DesktopIntegrations.discover(
+        homeDirectory: home.path,
+        registry: IntegrationRegistry(
+          supportDirectory: '${home.path}/.local/share/orgbot',
+        ),
+      );
     });
     addTearDown(() async => home.delete(recursive: true));
 
@@ -120,7 +126,12 @@ void main() {
 [mcp_servers.local]
 command = "node"
 ''');
-      snapshot = await DesktopIntegrations.discover(homeDirectory: home.path);
+      snapshot = await DesktopIntegrations.discover(
+        homeDirectory: home.path,
+        registry: IntegrationRegistry(
+          supportDirectory: '${home.path}/.local/share/orgbot',
+        ),
+      );
     });
     await tester.tap(find.byTooltip('Refresh tools'));
     await tester.pump();

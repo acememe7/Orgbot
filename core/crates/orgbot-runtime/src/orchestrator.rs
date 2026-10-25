@@ -81,6 +81,7 @@ pub struct Orchestrator {
     /// it can be run there — a phone cannot start a process, and the machine
     /// it is already talking to is usually where the servers live.
     workspace: Option<crate::workspace::Workspace>,
+    allowances: Option<crate::allowance::Allowances>,
 }
 
 impl Orchestrator {
@@ -143,6 +144,7 @@ impl Orchestrator {
             idle_rounds: 0,
             last_said: BTreeMap::new(),
             workspace: None,
+            allowances: None,
         };
         for (mut configured, provider) in providers {
             let saved = restored
@@ -184,6 +186,7 @@ impl Orchestrator {
             idle_rounds: 0,
             last_said: BTreeMap::new(),
             workspace: None,
+            allowances: None,
         }
     }
 
@@ -200,6 +203,9 @@ impl Orchestrator {
             })
         })?;
         let mut bot = Bot::new(spec.clone(), provider);
+        if let Some(allowances) = &self.allowances {
+            bot.attach_allowances(allowances.clone());
+        }
         if let Some((rx, socket)) = spawn_mcp_host(&spec) {
             bot.attach_mcp(rx, socket);
         }
@@ -225,6 +231,13 @@ impl Orchestrator {
             bot.attach_workspace(workspace.clone());
         }
         self.workspace = Some(workspace);
+    }
+
+    pub fn attach_allowances(&mut self, allowances: crate::allowance::Allowances) {
+        for bot in self.bots.values_mut() {
+            bot.attach_allowances(allowances.clone());
+        }
+        self.allowances = Some(allowances);
     }
 
     /// The computer this room is connected to, if any.
@@ -269,7 +282,8 @@ impl Orchestrator {
 
     /// Move the room into the running phase.
     pub fn start(&mut self) -> Result<(), orgbot_engine::EngineError> {
-        self.engine.with(|engine| engine.apply(Command::StartRoom))?;
+        self.engine
+            .with(|engine| engine.apply(Command::StartRoom))?;
         Ok(())
     }
 
@@ -301,9 +315,11 @@ impl Orchestrator {
         }
         // Work in hand that is not parked.
         let held = engine.active_tasks_of(agent);
-        let has_live_work = held
-            .iter()
-            .any(|id| engine.task(*id).is_some_and(|task| !task.state.is_waiting()));
+        let has_live_work = held.iter().any(|id| {
+            engine
+                .task(*id)
+                .is_some_and(|task| !task.state.is_waiting())
+        });
         if has_live_work {
             return Some(Wake::HeldWork);
         }
@@ -412,11 +428,24 @@ impl Orchestrator {
         let per_backend = engine.room().spec.limits.parallel_per_backend();
         let mut in_flight: BTreeMap<String, usize> = BTreeMap::new();
 
-        for offset in 0..self.rotation.len() {
+        let routing = crate::allowance::routing(self.allowances.as_ref());
+        let mut candidates = (0..self.rotation.len())
+            .map(|offset| self.rotation[(self.cursor + offset) % self.rotation.len()])
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|agent| {
+            let backend = engine
+                .agent(*agent)
+                .map(|spec| spec.provider.backend())
+                .unwrap_or_default();
+            routing.get(&backend).copied().flatten().unwrap_or(0)
+        });
+        for agent in candidates {
             if chosen.len() >= limit {
                 break;
             }
-            let agent = self.rotation[(self.cursor + offset) % self.rotation.len()];
+            if self.bots.get(&agent).is_some_and(|bot| !bot.available()) {
+                continue;
+            }
             let Some(reason) = self.wake_reason(&engine, agent) else {
                 continue;
             };
@@ -424,6 +453,9 @@ impl Orchestrator {
                 .agent(agent)
                 .map(|spec| spec.provider.backend())
                 .unwrap_or_default();
+            if routing.get(&backend) == Some(&None) {
+                continue;
+            }
             if !backend.is_empty() {
                 let running = in_flight.entry(backend.clone()).or_default();
                 if *running >= per_backend {
@@ -519,6 +551,13 @@ impl Orchestrator {
         }
 
         let engine = self.engine.clone();
+        let completed_before: BTreeSet<_> = engine.with(|engine| {
+            engine
+                .tasks()
+                .filter(|task| task.state == orgbot_proto::TaskState::Submitted)
+                .map(|task| task.id)
+                .collect()
+        });
         // Only one bot streams. The deltas from several turns arriving on one
         // channel would interleave into a paragraph none of them wrote; the
         // rest of the batch still posts its work to the room as usual.
@@ -536,6 +575,79 @@ impl Orchestrator {
             .collect::<Vec<_>>();
 
         let finished = futures::future::join_all(turns).await;
+        let memory_capture = self.engine.with(|engine| {
+            let repository = engine.archive().memory_repository();
+            let room_id = engine.room_id().to_string();
+            let captures = engine
+                .tasks()
+                .filter(|task| {
+                    task.state == orgbot_proto::TaskState::Submitted
+                        && !completed_before.contains(&task.id)
+                })
+                .map(|task| {
+                    let artifacts = task
+                        .artifacts
+                        .iter()
+                        .filter_map(|id| engine.artifact(*id))
+                        .collect::<Vec<_>>();
+                    let names = artifacts
+                        .iter()
+                        .map(|artifact| format!("{} ({})", artifact.name, artifact.id))
+                        .collect::<Vec<_>>();
+                    let decisions = artifacts
+                        .iter()
+                        .filter_map(|artifact| match &artifact.body {
+                            orgbot_proto::artifact::ArtifactBody::Text { text } => {
+                                Some(text.chars().take(1200).collect::<String>())
+                            }
+                            _ => None,
+                        })
+                        .take(3)
+                        .collect::<Vec<_>>();
+                    (
+                        task.id.to_string(),
+                        task.title.chars().take(160).collect::<String>(),
+                        task.brief.chars().take(4000).collect::<String>(),
+                        decisions,
+                        names,
+                    )
+                })
+                .collect::<Vec<_>>();
+            (repository, room_id, captures)
+        });
+        match memory_capture.0 {
+            Ok(Some(repository)) if !memory_capture.2.is_empty() => {
+                let room_id = memory_capture.1;
+                let captures = memory_capture.2;
+                match tokio::task::spawn_blocking(move || {
+                    captures
+                        .into_iter()
+                        .map(|(task_id, title, brief, decisions, names)| {
+                            let content = orgbot_engine::memory::completed_work_content(
+                                &brief, &decisions, &names,
+                            );
+                            (
+                                task_id.clone(),
+                                repository.add(&title, &content, Some(&room_id), Some(&task_id)),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await
+                {
+                    Ok(results) => {
+                        for (task, result) in results {
+                            if let Err(error) = result {
+                                tracing::warn!(%error, %task, "completed work could not be saved to project memory");
+                            }
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "project memory capture worker failed"),
+                }
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "project memory repository unavailable"),
+        }
         let mut reports = Vec::with_capacity(finished.len());
         for (agent, result) in finished {
             reports.push(match result {
@@ -578,7 +690,9 @@ impl Orchestrator {
         }
         if anyone_progressed {
             self.idle_rounds = 0;
-        } else {
+        } else if !reports.iter().any(|report| {
+            report.stop_reason == orgbot_providers::StopReason::Other("provider_wait".into())
+        }) {
             self.idle_rounds += 1;
         }
         reports
@@ -586,12 +700,7 @@ impl Orchestrator {
 
     /// How many bots this room may run at once.
     pub fn parallelism(&self) -> usize {
-        self.engine
-            .borrow()
-            .room()
-            .spec
-            .limits
-            .parallel_turns()
+        self.engine.borrow().room().spec.limits.parallel_turns()
     }
 
     /// Run until the room finishes, stalls, or runs out of budget.
@@ -603,7 +712,11 @@ impl Orchestrator {
                 }
                 return outcome;
             }
-            if self.step_many(self.batch_size(), sink.clone()).await.is_empty() {
+            if self
+                .step_many(self.batch_size(), sink.clone())
+                .await
+                .is_empty()
+            {
                 // Nobody actionable. The completion rule decides whether that
                 // is success or a room that has run out of road.
                 return if self.is_complete() {

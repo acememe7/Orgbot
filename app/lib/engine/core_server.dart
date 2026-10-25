@@ -11,6 +11,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
@@ -69,7 +70,7 @@ EngineBinary findEngine() {
 
 /// A running engine process hosting one room.
 class CoreServer {
-  final Process process;
+  final Process? process;
 
   /// The WebSocket URL the app should connect to.
   final String url;
@@ -80,6 +81,8 @@ class CoreServer {
 
   /// Everything the engine has written to stderr, for diagnosis.
   final StringBuffer diagnostics;
+  final String? _serviceDirectory;
+  final String? _enginePath;
 
   CoreServer._(
     this.process,
@@ -87,17 +90,42 @@ class CoreServer {
     this.token,
     this.roomFile,
     this.diagnostics,
-  );
+  ) : _serviceDirectory = null,
+      _enginePath = null;
 
-  /// Stop the engine and clean up the generated file.
+  CoreServer._service(
+    this.url,
+    this.token,
+    this.roomFile,
+    this.diagnostics,
+    this._serviceDirectory,
+    this._enginePath,
+  ) : process = null;
+
+  /// Stop the engine only for an explicit owner stop.
   Future<void> stop() async {
-    process.kill(ProcessSignal.sigterm);
+    final directory = _serviceDirectory;
+    if (directory != null) {
+      final result = await Process.run(_enginePath!, [
+        'room-service',
+        'stop',
+        '--directory',
+        directory,
+      ]);
+      if (result.exitCode != 0) {
+        throw EngineStartError('Could not stop the Linux room service.');
+      }
+      return;
+    }
+    final running = process;
+    if (running == null) return;
+    running.kill(ProcessSignal.sigterm);
     // Give it a moment to close its socket cleanly before insisting.
     try {
-      await process.exitCode.timeout(const Duration(seconds: 2));
+      await running.exitCode.timeout(const Duration(seconds: 2));
     } on TimeoutException {
-      process.kill(ProcessSignal.sigkill);
-      await process.exitCode;
+      running.kill(ProcessSignal.sigkill);
+      await running.exitCode;
     }
     try {
       if (await roomFile.parent.exists()) {
@@ -106,6 +134,12 @@ class CoreServer {
     } catch (_) {
       // A leftover temp file is not worth failing a shutdown over.
     }
+  }
+
+  /// Close the UI connection while leaving a Linux room service running.
+  Future<void> detach() async {
+    if (_serviceDirectory != null) return;
+    await stop();
   }
 }
 
@@ -118,12 +152,20 @@ class EngineStartError implements Exception {
 }
 
 /// Start the engine on a generated room file and wait until it is serving.
-Future<CoreServer> startRoom(RoomFile room, {String? enginePath}) async {
+Future<CoreServer> startRoom(
+  RoomFile room, {
+  String? enginePath,
+  String? roomId,
+}) async {
   final binary = enginePath != null
       ? EngineBinary(enginePath, null)
       : findEngine();
   if (!binary.available) {
     throw EngineStartError(binary.problem ?? 'no engine binary');
+  }
+
+  if (Platform.isLinux && roomId != null) {
+    return _startLinuxService(room, roomId, binary.path!);
   }
 
   final dir = await Directory.systemTemp.createTemp('orgbot-room-');
@@ -177,6 +219,142 @@ Future<CoreServer> startRoom(RoomFile room, {String? enginePath}) async {
   }
 
   return CoreServer._(process, 'ws://$address/ws', token, file, diagnostics);
+}
+
+Future<CoreServer> _startLinuxService(
+  RoomFile room,
+  String roomId,
+  String enginePath,
+) async {
+  if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(roomId)) {
+    throw EngineStartError('Invalid room identifier.');
+  }
+  final dataHome = Platform.environment['XDG_DATA_HOME']?.trim();
+  final home = dataHome == null || dataHome.isEmpty
+      ? '${Platform.environment['HOME'] ?? '.'}/.local/share'
+      : dataHome;
+  final directory = Directory('$home/orgbot/.services/$roomId').absolute;
+  await directory.create(recursive: true);
+  await _setMode(directory.path, '700');
+  final roomFile = File('${directory.path}/room.toml');
+  final diagnostics = StringBuffer();
+
+  final existing = await _serviceCommand(enginePath, [
+    'status',
+    '--directory',
+    directory.path,
+  ]);
+  final current = _decodeServiceResult(existing, required: false);
+  final alreadyRunning = current != null && current['running'] == true;
+  if (!alreadyRunning) {
+    final existingType = await FileSystemEntity.type(
+      roomFile.path,
+      followLinks: false,
+    );
+    if (existingType == FileSystemEntityType.link) {
+      throw EngineStartError('The Linux room configuration path is unsafe.');
+    }
+    await roomFile.writeAsString(room.toml, flush: true);
+    await _setMode(roomFile.path, '600');
+  }
+  final port = await _freePort();
+  final address = '127.0.0.1:$port';
+  final started = await _serviceCommand(
+    enginePath,
+    ['start', '--directory', directory.path, '--addr', address],
+    input: utf8.encode(jsonEncode(room.environment)),
+    allowFailure: false,
+  );
+  final currentStarted = _decodeServiceResult(started, required: true)!;
+  final details = (currentStarted['descriptor'] as Map).cast<String, Object?>();
+  final url = details['url'] as String;
+  final token = details['token'] as String;
+  final ready = await _waitForHealth(
+    url.replaceFirst('ws://', 'http://').replaceFirst('/ws', '/health'),
+    () => false,
+  );
+  if (!ready) {
+    await Process.run(enginePath, [
+      'room-service',
+      'stop',
+      '--directory',
+      directory.path,
+    ]);
+    throw EngineStartError(
+      'The Linux room service did not answer health checks.',
+    );
+  }
+  return CoreServer._service(
+    url,
+    token,
+    roomFile,
+    diagnostics,
+    directory.path,
+    enginePath,
+  );
+}
+
+Future<ProcessResult> _serviceCommand(
+  String enginePath,
+  List<String> arguments, {
+  List<int>? input,
+  bool allowFailure = true,
+}) async {
+  final process = await Process.start(enginePath, [
+    'room-service',
+    ...arguments,
+  ]);
+  final stdoutFuture = process.stdout.transform(utf8.decoder).join();
+  final stderrFuture = process.stderr.transform(utf8.decoder).join();
+  if (input != null) process.stdin.add(input);
+  await process.stdin.close();
+  final code = await process.exitCode;
+  final stdout = await stdoutFuture;
+  final stderr = await stderrFuture;
+  if (!allowFailure && code != 0) {
+    final details = stderr.trim();
+    throw EngineStartError(
+      details.isEmpty
+          ? 'Could not start the Linux room service.'
+          : _lastLines(details, 3),
+    );
+  }
+  return ProcessResult(process.pid, code, stdout, stderr);
+}
+
+Map<String, Object?>? _decodeServiceResult(
+  ProcessResult result, {
+  required bool required,
+}) {
+  if (result.exitCode != 0) {
+    if (required) {
+      final details = result.stderr.toString().trim();
+      throw EngineStartError(
+        details.isEmpty
+            ? 'Could not start the Linux room service.'
+            : _lastLines(details, 3),
+      );
+    }
+    return null;
+  }
+  try {
+    final decoded = jsonDecode(result.stdout as String);
+    return (decoded as Map).cast<String, Object?>();
+  } catch (_) {
+    if (required) {
+      throw EngineStartError(
+        'The Linux room service returned an invalid status.',
+      );
+    }
+    return null;
+  }
+}
+
+Future<void> _setMode(String path, String mode) async {
+  final result = await Process.run('chmod', [mode, path]);
+  if (result.exitCode != 0) {
+    throw EngineStartError('Could not secure the Linux room service files.');
+  }
 }
 
 /// Poll the engine's health endpoint until it answers or gives up.

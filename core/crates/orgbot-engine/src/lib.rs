@@ -29,26 +29,28 @@
 // variants are documented one level up, where the meaning actually lives.
 #![warn(missing_debug_implementations, rust_2018_idioms, unreachable_pub)]
 
+pub mod analytics;
 pub mod archive;
 pub mod command;
-pub mod analytics;
 pub mod consistency;
 pub mod deadlock;
 pub mod digest;
 pub mod eligibility;
-pub mod health;
 pub mod engine;
-pub mod notify;
 pub mod error;
+pub mod health;
+pub mod memory;
+pub mod notify;
 
-pub use command::Command;
 pub use analytics::{retrospective, Retrospective};
+pub use archive::Archive;
+pub use command::Command;
 pub use consistency::Violation;
 pub use deadlock::WaitGraph;
 pub use digest::{digest, BoardCounts, ObjectiveCard, Progress, RoomDigest};
 pub use eligibility::{Eligibility, LeaseState, Reason};
-pub use health::Health;
-pub use archive::Archive;
 pub use engine::Engine;
-pub use notify::{notification_for, Notification};
 pub use error::{EngineError, Result};
+pub use health::Health;
+pub use memory::{MemoryEntry, MemoryError, MemoryHit, MemoryRepository};
+pub use notify::{notification_for, Notification};

@@ -80,6 +80,20 @@ void main() {
     'room navigation and restart preserve the real conversation',
     (tester) async {
       if (!Platform.environment.containsKey('ORGBOT_ENGINE')) return;
+      final fixture = await tester.runAsync(
+        () => Directory.systemTemp.createTemp('orgbot-room-continuity-'),
+      );
+      const pathProvider = MethodChannel('plugins.flutter.io/path_provider');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            pathProvider,
+            (call) async => fixture!.path,
+          );
+      addTearDown(() async {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(pathProvider, null);
+        await fixture!.delete(recursive: true);
+      });
       final library = Library(saver: MemorySaver());
       await library.load();
       library.userName = 'Alex';

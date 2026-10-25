@@ -7,6 +7,8 @@
 
 #include "flutter/generated_plugin_registrant.h"
 #include "desktop_files_channel.h"
+#include "desktop_editor_channel.h"
+#include "native_workspace_panels.h"
 
 struct _MyApplication {
   GtkApplication parent_instance;
@@ -18,6 +20,12 @@ G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
+}
+
+static gboolean flutter_view_button_press_cb(GtkWidget* widget,
+                                              GdkEventButton*, gpointer) {
+  gtk_widget_grab_focus(widget);
+  return FALSE;
 }
 
 // Point the window at the app's own icon.
@@ -80,13 +88,19 @@ static void my_application_activate(GApplication* application) {
       project, self->dart_entrypoint_arguments);
 
   FlView* view = fl_view_new(project);
+  gtk_widget_add_events(GTK_WIDGET(view), GDK_BUTTON_PRESS_MASK);
+  g_signal_connect(view, "button-press-event",
+                   G_CALLBACK(flutter_view_button_press_cb), nullptr);
   GdkRGBA background_color;
   // Background defaults to black, override it here if necessary, e.g. #00000000
   // for transparent.
   gdk_rgba_parse(&background_color, "#000000");
   fl_view_set_background_color(view, &background_color);
   gtk_widget_show(GTK_WIDGET(view));
-  gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));
+  GtkOverlay* overlay = GTK_OVERLAY(gtk_overlay_new());
+  gtk_container_add(GTK_CONTAINER(overlay), GTK_WIDGET(view));
+  gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(overlay));
+  gtk_widget_show(GTK_WIDGET(overlay));
 
   // Show the window when Flutter renders.
   // Requires the view to be realized so we can start rendering.
@@ -96,6 +110,8 @@ static void my_application_activate(GApplication* application) {
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
   desktop_files_channel_register(view);
+  desktop_editor_channel_register(view);
+  native_workspace_panels_register(view, overlay);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

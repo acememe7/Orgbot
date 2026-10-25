@@ -12,12 +12,14 @@ import '../state/room_archive.dart';
 
 const desktopAttachmentsChannel = MethodChannel('orgbot/attachments');
 const desktopWorkspaceChannel = MethodChannel('orgbot/workspace');
+const desktopWorkspaceEditorChannel = MethodChannel('orgbot/workspace_editor');
 
 class DesktopFiles {
   static const maxFiles = 5;
   static const maxBytes = 20 * 1024 * 1024;
   static const maxTextBytes = 512 * 1024;
   static const maxPreviewBytes = 2 * 1024 * 1024;
+  static const maxEditableBytes = 2 * 1024 * 1024;
 
   static Future<Directory> roomAttachmentDirectory(String roomId) async =>
       Directory('${(await RoomArchive.directory(roomId)).path}/attachments');
@@ -40,6 +42,61 @@ class DesktopFiles {
       throw const FileSystemException('File is too large to preview.');
     }
     return bytes;
+  }
+
+  static Future<EditableProjectFile> readEditableProjectFile(
+    String root,
+    String path,
+  ) async {
+    final canonicalRoot = await Directory(root).resolveSymbolicLinks();
+    final canonicalFile = await File(path).resolveSymbolicLinks();
+    if (!canonicalFile.startsWith('$canonicalRoot${Platform.pathSeparator}')) {
+      throw const FileSystemException('This path leaves the selected project.');
+    }
+    final relative = canonicalFile.substring(canonicalRoot.length + 1);
+    final result = await desktopWorkspaceEditorChannel
+        .invokeMapMethod<String, Object?>('read', {
+          'root': canonicalRoot,
+          'path': relative,
+        });
+    final bytes = result?['bytes'];
+    final token = result?['token'];
+    if (bytes is! Uint8List ||
+        token is! String ||
+        bytes.length > maxEditableBytes) {
+      throw const FormatException('The project editor returned invalid data.');
+    }
+    return EditableProjectFile(bytes, token);
+  }
+
+  static Future<String> saveEditableProjectFile({
+    required String root,
+    required String path,
+    required Uint8List bytes,
+    required String expectedToken,
+  }) async {
+    if (bytes.length > maxEditableBytes) {
+      throw StateError('Edited files are limited to 2 MiB.');
+    }
+    final canonicalRoot = await Directory(root).resolveSymbolicLinks();
+    final canonicalFile = await File(path).resolveSymbolicLinks();
+    if (!canonicalFile.startsWith('$canonicalRoot${Platform.pathSeparator}')) {
+      throw const FileSystemException('This path leaves the selected project.');
+    }
+    final relative = canonicalFile.substring(canonicalRoot.length + 1);
+    final token = await desktopWorkspaceEditorChannel
+        .invokeMethod<String>('save', {
+          'root': canonicalRoot,
+          'path': relative,
+          'expected_token': expectedToken,
+          'bytes': bytes,
+        });
+    if (token == null || token.isEmpty) {
+      throw const FormatException(
+        'The project editor returned no file version.',
+      );
+    }
+    return token;
   }
 
   static Future<List<ChatFile>> pickAttachments(String roomId) async {
@@ -209,6 +266,20 @@ class DesktopFiles {
       } catch (_) {
         note = 'Original image retained; this format has no internal preview.';
       }
+    } else if (file.bytes > 0 && file.mimeType.startsWith('video/')) {
+      final analysis = await _extractVideoFrames(
+        original,
+        canonicalFolder,
+        file.name,
+      );
+      images = analysis.images;
+      note = analysis.note;
+      if (analysis.context.isNotEmpty) {
+        await File(
+          '$canonicalFolder/context.txt',
+        ).writeAsString(analysis.context, flush: true);
+        hasText = true;
+      }
     } else if (file.bytes > 0 && file.bytes <= maxTextBytes) {
       try {
         final bytes = await original.readAsBytes();
@@ -321,6 +392,230 @@ class DesktopFiles {
       if (!await File(output).exists() && await temp.exists()) {
         await temp.delete(recursive: true);
       }
+    }
+  }
+
+  static const _videoDemuxers = <String, String>{
+    '3g2': 'mov',
+    '3gp': 'mov',
+    'avi': 'avi',
+    'flv': 'flv',
+    'm2ts': 'mpegts',
+    'm4v': 'mov',
+    'mkv': 'matroska',
+    'mov': 'mov',
+    'mp4': 'mov',
+    'mpeg': 'mpeg',
+    'mpg': 'mpeg',
+    'mts': 'mpegts',
+    'ogv': 'ogg',
+    'ts': 'mpegts',
+    'webm': 'matroska',
+    'wmv': 'asf',
+  };
+
+  static Future<_VideoAnalysis> _extractVideoFrames(
+    File original,
+    String attachmentFolder,
+    String name,
+  ) async {
+    final extension = name.contains('.')
+        ? name.split('.').last.toLowerCase()
+        : '';
+    final demuxer = _videoDemuxers[extension];
+    if (demuxer == null) {
+      return const _VideoAnalysis(
+        images: 0,
+        note: 'Original video retained; this format cannot be sampled locally.',
+        context: '',
+      );
+    }
+    final probe = await _runBoundedMediaProcess('ffprobe', [
+      '-v',
+      'error',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-f',
+      demuxer,
+      '-i',
+      original.path,
+      '-show_entries',
+      'format=duration',
+      '-of',
+      'default=noprint_wrappers=1:nokey=1',
+    ], timeout: const Duration(seconds: 6));
+    final duration = double.tryParse(probe?.trim() ?? '');
+    if (duration == null || !duration.isFinite || duration <= 0) {
+      return const _VideoAnalysis(
+        images: 0,
+        note: 'Original video retained; duration could not be read safely.',
+        context: '',
+      );
+    }
+
+    final sampleCount = duration < 1.5
+        ? 1
+        : duration < 4
+        ? 2
+        : 4;
+    final temp = await Directory.systemTemp.createTemp('orgbot-video-frames-');
+    final timestamps = <double>[];
+    var saved = 0;
+    try {
+      for (var index = 0; index < sampleCount; index++) {
+        final seconds = sampleCount == 1
+            ? 0.0
+            : (duration * 0.95 * index / (sampleCount - 1));
+        final output = '${temp.path}/frame-$index.jpg';
+        final result = await _runBoundedMediaProcess('ffmpeg', [
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-nostdin',
+          '-protocol_whitelist',
+          'file,pipe',
+          '-threads',
+          '1',
+          '-filter_threads',
+          '1',
+          '-timelimit',
+          '4',
+          '-ss',
+          seconds.toStringAsFixed(3),
+          '-f',
+          demuxer,
+          '-i',
+          original.path,
+          '-map',
+          '0:v:0',
+          '-an',
+          '-sn',
+          '-dn',
+          '-frames:v',
+          '1',
+          '-vf',
+          'scale=640:360:force_original_aspect_ratio=decrease',
+          '-f',
+          'image2',
+          '-fs',
+          '$maxPreviewBytes',
+          '-y',
+          output,
+        ], timeout: const Duration(seconds: 6));
+        final frame = File(output);
+        if (result == null || !await frame.exists()) continue;
+        final size = await frame.length();
+        if (size == 0 || size > maxPreviewBytes) continue;
+        final temporary = File('$attachmentFolder/image-$saved.part');
+        await frame.copy(temporary.path);
+        await temporary.rename('$attachmentFolder/image-$saved.jpg');
+        timestamps.add(seconds);
+        saved++;
+      }
+    } on ProcessException {
+      // Optional ffmpeg tools are not a prerequisite for retaining the original.
+    } finally {
+      if (await temp.exists()) await temp.delete(recursive: true);
+    }
+    if (saved == 0) {
+      return const _VideoAnalysis(
+        images: 0,
+        note: 'Original video retained; no safe preview frames were available.',
+        context: '',
+      );
+    }
+    final labels = timestamps
+        .map((time) => '${time.toStringAsFixed(2)}s')
+        .join(', ');
+    final sampled = 'Sampled $saved of $sampleCount video frames.';
+    final context =
+        'Video preview frames were sampled at $labels from a ${duration.toStringAsFixed(2)} second clip. '
+        'These still images do not represent full motion or audio analysis; inspect the retained original for the complete video.\n';
+    return _VideoAnalysis(
+      images: saved,
+      note:
+          '$sampled Original retained; audio and full motion are not analyzed.',
+      context: context,
+    );
+  }
+
+  static Future<String?> _runBoundedMediaProcess(
+    String executable,
+    List<String> arguments, {
+    required Duration timeout,
+  }) async {
+    Process? process;
+    StreamSubscription<List<int>>? stdoutSubscription;
+    StreamSubscription<List<int>>? stderrSubscription;
+    final stdout = BytesBuilder(copy: false);
+    final stdoutDone = Completer<void>();
+    final stderrDone = Completer<void>();
+    var tooMuchOutput = false;
+    var timedOut = false;
+    try {
+      process = await Process.start(
+        executable,
+        arguments,
+        environment: {
+          'PATH': Platform.environment['PATH'] ?? '/usr/bin:/bin',
+          'LANG': Platform.environment['LANG'] ?? 'C.UTF-8',
+        },
+        includeParentEnvironment: false,
+        runInShell: false,
+      );
+      stdoutSubscription = process.stdout.listen(
+        (chunk) {
+          if (stdout.length + chunk.length > 8192) {
+            tooMuchOutput = true;
+            process!.kill(ProcessSignal.sigkill);
+          } else {
+            stdout.add(chunk);
+          }
+        },
+        onDone: () {
+          if (!stdoutDone.isCompleted) stdoutDone.complete();
+        },
+        onError: (Object _) {
+          if (!stdoutDone.isCompleted) stdoutDone.complete();
+        },
+      );
+      stderrSubscription = process.stderr.listen(
+        (_) {},
+        onDone: () {
+          if (!stderrDone.isCompleted) stderrDone.complete();
+        },
+        onError: (Object _) {
+          if (!stderrDone.isCompleted) stderrDone.complete();
+        },
+      );
+      final exitCode =
+          await (() async {
+            final code = await process!.exitCode;
+            await Future.wait([stdoutDone.future, stderrDone.future]);
+            return code;
+          })().timeout(
+            timeout,
+            onTimeout: () {
+              timedOut = true;
+              process!.kill(ProcessSignal.sigkill);
+              return -1;
+            },
+          );
+      if (timedOut || tooMuchOutput || exitCode != 0) return null;
+      return utf8.decode(stdout.takeBytes(), allowMalformed: true);
+    } on ProcessException {
+      return null;
+    } finally {
+      if (process != null && (timedOut || tooMuchOutput)) {
+        process.kill(ProcessSignal.sigkill);
+        try {
+          await process.exitCode.timeout(const Duration(seconds: 2));
+        } on TimeoutException {
+          // The process may already be reaped after SIGKILL.
+        }
+      }
+      await stdoutSubscription?.cancel();
+      await stderrSubscription?.cancel();
     }
   }
 
@@ -459,4 +754,23 @@ class DesktopFiles {
     final normalized = cleaned.isEmpty ? 'attachment' : cleaned;
     return normalized.substring(0, normalized.length.clamp(0, 120));
   }
+}
+
+class EditableProjectFile {
+  const EditableProjectFile(this.bytes, this.versionToken);
+
+  final Uint8List bytes;
+  final String versionToken;
+}
+
+class _VideoAnalysis {
+  const _VideoAnalysis({
+    required this.images,
+    required this.note,
+    required this.context,
+  });
+
+  final int images;
+  final String note;
+  final String context;
 }

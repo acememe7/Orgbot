@@ -26,7 +26,7 @@ use orgbot_runtime::{Orchestrator, RunOutcome};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::config::ResolvedRoom;
-use crate::protocol::{AgentView, ServerMessage};
+use crate::protocol::{AgentView, MemoryAction, MemoryRequest, MemorySearchItem, ServerMessage};
 
 /// How often the session wakes on its own to expire stale handoffs and sweep
 /// for deadlocks while it is otherwise idle.
@@ -88,6 +88,11 @@ pub enum Control {
     },
     /// Resume it.
     Resume,
+    /// Perform an owner-authorized project memory operation.
+    Memory {
+        request: MemoryRequest,
+        reply: oneshot::Sender<ServerMessage>,
+    },
     /// Stop the session and cancel an in-flight model call.
     Stop,
 }
@@ -110,10 +115,22 @@ impl SessionHandle {
 
     /// Enqueue control without waiting for a model to finish.
     pub async fn send(&self, control: Control) -> bool {
-        self.try_send(control)
+        let stop = matches!(&control, Control::Stop);
+        if self.try_send(control) {
+            return true;
+        }
+        if !stop {
+            return false;
+        }
+        // Shutdown must be able to interrupt an in-flight turn even when
+        // ordinary queued controls filled the bounded channel.
+        self.interrupt.lock().unwrap().cancel();
+        self.input_interrupt.lock().unwrap().cancel();
+        self.control.send(Control::Stop).await.is_ok()
     }
 
     pub fn try_send(&self, control: Control) -> bool {
+        let stop = matches!(control, Control::Stop);
         let interrupts = matches!(control, Control::Pause { .. } | Control::Stop);
         let input = matches!(
             control,
@@ -125,7 +142,7 @@ impl SessionHandle {
         if self.control.try_send(control).is_err() {
             return false;
         }
-        if input {
+        if input || stop {
             input_interrupt.cancel();
         }
         if interrupts {
@@ -180,6 +197,10 @@ pub struct RoomSession {
     /// server is I/O, building a session is not, and a room that has been
     /// assembled but never run should not have left processes behind.
     mcp: Vec<orgbot_runtime::mcp_client::McpServerSpec>,
+    memory_root: Option<std::path::PathBuf>,
+    memory_project: Option<String>,
+    memory_projects: Vec<String>,
+    memory_setup_error: Option<String>,
     /// Attachment ids become importable only after their message is committed.
     committed_attachment_ids: Arc<RwLock<HashSet<String>>>,
 }
@@ -192,6 +213,17 @@ impl RoomSession {
     /// task that names a missing role); a caller should surface them rather than
     /// spawn a room that cannot work.
     pub fn build(resolved: ResolvedRoom) -> anyhow::Result<(Self, SessionHandle)> {
+        Self::build_with_resume(resolved, false)
+    }
+
+    /// Build a room, optionally resuming only when its saved phase was running.
+    /// The Linux supervisor uses this on process/login recovery; ordinary room
+    /// opens remain paused as before.
+    pub fn build_with_resume(
+        mut resolved: ResolvedRoom,
+        resume_was_running: bool,
+    ) -> anyhow::Result<(Self, SessionHandle)> {
+        let allowances = resolved.allowances.take();
         let state_path = resolved.state_path.clone();
         let saved = match &state_path {
             Some(path) => {
@@ -229,9 +261,16 @@ impl RoomSession {
             None => None,
         };
         let restored = saved.is_some();
+        let saved_was_running = saved
+            .as_ref()
+            .and_then(saved_phase)
+            .is_some_and(|phase| phase == "running");
         let roles = resolved.roles.clone();
         let skills = resolved.skills.clone();
         let mcp = resolved.mcp.clone();
+        let memory_root = resolved.memory_root.clone();
+        let memory_project = resolved.project_id.clone();
+        let memory_projects = resolved.memory_projects.clone();
         let mut orchestrator = if let Some(saved) = saved {
             Orchestrator::restore(
                 saved,
@@ -257,6 +296,17 @@ impl RoomSession {
                 .map_err(|e| anyhow::anyhow!("starting the room: {e}"))?;
             orchestrator
         };
+        if let Some(allowances) = allowances {
+            orchestrator.attach_allowances(allowances);
+        }
+        if resume_was_running && saved_was_running {
+            orchestrator
+                .engine_mut()
+                .apply(Command::ResumeRoom)
+                .map_err(|error| {
+                    anyhow::anyhow!("resuming the previously running room: {error}")
+                })?;
+        }
 
         // Applied to restored rooms too: the roles a room declares are current
         // configuration, not history, and a saved room should pick up a table
@@ -265,19 +315,31 @@ impl RoomSession {
         // Same reasoning: a skill edited on disk should take effect the next
         // time the room opens, not be frozen into state the day it was written.
         orchestrator.engine_mut().set_skills(skills);
-        // What earlier rooms built. Excludes this room's own board, so a room
-        // is never offered its own work as something somebody else did.
-        if !resolved.prior_boards.is_empty() {
+        // The archive carries both earlier completed boards and the separate
+        // project memory store. It remains present even when either source is
+        // empty so owner controls have a single scoped API.
+        let archive = if !resolved.prior_boards.is_empty() {
             let boards: Vec<std::path::PathBuf> = resolved
                 .prior_boards
                 .iter()
                 .map(std::path::PathBuf::from)
                 .collect();
             let this_room = orchestrator.engine().room().spec.name.clone();
-            let archive = orgbot_engine::Archive::load(&boards, Some(&this_room));
+            orgbot_engine::Archive::load(&boards, Some(&this_room))
+        } else {
+            orgbot_engine::Archive::default()
+        };
+        let memory_setup_error = match (&memory_root, &memory_project) {
+            (Some(root), Some(project)) => archive
+                .configure_memory(root, project)
+                .err()
+                .map(|error| error.to_string()),
+            _ => None,
+        };
+        if !resolved.prior_boards.is_empty() {
             tracing::info!(rooms = archive.rooms().len(), "earlier rooms available");
-            orchestrator.engine_mut().set_archive(archive);
         }
+        orchestrator.engine_mut().set_archive(archive);
 
         if let Some(parent) = state_path.as_ref().and_then(|path| path.parent()) {
             orchestrator.attach_attachments(parent.join("attachments"));
@@ -339,6 +401,10 @@ impl RoomSession {
             interrupt: interrupt.clone(),
             input_interrupt: input_interrupt.clone(),
             mcp,
+            memory_root,
+            memory_project,
+            memory_projects,
+            memory_setup_error,
             committed_attachment_ids,
         };
         let handle = SessionHandle {
@@ -844,8 +910,112 @@ impl RoomSession {
                 self.settled = false;
                 self.broadcast_new_events();
             }
+            Control::Memory { request, reply } => {
+                let _ = reply.send(self.handle_memory(request));
+            }
         }
         ControlFlow::Continue
+    }
+
+    fn handle_memory(&self, request: MemoryRequest) -> ServerMessage {
+        let action = request.action;
+        let request_id = request.request_id.clone();
+        let fail = |message: String| ServerMessage::MemoryResult {
+            request_id: request_id.clone(),
+            action,
+            ok: false,
+            entries: vec![],
+            hits: vec![],
+            error: Some(message),
+        };
+        if request.request_id.is_empty() || request.request_id.len() > 80 {
+            return fail("Invalid memory request identifier.".into());
+        }
+        if let Some(message) = &self.memory_setup_error {
+            return fail(format!("Project memory is unavailable: {message}"));
+        }
+        let engine = self.orchestrator.engine();
+        let archive = engine.archive();
+        let root = self.memory_root.as_deref();
+        let result = match action {
+            MemoryAction::List => archive.memory_entries().map(|entries| (entries, vec![])),
+            MemoryAction::Search => {
+                let Some(query) = request.query.as_deref() else {
+                    return fail("A search query is required.".into());
+                };
+                if query.trim().is_empty() || query.len() > 1000 {
+                    return fail("Search query must be 1–1000 characters.".into());
+                }
+                archive.search_memory(query, 100).map(|hits| {
+                    (
+                        vec![],
+                        hits.into_iter()
+                            .map(|hit| MemorySearchItem {
+                                item: hit.entry,
+                                score: hit.score,
+                            })
+                            .collect(),
+                    )
+                })
+            }
+            MemoryAction::SetShared => {
+                let (Some(id), Some(shared)) = (request.id.as_deref(), request.shared) else {
+                    return fail("An entry and visibility value are required.".into());
+                };
+                if id.is_empty() || id.len() > 256 {
+                    return fail("Invalid memory entry identifier.".into());
+                }
+                archive
+                    .set_memory_shared(id, shared)
+                    .and_then(|_| archive.memory_entries())
+                    .map(|entries| (entries, vec![]))
+            }
+            MemoryAction::Delete => {
+                let Some(id) = request.id.as_deref() else {
+                    return fail("A memory entry is required.".into());
+                };
+                if id.is_empty() || id.len() > 256 {
+                    return fail("Invalid memory entry identifier.".into());
+                }
+                archive
+                    .delete_memory(id)
+                    .and_then(|_| archive.memory_entries())
+                    .map(|entries| (entries, vec![]))
+            }
+            MemoryAction::ShareToProject => {
+                let (Some(id), Some(target)) =
+                    (request.id.as_deref(), request.target_project.as_deref())
+                else {
+                    return fail("An entry and target project are required.".into());
+                };
+                if id.is_empty() || id.len() > 256 {
+                    return fail("Invalid memory entry identifier.".into());
+                }
+                if !self.memory_projects.iter().any(|known| known == target)
+                    || self.memory_project.as_deref() == Some(target)
+                {
+                    return fail("That project is not available for sharing.".into());
+                }
+                let Some(root) = root else {
+                    return fail("Cross-project memory storage is unavailable.".into());
+                };
+                archive
+                    .share_memory_to_project(id, root, target)
+                    .and_then(|_| archive.memory_entries())
+                    .map(|entries| (entries, vec![]))
+            }
+        };
+        match result {
+            Ok((entries, hits)) => ServerMessage::MemoryResult {
+                request_id,
+                action,
+                ok: true,
+                entries,
+                hits,
+                error: None,
+            },
+            Err(error) => fail(error.to_string()),
+        }
     }
 
     /// Unblock a task that was waiting on a human, recording the answer as a
@@ -938,6 +1108,15 @@ impl RoomSession {
         });
         outcome
     }
+}
+
+fn saved_phase(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("engine")
+        .and_then(|engine| engine.get("room"))
+        .or_else(|| value.get("room"))
+        .and_then(|room| room.get("phase"))
+        .and_then(serde_json::Value::as_str)
 }
 
 fn snapshot_of(orchestrator: &Orchestrator) -> ServerMessage {
@@ -1046,6 +1225,10 @@ fn describe(outcome: &RunOutcome) -> String {
 mod tests {
     use super::*;
     use crate::config::RoomConfig;
+    use async_trait::async_trait;
+    use orgbot_providers::{
+        CompletionRequest, CompletionResponse, ContentBlock, Provider, StopReason, Usage,
+    };
 
     const SCRIPTED_ROOM: &str = r#"
         [room]
@@ -1070,6 +1253,288 @@ mod tests {
             .resolve()
             .unwrap();
         RoomSession::build(resolved).unwrap()
+    }
+
+    #[derive(Debug)]
+    struct InFlightProvider(Arc<tokio::sync::Notify>);
+
+    #[async_trait]
+    impl Provider for InFlightProvider {
+        fn name(&self) -> &str {
+            "in-flight fixture"
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+            _sink: Option<mpsc::Sender<orgbot_providers::StreamEvent>>,
+        ) -> orgbot_providers::Result<CompletionResponse> {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl Provider for CountingProvider {
+        fn name(&self) -> &str {
+            "local allowance fixture"
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+            _sink: Option<mpsc::Sender<orgbot_providers::StreamEvent>>,
+        ) -> orgbot_providers::Result<CompletionResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.started.notify_one();
+            Ok(CompletionResponse {
+                model: "fixture".into(),
+                content: vec![ContentBlock::text("A local fixture response.")],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_interrupts_an_in_flight_turn_and_checkpoints_promptly() {
+        let dir = std::env::temp_dir().join(format!(
+            "orgbot-stop-in-flight-{}",
+            orgbot_proto::RoomId::new()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let mut config = RoomConfig::parse(SCRIPTED_ROOM, "stop.toml").unwrap();
+        config.room.state_path = Some(path.clone());
+        let mut resolved = config.resolve().unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        resolved.bots[0].provider = Arc::new(InFlightProvider(started.clone()));
+        let (session, handle) = RoomSession::build(resolved).unwrap();
+        let running = tokio::spawn(session.run());
+
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("fixture provider should be in flight");
+        let began = tokio::time::Instant::now();
+        assert!(handle.send(Control::Stop).await);
+        tokio::time::timeout(Duration::from_secs(2), running)
+            .await
+            .expect("stop should cancel the in-flight provider promptly")
+            .expect("session task should finish");
+        assert!(began.elapsed() < Duration::from_secs(2));
+        assert!(
+            path.is_file(),
+            "shutdown should persist the room checkpoint"
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"], 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn supervised_allowance_is_attached_without_process_environment_and_survives_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "orgbot-allowance-supervised-{}",
+            orgbot_proto::RoomId::new()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state_path = dir.join("state.json");
+        let allowance_config = dir.join("allowances.json");
+        let allowance_ledger = dir.join("ledger.json");
+        let policy = orgbot_runtime::allowance::Policy {
+            max_requests: 1,
+            ..Default::default()
+        };
+        std::fs::write(
+            &allowance_config,
+            serde_json::to_vec(&orgbot_runtime::allowance::Config {
+                providers: std::collections::BTreeMap::from([("deepseek".into(), policy)]),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let environment = std::collections::HashMap::from([
+            (
+                "ORGBOT_ALLOWANCE_CONFIG".into(),
+                allowance_config.display().to_string(),
+            ),
+            (
+                "ORGBOT_ALLOWANCE_LEDGER".into(),
+                allowance_ledger.display().to_string(),
+            ),
+        ]);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+
+        let resolved = || {
+            let mut config = RoomConfig::parse(SCRIPTED_ROOM, "allowance.toml").unwrap();
+            config.room.state_path = Some(state_path.clone());
+            let mut resolved = config.resolve_with_environment(&environment).unwrap();
+            resolved.bots[0].spec.provider = orgbot_proto::agent::ProviderRef::DeepSeek {
+                model: "fixture".into(),
+            };
+            resolved.bots[0].provider = Arc::new(CountingProvider {
+                calls: calls.clone(),
+                started: started.clone(),
+            });
+            resolved
+        };
+
+        let (session, handle) = RoomSession::build(resolved()).unwrap();
+        let mut events = handle.subscribe();
+        let running = tokio::spawn(session.run());
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("first local request should pass the allowance");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let ServerMessage::Event { envelope, .. } = events.recv().await.unwrap() {
+                    if matches!(envelope.event, orgbot_proto::Event::MessagePosted { .. }) {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("provider result should be committed before restart");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(handle.send(Control::Stop).await);
+        tokio::time::timeout(Duration::from_secs(2), running)
+            .await
+            .expect("first supervised session should stop")
+            .unwrap();
+
+        let (restored, restored_handle) = RoomSession::build_with_resume(resolved(), true).unwrap();
+        let restored_run = tokio::spawn(restored.run());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the persisted one-request allowance must block another provider call"
+        );
+        assert!(restored_handle.send(Control::Stop).await);
+        tokio::time::timeout(Duration::from_secs(2), restored_run)
+            .await
+            .expect("restored session should stop")
+            .unwrap();
+        let ledger: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&allowance_ledger).unwrap()).unwrap();
+        assert_eq!(ledger["providers"]["deepseek"]["requests"], 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn owner_memory_controls_return_mutated_entries_and_reject_unknown_projects() {
+        let root = std::env::temp_dir().join(format!(
+            "orgbot-memory-control-{}",
+            orgbot_proto::RoomId::new()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config = RoomConfig::parse(SCRIPTED_ROOM, "memory.toml").unwrap();
+        config.room.project_id = Some("project:source".into());
+        let environment = std::collections::HashMap::from([
+            ("ORGBOT_MEMORY_ROOT".into(), root.display().to_string()),
+            (
+                "ORGBOT_MEMORY_PROJECTS".into(),
+                r#"["project:source","project:target"]"#.into(),
+            ),
+        ]);
+        let (session, _) =
+            RoomSession::build(config.resolve_with_environment(&environment).unwrap()).unwrap();
+        let entry = session
+            .orchestrator
+            .engine()
+            .archive()
+            .remember("Release choice", "Keep the stable API surface", None, None)
+            .unwrap();
+
+        let hidden = session.handle_memory(MemoryRequest {
+            request_id: "visibility".into(),
+            action: MemoryAction::SetShared,
+            id: Some(entry.id.clone()),
+            shared: Some(false),
+            query: None,
+            target_project: None,
+        });
+        let ServerMessage::MemoryResult { entries, ok, .. } = hidden else {
+            panic!("memory result")
+        };
+        assert!(ok);
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].shared);
+
+        let rejected = session.handle_memory(MemoryRequest {
+            request_id: "unknown-target".into(),
+            action: MemoryAction::ShareToProject,
+            id: Some(entry.id.clone()),
+            shared: None,
+            query: None,
+            target_project: Some("project:unconfigured".into()),
+        });
+        assert!(matches!(
+            rejected,
+            ServerMessage::MemoryResult { ok: false, .. }
+        ));
+
+        let shared = session.handle_memory(MemoryRequest {
+            request_id: "known-target".into(),
+            action: MemoryAction::ShareToProject,
+            id: Some(entry.id),
+            shared: None,
+            query: None,
+            target_project: Some("project:target".into()),
+        });
+        assert!(matches!(
+            shared,
+            ServerMessage::MemoryResult { ok: true, .. }
+        ));
+        let target = orgbot_engine::Archive::default();
+        target.configure_memory(&root, "project:target").unwrap();
+        let target_entries = target.memory_entries().unwrap();
+        assert_eq!(target_entries.len(), 1);
+        assert!(target_entries[0].shared_from_scope.is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn supervised_restore_resumes_only_checkpoints_that_were_running() {
+        let dir = std::env::temp_dir().join(format!(
+            "orgbot-supervised-restore-{}",
+            orgbot_proto::RoomId::new()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let mut config = RoomConfig::parse(SCRIPTED_ROOM, "resume.toml").unwrap();
+        config.room.state_path = Some(path.clone());
+        let (running, _) = RoomSession::build(config.resolve().unwrap()).unwrap();
+        drop(running);
+        let (resumed, _) = RoomSession::build_with_resume(config.resolve().unwrap(), true).unwrap();
+        assert_eq!(
+            resumed.orchestrator.engine().room().phase,
+            RoomPhase::Running
+        );
+        drop(resumed);
+
+        let (mut paused, _) = RoomSession::build(config.resolve().unwrap()).unwrap();
+        paused.handle(Control::Pause {
+            reason: "owner paused".into(),
+        });
+        drop(paused);
+        let (still_paused, _) =
+            RoomSession::build_with_resume(config.resolve().unwrap(), true).unwrap();
+        assert_eq!(
+            still_paused.orchestrator.engine().room().phase,
+            RoomPhase::Paused
+        );
+        drop(still_paused);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

@@ -21,6 +21,8 @@ pub mod pair;
 pub mod protocol;
 pub mod runner;
 pub mod session;
+#[cfg(target_os = "linux")]
+pub mod supervisor;
 pub mod ws;
 
 pub use config::{ResolvedRoom, RoomConfig};
@@ -42,6 +44,18 @@ pub use session::{Control, RoomSession, SessionHandle};
 /// It returns when the listener stops serving.
 pub async fn serve_room(config: &Path, addr: SocketAddr, access: Access) -> anyhow::Result<()> {
     serve_room_with_readiness(config, addr, access, None).await
+}
+
+/// Host a room with the environment explicitly supplied by its owner process.
+/// This is used by the Linux service wrapper so provider secrets stay in the
+/// keyring and are never written to a unit file or room TOML.
+pub async fn serve_room_with_environment(
+    config: &Path,
+    addr: SocketAddr,
+    access: Access,
+    environment: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<()> {
+    serve_room_inner(config, addr, access, None, Some(environment), true).await
 }
 
 /// How a room is reached from outside this process.
@@ -102,6 +116,17 @@ pub async fn serve_room_with_readiness(
     access: Access,
     ready: Option<tokio::sync::oneshot::Sender<Result<std::net::SocketAddr, String>>>,
 ) -> anyhow::Result<()> {
+    serve_room_inner(config, addr, access, ready, None, false).await
+}
+
+async fn serve_room_inner(
+    config: &Path,
+    addr: SocketAddr,
+    access: Access,
+    ready: Option<tokio::sync::oneshot::Sender<Result<std::net::SocketAddr, String>>>,
+    environment: Option<&std::collections::HashMap<String, String>>,
+    resume_was_running: bool,
+) -> anyhow::Result<()> {
     if !addr.ip().is_loopback() && access.token.is_none() {
         anyhow::bail!("a reachable room requires a token");
     }
@@ -123,7 +148,10 @@ pub async fn serve_room_with_readiness(
         }
     };
     let room_name: Arc<str> = Arc::from(parsed.room.name.as_str());
-    let resolved = match parsed.resolve() {
+    let resolved = match environment.map_or_else(
+        || parsed.resolve(),
+        |env| parsed.resolve_with_environment(env),
+    ) {
         Ok(r) => r,
         Err(error) => {
             report(Err(format!("cannot resolve room: {error}")));
@@ -131,7 +159,7 @@ pub async fn serve_room_with_readiness(
         }
     };
     let workspace_spec = resolved.workspace.clone();
-    let (mut session, handle) = RoomSession::build(resolved)?;
+    let (mut session, handle) = RoomSession::build_with_resume(resolved, resume_was_running)?;
     let workspace_host = match workspace_spec {
         Some(spec) => Some(local_workspace::LocalWorkspaceHost::attach(spec, &mut session).await?),
         None => None,
@@ -142,6 +170,7 @@ pub async fn serve_room_with_readiness(
         room_name,
         token: access.token.map(Arc::from),
     };
+    let shutdown_session = state.session.clone();
     let app = Router::new()
         .route("/", get(ws::status))
         .route("/health", get(ws::health))
@@ -158,13 +187,7 @@ pub async fn serve_room_with_readiness(
         }
     };
     // Dropping a host also stops its room, including a model call in flight.
-    struct RunningSession(tokio::task::JoinHandle<orgbot_runtime::RunOutcome>);
-    impl Drop for RunningSession {
-        fn drop(&mut self) {
-            self.0.abort();
-        }
-    }
-    let _session = RunningSession(tokio::spawn(session.run()));
+    let session_task = tokio::spawn(session.run());
     struct RunningWorkspace(tokio::task::JoinHandle<()>);
     impl Drop for RunningWorkspace {
         fn drop(&mut self) {
@@ -175,6 +198,29 @@ pub async fn serve_room_with_readiness(
     let local = listener.local_addr().unwrap_or(addr);
     report(Ok(local));
     tracing::info!(%addr, "serving room; connect a client to ws://{addr}/ws");
-    axum::serve(listener, app).await?;
+    let shutdown_trigger = shutdown_session.clone();
+    let serving = axum::serve(listener, app).with_graceful_shutdown(async move {
+        #[cfg(unix)]
+        {
+            let mut terminate =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("install SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = terminate.recv() => {},
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = shutdown_trigger.send(Control::Stop).await;
+    });
+    let serving_result = serving.await;
+    // Drain an in-flight turn and persist its last committed checkpoint before
+    // the service process exits. The room phase itself remains untouched.
+    if serving_result.is_err() {
+        let _ = shutdown_session.send(Control::Stop).await;
+    }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), session_task).await;
+    serving_result?;
     Ok(())
 }

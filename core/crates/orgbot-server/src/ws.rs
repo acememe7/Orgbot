@@ -101,6 +101,35 @@ async fn serve_client(socket: WebSocket, state: AppState) {
                     ClientMessage::Ping => {
                         if send(&mut sender, &ServerMessage::Pong).await.is_err() { return; }
                     }
+                    ClientMessage::Memory { request } => {
+                        let request_id = request.request_id.clone();
+                        let action = request.action;
+                        let (reply, response) = tokio::sync::oneshot::channel();
+                        let queued = state.session.send(Control::Memory { request, reply }).await;
+                        if !queued {
+                            let _ = send(
+                                &mut sender,
+                                &ServerMessage::MemoryResult {
+                                    request_id,
+                                    action,
+                                    ok: false,
+                                    entries: vec![],
+                                    hits: vec![],
+                                    error: Some("room control queue is full or closed".into()),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                        match tokio::time::timeout(std::time::Duration::from_secs(20), response).await {
+                            Ok(Ok(message)) => {
+                                if send(&mut sender, &message).await.is_err() { return; }
+                            }
+                            _ => {
+                                let _ = send(&mut sender, &ServerMessage::Error { message: "project memory request timed out".into() }).await;
+                            }
+                        }
+                    }
                     message => if !dispatch(&state.session, message).await {
                         let _ = send(&mut sender, &ServerMessage::Error { message: "room control queue is full or closed".into() }).await;
                     },
@@ -252,6 +281,7 @@ async fn dispatch(session: &SessionHandle, message: ClientMessage) -> bool {
             // connection alive.
             true
         }
+        ClientMessage::Memory { .. } => true,
         ClientMessage::SendMessage {
             author,
             body,
@@ -376,6 +406,27 @@ mod tests {
         let post = r#"{"type":"send_message","author":"me","body":"hi"}"#;
         assert!(matches!(
             admit(Some(post), Some("s3cret-token-long-enough")),
+            Admission::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn memory_control_cannot_be_used_as_the_opening_frame() {
+        let request = ClientMessage::Memory {
+            request: crate::protocol::MemoryRequest {
+                request_id: "x".into(),
+                action: crate::protocol::MemoryAction::List,
+                id: None,
+                shared: None,
+                query: None,
+                target_project: None,
+            },
+        };
+        assert!(matches!(
+            admit(
+                Some(&serde_json::to_string(&request).unwrap()),
+                Some("s3cret-token-long-enough")
+            ),
             Admission::Refuse(_)
         ));
     }

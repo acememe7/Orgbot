@@ -87,6 +87,46 @@ enum CliCommand {
         #[arg(long)]
         socket: PathBuf,
     },
+    /// Manage a persistent Linux room service.
+    #[cfg(target_os = "linux")]
+    RoomService {
+        #[command(subcommand)]
+        action: RoomServiceAction,
+    },
+    /// Internal foreground entry point used by the generated user service.
+    #[cfg(target_os = "linux")]
+    RoomServiceRun {
+        #[arg(long)]
+        directory: PathBuf,
+    },
+    /// Internal detached restart monitor used without systemd user services.
+    #[cfg(target_os = "linux")]
+    RoomServiceSupervise {
+        #[arg(long)]
+        directory: PathBuf,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Subcommand)]
+enum RoomServiceAction {
+    /// Store credentials in Secret Service and start or reattach to the room.
+    Start {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        addr: SocketAddr,
+    },
+    /// Return the private connection descriptor and current health state.
+    Status {
+        #[arg(long)]
+        directory: PathBuf,
+    },
+    /// Stop supervision while preserving the room checkpoint.
+    Stop {
+        #[arg(long)]
+        directory: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -121,6 +161,33 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .map_err(anyhow::Error::msg)?;
             Ok(())
+        }
+        #[cfg(target_os = "linux")]
+        CliCommand::RoomService { action } => match action {
+            RoomServiceAction::Start { directory, addr } => {
+                let status =
+                    orgbot_server::supervisor::start(&directory, addr, std::io::stdin().lock())?;
+                println!("{}", serde_json::to_string(&status)?);
+                Ok(())
+            }
+            RoomServiceAction::Status { directory } => {
+                let status = orgbot_server::supervisor::status(&directory)?;
+                println!("{}", serde_json::to_string(&status)?);
+                Ok(())
+            }
+            RoomServiceAction::Stop { directory } => {
+                orgbot_server::supervisor::stop(&directory)?;
+                println!("stopped");
+                Ok(())
+            }
+        },
+        #[cfg(target_os = "linux")]
+        CliCommand::RoomServiceRun { directory } => {
+            orgbot_server::supervisor::run(&directory).await
+        }
+        #[cfg(target_os = "linux")]
+        CliCommand::RoomServiceSupervise { directory } => {
+            orgbot_server::supervisor::supervise(&directory)
         }
     }
 }
@@ -263,7 +330,10 @@ fn diagnose(state: &std::path::Path, bot: Option<&str>) -> anyhow::Result<()> {
     let utilization = engine.utilization();
     println!("\nWho is doing what:");
     for state in &utilization.bots {
-        println!("  @{:<14} {:<10} holding {}", state.handle, state.doing, state.holding);
+        println!(
+            "  @{:<14} {:<10} holding {}",
+            state.handle, state.doing, state.holding
+        );
     }
 
     println!("\nOpen work, and who could take it:");

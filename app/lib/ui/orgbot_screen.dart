@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'allowances_view.dart';
 import 'polish.dart';
 import '../orgbot/credentials.dart';
 import 'sign_in_screen.dart';
@@ -1652,6 +1653,7 @@ class _CliSetupState extends State<_CliSetup> {
             onRemove: () => widget.credentials?.forget(provider),
           ),
         const DesktopIntegrationsView(),
+        const AllowancesView(),
       ],
     ),
   );

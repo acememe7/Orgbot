@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../workspace/desktop_files.dart';
+import 'workspace_native_surface.dart';
+import 'workspace_text_editor.dart';
 
 class DesktopProjectPane extends StatefulWidget {
   const DesktopProjectPane({
@@ -14,6 +17,7 @@ class DesktopProjectPane extends StatefulWidget {
     this.onProjectSelected,
     @visibleForTesting this.initialRootForTesting,
     @visibleForTesting this.gitOutputForTesting,
+    @visibleForTesting this.gitActionForTesting,
   });
 
   final String? projectPath;
@@ -26,6 +30,21 @@ class DesktopProjectPane extends StatefulWidget {
   @visibleForTesting
   final Future<String> Function(String root, List<String> args)?
   gitOutputForTesting;
+  @visibleForTesting
+  final Future<String> Function(String root, List<String> args)?
+  gitActionForTesting;
+
+  @visibleForTesting
+  static bool isValidGitBranch(String value) {
+    final branch = value.trim();
+    return RegExp(r'^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$').hasMatch(branch) &&
+        !branch.contains('..') &&
+        !branch.contains('//') &&
+        !branch.contains('@{') &&
+        !branch.endsWith('.') &&
+        !branch.endsWith('/') &&
+        !branch.split('/').any((part) => part.startsWith('.'));
+  }
 
   @override
   State<DesktopProjectPane> createState() => _DesktopProjectPaneState();
@@ -57,6 +76,16 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
     'ogv',
     '3gp',
     'flv',
+  };
+  static const _audioExtensions = {
+    'mp3',
+    'wav',
+    'ogg',
+    'oga',
+    'flac',
+    'm4a',
+    'aac',
+    'opus',
   };
   static const _textExtensions = {
     'txt',
@@ -108,10 +137,16 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
   String _gitOutput = '';
   bool _loading = false;
   bool _gitLoading = false;
+  bool _gitActionRunning = false;
   bool _previewOpen = false;
   bool _previewLoading = false;
   bool _truncated = false;
-  bool _showGit = false;
+  String _activePanel = 'files';
+  final TextEditingController _webAddress = TextEditingController();
+  String? _webUri;
+  String? _workspaceError;
+  String? _editingPath;
+  final Map<String, _ProjectEditDraft> _editDrafts = {};
   int _listGeneration = 0;
   int _previewGeneration = 0;
   int _gitGeneration = 0;
@@ -160,6 +195,10 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
   @override
   void dispose() {
     unawaited(_removeThumbnail());
+    _webAddress.dispose();
+    for (final draft in _editDrafts.values) {
+      draft.controller.dispose();
+    }
     super.dispose();
   }
 
@@ -323,6 +362,7 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
       final ext = _extension(path);
       if (!_imageExtensions.contains(ext) &&
           !_videoExtensions.contains(ext) &&
+          !_audioExtensions.contains(ext) &&
           !_textExtensions.contains(ext)) {
         setState(() {
           _previewError = 'No internal preview is available for this file.';
@@ -353,6 +393,11 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
           _thumbnail = thumbnail;
           _previewLoading = false;
         });
+      } else if (_audioExtensions.contains(ext)) {
+        setState(() {
+          _previewBytes = bytes;
+          _previewLoading = false;
+        });
       } else {
         final preview = DesktopFiles.textPreview(bytes);
         setState(() {
@@ -373,9 +418,196 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
     }
   }
 
+  Future<void> _beginEdit(String path) async {
+    final root = _root;
+    if (root == null) return;
+    final existing = _editDrafts[path];
+    if (existing != null && !existing.loading) {
+      setState(() {
+        _editingPath = path;
+        _previewOpen = true;
+      });
+      return;
+    }
+    if (existing != null) return;
+    if (_editDrafts.length >= 8) {
+      final clean = _editDrafts.entries
+          .where((entry) => !entry.value.dirty && !entry.value.loading)
+          .map((entry) => entry.key)
+          .firstOrNull;
+      if (clean == null) {
+        setState(
+          () => _previewError =
+              'Close or save an open edit before editing another file.',
+        );
+        return;
+      }
+      _editDrafts.remove(clean)?.controller.dispose();
+    }
+    final draft = _ProjectEditDraft();
+    _editDrafts[path] = draft;
+    setState(() {
+      _editingPath = path;
+      _previewOpen = true;
+    });
+    try {
+      final document = await DesktopFiles.readEditableProjectFile(root, path);
+      final text = utf8.decode(document.bytes, allowMalformed: false);
+      if (text.contains('\u0000')) {
+        throw const FormatException('Binary files cannot be edited as text.');
+      }
+      if (!mounted || !identical(_editDrafts[path], draft)) return;
+      draft
+        ..controller.text = text
+        ..original = text
+        ..versionToken = document.versionToken
+        ..loading = false;
+      setState(() {});
+    } catch (error) {
+      if (!mounted || !identical(_editDrafts[path], draft)) return;
+      draft
+        ..loading = false
+        ..error = _errorMessage(error);
+      setState(() {});
+    }
+  }
+
+  Future<void> _reloadEdit(String path) async {
+    final root = _root;
+    final draft = _editDrafts[path];
+    if (root == null || draft == null || draft.saving) return;
+    setState(() {
+      draft
+        ..loading = true
+        ..error = null;
+    });
+    try {
+      final document = await DesktopFiles.readEditableProjectFile(root, path);
+      final text = utf8.decode(document.bytes, allowMalformed: false);
+      if (text.contains('\u0000')) {
+        throw const FormatException('Binary files cannot be edited as text.');
+      }
+      if (!mounted || !identical(_editDrafts[path], draft)) return;
+      draft
+        ..controller.value = TextEditingValue(
+          text: text,
+          selection: TextSelection.collapsed(offset: text.length),
+        )
+        ..original = text
+        ..versionToken = document.versionToken
+        ..loading = false;
+      setState(() {});
+    } catch (error) {
+      if (!mounted || !identical(_editDrafts[path], draft)) return;
+      draft
+        ..loading = false
+        ..error = _errorMessage(error);
+      setState(() {});
+    }
+  }
+
+  Future<void> _saveEdit(String path) async {
+    final root = _root;
+    final draft = _editDrafts[path];
+    if (root == null || draft == null || !draft.dirty || draft.saving) return;
+    final content = draft.controller.text;
+    setState(() {
+      draft
+        ..saving = true
+        ..error = null;
+    });
+    try {
+      final token = await DesktopFiles.saveEditableProjectFile(
+        root: root,
+        path: path,
+        bytes: Uint8List.fromList(utf8.encode(content)),
+        expectedToken: draft.versionToken!,
+      );
+      if (!mounted || !identical(_editDrafts[path], draft)) return;
+      draft
+        ..versionToken = token
+        ..original = content
+        ..saving = false;
+      setState(() {});
+    } catch (error) {
+      if (!mounted || !identical(_editDrafts[path], draft)) return;
+      draft
+        ..saving = false
+        ..error = _errorMessage(error);
+      setState(() {});
+    }
+  }
+
+  String _errorMessage(Object error) =>
+      error is PlatformException ? error.message ?? error.code : '$error';
+
+  Future<void> _discardEdit(String path) async {
+    final draft = _editDrafts[path];
+    if (draft == null || !draft.dirty) {
+      setState(() => _editingPath = null);
+      return;
+    }
+    final discard = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Discard unsaved changes?'),
+        content: const Text('The file has edits that have not been saved.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Keep editing'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Discard'),
+          ),
+        ],
+      ),
+    );
+    if (discard == true && mounted) {
+      draft.controller.dispose();
+      _editDrafts.remove(path);
+      setState(() => _editingPath = null);
+    }
+  }
+
   void _togglePreview() {
     if (_selected == null) return;
     setState(() => _previewOpen = !_previewOpen);
+  }
+
+  void _closeEditor() {
+    setState(() => _editingPath = null);
+  }
+
+  void _selectPanel(String panel) {
+    setState(() {
+      _activePanel = panel;
+      _workspaceError = null;
+    });
+    if (panel == 'git' && _gitOutput.isEmpty && _gitError == null) {
+      unawaited(_loadGit('status'));
+    }
+  }
+
+  Future<void> _openBrowser() async {
+    var value = _webAddress.text.trim();
+    if (value.isEmpty) return;
+    if (!value.contains('://')) value = 'https://$value';
+    final uri = Uri.tryParse(value);
+    if (uri == null ||
+        !{'http', 'https'}.contains(uri.scheme.toLowerCase()) ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        value.length > 4096) {
+      setState(() => _workspaceError = 'Enter a valid HTTP or HTTPS address.');
+      return;
+    }
+    setState(() {
+      _webUri = uri.toString();
+      _workspaceError = null;
+      _activePanel = 'browser';
+    });
   }
 
   Future<void> _openSelected() async {
@@ -463,6 +695,68 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
     }
   }
 
+  Future<void> _runGitAction(String action, String input) async {
+    final root = _root;
+    if (root == null || _gitActionRunning) return;
+    final value = input.trim();
+    late final List<String> args;
+    switch (action) {
+      case 'branch':
+        if (!DesktopProjectPane.isValidGitBranch(value)) {
+          setState(() => _gitError = 'Enter a valid branch name.');
+          return;
+        }
+        args = ['switch', '-c', value];
+      case 'merge':
+        if (!DesktopProjectPane.isValidGitBranch(value)) {
+          setState(() => _gitError = 'Enter a valid source branch name.');
+          return;
+        }
+        args = ['merge', '--no-edit', '--no-ff', value];
+      case 'commit':
+        if (value.isEmpty || value.length > 5000 || value.contains('\u0000')) {
+          setState(
+            () => _gitError = 'Commit message must be 1–5000 characters.',
+          );
+          return;
+        }
+        args = ['commit', '-m', value];
+      default:
+        return;
+    }
+    setState(() {
+      _gitActionRunning = true;
+      _gitError = null;
+      _gitOutput = '';
+    });
+    try {
+      final output =
+          await (widget.gitActionForTesting?.call(root, args) ??
+              DesktopFiles.boundedGitOutput(root, args));
+      if (!mounted || _root != root) return;
+      setState(
+        () => _gitOutput = output.trim().isEmpty
+            ? 'Git operation completed.'
+            : output,
+      );
+      if (widget.gitActionForTesting == null) await _refresh();
+      if (mounted && _root == root) await _loadGit('status');
+    } catch (error) {
+      if (mounted && _root == root) setState(() => _gitError = '$error');
+    } finally {
+      if (mounted && _root == root) setState(() => _gitActionRunning = false);
+    }
+  }
+
+  Future<void> _showGitActionDialog(String action) async {
+    final input = await showDialog<String>(
+      context: context,
+      builder: (context) => _GitActionDialog(action: action),
+    );
+    if (input == null || !mounted) return;
+    await _runGitAction(action, input);
+  }
+
   void _ensureWithinRoot(String root, String path) {
     if (path != root && !path.startsWith('$root${Platform.pathSeparator}')) {
       throw const FileSystemException('This path leaves the selected project.');
@@ -541,18 +835,32 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
                           icon: Icon(Icons.history),
                         ),
                       ],
-                      selected: {_showGit},
+                      emptySelectionAllowed: true,
+                      selected: {
+                        if (_activePanel == 'git') true,
+                        if (_activePanel == 'files') false,
+                      },
                       onSelectionChanged: (selection) {
-                        setState(() => _showGit = selection.first);
-                        if (selection.first &&
-                            _gitOutput.isEmpty &&
-                            _gitError == null) {
-                          unawaited(_loadGit('status'));
-                        }
+                        if (selection.isEmpty) return;
+                        _selectPanel(selection.first ? 'git' : 'files');
                       },
                     ),
                   ),
-                  if (!_showGit && _selected != null) ...[
+                  IconButton(
+                    tooltip: 'Local terminal',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => _selectPanel('terminal'),
+                    isSelected: _activePanel == 'terminal',
+                    icon: const Icon(Icons.terminal),
+                  ),
+                  IconButton(
+                    tooltip: 'Web preview',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => _selectPanel('browser'),
+                    isSelected: _activePanel == 'browser',
+                    icon: const Icon(Icons.language),
+                  ),
+                  if (_activePanel == 'files' && _selected != null) ...[
                     const SizedBox(width: 8),
                     IconButton(
                       tooltip: _previewOpen ? 'Hide preview' : 'Show preview',
@@ -568,8 +876,12 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
               ),
             ),
             Expanded(
-              child: _showGit
+              child: _activePanel == 'git'
                   ? _gitPanel(scheme)
+                  : _activePanel == 'terminal'
+                  ? _terminalPanel(scheme, root)
+                  : _activePanel == 'browser'
+                  ? _browserPanel(scheme)
                   : wide && _previewOpen
                   ? Row(
                       children: [
@@ -614,11 +926,22 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
           ),
           IconButton(
             tooltip: 'Refresh',
-            onPressed: (_showGit ? _gitLoading : _loading)
+            onPressed:
+                (_activePanel == 'git'
+                    ? (_gitLoading || _gitActionRunning)
+                    : _loading)
                 ? null
-                : _showGit
+                : _activePanel == 'git'
                 ? () => _loadGit(_gitView)
-                : _refresh,
+                : _activePanel == 'files'
+                ? _refresh
+                : _activePanel == 'browser'
+                ? () => unawaited(
+                    nativeWorkspacePanelChannel.invokeMethod<void>(
+                      'browser_reload',
+                    ),
+                  )
+                : null,
             icon: const Icon(Icons.refresh),
           ),
         ],
@@ -726,7 +1049,18 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
     final path = _selected;
     final ext = path == null ? '' : _extension(path);
     Widget body;
-    if (_previewLoading) {
+    final draft = path == null ? null : _editDrafts[path];
+    if (path != null && _editingPath == path && draft != null) {
+      body = WorkspaceTextEditor(
+        controller: draft.controller,
+        loading: draft.loading,
+        saving: draft.saving,
+        error: draft.error,
+        dirty: draft.dirty,
+        onChanged: (_) => setState(() {}),
+        onReload: () => _reloadEdit(path),
+      );
+    } else if (_previewLoading) {
       body = const Center(child: CircularProgressIndicator(strokeWidth: 2));
     } else if (_previewError != null) {
       body = Center(
@@ -761,6 +1095,18 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
             errorBuilder: (_, _, _) => _unsupportedPreview(scheme),
           ),
         ),
+      );
+    } else if ((_videoExtensions.contains(ext) ||
+            _audioExtensions.contains(ext)) &&
+        _previewBytes != null) {
+      final kind = _videoExtensions.contains(ext) ? 'video' : 'audio';
+      body = NativeWorkspaceSurface(
+        panel: NativeWorkspacePanel.browser,
+        mediaBytes: _previewBytes,
+        mediaKind: kind,
+        mediaExtension: ext,
+        mediaKey: '$path:${_previewBytes!.length}:$_previewGeneration',
+        onError: (error) => setState(() => _previewError = error),
       );
     } else if (_videoExtensions.contains(ext)) {
       final thumbnail = _thumbnail;
@@ -816,11 +1162,36 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
                   ),
                 ),
               ),
+              if (path != null && _textExtensions.contains(ext))
+                if (_editingPath == path && draft != null) ...[
+                  IconButton(
+                    tooltip: 'Save changes',
+                    onPressed: draft.dirty && !draft.saving
+                        ? () => _saveEdit(path)
+                        : null,
+                    icon: const Icon(Icons.save_outlined, size: 18),
+                  ),
+                  IconButton(
+                    tooltip: 'Discard changes',
+                    onPressed: draft.saving ? null : () => _discardEdit(path),
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                  ),
+                  IconButton(
+                    tooltip: 'Close editor',
+                    onPressed: _closeEditor,
+                    icon: const Icon(Icons.visibility_outlined, size: 18),
+                  ),
+                ] else
+                  IconButton(
+                    tooltip: 'Edit file',
+                    onPressed: () => _beginEdit(path),
+                    icon: const Icon(Icons.edit_outlined, size: 18),
+                  ),
               if (path != null)
-                TextButton.icon(
+                IconButton(
+                  tooltip: 'Open With',
                   onPressed: _openSelected,
                   icon: const Icon(Icons.open_in_new, size: 18),
-                  label: const Text('Open With'),
                 ),
             ],
           ),
@@ -841,8 +1212,126 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
     ],
   );
 
+  Widget _terminalPanel(ColorScheme scheme, String root) => Column(
+    children: [
+      Container(
+        height: 38,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+        ),
+        child: Row(
+          children: [
+            const Expanded(
+              child: Text('Local shell · runs as your Linux user'),
+            ),
+            IconButton(
+              tooltip: 'Stop terminal process group',
+              visualDensity: VisualDensity.compact,
+              onPressed: () => unawaited(
+                nativeWorkspacePanelChannel.invokeMethod<void>('terminal_stop'),
+              ),
+              icon: const Icon(Icons.stop_circle_outlined, size: 18),
+            ),
+          ],
+        ),
+      ),
+      if (_workspaceError != null)
+        Padding(
+          padding: const EdgeInsets.all(8),
+          child: Text(_workspaceError!, style: TextStyle(color: scheme.error)),
+        ),
+      Expanded(
+        child: NativeWorkspaceSurface(
+          panel: NativeWorkspacePanel.terminal,
+          root: root,
+          onError: (error) => setState(() => _workspaceError = error),
+        ),
+      ),
+    ],
+  );
+
+  Widget _browserPanel(ColorScheme scheme) => Column(
+    children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(10, 0, 8, 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _webAddress,
+                onSubmitted: (_) => unawaited(_openBrowser()),
+                decoration: const InputDecoration(
+                  isDense: true,
+                  hintText: 'https://example.com',
+                  prefixIcon: Icon(Icons.language, size: 18),
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            IconButton.filledTonal(
+              tooltip: 'Open address',
+              visualDensity: VisualDensity.compact,
+              onPressed: () => unawaited(_openBrowser()),
+              icon: const Icon(Icons.arrow_forward, size: 18),
+            ),
+          ],
+        ),
+      ),
+      if (_workspaceError != null)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+          child: Text(_workspaceError!, style: TextStyle(color: scheme.error)),
+        ),
+      Expanded(
+        child: _webUri == null
+            ? Center(
+                child: Text(
+                  'Enter a web address to preview it here.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              )
+            : NativeWorkspaceSurface(
+                panel: NativeWorkspacePanel.browser,
+                uri: _webUri,
+                onError: (error) => setState(() => _workspaceError = error),
+              ),
+      ),
+    ],
+  );
+
   Widget _gitPanel(ColorScheme scheme) => Column(
     children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+        child: Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            OutlinedButton.icon(
+              onPressed: _gitActionRunning
+                  ? null
+                  : () => _showGitActionDialog('branch'),
+              icon: const Icon(Icons.account_tree_outlined, size: 16),
+              label: const Text('Branch'),
+            ),
+            OutlinedButton.icon(
+              onPressed: _gitActionRunning
+                  ? null
+                  : () => _showGitActionDialog('merge'),
+              icon: const Icon(Icons.merge, size: 16),
+              label: const Text('Merge'),
+            ),
+            OutlinedButton.icon(
+              onPressed: _gitActionRunning
+                  ? null
+                  : () => _showGitActionDialog('commit'),
+              icon: const Icon(Icons.commit, size: 16),
+              label: const Text('Commit staged'),
+            ),
+          ],
+        ),
+      ),
       Padding(
         padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
         child: SegmentedButton<String>(
@@ -856,6 +1345,12 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
         ),
       ),
       if (_gitLoading) const LinearProgressIndicator(minHeight: 2),
+      if (_gitActionRunning) const LinearProgressIndicator(minHeight: 2),
+      if (_gitActionRunning)
+        const Padding(
+          padding: EdgeInsets.all(8),
+          child: Text('Running the requested local Git operation…'),
+        ),
       if (_gitError != null)
         Padding(
           padding: const EdgeInsets.all(12),
@@ -890,4 +1385,74 @@ class _ProjectEntry {
   final bool directory;
   final bool symlink;
   final bool regularFile;
+}
+
+class _ProjectEditDraft {
+  final TextEditingController controller = TextEditingController();
+  String original = '';
+  String? versionToken;
+  String? error;
+  bool loading = true;
+  bool saving = false;
+
+  bool get dirty => controller.text != original;
+}
+
+class _GitActionDialog extends StatefulWidget {
+  const _GitActionDialog({required this.action});
+
+  final String action;
+
+  @override
+  State<_GitActionDialog> createState() => _GitActionDialogState();
+}
+
+class _GitActionDialogState extends State<_GitActionDialog> {
+  final TextEditingController _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final title = switch (widget.action) {
+      'branch' => 'Create branch and switch',
+      'merge' => 'Merge local branch',
+      _ => 'Commit staged changes',
+    };
+    final label = switch (widget.action) {
+      'branch' => 'New branch name',
+      'merge' => 'Source branch',
+      _ => 'Commit message',
+    };
+    return AlertDialog(
+      title: Text(title),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        maxLines: widget.action == 'commit' ? 4 : 1,
+        maxLength: widget.action == 'commit' ? 5000 : 100,
+        decoration: InputDecoration(labelText: label),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _controller.text),
+          child: Text(
+            widget.action == 'merge'
+                ? 'Merge'
+                : widget.action == 'branch'
+                ? 'Create'
+                : 'Commit staged',
+          ),
+        ),
+      ],
+    );
+  }
 }

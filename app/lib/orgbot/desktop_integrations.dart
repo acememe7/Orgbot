@@ -6,22 +6,31 @@
 /// `${NAME}` references to the private, ephemeral room file.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+
+import 'integration_registry.dart';
 
 /// A configured integration source on this machine.
-enum DesktopIntegrationSource { codex, claude, grok }
+enum DesktopIntegrationSource { codex, claude, grok, managed }
 
 /// How an integration is configured locally.
 enum DesktopIntegrationTransport { stdio, http, unsupported }
 
 /// Safe, displayable connection status. `configured` does not claim the server
 /// has connected or authenticated; the runtime reports that separately.
-enum DesktopIntegrationState { configured, unsupported, unavailable }
+enum DesktopIntegrationState { configured, disabled, unsupported, unavailable }
 
 /// Sanitized status for a configured MCP server.
 class DesktopMcpStatus {
   final String name;
+  final String? managedId;
+  final bool managed;
   final DesktopIntegrationSource source;
   final DesktopIntegrationTransport transport;
   final DesktopIntegrationState state;
@@ -29,6 +38,8 @@ class DesktopMcpStatus {
 
   const DesktopMcpStatus({
     required this.name,
+    this.managedId,
+    this.managed = false,
     required this.source,
     required this.transport,
     required this.state,
@@ -50,8 +61,27 @@ class DesktopSkillStatus {
   });
 }
 
+/// Aggregate result from read-only MCP initialize and tools/list probes.
+/// No tool methods are invoked and no server names or credentials are retained.
+class DesktopIntegrationValidation {
+  final int configured;
+  final int reachable;
+  final int unavailable;
+  final int unsupported;
+  final int disabled;
+
+  const DesktopIntegrationValidation({
+    required this.configured,
+    required this.reachable,
+    required this.unavailable,
+    required this.unsupported,
+    required this.disabled,
+  });
+}
+
 class _McpSpec {
   final String name;
+  final String? displayName;
   final DesktopIntegrationSource source;
   final DesktopIntegrationTransport transport;
   final String? command;
@@ -60,9 +90,13 @@ class _McpSpec {
   final String? url;
   final Map<String, String> headers;
   final String? unsupportedReason;
+  final String? id;
+  final bool managed;
+  final bool enabled;
 
   const _McpSpec({
     required this.name,
+    this.displayName,
     required this.source,
     required this.transport,
     this.command,
@@ -71,6 +105,9 @@ class _McpSpec {
     this.url,
     this.headers = const {},
     this.unsupportedReason,
+    this.id,
+    this.managed = false,
+    this.enabled = true,
   });
 }
 
@@ -146,6 +183,32 @@ class DesktopIntegrationSnapshot {
         ..writeln();
     }
   }
+
+  /// Checks configured servers using only MCP initialize and tools/list.
+  /// Each result is reduced to a count so endpoint details remain private.
+  Future<DesktopIntegrationValidation> validateConnections() async {
+    var reachable = 0;
+    var unavailable = 0;
+    for (final spec in _runnable) {
+      try {
+        await _probeMcp(spec);
+        reachable++;
+      } on Object {
+        unavailable++;
+      }
+    }
+    return DesktopIntegrationValidation(
+      configured: _runnable.length,
+      reachable: reachable,
+      unavailable: unavailable,
+      unsupported: mcpServers
+          .where((server) => server.state == DesktopIntegrationState.unsupported)
+          .length,
+      disabled: mcpServers
+          .where((server) => server.state == DesktopIntegrationState.disabled)
+          .length,
+    );
+  }
 }
 
 /// Discovers active direct MCP entries and installed skill folders without
@@ -153,17 +216,64 @@ class DesktopIntegrationSnapshot {
 class DesktopIntegrations {
   const DesktopIntegrations._();
 
+  static Future<String> testManaged(
+    ManagedMcpServer server,
+    IntegrationRegistry registry,
+  ) async {
+    Future<Map<String, String>?> resolve(Map<String, String> references) async {
+      final values = <String, String>{};
+      for (final entry in references.entries) {
+        final value =
+            await registry.secret(server.id, entry.value) ??
+            Platform.environment[entry.value];
+        if (value == null) return null;
+        values[entry.key] = value;
+      }
+      return values;
+    }
+
+    try {
+      final env = await resolve(server.env);
+      final headers = await resolve(server.headers);
+      if (env == null || headers == null) {
+        return 'A credential reference is unavailable.';
+      }
+      final spec = _McpSpec(
+        name: server.id,
+        source: DesktopIntegrationSource.managed,
+        transport: server.transport == ManagedMcpTransport.stdio
+            ? DesktopIntegrationTransport.stdio
+            : DesktopIntegrationTransport.http,
+        command: server.command,
+        args: server.args,
+        env: env,
+        url: server.url,
+        headers: headers,
+      );
+      final count = await _probeMcp(spec);
+      return 'Connected · $count tools';
+    } on TimeoutException {
+      return 'Connection timed out.';
+    } on Object {
+      return 'Could not connect. Check the server settings and credentials.';
+    }
+  }
+
   static Future<DesktopIntegrationSnapshot> discover({
     String? homeDirectory,
+    IntegrationRegistry? registry,
   }) async {
     final home = homeDirectory ?? Platform.environment['HOME'] ?? '';
-    if (home.isEmpty) {
-      return const DesktopIntegrationSnapshot._([], [], []);
-    }
     final specs = <_McpSpec>[];
-    await _readCodex(home, specs);
-    await _readClaude(home, specs);
-    await _readGrok(home, specs);
+    if (home.isNotEmpty) {
+      await _readCodex(home, specs);
+      await _readClaude(home, specs);
+      await _readGrok(home, specs);
+    }
+    final managedRegistry = registry ?? IntegrationRegistry();
+    for (final server in await _listManagedMcp(managedRegistry)) {
+      specs.add(await _fromManaged(server, managedRegistry));
+    }
 
     final statuses = <DesktopMcpStatus>[];
     final runnable = <_McpSpec>[];
@@ -171,21 +281,27 @@ class DesktopIntegrations {
       final unsupported = spec.unsupportedReason;
       final state = unsupported != null
           ? DesktopIntegrationState.unsupported
+          : !spec.enabled
+          ? DesktopIntegrationState.disabled
           : DesktopIntegrationState.configured;
       statuses.add(
         DesktopMcpStatus(
-          name: spec.name,
+          name: spec.displayName ?? spec.name,
+          managedId: spec.id,
+          managed: spec.managed,
           source: spec.source,
           transport: spec.transport,
           state: state,
           detail:
               unsupported ??
-              'Configured locally; connection has not been tested.',
+              (state == DesktopIntegrationState.disabled
+                  ? 'Disabled in OrgBots.'
+                  : 'Configured locally; connection has not been tested.'),
         ),
       );
       if (state == DesktopIntegrationState.configured) runnable.add(spec);
     }
-    final skills = await _discoverSkills(home);
+    final skills = await _discoverSkills(home, managedRegistry);
     return DesktopIntegrationSnapshot._(
       List.unmodifiable(statuses),
       List.unmodifiable(skills),
@@ -255,70 +371,86 @@ class DesktopIntegrations {
     }
   }
 
-  static Future<List<DesktopSkillStatus>> _discoverSkills(String home) async {
-    final roots = <(String, DesktopIntegrationSource)>[
-      ('$home/.agents/skills', DesktopIntegrationSource.codex),
-      ('$home/.codex/skills', DesktopIntegrationSource.codex),
-      ('$home/.claude/skills', DesktopIntegrationSource.claude),
-      ('$home/.grok/skills', DesktopIntegrationSource.grok),
-    ];
-    final codexConfig = File('$home/.codex/config.toml');
-    try {
-      final text = await codexConfig.readAsString();
-      for (final plugin in _parseTomlPlugins(text)) {
-        final identity = plugin.name.split('@');
-        if (identity.length != 2) continue;
-        final pluginRoot = Directory(
-          '$home/.codex/plugins/cache/${identity[1]}/${identity[0]}',
+  static Future<List<DesktopSkillStatus>> _discoverSkills(
+    String home,
+    IntegrationRegistry registry,
+  ) async {
+    final roots = <(String, DesktopIntegrationSource)>[];
+    if (home.isNotEmpty) {
+      roots.addAll([
+        ('$home/.agents/skills', DesktopIntegrationSource.codex),
+        ('$home/.codex/skills', DesktopIntegrationSource.codex),
+        ('$home/.claude/skills', DesktopIntegrationSource.claude),
+        ('$home/.grok/skills', DesktopIntegrationSource.grok),
+      ]);
+      final codexConfig = File('$home/.codex/config.toml');
+      try {
+        final text = await codexConfig.readAsString();
+        for (final plugin in _parseTomlPlugins(text)) {
+          final identity = plugin.name.split('@');
+          if (identity.length != 2) continue;
+          final pluginRoot = Directory(
+            '$home/.codex/plugins/cache/${identity[1]}/${identity[0]}',
+          );
+          try {
+            await for (final version in pluginRoot.list(followLinks: false)) {
+              if (version is Directory) {
+                roots.add((
+                  '${version.path}/skills',
+                  DesktopIntegrationSource.codex,
+                ));
+              }
+            }
+          } on FileSystemException {
+            // An enabled plugin may not be installed on this machine.
+          }
+        }
+      } on FileSystemException {
+        // The direct roots remain useful when there is no Codex config.
+      }
+      // Claude plugin skills are included only when installed and enabled.
+      try {
+        final settings = jsonDecode(
+          await File('$home/.claude/settings.json').readAsString(),
         );
-        try {
-          await for (final version in pluginRoot.list(followLinks: false)) {
-            if (version is Directory) {
-              roots.add((
-                '${version.path}/skills',
-                DesktopIntegrationSource.codex,
-              ));
+        final installed = jsonDecode(
+          await File(
+            '$home/.claude/plugins/installed_plugins.json',
+          ).readAsString(),
+        );
+        final enabled = settings is Map ? settings['enabledPlugins'] : null;
+        final pluginMap = installed is Map ? installed['plugins'] : null;
+        if (enabled is Map && pluginMap is Map) {
+          for (final entry in enabled.entries) {
+            if (entry.value != true) continue;
+            final installs = pluginMap[entry.key];
+            if (installs is! List) continue;
+            for (final install in installs) {
+              if (install is Map && install['installPath'] is String) {
+                roots.add((
+                  '${install['installPath']}/skills',
+                  DesktopIntegrationSource.claude,
+                ));
+              }
             }
           }
-        } on FileSystemException {
-          // An enabled plugin may not be installed on this machine.
         }
+      } on FileSystemException {
+        // Plugin manifests are optional.
+      } on FormatException {
+        // Ignore malformed plugin metadata.
       }
-    } on FileSystemException {
-      // The direct roots remain useful when there is no Codex config.
     }
-    // Claude plugin skill folders are included only for plugins enabled in the
-    // user's settings and listed as installed by Claude Code.
     try {
-      final settings = jsonDecode(
-        await File('$home/.claude/settings.json').readAsString(),
-      );
-      final installed = jsonDecode(
-        await File(
-          '$home/.claude/plugins/installed_plugins.json',
-        ).readAsString(),
-      );
-      final enabled = settings is Map ? settings['enabledPlugins'] : null;
-      final pluginMap = installed is Map ? installed['plugins'] : null;
-      if (enabled is Map && pluginMap is Map) {
-        for (final entry in enabled.entries) {
-          if (entry.value != true) continue;
-          final installs = pluginMap[entry.key];
-          if (installs is! List) continue;
-          for (final install in installs) {
-            if (install is Map && install['installPath'] is String) {
-              roots.add((
-                '${install['installPath']}/skills',
-                DesktopIntegrationSource.claude,
-              ));
-            }
-          }
-        }
-      }
-    } on FileSystemException {
-      // Plugin manifests are optional.
-    } on FormatException {
-      // Ignore malformed plugin metadata.
+      roots.add((
+        await registry.managedSkillsDirectory(),
+        DesktopIntegrationSource.managed,
+      ));
+    } on FlutterError {
+      // Native engine tests can discover CLI integrations without a platform
+      // binding; managed storage is unavailable in that headless context.
+    } on MissingPluginException {
+      // The optional path provider plugin is absent in a headless context.
     }
 
     final found = <String, DesktopSkillStatus>{};
@@ -362,6 +494,282 @@ class DesktopIntegrations {
       ..sort((a, b) => a.name.compareTo(b.name));
     return result;
   }
+}
+
+Future<List<ManagedMcpServer>> _listManagedMcp(
+  IntegrationRegistry registry,
+) async {
+  try {
+    return await registry.listMcp();
+  } on FlutterError {
+    // Managed registrations are optional during headless native room startup.
+    return const [];
+  } on MissingPluginException {
+    return const [];
+  }
+}
+
+Future<int> _probeMcp(_McpSpec spec) async {
+  const timeout = Duration(seconds: 8);
+  if (spec.transport == DesktopIntegrationTransport.http) {
+    final client = HttpClient()..connectionTimeout = timeout;
+    try {
+      final session = <String, String>{};
+      final initialized = await _httpMcpRequest(client, spec, session, {
+        'jsonrpc': '2.0',
+        'id': 1,
+        'method': 'initialize',
+        'params': {
+          'protocolVersion': '2025-03-26',
+          'capabilities': {},
+          'clientInfo': {'name': 'orgbot', 'version': '1'},
+        },
+      }).timeout(timeout);
+      final protocol = initialized['result']?['protocolVersion'];
+      if (initialized['error'] != null || protocol is! String) {
+        throw const FormatException('MCP initialization failed.');
+      }
+      session['protocol'] = protocol;
+      await _httpMcpRequest(client, spec, session, {
+        'jsonrpc': '2.0',
+        'method': 'notifications/initialized',
+      }).timeout(timeout);
+      final listed = await _httpMcpRequest(client, spec, session, {
+        'jsonrpc': '2.0',
+        'id': 2,
+        'method': 'tools/list',
+      }).timeout(timeout);
+      final tools = listed['result']?['tools'];
+      if (listed['error'] != null || tools is! List) {
+        throw const FormatException('MCP tool listing failed.');
+      }
+      return tools.length;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  if (spec.transport != DesktopIntegrationTransport.stdio ||
+      spec.command == null) {
+    throw const FormatException('Unsupported MCP transport.');
+  }
+  final environment = Map<String, String>.fromEntries(
+    Platform.environment.entries.where(
+      (entry) => !_isCredentialEnvironmentName(entry.key),
+    ),
+  )..addAll(spec.env);
+  final process = await Process.start(
+    spec.command!,
+    spec.args,
+    environment: environment,
+    includeParentEnvironment: false,
+  );
+  var outputBytes = 0;
+  final boundedOutput = process.stdout.transform(
+    StreamTransformer<List<int>, List<int>>.fromHandlers(
+      handleData: (chunk, sink) {
+        outputBytes += chunk.length;
+        if (outputBytes > 1024 * 1024) {
+          process.kill(ProcessSignal.sigkill);
+          sink.addError(const FormatException('MCP response is too large.'));
+        } else {
+          sink.add(chunk);
+        }
+      },
+    ),
+  );
+  final lines = StreamIterator<String>(
+    boundedOutput.transform(utf8.decoder).transform(const LineSplitter()),
+  );
+  final stderr = process.stderr.listen((_) {});
+  try {
+    process.stdin.writeln(
+      jsonEncode({
+        'jsonrpc': '2.0',
+        'id': 1,
+        'method': 'initialize',
+        'params': {
+          'protocolVersion': '2025-03-26',
+          'capabilities': {},
+          'clientInfo': {'name': 'orgbot', 'version': '1'},
+        },
+      }),
+    );
+    await process.stdin.flush();
+    final initialized = await _readMcpReply(lines, 1).timeout(timeout);
+    if (initialized['error'] != null || initialized['result'] is! Map) {
+      throw const FormatException('MCP initialization failed.');
+    }
+    process.stdin.writeln(
+      jsonEncode({'jsonrpc': '2.0', 'method': 'notifications/initialized'}),
+    );
+    process.stdin.writeln(
+      jsonEncode({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'}),
+    );
+    await process.stdin.flush();
+    final listed = await _readMcpReply(lines, 2).timeout(timeout);
+    final tools = listed['result']?['tools'];
+    if (listed['error'] != null || tools is! List) {
+      throw const FormatException('MCP tool listing failed.');
+    }
+    return tools.length;
+  } finally {
+    process.kill(ProcessSignal.sigterm);
+    try {
+      await process.exitCode.timeout(const Duration(seconds: 1));
+    } on TimeoutException {
+      process.kill(ProcessSignal.sigkill);
+      try {
+        await process.exitCode.timeout(const Duration(seconds: 1));
+      } on TimeoutException {
+        // The operating system has received SIGKILL; avoid hanging cleanup.
+      }
+    }
+    await lines.cancel();
+    await stderr.cancel();
+  }
+}
+
+bool _isCredentialEnvironmentName(String name) {
+  final normalized = name.toUpperCase();
+  return normalized.startsWith('ORGBOT_') ||
+      normalized.contains('_API_KEY') ||
+      normalized.contains('_TOKEN') ||
+      normalized.contains('_SECRET') ||
+      normalized.contains('_PASSWORD') ||
+      normalized.contains('_CREDENTIAL') ||
+      normalized.contains('_AUTHORIZATION');
+}
+
+Future<Map<String, dynamic>> _httpMcpRequest(
+  HttpClient client,
+  _McpSpec spec,
+  Map<String, String> session,
+  Map<String, Object?> message,
+) async {
+  final request = await client.postUrl(Uri.parse(spec.url!));
+  request.headers
+    ..set(HttpHeaders.contentTypeHeader, 'application/json')
+    ..set(HttpHeaders.acceptHeader, 'application/json, text/event-stream');
+  request.followRedirects = false;
+  for (final header in spec.headers.entries) {
+    request.headers.set(header.key, header.value);
+  }
+  if (session['id'] case final id?) request.headers.set('Mcp-Session-Id', id);
+  if (session['protocol'] case final protocol?) {
+    request.headers.set('Mcp-Protocol-Version', protocol);
+  }
+  request.write(jsonEncode(message));
+  final response = await request.close();
+  if (response.statusCode != HttpStatus.ok &&
+      response.statusCode != HttpStatus.accepted) {
+    throw const HttpException('MCP endpoint rejected the request.');
+  }
+  if (response.headers.value('mcp-session-id') case final id?) {
+    session['id'] = id;
+  }
+  if (message['id'] == null && response.statusCode == HttpStatus.accepted) {
+    await response.drain<void>();
+    return {};
+  }
+  final body = await _readBoundedResponse(response);
+  final payload = response.headers.contentType?.mimeType == 'text/event-stream'
+      ? body
+            .split('\n')
+            .where((line) => line.startsWith('data:'))
+            .map((line) => line.substring(5).trim())
+            .firstWhere((line) => line.isNotEmpty)
+      : body;
+  final decoded = jsonDecode(payload);
+  if (decoded is! Map<String, dynamic>) {
+    throw const FormatException('MCP endpoint returned an invalid response.');
+  }
+  return decoded;
+}
+
+Future<String> _readBoundedResponse(HttpClientResponse response) async {
+  final bytes = BytesBuilder(copy: false);
+  await for (final chunk in response) {
+    if (bytes.length + chunk.length > 1024 * 1024) {
+      throw const FormatException('MCP response is too large.');
+    }
+    bytes.add(chunk);
+  }
+  return utf8.decode(bytes.takeBytes());
+}
+
+Future<Map<String, dynamic>> _readMcpReply(
+  StreamIterator<String> lines,
+  int id,
+) async {
+  for (
+    var lineCount = 0;
+    lineCount < 32 && await lines.moveNext();
+    lineCount++
+  ) {
+    final line = lines.current;
+    if (line.length > 1024 * 1024) {
+      throw const FormatException('MCP response is too large.');
+    }
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(line);
+    } on FormatException {
+      continue;
+    }
+    if (decoded is Map<String, dynamic> && decoded['id'] == id) return decoded;
+  }
+  throw const FormatException(
+    'MCP server did not return the expected response.',
+  );
+}
+
+Future<_McpSpec> _fromManaged(
+  ManagedMcpServer server,
+  IntegrationRegistry registry,
+) async {
+  Future<Map<String, String>?> resolve(Map<String, String> references) async {
+    final values = <String, String>{};
+    for (final entry in references.entries) {
+      final value =
+          await registry.secret(server.id, entry.value) ??
+          Platform.environment[entry.value];
+      if (value == null) return null;
+      values[entry.key] = value;
+    }
+    return values;
+  }
+
+  final env = await resolve(server.env);
+  final headers = await resolve(server.headers);
+  if ((env == null || headers == null) && server.enabled) {
+    return _McpSpec(
+      id: server.id,
+      managed: true,
+      enabled: server.enabled,
+      name: server.id,
+      displayName: server.name,
+      source: DesktopIntegrationSource.managed,
+      transport: DesktopIntegrationTransport.unsupported,
+      unsupportedReason: 'A credential reference is not available.',
+    );
+  }
+  return _McpSpec(
+    id: server.id,
+    managed: true,
+    enabled: server.enabled,
+    name: server.id,
+    displayName: server.name,
+    source: DesktopIntegrationSource.managed,
+    transport: server.transport == ManagedMcpTransport.stdio
+        ? DesktopIntegrationTransport.stdio
+        : DesktopIntegrationTransport.http,
+    command: server.command,
+    args: server.args,
+    env: env ?? const {},
+    url: server.url,
+    headers: headers ?? const {},
+  );
 }
 
 _McpSpec _fromJson(

@@ -188,6 +188,19 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             ),
         ),
         tool(
+            "search_project_memory",
+            "Search durable notes shared by rooms in this explicitly configured project. This is a local semantic search and makes no model call. Use it when prior decisions or known constraints may affect the task.",
+            schema::object(vec![("query", schema::string("What you need to recall, phrased naturally."))], &["query"]),
+        ),
+        tool(
+            "save_project_memory",
+            "Save a concise project decision or reusable outcome for later rooms. Keep it factual and scoped to this project; never store credentials or private user data.",
+            schema::object(vec![
+                ("title", schema::string("Short subject for the note.")),
+                ("content", schema::string("Reusable decision, constraint, or result.")),
+            ], &["title", "content"]),
+        ),
+        tool(
             "use_skill",
             "Load a playbook by name. The room lists what it has near the top of \
              your instructions, with one line each; this returns the whole thing. \
@@ -507,6 +520,7 @@ fn review_only_tool_allowed(name: &str) -> bool {
             | "start_task"
             | "find_prior_work"
             | "read_prior_artifact"
+            | "search_project_memory"
             | "use_skill"
             | "read_artifact"
             | "release_task"
@@ -554,6 +568,8 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
         "use_skill" => use_skill(engine, input),
         "find_prior_work" => find_prior_work(engine, input),
         "read_prior_artifact" => read_prior_artifact(engine, input),
+        "search_project_memory" => search_project_memory(engine, input),
+        "save_project_memory" => save_project_memory(engine, input),
         "read_artifact" => read_artifact(engine, input),
         "submit_for_review" => submit_for_review(engine, actor, input),
         "offer_handoff" => offer_handoff(engine, actor, input),
@@ -1236,6 +1252,45 @@ fn read_prior_artifact(engine: &Engine, input: &Value) -> ToolOutcome {
         None => ToolOutcome::error(format!(
             "No earlier room holds artifact `{id}`. Use find_prior_work to get an id."
         )),
+    }
+}
+
+fn search_project_memory(engine: &Engine, input: &Value) -> ToolOutcome {
+    let query = match required_str(input, "query") {
+        Ok(query) => query,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    if !engine.archive().has_memory() {
+        return ToolOutcome::error(
+            "Project memory is unavailable because this room has no explicitly configured project scope.",
+        );
+    }
+    match engine.archive().search_memory(query, 5) {
+        Ok(hits) if hits.is_empty() => ToolOutcome::ok(
+            "No related shared project notes were found. This project has no matching memory yet; proceed from the current room evidence.",
+        ),
+        Ok(hits) => {
+            let mut out = String::from("Related project notes, most relevant first:\n");
+            for hit in hits {
+                out.push_str(&format!(
+                    "\n{} (relevance {:.2})\n{}\n",
+                    hit.entry.title, hit.score, hit.entry.content
+                ));
+            }
+            ToolOutcome::ok(out)
+        }
+        Err(error) => ToolOutcome::error(format!("Project memory could not be read: {error}")),
+    }
+}
+
+fn save_project_memory(engine: &Engine, input: &Value) -> ToolOutcome {
+    let (title, content) = match (required_str(input, "title"), required_str(input, "content")) {
+        (Ok(title), Ok(content)) => (title, content),
+        (Err(message), _) | (_, Err(message)) => return ToolOutcome::error(message),
+    };
+    match engine.archive().remember(title, content, None, None) {
+        Ok(entry) => ToolOutcome::ok(format!("Saved project note `{}`.", entry.id)),
+        Err(error) => ToolOutcome::error(format!("Project memory could not be saved: {error}")),
     }
 }
 

@@ -262,6 +262,26 @@ impl Room {
                 self.resync.store(true, Ordering::Release);
                 return true;
             }
+            ClientMessage::Memory { request } => {
+                let Some(runtime) = &self.runtime else { return false; };
+                let (reply, response) = oneshot::channel();
+                if !self.handle.try_send(Control::Memory { request, reply }) { return false; }
+                let inbox = Arc::clone(&self.inbox);
+                let resync = Arc::clone(&self.resync);
+                runtime.spawn(async move {
+                    let message = match tokio::time::timeout(std::time::Duration::from_secs(20), response).await {
+                        Ok(Ok(message)) => message,
+                        _ => ServerMessage::Error { message: "project memory request timed out".into() },
+                    };
+                    let mut inbox = inbox.lock().unwrap();
+                    if inbox.len() >= INBOX_LIMIT {
+                        inbox.clear();
+                        resync.store(true, Ordering::Release);
+                    }
+                    inbox.push(message);
+                });
+                return true;
+            }
             ClientMessage::Ping => return true,
         };
         self.handle.try_send(control)
@@ -321,6 +341,25 @@ impl Drop for Room {
 mod tests {
     use super::*;
     use orgbot_providers::{ScriptedProvider, Turn};
+
+    #[test]
+    fn native_memory_requests_return_owner_response_without_blocking() {
+        let room = Room::open(r#"[room]
+name="ffi-memory"
+goal="fixture"
+completion="manual"
+[[bots]]
+handle="fixture"
+provider={kind="scripted",script=""}
+"#, &[]).unwrap();
+        assert!(room.control(r#"{"type":"memory","request":{"request_id":"fixture","action":"list"}}"#));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if room.drain().iter().any(|message| message["type"] == "memory_result" && message["request_id"] == "fixture") { break; }
+            assert!(std::time::Instant::now() < deadline, "memory control did not answer");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     #[tokio::test]
     async fn renewal_changes_the_next_call_without_replacing_the_bot() {

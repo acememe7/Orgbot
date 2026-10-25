@@ -135,6 +135,56 @@ fn each_role_sees_exactly_the_extra_tool_it_needs() {
 }
 
 #[test]
+fn project_memory_tools_search_semantically_and_keep_reviewers_read_only() {
+    let mut f = fixture();
+    let root = std::env::temp_dir().join(format!(
+        "orgbot-tools-memory-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    f.engine
+        .archive()
+        .configure_memory(&root, "project-alpha")
+        .unwrap();
+    let saved = f.call(
+        f.worker,
+        "save_project_memory",
+        json!({"title":"Restart recovery", "content":"Persist login credentials across application restart."}),
+    );
+    assert!(
+        !saved.is_error,
+        "project-scoped memory save should work: {}",
+        saved.content
+    );
+    let found = f.call(
+        f.worker,
+        "search_project_memory",
+        json!({"query":"restore authentication after reboot"}),
+    );
+    assert!(!found.is_error, "search should work: {}", found.content);
+    assert!(found.content.contains("Restart recovery"));
+
+    let reviewer = f.engine.agent(f.inspector).unwrap().clone();
+    let mut reviewer = reviewer;
+    reviewer.autonomy.review_only = true;
+    f.engine.update_agent(reviewer);
+    let outcome = f.call(
+        f.inspector,
+        "save_project_memory",
+        json!({"title":"review","content":"remember this"}),
+    );
+    assert!(
+        outcome.is_error,
+        "review-only reviewer cannot mutate project memory"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn review_only_bots_get_read_tools_and_cannot_dispatch_mutations() {
     let mut f = fixture();
     let mut reviewer = f.engine.agent(f.inspector).unwrap().clone();

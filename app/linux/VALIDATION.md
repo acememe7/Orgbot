@@ -1,3 +1,69 @@
+# OrgBots desktop workspace 1.7.0 — 2026-10-25
+
+## Delivered and checked
+
+- [x] Linux room supervision, Secret Service credentials, checkpoint recovery,
+  UI detach/reconnect and explicit stop; paused work stays paused after restart.
+- [x] Durable provider allowances across rooms, API text-token/cost reservations
+  with configured prices, CLI launch caps, reset windows and cooldown routing.
+- [x] Project memory with offline concept retrieval, bounded history summaries,
+  automatic completed-work capture and owner search/hide/delete/share controls.
+- [x] Managed MCP settings/authentication/tests, skill folder/ZIP management and
+  supported CLI plugin operations, retaining unsupported-policy boundaries.
+- [x] Native terminal and text editor, Git branch/commit-staged/merge, embedded
+  browser, native audio/video controls and timestamped video attachment samples.
+- [x] Browser state retained through resize/collapse/dialogs; stale media errors
+  suppressed; no native surfaces covering Flutter dialogs. Background media
+  writes are cancellable. Failed editor rollback preserves its recovery copy.
+
+## Verification and artifact
+
+- [x] Flutter: 264 passed, three external SSH checks skipped; analyzer clean.
+  Rust workspace: 775 passed, zero failed, one ignored. Release engine built.
+- [x] Native editor recovery, overlay bounds, browser navigation/lifecycle and
+  media metadata/CSP regression checks passed. The media harness does not claim
+  trusted control interaction; actual app Play/Pause/seek was checked separately.
+- [x] Real X11/Nvidia desktop checks at 1440×920, 800×920 and 375×920: terminal,
+  save-to-disk editor, Git branch, spending control, project memory, scripted
+  replies/reconnect, browser interaction, MP4 Play/Pause/seek and WAV Play/Pause.
+  Clean profile playback passed after diagnostic logging was removed.
+- [x] Measured profile sample: 115 frames from 32 inspector switches; UI p95
+  8.440 ms, raster-thread p95 16.581 ms. Four raster samples exceeded 16.67 ms.
+  This small-room trace is not a GPU hardware timing or general FPS claim.
+- [x] Isolated actual systemd lifecycle test and 600.1-second recovery/allowance
+  fixture passed: ten cycles, 12 fake CLI launches, 12 ledger entries, checkpoint
+  persistence and paused-state preservation. No real inference in this fixture.
+- [x] Saved DeepSeek key verified with a bounded request (48 input, 2 output
+  tokens). Codex reply/resume and Grok reply passed. Claude was authenticated but
+  at its weekly quota; Ollama was not called because the owner is unsubscribed.
+- [x] Linux release and packaging fixtures passed. All 26 extracted Flutter
+  bundle files and the bundled engine match the build; all six native ELF files
+  resolve their dependencies. Package extracted and launched in isolated app
+  data/keyring; no system install, real-library migration or push performed.
+- [x] Staged credential-pattern scan: zero findings across 74 owned files;
+  staged diff checks pass. Unrelated README, lockfile and Tauri work is preserved.
+- [x] Final scoped Astra source, integration, visual, artifact and claims
+  review approved; all required corrections resolved. Package hash independently
+  verified by the reviewer. Approval does not include system install or push.
+
+Package: `app/orgbot_1.7.0_amd64.deb`, Ubuntu 24.04/amd64, glibc >=2.39.
+Size: 14,081,632 bytes.
+SHA-256: `4440888b84c904c82487861f6dad59aa94dd172ee8ccfd25180deee3dbbc2930`.
+Engine SHA-256: `a6d3f41ff0a501f0873fa3c0cbd721c34f24cd2c997323cdf3996d1319604fbd`.
+Artifact manifest: `/tmp/orgbots-linux-1.7.0-artifact.json`.
+Detailed evidence: [DESKTOP_COMPLETION.md](DESKTOP_COMPLETION.md).
+
+## External acceptance and limits
+
+Multi-day, host sleep/reboot, Wayland, physical Android and comprehensive
+screen-reader acceptance remain unverified. Provider subscription quotas and
+opaque CLI internal token/cost usage cannot be enforced as exact account caps.
+Tool compatibility and codecs remain provider/format specific. Active agents
+consume allowance; dividing work does not guarantee lower total tokens.
+See [REMAINING.md](REMAINING.md) for the full implementation/acceptance inventory.
+
+---
+
 # OrgBots desktop refinement 1.6.1 — 2026-10-25
 
 ## Delivered and checked

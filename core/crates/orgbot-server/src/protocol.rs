@@ -10,12 +10,46 @@
 //! layer.
 
 use orgbot_engine::digest::RoomDigest;
-use orgbot_proto::ids::{DecisionId, MessageId};
 use orgbot_proto::event::{EventEnvelope, Seq};
+use orgbot_proto::ids::{DecisionId, MessageId};
 use orgbot_proto::room::RoomPhase;
 use orgbot_proto::{AgentId, AgentStatus, Room, Task, TaskId};
 use orgbot_providers::StreamEvent;
 use serde::{Deserialize, Serialize};
+
+/// Owner-only project-memory operation. This surface is available only after
+/// the room socket handshake; model tools do not dispatch these controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryAction {
+    List,
+    Search,
+    SetShared,
+    Delete,
+    ShareToProject,
+}
+
+/// A bounded request for the owner-facing project memory panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryRequest {
+    pub request_id: String,
+    pub action: MemoryAction,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub shared: Option<bool>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub target_project: Option<String>,
+}
+
+/// A memory search result, preserving a stable item DTO for Flutter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemorySearchItem {
+    pub item: orgbot_engine::MemoryEntry,
+    pub score: f32,
+}
 
 /// The protocol version a client must speak. Bumped on a breaking change so a
 /// stale client is refused up front rather than failing on an unknown variant.
@@ -89,6 +123,8 @@ pub enum ClientMessage {
     Resync,
     /// A liveness ping.
     Ping,
+    /// Owner control for the local project memory panel.
+    Memory { request: MemoryRequest },
 }
 
 /// A message from the server to a client.
@@ -160,6 +196,18 @@ pub enum ServerMessage {
         /// What went wrong.
         message: String,
     },
+    /// Private reply to the authenticated owner's memory request.
+    MemoryResult {
+        request_id: String,
+        action: MemoryAction,
+        ok: bool,
+        #[serde(default)]
+        entries: Vec<orgbot_engine::MemoryEntry>,
+        #[serde(default)]
+        hits: Vec<MemorySearchItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// The room has finished; the socket will close after this.
     Closed {
         /// Why.
@@ -229,12 +277,33 @@ mod tests {
     }
 
     #[test]
+    fn memory_controls_carry_owner_action_and_correlation_id() {
+        let message = ClientMessage::Memory {
+            request: MemoryRequest {
+                request_id: "room-1".into(),
+                action: MemoryAction::ShareToProject,
+                id: Some("entry".into()),
+                shared: None,
+                query: None,
+                target_project: Some("project:/workspace".into()),
+            },
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            message
+        );
+    }
+
+    #[test]
     fn older_human_message_payloads_default_reply_to() {
-        let message: ClientMessage = serde_json::from_str(
-            r#"{"type":"send_message","author":"Alex","body":"hello"}"#,
-        )
-        .unwrap();
-        assert!(matches!(message, ClientMessage::SendMessage { reply_to: None, .. }));
+        let message: ClientMessage =
+            serde_json::from_str(r#"{"type":"send_message","author":"Alex","body":"hello"}"#)
+                .unwrap();
+        assert!(matches!(
+            message,
+            ClientMessage::SendMessage { reply_to: None, .. }
+        ));
     }
 
     #[test]
@@ -247,7 +316,10 @@ mod tests {
             task: None,
         };
         let json = serde_json::to_string(&message).unwrap();
-        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), message);
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            message
+        );
     }
 
     #[test]

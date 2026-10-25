@@ -22,6 +22,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +76,10 @@ pub struct Match {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Archive {
     rooms: Vec<PriorRoom>,
+    /// Shared project memory is not part of the room checkpoint. The server
+    /// configures it from the explicit project scope after opening a room.
+    #[serde(skip, default)]
+    memory: Arc<Mutex<Option<crate::memory::MemoryRepository>>>,
 }
 
 /// How many matches a search returns.
@@ -97,7 +102,10 @@ impl Archive {
                 _ => {}
             }
         }
-        Self { rooms }
+        Self {
+            rooms,
+            ..Self::default()
+        }
     }
 
     /// The rooms held.
@@ -108,6 +116,150 @@ impl Archive {
     /// Whether anything was found.
     pub fn is_empty(&self) -> bool {
         self.rooms.is_empty()
+    }
+
+    /// Attach a local memory store for an explicitly supplied project scope.
+    ///
+    /// This is called by the local server after room configuration is checked.
+    /// An empty project scope is rejected instead of widening visibility.
+    pub fn configure_memory(
+        &self,
+        root: impl AsRef<Path>,
+        project_scope: &str,
+    ) -> Result<(), crate::memory::MemoryError> {
+        let repository = crate::memory::MemoryRepository::open(root, project_scope)?;
+        let mut slot = self
+            .memory
+            .lock()
+            .map_err(|_| std::io::Error::other("memory lock poisoned"))?;
+        *slot = Some(repository);
+        Ok(())
+    }
+
+    /// Whether this room has an explicitly configured project memory store.
+    pub fn has_memory(&self) -> bool {
+        self.memory.lock().ok().is_some_and(|slot| slot.is_some())
+    }
+
+    /// Clone the configured project repository handle without doing memory
+    /// I/O. Callers can move it to a blocking worker after releasing the
+    /// engine lock; no scope is inferred when memory is unconfigured.
+    pub fn memory_repository(
+        &self,
+    ) -> Result<Option<crate::memory::MemoryRepository>, crate::memory::MemoryError> {
+        let slot = self
+            .memory
+            .lock()
+            .map_err(|_| std::io::Error::other("memory lock poisoned"))?;
+        Ok(slot.clone())
+    }
+
+    /// Search shared notes in the configured project. No configured scope is
+    /// treated as an empty result rather than a global fallback.
+    pub fn search_memory(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::memory::MemoryHit>, crate::memory::MemoryError> {
+        let slot = self
+            .memory
+            .lock()
+            .map_err(|_| std::io::Error::other("memory lock poisoned"))?;
+        match slot.as_ref() {
+            Some(repository) => repository.search(query, limit),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Save a note to the active project, optionally tying it to completed
+    /// room work. Automatic extraction supplies the task metadata directly.
+    pub fn remember(
+        &self,
+        title: &str,
+        content: &str,
+        source_room: Option<&str>,
+        source_task: Option<&str>,
+    ) -> Result<crate::memory::MemoryEntry, crate::memory::MemoryError> {
+        let slot = self
+            .memory
+            .lock()
+            .map_err(|_| std::io::Error::other("memory lock poisoned"))?;
+        let repository = slot
+            .as_ref()
+            .ok_or(crate::memory::MemoryError::InvalidScope)?;
+        repository.add(title, content, source_room, source_task)
+    }
+
+    /// Return entries for the owner-facing project memory view.
+    pub fn memory_entries(
+        &self,
+    ) -> Result<Vec<crate::memory::MemoryEntry>, crate::memory::MemoryError> {
+        let slot = self
+            .memory
+            .lock()
+            .map_err(|_| std::io::Error::other("memory lock poisoned"))?;
+        match slot.as_ref() {
+            Some(repository) => repository.list(),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Change visibility or delete a note in the current project. These
+    /// methods are for owner-controlled server operations, not model tools.
+    pub fn set_memory_shared(
+        &self,
+        id: &str,
+        shared: bool,
+    ) -> Result<crate::memory::MemoryEntry, crate::memory::MemoryError> {
+        let slot = self
+            .memory
+            .lock()
+            .map_err(|_| std::io::Error::other("memory lock poisoned"))?;
+        slot.as_ref()
+            .ok_or(crate::memory::MemoryError::InvalidScope)?
+            .set_shared(id, shared)
+    }
+
+    /// Permanently delete a note from the current project.
+    pub fn delete_memory(&self, id: &str) -> Result<(), crate::memory::MemoryError> {
+        let slot = self
+            .memory
+            .lock()
+            .map_err(|_| std::io::Error::other("memory lock poisoned"))?;
+        slot.as_ref()
+            .ok_or(crate::memory::MemoryError::InvalidScope)?
+            .delete(id)
+    }
+
+    /// Copy one note to another explicitly named project scope.
+    pub fn share_memory_to_project(
+        &self,
+        id: &str,
+        root: impl AsRef<Path>,
+        target_scope: &str,
+    ) -> Result<crate::memory::MemoryEntry, crate::memory::MemoryError> {
+        let slot = self
+            .memory
+            .lock()
+            .map_err(|_| std::io::Error::other("memory lock poisoned"))?;
+        slot.as_ref()
+            .ok_or(crate::memory::MemoryError::InvalidScope)?
+            .share_to_project(id, root, target_scope)
+    }
+
+    /// Extract a completed task into the current project's shared knowledge
+    /// store without a model call.
+    pub fn capture_completed_work(
+        &self,
+        room: &str,
+        task: &str,
+        title: &str,
+        brief: &str,
+        decisions: &[String],
+        artifact_names: &[String],
+    ) -> Result<crate::memory::MemoryEntry, crate::memory::MemoryError> {
+        let content = crate::memory::completed_work_content(brief, decisions, artifact_names);
+        self.remember(title, &content, Some(room), Some(task))
     }
 
     /// Work resembling `query`, closest first.
@@ -259,21 +411,27 @@ fn distil(path: &Path) -> Option<PriorRoom> {
             let Some(task) = artifact.get("task").and_then(serde_json::Value::as_str) else {
                 continue;
             };
-            by_task.entry(task.to_string()).or_default().push(PriorArtifact {
-                id: id.clone(),
-                name: artifact
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("untitled")
-                    .to_string(),
-            });
+            by_task
+                .entry(task.to_string())
+                .or_default()
+                .push(PriorArtifact {
+                    id: id.clone(),
+                    name: artifact
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("untitled")
+                        .to_string(),
+                });
         }
     }
 
     let mut tasks = Vec::new();
     if let Some(board) = engine.get("tasks").and_then(|t| t.as_object()) {
         for (id, task) in board {
-            let state = task.get("state").and_then(serde_json::Value::as_str).unwrap_or("");
+            let state = task
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
             // Drafts and work nobody finished are not worth offering as prior
             // art; what is worth offering is what was actually produced.
             let delivered = state == "submitted";
@@ -403,7 +561,10 @@ mod tests {
         let archive = Archive::load(std::slice::from_ref(&path), None);
         let hits = archive.search("multi-part artifact pagination read defect");
 
-        assert!(!hits.is_empty(), "the work named by the query must be found");
+        assert!(
+            !hits.is_empty(),
+            "the work named by the query must be found"
+        );
         assert_eq!(
             hits[0].task.title,
             "multi-part artifacts cannot be read past part 1"
@@ -430,7 +591,9 @@ mod tests {
         );
         let archive = Archive::load(std::slice::from_ref(&path), None);
         assert!(
-            archive.search("write the quarterly investor update").is_empty(),
+            archive
+                .search("write the quarterly investor update")
+                .is_empty(),
             "sharing `quarterly` is not being about the same thing"
         );
         let _ = std::fs::remove_file(path);
@@ -461,7 +624,9 @@ mod tests {
             serde_json::json!({}),
         );
         let archive = Archive::load(std::slice::from_ref(&path), None);
-        assert!(archive.search("write the marketing launch email").is_empty());
+        assert!(archive
+            .search("write the marketing launch email")
+            .is_empty());
         let _ = std::fs::remove_file(path);
     }
 

@@ -325,10 +325,7 @@ async fn connect_one(
         McpTransport::Http { url, headers } => Channel::Http {
             url: url.clone(),
             headers: headers.clone(),
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(60))
-                .build()
-                .map_err(|e| e.to_string())?,
+            client: http_client()?,
             session: Arc::new(Mutex::new(HttpSession::default())),
         },
     };
@@ -378,6 +375,16 @@ async fn connect_one(
         tools,
         channel,
     })
+}
+
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        // Managed MCP endpoints can carry owner-provided credentials and
+        // session IDs. A redirect may send those headers to another host.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())
 }
 
 fn strip_inherited_credentials(
@@ -957,6 +964,85 @@ mod tests {
         assert!(!outcome.is_error);
         assert!(outcome.content.contains("mock tool completed"));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_http_mcp_never_follows_cross_host_307_or_308() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        for status in [307, 308] {
+            let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let destination_address = destination.local_addr().unwrap();
+            let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin_address = origin.local_addr().unwrap();
+            let origin_task = tokio::spawn(async move {
+                let (stream, _) = origin.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).await.unwrap();
+                let mut headers = BTreeMap::new();
+                let mut content_length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).await.unwrap();
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':') {
+                        match name.trim().to_ascii_lowercase().as_str() {
+                            "content-length" => content_length = value.trim().parse().unwrap(),
+                            _ => {
+                                headers.insert(
+                                    name.trim().to_ascii_lowercase(),
+                                    value.trim().to_owned(),
+                                );
+                            }
+                        }
+                    }
+                }
+                let mut body = vec![0; content_length];
+                reader.read_exact(&mut body).await.unwrap();
+                assert_eq!(
+                    headers.get("x-api-key").map(String::as_str),
+                    Some("owner-secret")
+                );
+                assert_eq!(
+                    headers.get("mcp-session-id").map(String::as_str),
+                    Some("origin-session")
+                );
+                let response = format!(
+                    "HTTP/1.1 {status} Redirect\r\nLocation: http://{destination_address}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+            });
+
+            let channel = Channel::Http {
+                url: format!("http://{origin_address}/mcp"),
+                headers: BTreeMap::from([("x-api-key".into(), "owner-secret".into())]),
+                client: http_client().unwrap(),
+                session: Arc::new(Mutex::new(HttpSession {
+                    session_id: Some("origin-session".into()),
+                    protocol_version: Some(PROTOCOL_VERSION.into()),
+                })),
+            };
+            assert!(
+                channel
+                    .request(json!({"method": "tools/call", "params": {}}))
+                    .await
+                    .is_err()
+            );
+            origin_task.await.unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(150), destination.accept())
+                    .await
+                    .is_err(),
+                "HTTP {status} must not forward credentials or issue a request to another host"
+            );
+        }
     }
 
     /// Text content is what a model reads; the envelope is not.

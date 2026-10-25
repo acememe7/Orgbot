@@ -9,11 +9,18 @@ import 'package:orgbot_app/workspace/desktop_files.dart';
 Future<void> main() async {
   TestWidgetsFlutterBinding.ensureInitialized();
   var ffmpegAvailable = false;
+  var ffprobeAvailable = false;
   try {
     final probe = await Process.run('ffmpeg', ['-version'], runInShell: false);
     ffmpegAvailable = probe.exitCode == 0;
   } on ProcessException {
     // The optional thumbnail test is skipped when FFmpeg is not installed.
+  }
+  try {
+    final probe = await Process.run('ffprobe', ['-version'], runInShell: false);
+    ffprobeAvailable = probe.exitCode == 0;
+  } on ProcessException {
+    // Video analysis is optional when FFprobe is not installed.
   }
 
   test('text previews reject binary and oversized content', () {
@@ -153,6 +160,67 @@ Future<void> main() async {
       }
     },
     skip: !ffmpegAvailable,
+  );
+
+  test(
+    'video attachments store a timestamped bounded frame sample and original',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'orgbot-video-analysis-',
+      );
+      final video = File('${root.path}/short.mp4');
+      final attachmentRoot = Directory('${root.path}/room/attachments')
+        ..createSync(recursive: true);
+      try {
+        final encoded = await Process.run('ffmpeg', [
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-nostdin',
+          '-f',
+          'lavfi',
+          '-i',
+          'color=c=blue:s=64x64:r=2:d=0.5',
+          '-an',
+          '-c:v',
+          'mpeg4',
+          '-y',
+          video.path,
+        ], runInShell: false);
+        expect(encoded.exitCode, 0, reason: '${encoded.stderr}');
+        final file = await DesktopFiles.stageLocalFile(
+          roomId: 'room_test',
+          root: attachmentRoot,
+          sourcePath: video.path,
+          name: 'short.mp4',
+          mimeType: 'video/mp4',
+        );
+        expect(file.images, 1);
+        expect(file.hasText, isTrue);
+        expect(file.note, contains('audio and full motion are not analyzed'));
+        final folder = Directory('${attachmentRoot.path}/${file.id}');
+        expect(
+          await File('${folder.path}/original').length(),
+          await video.length(),
+        );
+        expect(
+          await File('${folder.path}/image-0.jpg').length(),
+          greaterThan(8),
+        );
+        final context = await File('${folder.path}/context.txt').readAsString();
+        expect(context, contains('0.00s'));
+        expect(context, contains('not represent full motion'));
+        final manifest = ChatFile.fromJson(
+          jsonDecode(await File('${folder.path}/manifest.json').readAsString())
+              as Map<String, Object?>,
+        );
+        expect(manifest.images, 1);
+        expect(manifest.note, contains('Original retained'));
+      } finally {
+        await root.delete(recursive: true);
+      }
+    },
+    skip: !ffmpegAvailable || !ffprobeAvailable,
   );
 
   test(

@@ -25,12 +25,16 @@ void main() {
   test(
     'Library session notifications track room previews and detach on stop',
     () async {
+      final fixture = await Directory.systemTemp.createTemp(
+        "orgbot-notifications-",
+      );
+      addTearDown(() => fixture.delete(recursive: true));
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       const pathProvider = MethodChannel('plugins.flutter.io/path_provider');
       messenger.setMockMethodCallHandler(
         pathProvider,
-        (call) async => Directory.systemTemp.path,
+        (call) async => fixture.path,
       );
       final previousOverrides = HttpOverrides.current;
       HttpOverrides.global = _RealHttpOverrides();
@@ -53,7 +57,10 @@ void main() {
       final session = library.session(room);
       var shellNotifications = 0;
       library.addListener(() => shellNotifications++);
-      addTearDown(library.dispose);
+      addTearDown(() async {
+        await session.stop();
+        library.dispose();
+      });
 
       await session.start();
       expect(session.phase, RoomLaunch.running, reason: session.error);

@@ -12,6 +12,7 @@ import 'dart:convert';
 import '../workspace/workspace.dart';
 import '../workspace/attachments.dart';
 import '../orgbot/desktop_integrations.dart';
+import '../orgbot/allowances.dart';
 import '../protocol/models.dart' show ChatFile;
 
 import 'package:flutter/foundation.dart';
@@ -76,6 +77,9 @@ class EngineRoomController extends ChangeNotifier {
   WorkspaceConnection? workspace;
   bool _disposed = false;
   int _generation = 0;
+  int _memoryRequestSequence = 0;
+  final Map<String, Completer<Map<String, Object?>>> _memoryRequests = {};
+  Set<String> _memoryProjects = const {};
   TrustHost? trustHost;
   bool _controlBusy = false;
   final _workspaceCalls = <int, WorkspaceConnection>{};
@@ -115,6 +119,9 @@ class EngineRoomController extends ChangeNotifier {
 
   /// The live room state, once connected.
   RoomStore? get store => _store;
+
+  /// Projects this desktop owner has explicitly configured for memory sharing.
+  Set<String> get memoryProjects => Set.unmodifiable(_memoryProjects);
 
   /// Whether the room is up and usable.
   bool get isRunning => phase == RoomLaunch.running;
@@ -213,6 +220,13 @@ class EngineRoomController extends ChangeNotifier {
         await library.save();
       }
 
+      final projectId = await _projectScope(room.path);
+      final knownProjects = <String>{
+        for (final knownRoom in library.rooms)
+          await _projectScope(knownRoom.path) ?? 'room:${knownRoom.id}',
+      };
+      if (projectId != null) knownProjects.add(projectId);
+      _memoryProjects = knownProjects;
       final file = buildRoomFile(
         room,
         bots,
@@ -238,11 +252,19 @@ class EngineRoomController extends ChangeNotifier {
         userName: library.userName,
         userProfile: library.userProfile,
         statePath: savedState.path,
+        projectId: projectId,
         skillsPath: await unpackBundledSkills(),
         priorBoards: await RoomArchive.otherBoards(room.id),
-        desktopIntegrations: !runsInProcess && bots.any((bot) => bot.provider.needsApiKey)
-            ? await DesktopIntegrations.discover() : null,
+        desktopIntegrations:
+            !runsInProcess && bots.any((bot) => bot.provider.needsApiKey)
+            ? await DesktopIntegrations.discover()
+            : null,
       );
+      if (!runsInProcess) {
+        file.environment.addAll(
+          await DesktopAllowances.environment(projectIds: knownProjects),
+        );
+      }
       skipped = file.skipped;
       if (file.toml.contains('[[bots]]') == false) {
         throw EngineStartError(
@@ -300,9 +322,9 @@ class EngineRoomController extends ChangeNotifier {
 
   /// Run the room as a child process and talk to it over a socket.
   Future<void> _startSubprocess(RoomFile file) async {
-    final server = await startRoom(file);
+    final server = await startRoom(file, roomId: room.id);
     if (_disposed) {
-      await server.stop();
+      await server.detach();
       return;
     }
     _server = server;
@@ -313,9 +335,15 @@ class EngineRoomController extends ChangeNotifier {
     _store?.removeListener(_changed);
     _store?.dispose();
     _client = client;
-    _archiveSubscription = client.messages.listen(
-      (message) => _archive?.append([message]),
-    );
+    _archiveSubscription = client.messages.listen((message) {
+      if (message['type'] == 'memory_result') {
+        final id = message['request_id'] as String?;
+        final pending = id == null ? null : _memoryRequests.remove(id);
+        pending?.complete(Map<String, Object?>.from(message));
+        return;
+      }
+      _archive?.append([message]);
+    });
     final store = RoomStore(client);
     _store = store;
     store.addListener(_changed);
@@ -557,6 +585,87 @@ class EngineRoomController extends ChangeNotifier {
     return true;
   }
 
+  Future<Map<String, Object?>> _memoryRequest(
+    String action, {
+    String? id,
+    bool? shared,
+    String? query,
+    String? targetProject,
+  }) async {
+    final client = _client;
+    if (client == null || client.current != LinkState.connected) {
+      throw StateError('Open the room before managing project memory.');
+    }
+    final requestId = '${room.id}-${++_memoryRequestSequence}';
+    final response = Completer<Map<String, Object?>>();
+    _memoryRequests[requestId] = response;
+    final request = <String, Object?>{
+      'request_id': requestId,
+      'action': action,
+    };
+    if (id != null) request['id'] = id;
+    if (shared != null) request['shared'] = shared;
+    if (query != null) request['query'] = query;
+    if (targetProject != null) request['target_project'] = targetProject;
+    client.send({
+      'type': 'memory',
+      'request': request,
+    });
+    try {
+      final result = await response.future.timeout(const Duration(seconds: 22));
+      if (result['ok'] != true) {
+        throw StateError(
+          result['error'] as String? ?? 'Project memory request failed.',
+        );
+      }
+      return result;
+    } finally {
+      _memoryRequests.remove(requestId);
+    }
+  }
+
+  Future<List<Map<String, Object?>>> listProjectMemory() async =>
+      ((await _memoryRequest('list'))['entries'] as List)
+          .cast<Map>()
+          .map((entry) => entry.cast<String, Object?>())
+          .toList(growable: false);
+
+  Future<List<Map<String, Object?>>> searchProjectMemory(String query) async =>
+      ((await _memoryRequest('search', query: query))['hits'] as List)
+          .cast<Map>()
+          .map((hit) => hit.cast<String, Object?>())
+          .toList(growable: false);
+
+  Future<List<Map<String, Object?>>> setProjectMemoryShared(
+    String id,
+    bool shared,
+  ) async =>
+      ((await _memoryRequest('set_shared', id: id, shared: shared))['entries']
+              as List)
+          .cast<Map>()
+          .map((entry) => entry.cast<String, Object?>())
+          .toList(growable: false);
+
+  Future<List<Map<String, Object?>>> deleteProjectMemory(String id) async =>
+      ((await _memoryRequest('delete', id: id))['entries'] as List)
+          .cast<Map>()
+          .map((entry) => entry.cast<String, Object?>())
+          .toList(growable: false);
+
+  Future<List<Map<String, Object?>>> shareProjectMemory(
+    String id,
+    String targetProject,
+  ) async =>
+      ((await _memoryRequest(
+                'share_to_project',
+                id: id,
+                targetProject: targetProject,
+              ))['entries']
+              as List)
+          .cast<Map>()
+          .map((entry) => entry.cast<String, Object?>())
+          .toList(growable: false);
+
   /// Pause or resume, depending on where the room is.
   Future<void> reconnectWorkspace() async {
     if (_controlBusy || _disposed || _workspaceCalls.isNotEmpty) return;
@@ -611,7 +720,7 @@ class EngineRoomController extends ChangeNotifier {
     }
   }
 
-  Future<void> _teardown() async {
+  Future<void> _teardown({bool stopServer = false}) async {
     _renewalTimer?.cancel();
     _renewalTimer = null;
     _providerEnvironment = {};
@@ -628,11 +737,22 @@ class EngineRoomController extends ChangeNotifier {
     _store?.removeListener(_changed);
     await _archiveSubscription?.cancel();
     _archiveSubscription = null;
+    for (final request in _memoryRequests.values) {
+      if (!request.isCompleted) {
+        request.completeError(StateError('Room connection closed.'));
+      }
+    }
+    _memoryRequests.clear();
     await _archive?.close();
     _archive = null;
     await _client?.close();
     _client = null;
-    await _server?.stop();
+    final server = _server;
+    if (stopServer) {
+      await server?.stop();
+    } else {
+      await server?.detach();
+    }
     _server = null;
     await _background(false);
   }
@@ -646,7 +766,7 @@ class EngineRoomController extends ChangeNotifier {
       }
     }
     ++_generation;
-    await _teardown();
+    await _teardown(stopServer: true);
     _to(RoomLaunch.closed);
   }
 
@@ -657,6 +777,19 @@ class EngineRoomController extends ChangeNotifier {
     _store?.removeListener(_changed);
     unawaited(_teardown().whenComplete(() => _store?.dispose()));
     super.dispose();
+  }
+}
+
+/// Project memory is shared only for an existing local folder. A remote or
+/// not-yet-created path stays room-scoped until the owner selects a project.
+Future<String?> _projectScope(String path) async {
+  if (path.trim().isEmpty) return null;
+  final directory = Directory(expandHome(path));
+  if (!await directory.exists()) return null;
+  try {
+    return 'project:${await directory.resolveSymbolicLinks()}';
+  } on FileSystemException {
+    return null;
   }
 }
 
