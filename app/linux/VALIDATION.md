@@ -1,3 +1,28 @@
+# OrgBots dock association 1.8.1 — 2026-10-25
+
+- [x] Corrected the launcher's `StartupWMClass` from `orgbot_app` to
+  `com.orgbot.app`, matching the live GTK application/window identity. The
+  installed icon itself was already correct and resolved through the GTK theme.
+- [x] Applied a new per-user `~/.local/share/applications/orgbot.desktop`
+  override to the installed 1.8.0 app. No existing local launcher was replaced.
+  GNOME refreshed the dock to the OrgBots icon without restarting the app or
+  rooms; the existing app PID remained 3945099. Visual evidence:
+  `/tmp/orgbots-dock-after-launcher-fix.png`.
+- [x] Desktop-file validation and packaging fixtures passed. The corrected
+  launcher is in the 1.8.1 package; application/engine/icon bytes match the
+  validated 1.8.0 builds. No application or engine code changed.
+- [x] Final scoped Astra source, package, visible dock and claims review
+  approved; no required corrections remain.
+
+Package: `app/orgbot_1.8.1_amd64.deb`, 15,299,906 bytes.
+SHA-256: `5ecd12c1c1563e19464c6c39dda630f7b6552b65d2f6ad8e58bc9e2fda7acf46`.
+The package has not been system-installed by this change; the local override
+provides the immediate fix. Wayland was not checked. Desktop database refresh
+reported an unrelated pre-existing malformed `gnome-control-center.desktop`;
+the OrgBots entry resolved and the dock refreshed successfully.
+
+---
+
 # OrgBots Linux desktop 1.8.0 — 2026-10-25
 
 - [x] Short desktop transitions honor reduced motion. Hidden pages stop their

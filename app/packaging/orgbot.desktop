@@ -8,4 +8,4 @@ Icon=orgbot
 Terminal=false
 Categories=Development;Utility;
 Keywords=AI;agents;bots;chat;tasks;
-StartupWMClass=orgbot_app
+StartupWMClass=com.orgbot.app
