@@ -22,7 +22,7 @@ class FakeClient implements RoomClient {
   @override
   void send(Map<String, Object?> m) {}
   @override
-  void sendMessage(String a, String b, {String? taskId}) {}
+  void sendMessage(String a, String b, {String? taskId, String? replyTo}) {}
   @override
   void answerBot(String t, String a) {}
   @override
@@ -80,6 +80,6 @@ void main() {
     expect(find.text('ship the notes'), findsOneWidget);
     expect(find.text('@lead'), findsOneWidget);
     expect(find.text('Write the notes'), findsOneWidget);
-    expect(find.text('Message the room…'), findsOneWidget);
+    expect(find.text('Message or @mention a teammate…'), findsOneWidget);
   });
 }

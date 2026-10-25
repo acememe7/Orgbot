@@ -23,11 +23,13 @@ import '../workspace/workspace_screen.dart';
 import '../workspace/workspace.dart';
 import '../workspace/attachments.dart';
 import '../protocol/models.dart' show ChatFile;
+import '../protocol/models.dart' show ChatMessage;
 import '../orgbot/room_check.dart';
 import '../state/room_store.dart';
 import 'brand.dart';
 import 'room_widgets.dart';
 import 'polish.dart';
+import 'desktop_project_pane.dart';
 
 /// Runs a saved room on the engine and shows it.
 class EngineRoomScreen extends StatefulWidget {
@@ -36,11 +38,15 @@ class EngineRoomScreen extends StatefulWidget {
     required this.room,
     required this.library,
     this.displayName,
+    this.embedded = false,
+    this.desktopLayout,
   });
 
   final defs.RoomDef room;
   final Library library;
   final String? displayName;
+  final bool embedded;
+  final bool? desktopLayout;
 
   @override
   State<EngineRoomScreen> createState() => _EngineRoomScreenState();
@@ -65,6 +71,12 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   bool _needsStartConfirmation = false;
   String? _startCheckError;
   bool _startRequested = false;
+  ChatMessage? _replyTo;
+  final FocusNode _composeFocus = FocusNode();
+  bool _showInspector = true;
+  int _inspector = 0;
+  double _inspectorWidth = 390;
+  bool get _desktop => widget.desktopLayout ?? canRunAgentClis;
 
   /// Below this the rail becomes a tab rather than a column.
   static const double _wide = 1000;
@@ -76,7 +88,7 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
     _needsStartConfirmation = canRunAgentClis && _desktopStartable;
     _checkingFreshRoom = _needsStartConfirmation;
     _attachments = RoomAttachments(widget.room.id);
-    if (Platform.isAndroid) {
+    if (Platform.isAndroid || (Platform.isLinux && _desktop)) {
       _preparingAttachments = true;
       _loadAttachments();
     }
@@ -207,6 +219,7 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
     _controller.draft = _input.text;
     _controller.trustHost = null;
     _input.dispose();
+    _composeFocus.dispose();
     _memory.dispose();
     _scroll.dispose();
     super.dispose();
@@ -239,6 +252,7 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
         widget.displayName ?? widget.library.userName,
         text,
         files: files,
+        replyTo: _replyTo?.id,
       )) {
         _attachmentError(
           _controller.error ??
@@ -249,7 +263,10 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
       _controller.draft = '';
       if (mounted) {
         _input.clear();
-        setState(() => _files = []);
+        setState(() {
+          _files = [];
+          _replyTo = null;
+        });
       }
       if (files.isNotEmpty) await _attachments.saveDraft([]);
     } catch (e) {
@@ -263,20 +280,29 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   Widget build(BuildContext context) {
     final store = _controller.store;
     final wide = MediaQuery.sizeOf(context).width >= _wide;
+    final body = store != null
+        ? _room(store, wide)
+        : _checkingFreshRoom || _needsStartConfirmation
+        ? _freshRoomStart()
+        : _controller.phase == RoomLaunch.failed
+        ? _failure()
+        : _starting();
 
     return Scaffold(
       appBar: _appBar(store),
-      body: store != null
-          ? _room(store, wide)
-          : _checkingFreshRoom
-          ? _freshRoomStart()
-          : _needsStartConfirmation
-          ? _freshRoomStart()
-          : switch (_controller.phase) {
-              RoomLaunch.failed => _failure(),
-              RoomLaunch.running when store != null => _room(store, wide),
-              _ => _starting(),
-            },
+      body: store == null && _desktop && _showInspector
+          ? LayoutBuilder(
+              builder: (context, constraints) => constraints.maxWidth < 850
+                  ? body
+                  : Row(
+                      children: [
+                        Expanded(child: body),
+                        const VerticalDivider(width: 1),
+                        SizedBox(width: 390, child: _projectPane()),
+                      ],
+                    ),
+            )
+          : body,
     );
   }
 
@@ -297,10 +323,10 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
                 style: Theme.of(context).textTheme.titleLarge,
               ),
               const SizedBox(height: 10),
-              const Text(
-                'Provider subscription or API allowance is used while agents '
-                'work. Viewing an idle room does not use it. The turn limit '
-                'pauses the room by turn count; it is not an exact token cap.',
+              Text(
+                widget.room.maxTurns == 0
+                    ? 'Work continues until the task is finished or you pause. Active agents use provider allowance; idle sessions wait without model calls.'
+                    : 'Active agents use provider allowance. This session pauses after ${widget.room.maxTurns} turns; this is not an exact token cap.',
                 textAlign: TextAlign.center,
               ),
               if (_checkingFreshRoom) ...[
@@ -329,6 +355,27 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
     );
   }
 
+  Widget _projectPane() => DesktopProjectPane(
+    projectPath: widget.room.path,
+    roomId: widget.room.id,
+    onProjectSelected: (path) async {
+      widget.room.path = path;
+      await widget.library.save();
+      if (mounted) {
+        setState(() {});
+        if (_controller.isRunning) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Project saved. Stop and reopen this session to apply it to running agents.',
+              ),
+            ),
+          );
+        }
+      }
+    },
+  );
+
   PreferredSizeWidget _appBar(RoomStore? store) {
     final scheme = Theme.of(context).colorScheme;
     final state = _controller.phase == RoomLaunch.failed
@@ -337,7 +384,8 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
         ? 'Saved'
         : store?.runStateLabel ?? 'Active';
     return AppBar(
-      titleSpacing: 0,
+      automaticallyImplyLeading: !widget.embedded,
+      titleSpacing: widget.embedded ? 22 : 0,
       toolbarHeight: 68,
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -358,6 +406,14 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
         ],
       ),
       actions: [
+        if (_desktop)
+          IconButton(
+            tooltip: _showInspector
+                ? 'Hide project panel'
+                : 'Show project panel',
+            onPressed: () => setState(() => _showInspector = !_showInspector),
+            icon: const Icon(Icons.space_dashboard_outlined),
+          ),
         if (store != null)
           IconButton(
             tooltip: !_controller.isRunning
@@ -381,8 +437,8 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
           onSelected: (value) async {
             if (value == 'reconnect') await _controller.reconnectWorkspace();
             if (value == 'stop') {
-              await widget.library.stopRoom(widget.room.id);
-              if (mounted) Navigator.pop(context);
+              await _controller.stop();
+              if (mounted && !widget.embedded) Navigator.pop(context);
             }
           },
           itemBuilder: (_) => [
@@ -507,15 +563,29 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
             controller: _scroll,
             attachmentRoot: _attachmentRoot,
             onOpenAttachment: _openAttachment,
+            onReply: (message) {
+              setState(() => _replyTo = message);
+              _composeFocus.requestFocus();
+            },
           ),
         ),
         Composer(
           controller: _input,
+          focusNode: _composeFocus,
+          replyTo: _replyTo,
+          replyAuthor: _replyTo == null
+              ? null
+              : _replyTo!.author.isHuman
+              ? _replyTo!.author.name ?? 'You'
+              : store.handleFor(_replyTo!.author.agentId),
+          onCancelReply: () => setState(() => _replyTo = null),
           onSend: _send,
           mentions: [for (final bot in store.agents) bot.handle],
           attachments: _files,
           attachmentRoot: _attachmentRoot,
-          onAttach: Platform.isAndroid ? _pickAttachments : null,
+          onAttach: Platform.isAndroid || (Platform.isLinux && _desktop)
+              ? _pickAttachments
+              : null,
           onRemoveAttachment: _removeAttachment,
           onOpenAttachment: _openAttachment,
           busy: _preparingAttachments || _sending,
@@ -523,6 +593,7 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
         ),
       ],
     );
+    if (_desktop) return _desktopRoom(store, chat, problem);
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 1100),
@@ -617,6 +688,165 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _desktopRoom(RoomStore store, Widget chat, String? problem) {
+    final scheme = Theme.of(context).colorScheme;
+    final panel = Column(
+      children: [
+        Container(
+          height: 48,
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+          ),
+          child: Row(
+            children: [
+              for (final entry in [
+                (Icons.folder_open, 'Project'),
+                (Icons.checklist, 'Work'),
+                (Icons.people_outline, 'Team'),
+                (Icons.history, 'Memory'),
+              ].indexed)
+                Expanded(
+                  child: Tooltip(
+                    message: entry.$2.$2,
+                    child: InkWell(
+                      onTap: () => setState(() => _inspector = entry.$1),
+                      child: Container(
+                        height: 48,
+                        decoration: BoxDecoration(
+                          border: Border(
+                            bottom: BorderSide(
+                              color: _inspector == entry.$1
+                                  ? scheme.primary
+                                  : Colors.transparent,
+                              width: 2,
+                            ),
+                          ),
+                        ),
+                        child: Center(
+                          child: Icon(
+                            entry.$2.$1,
+                            size: 20,
+                            color: _inspector == entry.$1
+                                ? scheme.primary
+                                : scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: switch (_inspector) {
+            0 => _projectPane(),
+            1 => ObjectivesPane(
+              store: store,
+              onShowAllRecords: () => setState(() => _inspector = 2),
+            ),
+            2 => ActivityRail(
+              store: store,
+              showBoard: true,
+              canAnswer: _controller.isRunning,
+            ),
+            _ => _roomMemory(store),
+          },
+        ),
+      ],
+    );
+    return Column(
+      children: [
+        if (problem != null)
+          MaterialBanner(
+            content: Text(
+              problem,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+            actions: [
+              TextButton(
+                onPressed: !_controller.isRunning
+                    ? _controller.start
+                    : () => setState(() {
+                        _controller.error = null;
+                        store.lastError = null;
+                      }),
+                child: Text(!_controller.isRunning ? 'Retry' : 'Dismiss'),
+              ),
+            ],
+          ),
+        if (store.isPaused)
+          MaterialBanner(
+            content: const Text(
+              'Session paused. Resume when you want agents to continue.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: _controller.togglePause,
+                child: const Text('Resume'),
+              ),
+            ],
+          ),
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              if (!_showInspector) return chat;
+              if (constraints.maxWidth < 850) {
+                return DefaultTabController(
+                  length: 2,
+                  child: Column(
+                    children: [
+                      const TabBar(
+                        tabs: [
+                          Tab(text: 'Conversation'),
+                          Tab(text: 'Workspace'),
+                        ],
+                      ),
+                      Expanded(child: TabBarView(children: [chat, panel])),
+                    ],
+                  ),
+                );
+              }
+              final width = _inspectorWidth.clamp(
+                300.0,
+                constraints.maxWidth - 450,
+              );
+              return Row(
+                children: [
+                  Expanded(child: chat),
+                  MouseRegion(
+                    cursor: SystemMouseCursors.resizeColumn,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onHorizontalDragUpdate: (details) => setState(
+                        () => _inspectorWidth =
+                            (_inspectorWidth - details.delta.dx).clamp(
+                              300.0,
+                              constraints.maxWidth - 450,
+                            ),
+                      ),
+                      child: SizedBox(
+                        width: 7,
+                        child: Center(
+                          child: VerticalDivider(
+                            width: 1,
+                            color: scheme.outlineVariant,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: width, child: panel),
+                ],
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 

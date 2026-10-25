@@ -4,7 +4,7 @@ import 'package:orgbot_app/orgbot/library.dart';
 import 'package:orgbot_app/ui/orgbot_screen.dart';
 
 void main() {
-  testWidgets('desktop room starts conservative and keeps Android defaults', (
+  testWidgets('desktop sessions run continuously and keep Android defaults', (
     tester,
   ) async {
     Future<void> openRoomEditor(bool desktopClis) async {
@@ -16,20 +16,22 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('New room'));
+      await tester.tap(
+        desktopClis
+            ? find.text('New session').first
+            : find.byTooltip('New room'),
+      );
       await tester.pumpAndSettle();
 
       final fields = tester
           .widgetList<DropdownButton<int>>(find.byType(DropdownButton<int>))
           .toList();
-      expect(fields.first.value, desktopClis ? 100 : 2000);
+      expect(fields.first.value, desktopClis ? 0 : 2000);
       expect(
         fields.first.items!.map((item) => item.value),
-        containsAll(
-          desktopClis ? [100, 250, 500] : [500, 2000, 5000, 20000, 0],
-        ),
+        containsAll(desktopClis ? [0, 100, 500] : [500, 2000, 5000, 20000, 0]),
       );
-      expect(fields[1].value, desktopClis ? 1 : 2);
+      expect(fields[1].value, desktopClis ? 4 : 2);
       await tester.pumpWidget(const SizedBox.shrink());
       library.dispose();
     }
@@ -49,7 +51,7 @@ void main() {
       MaterialApp(home: OrgBotScreen(library: library, desktopClis: true)),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Bots').last);
+    await tester.tap(find.text('Team').first);
     await tester.pump();
     await tester.tap(find.byTooltip('New bot'));
     await tester.pump(const Duration(milliseconds: 400));

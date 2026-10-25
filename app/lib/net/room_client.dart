@@ -37,7 +37,12 @@ abstract class RoomLink {
   void send(Map<String, Object?> message);
 
   /// Say something to the room as a person.
-  void sendMessage(String author, String body, {String? taskId});
+  void sendMessage(
+    String author,
+    String body, {
+    String? taskId,
+    String? replyTo,
+  });
 
   /// Answer a bot that asked a question.
   void answerBot(String task, String answer);
@@ -203,13 +208,19 @@ class RoomClient implements RoomLink {
 
   /// Post a human message into the room.
   @override
-  void sendMessage(String author, String body, {String? taskId}) {
+  void sendMessage(
+    String author,
+    String body, {
+    String? taskId,
+    String? replyTo,
+  }) {
     final message = <String, Object?>{
       'type': 'send_message',
       'author': author,
       'body': body,
     };
     if (taskId != null) message['task'] = taskId;
+    if (replyTo != null) message['reply_to'] = replyTo;
     send(message);
   }
 
@@ -300,8 +311,18 @@ class LocalRoomClient implements RoomLink {
   }
 
   @override
-  void sendMessage(String author, String body, {String? taskId}) =>
-      send({'type': 'send_message', 'author': author, 'body': body});
+  void sendMessage(
+    String author,
+    String body, {
+    String? taskId,
+    String? replyTo,
+  }) => send({
+    'type': 'send_message',
+    'author': author,
+    'body': body,
+    'task': ?taskId,
+    'reply_to': ?replyTo,
+  });
 
   @override
   void answerBot(String task, String answer) =>

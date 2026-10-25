@@ -289,6 +289,10 @@ class ChatMessage {
     required this.taskId,
     required this.sentAt,
     this.files = const [],
+    this.replyTo,
+    this.audienceKind = 'everyone',
+    this.audienceAgents = const [],
+    this.audienceRoles = const [],
   });
 
   final String id;
@@ -298,21 +302,32 @@ class ChatMessage {
   final String? taskId;
   final Timestamp sentAt;
   final List<ChatFile> files;
+  final String? replyTo;
+  final String audienceKind;
+  final List<String> audienceAgents;
+  final List<String> audienceRoles;
 
-  factory ChatMessage.fromJson(Map<String, Object?> json) => ChatMessage(
-    id: json['id'] as String? ?? '',
-    author: Author.fromJson(
-      (json['author'] as Map?)?.cast<String, Object?>() ?? const {},
-    ),
-    body: json['body'] as String? ?? '',
-    intent: json['intent'] as String? ?? 'say',
-    taskId: json['task'] as String?,
-    sentAt: Timestamp.fromJson(json['sent_at']),
-    files: [
-      for (final f in json['files'] as List? ?? [])
-        ChatFile.fromJson((f as Map).cast<String, Object?>()),
-    ],
-  );
+  factory ChatMessage.fromJson(Map<String, Object?> json) {
+    final audience = (json['audience'] as Map?)?.cast<String, Object?>();
+    return ChatMessage(
+      id: json['id'] as String? ?? '',
+      author: Author.fromJson(
+        (json['author'] as Map?)?.cast<String, Object?>() ?? const {},
+      ),
+      body: json['body'] as String? ?? '',
+      intent: json['intent'] as String? ?? 'say',
+      taskId: json['task'] as String?,
+      sentAt: Timestamp.fromJson(json['sent_at']),
+      files: [
+        for (final f in json['files'] as List? ?? [])
+          ChatFile.fromJson((f as Map).cast<String, Object?>()),
+      ],
+      replyTo: json['reply_to'] as String?,
+      audienceKind: audience?['kind'] as String? ?? 'everyone',
+      audienceAgents: (audience?['agents'] as List? ?? const []).cast<String>(),
+      audienceRoles: (audience?['roles'] as List? ?? const []).cast<String>(),
+    );
+  }
 }
 
 class ChatFile {

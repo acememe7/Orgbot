@@ -238,11 +238,13 @@ impl Room {
                 body,
                 task,
                 files,
+                reply_to,
             } => Control::HumanMessage {
                 author,
                 body,
                 task,
                 files,
+                reply_to,
             },
             ClientMessage::AnswerBot { task, answer } => Control::Answer { task, answer },
             ClientMessage::AnswerDecision {
@@ -281,6 +283,7 @@ impl Room {
             author: author.to_string(),
             body: body.to_string(),
             task: None,
+            reply_to: None,
         })
     }
 

@@ -29,7 +29,7 @@ class FakeClient implements RoomClient {
   @override
   void send(Map<String, Object?> m) => sent.add(m);
   @override
-  void sendMessage(String a, String b, {String? taskId}) =>
+  void sendMessage(String a, String b, {String? taskId, String? replyTo}) =>
       sent.add({'author': a, 'body': b});
   @override
   void answerBot(String t, String a) =>
@@ -243,7 +243,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('@iris'), findsOneWidget);
+    expect(find.text('Iris'), findsOneWidget);
     expect(find.text('on it'), findsOneWidget);
   });
 
@@ -276,8 +276,8 @@ void main() {
     await tester.pump();
 
     expect(find.text('Activity'), findsOneWidget);
-    expect(find.text('@iris'), findsOneWidget);
-    expect(find.text('@quill'), findsOneWidget);
+    expect(find.text('Iris'), findsOneWidget);
+    expect(find.text('Quill'), findsOneWidget);
     expect(
       find.textContaining('is working on'),
       findsOneWidget,

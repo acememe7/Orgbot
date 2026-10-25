@@ -42,13 +42,13 @@ void main() {
     final file = buildRoomFile(room(), [restored], canRunClis: true);
     expect(file.toml, contains('review_only = true'));
     expect(file.toml, contains('policy = "read_only"'));
-    expect(file.toml, contains('max_turns_per_task = 4'));
-    expect(file.toml, contains('max_open_handoffs = 2'));
+    expect(file.toml, contains('max_turns_per_task = 8'));
+    expect(file.toml, contains('max_open_handoffs = 4'));
     final worker = buildRoomFile(room(), [
       BotDef(name: 'Builder'),
     ], canRunClis: true);
     expect(worker.toml, contains('policy = "workspace_write"'));
-    expect(worker.toml, contains('max_turns_per_task = 6'));
+    expect(worker.toml, contains('max_turns_per_task = 24'));
     final phone = buildRoomFile(room(), [
       BotDef(name: 'Demo', provider: ProviderKind.scripted),
     ], canRunClis: false);
@@ -161,7 +161,7 @@ void main() {
       );
       expect(
         buildRoomFile(room(), [bot], canRunClis: true).toml,
-        isNot(contains('max_duration_ms')),
+        contains('max_duration_ms = 0'),
       );
     },
   );

@@ -44,7 +44,14 @@ pub struct Workspace {
     /// Every clone of a `Workspace` shares this, which is what makes it a
     /// room-wide queue rather than a per-bot one.
     pub gate: Arc<tokio::sync::Mutex<()>>,
-    supports_attachment_import: bool,
+    capabilities: WorkspaceCapabilities,
+}
+
+/// Operations a connected workspace host actually implements.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkspaceCapabilities {
+    pub attachment_import: bool,
+    pub git_read: bool,
 }
 
 impl Workspace {
@@ -54,7 +61,24 @@ impl Workspace {
             spec,
             tx,
             gate: Arc::new(tokio::sync::Mutex::new(())),
-            supports_attachment_import: true,
+            capabilities: WorkspaceCapabilities {
+                attachment_import: true,
+                git_read: false,
+            },
+        }
+    }
+
+    /// Construct a workspace with capabilities backed by its host.
+    pub fn with_capabilities(
+        spec: WorkspaceSpec,
+        tx: mpsc::Sender<WorkspaceCall>,
+        capabilities: WorkspaceCapabilities,
+    ) -> Self {
+        Self {
+            spec,
+            tx,
+            gate: Arc::new(tokio::sync::Mutex::new(())),
+            capabilities,
         }
     }
 
@@ -64,7 +88,7 @@ impl Workspace {
         tx: mpsc::Sender<WorkspaceCall>,
     ) -> Self {
         let mut workspace = Self::new(spec, tx);
-        workspace.supports_attachment_import = false;
+        workspace.capabilities.attachment_import = false;
         workspace
     }
 
@@ -84,7 +108,7 @@ impl Workspace {
             ),
         ];
         if self.spec.writable {
-            if self.supports_attachment_import {
+            if self.capabilities.attachment_import {
                 tools.push(tool("workspace_import_attachment", "Copy a user-attached original file into the selected working directory. Pass its attachment id from the conversation. Returns a new unique relative path; never overwrites another file. Use this when extracted text/images are insufficient, or for other file formats.", json!({"id":{"type":"string"}}), json!(["id"])));
             }
             tools.push(tool("workspace_write", "Atomically create or replace a UTF-8 file (up to 1 MiB). Parent directory must exist.", json!({"path":{"type":"string"},"content":{"type":"string"}}), json!(["path","content"])));
@@ -97,6 +121,14 @@ impl Workspace {
             if self.spec.commands {
                 tools.push(tool("workspace_run", "Run a POSIX shell command on the selected SSH computer, starting in its workspace. Output is bounded to 64 KiB. Commands default to 300 seconds; set timeout_seconds from 1 to 1800 for longer builds or tests. A command timeout stops its channel, not SSH; inspect partial effects before retrying. Shell access has the SSH account's permissions, not a directory sandbox. Do not start persistent/background processes.", json!({"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":1800}}), json!(["command"])));
             }
+        }
+        if self.capabilities.git_read {
+            tools.push(tool(
+                "workspace_git",
+                "Read repository status, a bounded diff, or recent commit history for the selected Linux workspace. This is read-only.",
+                json!({"action":{"type":"string","enum":["status","diff","log"]}}),
+                json!(["action"]),
+            ));
         }
         tools
     }
@@ -201,6 +233,52 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn workspace_tools_follow_host_capabilities_and_write_policy() {
+        let (tx, _rx) = mpsc::channel(1);
+        let workspace = Workspace::with_capabilities(
+            WorkspaceSpec {
+                label: "read-only Linux".into(),
+                root: "/tmp/project".into(),
+                writable: false,
+                commands: false,
+            },
+            tx,
+            WorkspaceCapabilities {
+                attachment_import: true,
+                git_read: true,
+            },
+        );
+        let names: Vec<_> = workspace
+            .definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(names.contains(&"workspace_git".into()));
+        assert!(!names.contains(&"workspace_import_attachment".into()));
+        assert!(!names.contains(&"workspace_write".into()));
+        assert!(!names.contains(&"workspace_mkdir".into()));
+
+        let (tx, _rx) = mpsc::channel(1);
+        let unsupported = Workspace::with_capabilities(
+            WorkspaceSpec {
+                label: "Android".into(),
+                root: "/project".into(),
+                writable: true,
+                commands: false,
+            },
+            tx,
+            WorkspaceCapabilities::default(),
+        );
+        let names: Vec<_> = unsupported
+            .definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(!names.contains(&"workspace_git".into()));
+        assert!(!names.contains(&"workspace_import_attachment".into()));
     }
     use super::*;
     use crate::Orchestrator;

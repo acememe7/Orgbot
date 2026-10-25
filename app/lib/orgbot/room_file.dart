@@ -18,6 +18,7 @@ import 'credentials.dart';
 import 'models.dart';
 import 'room_check.dart';
 import 'roles.dart';
+import 'desktop_integrations.dart';
 
 /// A room file plus the environment the server needs to run it.
 class RoomFile {
@@ -45,6 +46,7 @@ RoomFile buildRoomFile(
   String? statePath,
   String? skillsPath,
   List<String> priorBoards = const [],
+  DesktopIntegrationSnapshot? desktopIntegrations,
 }) {
   // A CLI can only run where the binary exists. Everywhere else — a phone,
   // most obviously — the same subscription is reached through its API with
@@ -91,7 +93,7 @@ RoomFile buildRoomFile(
   // the room's setting rather than whatever the engine defaults to, and so a
   // long-running room is not stopped once a day by a number nobody chose.
   buffer.writeln('[room.limits]');
-  if (!runsClis) buffer.writeln('max_duration_ms = 0');
+  buffer.writeln('max_duration_ms = 0');
   // How many bots work at once. Without this the engine runs one at a time,
   // which is why a room could hold twenty bots and still have nineteen of them
   // sitting idle at any moment.
@@ -122,7 +124,11 @@ RoomFile buildRoomFile(
       ..writeln('[[bots]]')
       ..writeln('handle = ' + _s(handle))
       ..writeln('display_name = ' + _s(bot.name.isEmpty ? handle : bot.name))
-      ..writeln('roles = [' + _s(role.key) + ']')
+      ..writeln(
+        'roles = [' +
+            bot.roles.map((key) => _s(Roles.byKey(key).key)).join(', ') +
+            ']',
+      )
       ..writeln(
         'persona = ' +
             _s(
@@ -141,8 +147,8 @@ RoomFile buildRoomFile(
       ..writeln('review_only = ${powers.reviewOnly}');
     if (runsClis) {
       buffer
-        ..writeln('max_turns_per_task = ${powers.reviewOnly ? 4 : 6}')
-        ..writeln('max_open_handoffs = 2');
+        ..writeln('max_turns_per_task = ${powers.reviewOnly ? 8 : 24}')
+        ..writeln('max_open_handoffs = 4');
     }
 
     final paired = credentials?.forProvider(bot.provider);
@@ -255,7 +261,9 @@ RoomFile buildRoomFile(
   // Without this the engine matches roles by name exactly, and work sits
   // stranded whenever the one bot holding a role is busy — which is how a
   // sixteen-bot room ended up with nine bots free and nothing moving.
-  final held = <String>{for (final bot in bots) Roles.byKey(bot.role).key};
+  final held = <String>{
+    for (final bot in bots) ...bot.roles.map((key) => Roles.byKey(key).key),
+  };
   for (final key in held) {
     final role = Roles.byKey(key);
     if (role.capabilities.isEmpty && role.fallbacks.isEmpty) continue;
@@ -282,6 +290,10 @@ RoomFile buildRoomFile(
       ..writeln('title = ' + _s(_firstLine(task)))
       ..writeln('brief = ' + _s(task))
       ..writeln();
+  }
+
+  if (runsClis) {
+    desktopIntegrations?.appendRoomConfig(buffer, environment: environment);
   }
 
   return RoomFile(buffer.toString(), environment, skipped);
@@ -327,7 +339,8 @@ String _apiKindFor(ProviderKind provider) {
 /// A bot's full standing instruction: its own persona plus its role's brief.
 String _persona(BotDef bot, RoleDef role) {
   final own = bot.persona.trim();
-  return own.isEmpty ? role.brief : own + '\n\n' + role.brief;
+  final brief = bot.roles.map((key) => Roles.byKey(key).brief).join('\n');
+  return own.isEmpty ? brief : own + '\n\n' + brief;
 }
 
 /// Drop the `[[bots]]` block currently being written, used when a bot turns

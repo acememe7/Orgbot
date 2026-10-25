@@ -32,7 +32,7 @@ Future<void> expectFreshRoomGate(WidgetTester tester, RoomLaunch phase) async {
   await library.load();
   final id =
       'start_gate_${phase.name}_${DateTime.now().microsecondsSinceEpoch}';
-  final room = RoomDef(name: 'Fresh room', id: id);
+  final room = RoomDef(name: 'Fresh room', id: id, maxTurns: 0);
   final controller = CountingRoom(room: room, library: library, phase: phase);
   library.sessions[id] = controller;
 
@@ -58,18 +58,20 @@ Future<void> expectFreshRoomGate(WidgetTester tester, RoomLaunch phase) async {
   }
   expect(find.text('Ready to start this room?'), findsOneWidget);
   expect(
-    find.textContaining('Viewing an idle room does not use it'),
+    find.textContaining(
+      'Work continues until the task is finished or you pause',
+    ),
     findsOneWidget,
   );
   expect(
-    tester
-        .widget<FilledButton>(find.byKey(const ValueKey('start-fresh-room')))
-        .onPressed,
-    isNotNull,
+    find.textContaining('idle sessions wait without model calls'),
+    findsOneWidget,
   );
+  final startButton = find.byKey(const ValueKey('start-fresh-room'));
+  expect(tester.widget<FilledButton>(startButton).onPressed, isNotNull);
   expect(controller.starts, 0);
 
-  await tester.tap(find.byKey(const ValueKey('start-fresh-room')));
+  await tester.tap(startButton);
   await tester.pump();
   expect(controller.starts, 1);
   expect(find.text('Preparing the room'), findsOneWidget);

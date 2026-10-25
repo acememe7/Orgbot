@@ -72,6 +72,7 @@ async fn restart_restores_identity_chat_and_bot_memory_without_running_again() {
             author: "Alex".into(),
             body: "Keep this decision".into(),
             task: None,
+            reply_to: None,
         })
         .await;
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -200,6 +201,7 @@ async fn attachments_reach_bot_memory_and_survive_restart_with_room_boundaries()
             author: "Alex".into(),
             body: "Inspect my study".into(),
             task: None,
+            reply_to: None,
             files: vec![id.into()],
         })
         .await;

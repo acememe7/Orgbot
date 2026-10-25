@@ -9,16 +9,19 @@
 //! no bot is actionable the session does **not** end the room — it waits for a
 //! human to say something. A group chat is meant to sit idle between requests.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use orgbot_engine::Command;
-use orgbot_proto::graph::TaskOrigin;
 use orgbot_proto::chat::Audience;
 use orgbot_proto::event::{EventEnvelope, Seq};
+use orgbot_proto::graph::TaskOrigin;
 use orgbot_proto::task::BlockReason;
-use orgbot_proto::{Author, ChatMessage, MessageIntent, RoomPhase, TaskId, TaskState, Timestamp};
+use orgbot_proto::{
+    Author, ChatMessage, MessageId, MessageIntent, RoomPhase, TaskId, TaskState, Timestamp,
+};
 use orgbot_runtime::{Orchestrator, RunOutcome};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -68,6 +71,8 @@ pub enum Control {
         body: String,
         /// The task under discussion, if any.
         task: Option<TaskId>,
+        /// The message being replied to, when this is part of a thread.
+        reply_to: Option<MessageId>,
     },
     /// A human answers a bot blocked awaiting one.
     Answer {
@@ -175,6 +180,8 @@ pub struct RoomSession {
     /// server is I/O, building a session is not, and a room that has been
     /// assembled but never run should not have left processes behind.
     mcp: Vec<orgbot_runtime::mcp_client::McpServerSpec>,
+    /// Attachment ids become importable only after their message is committed.
+    committed_attachment_ids: Arc<RwLock<HashSet<String>>>,
 }
 
 impl RoomSession {
@@ -272,7 +279,6 @@ impl RoomSession {
             orchestrator.engine_mut().set_archive(archive);
         }
 
-
         if let Some(parent) = state_path.as_ref().and_then(|path| path.parent()) {
             orchestrator.attach_attachments(parent.join("attachments"));
         }
@@ -309,6 +315,14 @@ impl RoomSession {
             snapshot: snapshot_of(&orchestrator),
             backlog: orchestrator.engine().log().to_vec(),
         }));
+        let committed_attachment_ids = Arc::new(RwLock::new(
+            orchestrator
+                .engine()
+                .transcript()
+                .iter()
+                .flat_map(|message| message.files.iter().map(|file| file.id.clone()))
+                .collect(),
+        ));
         let interrupt = Arc::new(Mutex::new(CancellationToken::new()));
         let input_token = CancellationToken::new();
         orchestrator.attach_input_interrupt(input_token.clone());
@@ -325,6 +339,7 @@ impl RoomSession {
             interrupt: interrupt.clone(),
             input_interrupt: input_interrupt.clone(),
             mcp,
+            committed_attachment_ids,
         };
         let handle = SessionHandle {
             control: control_tx,
@@ -335,6 +350,15 @@ impl RoomSession {
         };
         session.save_state()?;
         Ok((session, handle))
+    }
+
+    /// Shared, live set of attachment ids present on committed room messages.
+    pub(crate) fn committed_attachment_ids(&self) -> Arc<RwLock<HashSet<String>>> {
+        Arc::clone(&self.committed_attachment_ids)
+    }
+
+    pub(crate) fn state_path(&self) -> Option<&std::path::Path> {
+        self.state_path.as_deref()
     }
 
     /// Save completed state atomically before announcing it to clients.
@@ -577,6 +601,13 @@ impl RoomSession {
                     .into(),
             });
         }
+        *self.committed_attachment_ids.write().unwrap() = self
+            .orchestrator
+            .engine()
+            .transcript()
+            .iter()
+            .flat_map(|message| message.files.iter().map(|file| file.id.clone()))
+            .collect();
         let new: Vec<_> = self
             .orchestrator
             .engine()
@@ -663,6 +694,7 @@ impl RoomSession {
                 body,
                 task,
                 files,
+                reply_to,
             } => {
                 let root = self
                     .state_path
@@ -681,25 +713,43 @@ impl RoomSession {
                     }
                 };
                 let room = self.orchestrator.engine().room_id();
-                let audience = human_audience(&self.orchestrator.engine(), &body);
-                let mut message = ChatMessage {
+                let engine = self.orchestrator.engine();
+                let parent_author = match reply_to {
+                    Some(reply_to) => {
+                        match engine.transcript().iter().find(|m| m.id == reply_to) {
+                            Some(parent) => Some(parent.author.clone()),
+                            None => {
+                                let _ = self.events.send(ServerMessage::Error {
+                                message: "Message was not sent: the reply target is not in this room.".into(),
+                            });
+                                return ControlFlow::Continue;
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                let audience = human_audience(&engine, &body, parent_author.as_ref());
+                drop(engine);
+                let intent = if audience == Audience::Human {
+                    MessageIntent::Answer
+                } else {
+                    MessageIntent::Ask
+                };
+                let message = ChatMessage {
                     id: orgbot_proto::MessageId::new(),
                     room,
                     author: Author::Human { name: author },
                     audience,
-                    intent: MessageIntent::Ask,
+                    intent,
                     body,
                     task,
                     handoff: None,
-                    reply_to: None,
+                    reply_to,
                     attachments: vec![],
 
                     files,
                     sent_at: Timestamp::now(),
                 };
-                // A human message is addressed to the room and expects a reply,
-                // so it wakes the bots.
-                message.intent = MessageIntent::Ask;
                 let completed = self.orchestrator.engine().room().phase == RoomPhase::Completed;
                 if let Err(error) = self.orchestrator.engine_mut().apply(Command::PostMessage {
                     message: Box::new(message),
@@ -750,27 +800,24 @@ impl RoomSession {
                 // decision where it was made, not have to infer it from a
                 // task quietly becoming claimable.
                 let room = self.orchestrator.engine().room_id();
-                let _ = self
-                    .orchestrator
-                    .engine_mut()
-                    .apply(Command::PostMessage {
-                        message: Box::new(ChatMessage {
-                            id: orgbot_proto::MessageId::new(),
-                            room,
-                            author: Author::Human {
-                                name: "operator".into(),
-                            },
-                            audience: Audience::Everyone,
-                            intent: MessageIntent::Answer,
-                            body: decided,
-                            task: None,
-                            handoff: None,
-                            reply_to: None,
-                            attachments: vec![],
-                            files: vec![],
-                            sent_at: Timestamp::now(),
-                        }),
-                    });
+                let _ = self.orchestrator.engine_mut().apply(Command::PostMessage {
+                    message: Box::new(ChatMessage {
+                        id: orgbot_proto::MessageId::new(),
+                        room,
+                        author: Author::Human {
+                            name: "operator".into(),
+                        },
+                        audience: Audience::Everyone,
+                        intent: MessageIntent::Answer,
+                        body: decided,
+                        task: None,
+                        handoff: None,
+                        reply_to: None,
+                        attachments: vec![],
+                        files: vec![],
+                        sent_at: Timestamp::now(),
+                    }),
+                });
                 self.broadcast_new_events();
             }
             Control::Stop => return ControlFlow::Stop(RunOutcome::Idle),
@@ -860,8 +907,12 @@ impl RoomSession {
     /// to tear down, and a finished room should still be readable.
     fn finish(&mut self, outcome: &RunOutcome) {
         let command = match outcome {
-            RunOutcome::OutOfTime | RunOutcome::OutOfTurns => Command::PauseRoom { reason: describe(outcome) },
-            _ => Command::CloseRoom { reason: describe(outcome) },
+            RunOutcome::OutOfTime | RunOutcome::OutOfTurns => Command::PauseRoom {
+                reason: describe(outcome),
+            },
+            _ => Command::CloseRoom {
+                reason: describe(outcome),
+            },
         };
         if self.orchestrator.engine().room().phase != RoomPhase::Completed {
             let _ = self.orchestrator.engine_mut().apply(command);
@@ -876,7 +927,10 @@ impl RoomSession {
     fn close(mut self, outcome: RunOutcome) -> RunOutcome {
         // Only a genuinely finished room emits room_closed; a pause or an idle
         // wait that ended because the last client left leaves it resumable.
-        if matches!(outcome, RunOutcome::Completed | RunOutcome::OutOfTurns | RunOutcome::OutOfTime) {
+        if matches!(
+            outcome,
+            RunOutcome::Completed | RunOutcome::OutOfTurns | RunOutcome::OutOfTime
+        ) {
             self.finish(&outcome);
         }
         let _ = self.events.send(ServerMessage::Closed {
@@ -929,25 +983,43 @@ fn touches_the_board(event: &orgbot_proto::event::Event) -> bool {
 }
 
 /// Tags direct attention; the room transcript remains visible to everyone.
-fn human_audience(engine: &orgbot_engine::Engine, body: &str) -> Audience {
+fn human_audience(
+    engine: &orgbot_engine::Engine,
+    body: &str,
+    parent_author: Option<&Author>,
+) -> Audience {
     let tags: Vec<_> = body
         .split(|c: char| !(c.is_alphanumeric() || matches!(c, '@' | '_' | '-')))
         .filter_map(|word| word.strip_prefix('@'))
         .filter(|tag| !tag.is_empty())
         .collect();
-    if tags.is_empty() || tags.iter().any(|tag| tag.eq_ignore_ascii_case("all")) {
+    if tags.iter().any(|tag| tag.eq_ignore_ascii_case("all")) {
         return Audience::Everyone;
     }
-    Audience::Agents {
-        agents: engine
+    if tags.is_empty() {
+        return match parent_author {
+            Some(Author::Agent { agent }) => Audience::Agents {
+                agents: vec![*agent],
+            },
+            Some(Author::Human { .. } | Author::System) => Audience::Human,
+            None => Audience::Everyone,
+        };
+    }
+    let mut targets = Vec::new();
+    for tag in tags {
+        let matches: Vec<_> = engine
             .agents()
             .filter(|agent| {
-                tags.iter()
-                    .any(|tag| tag.eq_ignore_ascii_case(&agent.handle))
+                tag.eq_ignore_ascii_case(&agent.handle)
+                    || tag.eq_ignore_ascii_case(&agent.display_name)
             })
             .map(|agent| agent.id)
-            .collect(),
+            .collect();
+        if matches.len() == 1 && !targets.contains(&matches[0]) {
+            targets.push(matches[0]);
+        }
     }
+    Audience::Agents { agents: targets }
 }
 
 /// Whether the run loop should keep going or stop.
@@ -1006,11 +1078,22 @@ mod tests {
             let (mut session, _) = session();
             let task = session.orchestrator.engine().tasks().next().unwrap().id;
             session.finish(&outcome);
-            assert_eq!(session.orchestrator.engine().room().phase, RoomPhase::Paused);
+            assert_eq!(
+                session.orchestrator.engine().room().phase,
+                RoomPhase::Paused
+            );
             assert!(session.orchestrator.engine().task(task).is_some());
-            assert!(!session.orchestrator.engine().log().iter().any(|e| matches!(e.event, orgbot_proto::Event::RoomClosed { .. })));
+            assert!(!session
+                .orchestrator
+                .engine()
+                .log()
+                .iter()
+                .any(|e| matches!(e.event, orgbot_proto::Event::RoomClosed { .. })));
             session.handle(Control::Resume);
-            assert_eq!(session.orchestrator.engine().room().phase, RoomPhase::Running);
+            assert_eq!(
+                session.orchestrator.engine().room().phase,
+                RoomPhase::Running
+            );
             assert!(session.orchestrator.engine().task(task).is_some());
         }
     }
@@ -1040,6 +1123,7 @@ mod tests {
                     body: "Read the context I already sent".into(),
                     task: None,
                     files: vec![],
+                    reply_to: None,
                 });
                 session
                     .orchestrator
@@ -1068,6 +1152,7 @@ mod tests {
                             body: format!("Follow-up {pass}"),
                             task: None,
                             files: vec![],
+                            reply_to: None,
                         })
                         .await;
                 }
@@ -1076,7 +1161,9 @@ mod tests {
                     loop {
                         match events.recv().await.unwrap() {
                             ServerMessage::Event { envelope, .. } => {
-                                if let orgbot_proto::Event::MessagePosted { message } = envelope.event {
+                                if let orgbot_proto::Event::MessagePosted { message } =
+                                    envelope.event
+                                {
                                     if message.author.agent().is_some() {
                                         answered = true;
                                     }
@@ -1116,6 +1203,7 @@ mod tests {
             body: "Kept until resume".into(),
             task: None,
             files: vec![],
+            reply_to: None,
         });
         assert_eq!(
             session.orchestrator.engine().room().phase,
@@ -1125,26 +1213,219 @@ mod tests {
 
     #[test]
     fn human_tags_route_attention_and_ignore_email_addresses() {
-        let (session, _handle) = session();
+        let (mut session, _handle) = session();
+        let mut named_agent = session
+            .orchestrator
+            .engine()
+            .agent_by_handle("lead")
+            .unwrap()
+            .clone();
+        named_agent.display_name = "Julian".into();
+        session.orchestrator.engine_mut().update_agent(named_agent);
         let engine = session.orchestrator.engine();
         let lead = engine.agent_by_handle("lead").unwrap().id;
         assert_eq!(
-            human_audience(&engine, "@LEAD, please check"),
+            human_audience(&engine, "@LEAD, please check", None),
             Audience::Agents { agents: vec![lead] }
         );
         assert_eq!(
-            human_audience(&engine, "@lead @lead check"),
+            human_audience(&engine, "@lead @lead check", None),
             Audience::Agents { agents: vec![lead] }
         );
         assert_eq!(
-            human_audience(&engine, "@missing check"),
+            human_audience(&engine, "@Julian check", None),
+            Audience::Agents { agents: vec![lead] }
+        );
+        drop(engine);
+        let duplicate = orgbot_proto::AgentSpec::new(
+            "backup",
+            "Julian",
+            orgbot_proto::agent::ProviderRef::Scripted {
+                script: "test".into(),
+            },
+        );
+        session
+            .orchestrator
+            .engine_mut()
+            .apply(Command::JoinAgent {
+                spec: Box::new(duplicate),
+            })
+            .unwrap();
+        let engine = session.orchestrator.engine();
+        assert_eq!(
+            human_audience(&engine, "@Julian check", None),
             Audience::Agents { agents: vec![] }
         );
-        assert_eq!(human_audience(&engine, "@all hello"), Audience::Everyone);
         assert_eq!(
-            human_audience(&engine, "mail foo@lead.example"),
+            human_audience(&engine, "@missing check", None),
+            Audience::Agents { agents: vec![] }
+        );
+        assert_eq!(
+            human_audience(&engine, "@all hello", None),
             Audience::Everyone
         );
+        assert_eq!(
+            human_audience(&engine, "mail foo@lead.example", None),
+            Audience::Everyone
+        );
+        assert_eq!(
+            human_audience(&engine, "follow-up", Some(&Author::Agent { agent: lead })),
+            Audience::Agents { agents: vec![lead] }
+        );
+        assert_eq!(
+            human_audience(
+                &engine,
+                "thanks",
+                Some(&Author::Human {
+                    name: "Alex".into()
+                }),
+            ),
+            Audience::Human
+        );
+        assert_eq!(
+            human_audience(
+                &engine,
+                "@all instead",
+                Some(&Author::Agent { agent: lead }),
+            ),
+            Audience::Everyone
+        );
+    }
+
+    #[test]
+    fn attachment_import_allowlist_tracks_only_committed_message_files() {
+        let (mut session, _handle) = session();
+        let id = "att_0123456789abcdef0123456789abcdef".to_string();
+        assert!(!session
+            .committed_attachment_ids
+            .read()
+            .unwrap()
+            .contains(&id));
+        let (room, author) = {
+            let engine = session.orchestrator.engine();
+            (engine.room_id(), engine.agent_by_handle("lead").unwrap().id)
+        };
+        let mut message = ChatMessage::say(room, author, "attached file");
+        message.files.push(orgbot_proto::chat::ChatFile {
+            id: id.clone(),
+            name: "source.bin".into(),
+            mime_type: "application/octet-stream".into(),
+            bytes: 1,
+            has_text: false,
+            images: 0,
+            note: String::new(),
+        });
+        session
+            .orchestrator
+            .engine_mut()
+            .apply(Command::PostMessage {
+                message: Box::new(message),
+            })
+            .unwrap();
+        session.broadcast_new_events();
+        assert!(session
+            .committed_attachment_ids
+            .read()
+            .unwrap()
+            .contains(&id));
+    }
+
+    #[test]
+    fn human_replies_are_threaded_and_invalid_parents_are_rejected() {
+        let (mut session, handle) = session();
+        let target = session
+            .orchestrator
+            .engine()
+            .agent_by_handle("lead")
+            .unwrap()
+            .id;
+        let parent = ChatMessage::say(
+            session.orchestrator.engine().room_id(),
+            target,
+            "Can you clarify?",
+        );
+        let parent_id = parent.id;
+        session
+            .orchestrator
+            .engine_mut()
+            .apply(Command::PostMessage {
+                message: Box::new(parent),
+            })
+            .unwrap();
+
+        session.handle(Control::HumanMessage {
+            author: "Alex".into(),
+            body: "Here is the detail.".into(),
+            task: None,
+            files: vec![],
+            reply_to: Some(parent_id),
+        });
+        let reply = session
+            .orchestrator
+            .engine()
+            .transcript()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(reply.reply_to, Some(parent_id));
+        assert_eq!(
+            reply.audience,
+            Audience::Agents {
+                agents: vec![target]
+            }
+        );
+        assert_eq!(reply.intent, MessageIntent::Ask);
+        assert!(reply.wakes(target, &["coordinator".into()]));
+
+        let human_parent = ChatMessage {
+            author: Author::Human {
+                name: "Alex".into(),
+            },
+            ..ChatMessage::say(
+                session.orchestrator.engine().room_id(),
+                target,
+                "I will follow up with myself.",
+            )
+        };
+        let human_parent_id = human_parent.id;
+        session
+            .orchestrator
+            .engine_mut()
+            .apply(Command::PostMessage {
+                message: Box::new(human_parent),
+            })
+            .unwrap();
+        session.handle(Control::HumanMessage {
+            author: "Alex".into(),
+            body: "Acknowledged.".into(),
+            task: None,
+            files: vec![],
+            reply_to: Some(human_parent_id),
+        });
+        let human_reply = session
+            .orchestrator
+            .engine()
+            .transcript()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(human_reply.audience, Audience::Human);
+        assert_eq!(human_reply.intent, MessageIntent::Answer);
+
+        let before = session.orchestrator.engine().transcript().len();
+        let mut events = handle.subscribe();
+        session.handle(Control::HumanMessage {
+            author: "Alex".into(),
+            body: "This must not broadcast.".into(),
+            task: None,
+            files: vec![],
+            reply_to: Some(MessageId::new()),
+        });
+        assert_eq!(session.orchestrator.engine().transcript().len(), before);
+        assert!(matches!(
+            events.try_recv(),
+            Ok(ServerMessage::Error { message }) if message.contains("reply target is not in this room")
+        ));
     }
 
     #[test]
@@ -1287,6 +1568,7 @@ mod tests {
                 author: "Alex".into(),
                 body: "any progress?".into(),
                 task: None,
+                reply_to: None,
             })
             .await;
 
@@ -1424,6 +1706,7 @@ mod resting_tests {
                     author: "Tester".into(),
                     body: "hello?".into(),
                     task: None,
+                    reply_to: None,
                 })
                 .await,
             "the room must still be accepting messages"

@@ -8,7 +8,7 @@
 use orgbot_engine::{Command, Engine};
 use orgbot_proto::agent::{Autonomy, ProviderRef};
 use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
-use orgbot_proto::{AgentId, AgentSpec, TaskState};
+use orgbot_proto::{AgentId, AgentSpec, ChatMessage, TaskState};
 use orgbot_tools::{definitions_for, dispatch, ToolOutcome};
 use serde_json::{json, Value};
 
@@ -492,6 +492,90 @@ fn a_bot_can_be_addressed_by_handle_rather_than_by_id() {
         "post_message",
         json!({"body": "over to you", "to_agents": ["w2"], "intent": "say"}),
     );
+}
+
+#[test]
+fn chat_mentions_and_replies_target_only_the_addressed_bot() {
+    let mut f = fixture();
+    f.ok(
+        f.worker,
+        "post_message",
+        json!({"body": "@w2 can you check this?"}),
+    );
+    let mention = f.engine.transcript().last().unwrap();
+    assert_eq!(
+        mention.audience,
+        orgbot_proto::Audience::Agents {
+            agents: vec![f.worker2]
+        }
+    );
+    assert!(mention.wakes(f.worker2, &["writer".into()]));
+    assert!(!mention.wakes(f.worker, &["writer".into()]));
+
+    let parent = ChatMessage::say(f.engine.room_id(), f.worker2, "What should I check?");
+    let parent_id = parent.id;
+    f.engine
+        .apply(Command::PostMessage {
+            message: Box::new(parent),
+        })
+        .unwrap();
+    f.ok(
+        f.worker,
+        "post_message",
+        json!({"body": "Reviewing your question.", "reply_to": parent_id.to_string()}),
+    );
+    let reply = f.engine.transcript().last().unwrap();
+    assert_eq!(reply.reply_to, Some(parent_id));
+    assert_eq!(
+        reply.audience,
+        orgbot_proto::Audience::Agents {
+            agents: vec![f.worker2]
+        }
+    );
+    assert!(reply.wakes(f.worker2, &["writer".into()]));
+    assert!(!reply.wakes(f.lead, &["coordinator".into()]));
+}
+
+#[test]
+fn chat_mentions_accept_a_unique_display_name_but_reject_ambiguous_names() {
+    let mut f = fixture();
+    let mut worker = f.engine.agent(f.worker2).unwrap().clone();
+    worker.display_name = "Julian".into();
+    f.engine.update_agent(worker);
+    f.ok(
+        f.worker,
+        "post_message",
+        json!({"body": "@Julian please review"}),
+    );
+    assert_eq!(
+        f.engine.transcript().last().unwrap().audience,
+        orgbot_proto::Audience::Agents {
+            agents: vec![f.worker2]
+        }
+    );
+
+    let mut worker = f.engine.agent(f.worker).unwrap().clone();
+    worker.display_name = "Julian".into();
+    f.engine.update_agent(worker);
+    let error = f.err(
+        f.lead,
+        "post_message",
+        json!({"body": "@Julian please review"}),
+    );
+    assert!(error.contains("ambiguous"));
+    assert_eq!(f.engine.transcript().len(), 1);
+}
+
+#[test]
+fn post_message_rejects_unknown_reply_ids() {
+    let mut f = fixture();
+    let result = f.err(
+        f.worker,
+        "post_message",
+        json!({"body": "This reply must not be broadcast.", "reply_to": "msg_00000000000000000000000000000000"}),
+    );
+    assert!(result.contains("no message with that id in this room"));
+    assert!(f.engine.transcript().is_empty());
 }
 
 // ---------------------------------------------------- errors as instructions

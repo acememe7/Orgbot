@@ -11,12 +11,12 @@ from specialist_team import (
 
 
 class SpecialistTeamTest(unittest.TestCase):
-    def test_preset_has_seven_unique_keyless_bots_with_expected_policy(self):
+    def test_preset_has_ten_unique_keyless_bots_with_expected_policy(self):
         preset = load_preset()
         bots = preset["bots"]
-        self.assertEqual(len(bots), 7)
-        self.assertEqual(len({bot["id"] for bot in bots}), 7)
-        self.assertEqual(len({bot["handle"] for bot in bots}), 7)
+        self.assertEqual(len(bots), 10)
+        self.assertEqual(len({bot["id"] for bot in bots}), 10)
+        self.assertEqual(len({bot["handle"] for bot in bots}), 10)
         self.assertTrue(all(bot["apiKey"] == "" for bot in bots))
 
         by_handle = {bot["handle"]: bot for bot in bots}
@@ -33,6 +33,9 @@ class SpecialistTeamTest(unittest.TestCase):
                 "deepseek-builder": ("deepseek", "deepseek-flash", "engineer"),
                 "ollama-deepseek": ("ollama", "deepseek-v4.1-flash:1017", "researcher"),
                 "ollama-glm": ("ollama", "glm-5.3-flash", "qa"),
+                "sol": ("codex", "gpt-6.1-sol", "engineer"),
+                "mira": ("codex", "gpt-6-luna", "engineer"),
+                "ellis": ("anthropic", "claude-haiku-5-5", "writer"),
             },
         )
         self.assertEqual(
@@ -49,7 +52,7 @@ class SpecialistTeamTest(unittest.TestCase):
         self.assertTrue(by_handle["grok"]["powers"]["may_create_tasks"])
         self.assertTrue(by_handle["grok"]["powers"]["may_submit"])
         self.assertTrue(by_handle["ollama-glm"]["powers"]["may_inspect"])
-        self.assertEqual(preset["room_limits"], {"max_turns": 100, "parallel_turns": 1})
+        self.assertEqual(preset["room_limits"], {"max_turns": 0, "parallel_turns": 4})
 
     def test_transform_preserves_existing_data_and_does_not_mutate_input(self):
         preset = load_preset()
@@ -83,12 +86,12 @@ class SpecialistTeamTest(unittest.TestCase):
         self.assertEqual(transformed["user"], original["user"])
         self.assertEqual(transformed["tasks"], original["tasks"])
         self.assertEqual(transformed["bots"], preset["bots"])
-        self.assertEqual(len(transformed["bots"]), 7)
+        self.assertEqual(len(transformed["bots"]), 10)
         bot_ids = [bot["id"] for bot in preset["bots"]]
         for old, room in zip(original["rooms"], transformed["rooms"], strict=True):
             self.assertEqual(room["bots"], [{"bot_id": bot_id} for bot_id in bot_ids])
-            self.assertEqual(room["max_turns"], 100)
-            self.assertEqual(room["parallel_turns"], 1)
+            self.assertEqual(room["max_turns"], 0)
+            self.assertEqual(room["parallel_turns"], 4)
             self.assertEqual(room.get("tasks"), old.get("tasks"))
             self.assertEqual(room.get("workspace"), old.get("workspace"))
             self.assertEqual(room.get("history"), old.get("history"))
@@ -115,6 +118,21 @@ class SpecialistTeamTest(unittest.TestCase):
         self.assertNotIn("stale routing", memory)
         self.assertEqual(memory.count(_MEMORY_START), 1)
         self.assertEqual(memory.count(_MEMORY_END), 1)
+
+    def test_existing_per_bot_key_is_preserved_for_same_provider(self):
+        preset = load_preset()
+        old = copy.deepcopy(preset["bots"][4])
+        old["apiKey"] = "fixture-private-key"
+        result = replace_with_specialist_team({"bots": [old], "rooms": []})
+        self.assertEqual(result["bots"][4]["apiKey"], "fixture-private-key")
+        self.assertEqual(preset["bots"][4]["apiKey"], "")
+
+    def test_every_role_has_an_owner(self):
+        import re
+        from pathlib import Path
+        roles = set(re.findall(r"key: '([^']+)'", (Path(__file__).parents[1] / "lib/orgbot/roles.dart").read_text()))
+        assigned = {role for bot in load_preset()["bots"] for role in [bot["role"], *bot.get("additional_roles", [])]}
+        self.assertEqual(roles - assigned, set())
 
     def test_invalid_preset_is_rejected(self):
         preset = load_preset()

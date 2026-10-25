@@ -11,6 +11,7 @@ import 'dart:async';
 import 'dart:convert';
 import '../workspace/workspace.dart';
 import '../workspace/attachments.dart';
+import '../orgbot/desktop_integrations.dart';
 import '../protocol/models.dart' show ChatFile;
 
 import 'package:flutter/foundation.dart';
@@ -239,6 +240,8 @@ class EngineRoomController extends ChangeNotifier {
         statePath: savedState.path,
         skillsPath: await unpackBundledSkills(),
         priorBoards: await RoomArchive.otherBoards(room.id),
+        desktopIntegrations: !runsInProcess && bots.any((bot) => bot.provider.needsApiKey)
+            ? await DesktopIntegrations.discover() : null,
       );
       skipped = file.skipped;
       if (file.toml.contains('[[bots]]') == false) {
@@ -511,6 +514,7 @@ class EngineRoomController extends ChangeNotifier {
     String author,
     String text, {
     List<ChatFile> files = const [],
+    String? replyTo,
   }) async {
     final body = text.trim();
     if (body.isEmpty || !isRunning || _controlBusy) return false;
@@ -535,6 +539,7 @@ class EngineRoomController extends ChangeNotifier {
         'author': author,
         'body': body,
         'files': files.map((f) => f.id).toList(),
+        'reply_to': ?replyTo,
       })) {
         return false;
       }
@@ -544,6 +549,7 @@ class EngineRoomController extends ChangeNotifier {
         'author': author,
         'body': body,
         if (files.isNotEmpty) 'files': files.map((f) => f.id).toList(),
+        'reply_to': ?replyTo,
       });
     }
     _store?.addPending(author, body, files: files);

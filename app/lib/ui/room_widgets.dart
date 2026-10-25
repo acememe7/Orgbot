@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'dart:io';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -176,7 +177,9 @@ class _BotRow extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '@${entry.agent.handle}',
+                      entry.agent.displayName.isEmpty
+                          ? '@${entry.agent.handle}'
+                          : entry.agent.displayName,
                       style: const TextStyle(
                         fontWeight: FontWeight.w700,
                         fontSize: 13,
@@ -379,12 +382,14 @@ class Transcript extends StatefulWidget {
     required this.controller,
     this.attachmentRoot,
     this.onOpenAttachment,
+    this.onReply,
   });
 
   final RoomStore store;
   final ScrollController controller;
   final String? attachmentRoot;
   final void Function(ChatFile)? onOpenAttachment;
+  final ValueChanged<ChatMessage>? onReply;
 
   @override
   State<Transcript> createState() => _TranscriptState();
@@ -486,6 +491,7 @@ class _TranscriptState extends State<Transcript>
             pending: store.isPending(message),
             attachmentRoot: widget.attachmentRoot,
             onOpenAttachment: widget.onOpenAttachment,
+            onReply: widget.onReply,
           );
         },
         childCount: count,
@@ -752,6 +758,7 @@ class _Bubble extends StatelessWidget {
     this.pending = false,
     this.attachmentRoot,
     this.onOpenAttachment,
+    this.onReply,
   });
 
   final ChatMessage message;
@@ -761,6 +768,7 @@ class _Bubble extends StatelessWidget {
   final bool pending;
   final String? attachmentRoot;
   final void Function(ChatFile)? onOpenAttachment;
+  final ValueChanged<ChatMessage>? onReply;
 
   @override
   Widget build(BuildContext context) {
@@ -788,6 +796,15 @@ class _Bubble extends StatelessWidget {
     final name = isHuman
         ? (author.name ?? 'you')
         : store.handleFor(author.agentId);
+    final displayName = isHuman
+        ? name
+        : store.agents
+              .where((a) => a.id == author.agentId)
+              .firstOrNull
+              ?.displayName;
+    final parent = message.replyTo == null
+        ? null
+        : store.messages.where((m) => m.id == message.replyTo).firstOrNull;
     final color = isHuman
         ? scheme.primary
         : handleColor(
@@ -820,7 +837,9 @@ class _Bubble extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  isHuman ? name : '@$name',
+                  displayName == null || displayName.isEmpty
+                      ? name
+                      : displayName,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
@@ -847,8 +866,33 @@ class _Bubble extends StatelessWidget {
                     color: scheme.onSurfaceVariant,
                   ),
                 ),
+              if (!pending && onReply != null)
+                IconButton(
+                  tooltip: 'Reply to $name',
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.reply, size: 18),
+                  onPressed: () => onReply!(message),
+                ),
             ],
           ),
+          if (message.replyTo != null)
+            Container(
+              margin: const EdgeInsets.only(top: 8),
+              padding: const EdgeInsets.fromLTRB(10, 4, 6, 4),
+              decoration: BoxDecoration(
+                border: Border(
+                  left: BorderSide(color: scheme.primary, width: 2),
+                ),
+              ),
+              child: Text(
+                parent == null
+                    ? 'Reply to earlier message'
+                    : '${parent.author.isHuman ? parent.author.name ?? 'You' : store.handleFor(parent.author.agentId)}: ${parent.body}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
+              ),
+            ),
           const SizedBox(height: 10),
           Opacity(
             opacity: pending ? 0.7 : 1,
@@ -1111,6 +1155,10 @@ class Composer extends StatelessWidget {
     this.onOpenAttachment,
     this.busy = false,
     this.busyLabel = 'Preparing attachments…',
+    this.focusNode,
+    this.replyTo,
+    this.replyAuthor,
+    this.onCancelReply,
   });
 
   final TextEditingController controller;
@@ -1122,6 +1170,10 @@ class Composer extends StatelessWidget {
   final void Function(ChatFile)? onRemoveAttachment, onOpenAttachment;
   final bool busy;
   final String busyLabel;
+  final FocusNode? focusNode;
+  final ChatMessage? replyTo;
+  final String? replyAuthor;
+  final VoidCallback? onCancelReply;
 
   @override
   Widget build(BuildContext context) {
@@ -1137,6 +1189,47 @@ class Composer extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (replyTo != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 12, top: 4),
+              child: Row(
+                children: [
+                  Icon(Icons.reply, size: 18, color: scheme.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Reply to ${replyAuthor ?? 'message'}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: scheme.primary,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 12,
+                          ),
+                        ),
+                        Text(
+                          replyTo!.body,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: scheme.onSurfaceVariant,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Cancel reply',
+                    onPressed: onCancelReply,
+                    icon: const Icon(Icons.close, size: 18),
+                  ),
+                ],
+              ),
+            ),
           if (attachments.isNotEmpty)
             SizedBox(
               height: MediaQuery.textScalerOf(context).scale(76) + 36,
@@ -1225,30 +1318,44 @@ class Composer extends StatelessWidget {
                   },
                 ),
               Expanded(
-                child: TextField(
-                  controller: controller,
-                  enabled: !busy,
-                  minLines: 1,
-                  maxLines: 5,
-                  style: const TextStyle(fontSize: 14, height: 1.5),
-                  textInputAction: TextInputAction.send,
-                  onSubmitted: (_) {
-                    if (!busy &&
-                        (controller.text.trim().isNotEmpty ||
-                            attachments.isNotEmpty)) {
-                      onSend();
-                    }
+                child: CallbackShortcuts(
+                  bindings: {
+                    if (replyTo != null)
+                      const SingleActivator(LogicalKeyboardKey.escape): () =>
+                          onCancelReply?.call(),
+                    const SingleActivator(
+                      LogicalKeyboardKey.enter,
+                      control: true,
+                    ): () {
+                      if (!busy) onSend();
+                    },
                   },
-                  decoration: const InputDecoration(
-                    hintText: 'Message the room…',
-                    filled: false,
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    disabledBorder: InputBorder.none,
-                    contentPadding: EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 12,
+                  child: TextField(
+                    controller: controller,
+                    focusNode: focusNode,
+                    enabled: !busy,
+                    minLines: 1,
+                    maxLines: 5,
+                    style: const TextStyle(fontSize: 14, height: 1.5),
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) {
+                      if (!busy &&
+                          (controller.text.trim().isNotEmpty ||
+                              attachments.isNotEmpty)) {
+                        onSend();
+                      }
+                    },
+                    decoration: const InputDecoration(
+                      hintText: 'Message or @mention a teammate…',
+                      filled: false,
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      disabledBorder: InputBorder.none,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 12,
+                      ),
                     ),
                   ),
                 ),
@@ -1422,7 +1529,9 @@ class _FailureBanner extends StatelessWidget {
                 children: [
                   for (final entry in failing) ...[
                     Text(
-                      '@${entry.agent.handle}',
+                      entry.agent.displayName.isEmpty
+                          ? '@${entry.agent.handle}'
+                          : entry.agent.displayName,
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
                     const SizedBox(height: 8),

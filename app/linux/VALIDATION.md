@@ -1,4 +1,100 @@
-# Linux specialist workspace validation — 2026-10-25
+# OrgBots desktop sessions 1.6.0 — 2026-10-25
+
+This section supersedes the 1.5.2 behavior and roster recorded below.
+
+## Delivered and checked
+
+- [x] Persistent desktop session sidebar, conversation and resizable project/work/
+  team/memory inspector; compact windows switch the inspector to a tab.
+- [x] Reply context persists through WebSocket, FFI and room checkpoints. Replies
+  target the original agent unless explicit mentions select another recipient.
+  Bots can address agents by handle or unambiguous display name. Explicit Pause
+  parks incoming work until Resume.
+- [x] Native multi-file/folder selection, retained originals, text/image previews,
+  short-video thumbnails and system Open With; read-only Git status/diff/history.
+  Attachments accept any file format within five files/20 MiB each. Internal
+  decoding depends on available codecs; video thumbnails require FFmpeg.
+- [x] Native CLIs retain installed MCP/skills/plugins. Compatible stdio and
+  Streamable HTTP MCP configuration and local skill folders are discovered for
+  API bots. Unsupported policy filters, legacy SSE and plugin-only hooks are not
+  imported as unrestricted tools. The UI distinguishes configured from connected.
+  Local discovery found seven configured MCP entries, one unsupported entry and
+  208 skill folders; those counts do not establish live connectivity.
+- [x] CLI conversation IDs persist across engine restarts, bound to CLI/model/
+  project and policy. Session files are private. MCP credentials stay in the
+  process environment, not generated room TOML or the discovery UI.
+- [x] Desktop defaults and both saved rooms use no total turn/time cutoff and
+  four concurrent turns. Idle rooms make no inference requests. Worker episodes
+  retain 24 model/tool rounds, reviewers eight; individual CLI invocations retain
+  the existing 600-second timeout. Failures, provider limits, Pause and host sleep
+  still interrupt work. This is not a background service or a spending cap.
+- [x] Sol uses extra-high reasoning. OrgBots room instructions retain Luna
+  delegation and assign reviews to its team, without a duplicate mandatory
+  nested Astra review. Global Codex instructions were not changed.
+
+## Saved team and data
+
+| Name | Model | Assignment |
+| --- | --- | --- |
+| Astra | `gpt-6-astra` | Code review and security; review-only |
+| Julian | `claude-opus-5-5` | Architecture, design, product decisions and selective review |
+| Miles | `grok-4.7` | Coordination, support and delivery |
+| Finn | `grok-4.7` | Fast changes and general implementation |
+| Devon | `deepseek-flash` | Backend, data and implementation |
+| Rhea | `deepseek-v4.1-flash:1017` via Ollama | Research and analysis |
+| Quinn | `glm-5.3-flash` via Ollama | QA and reproduction |
+| Sol | `gpt-6.1-sol` | Difficult implementation, integration and operations |
+| Mira | `gpt-6-luna` | Bounded implementation and frontend subtasks |
+| Ellis | `claude-haiku-5-5` | Writing, editing and documentation |
+
+- [x] Ten named bots cover all 18 catalog roles. Stable identities/handles keep
+  old conversations valid. Personas are candid and professional, without claims
+  to be human. Review cross-checks are selective, not automatic ping-pong.
+- [x] Replaced the actual seven-bot library with ten bots in both existing rooms.
+  Encrypted backup label: `OrgBot team backup 20261025T132116Z`. Backup/readback,
+  idempotence, profile, room settings and credential preservation verified.
+  All 87 room-history files retain their exact SHA-256 fingerprints.
+- [x] DeepSeek/Ollama API fields remain available; no keys were saved on this PC.
+  Enter them in Connections & tools. Haiku 5.5 was found in the installed Claude
+  CLI catalog; live model authorization and inference were not exercised.
+
+## Verification and artifact
+
+- [x] Rust workspace: 733 passed, one ignored. After the final MCP negotiation
+  correction, its 14 focused tests passed again and the release engine rebuilt.
+- [x] Final Flutter suite against that engine: 231 passed, three external SSH
+  checks skipped. Flutter analysis: no issues. Python migration: six passed.
+- [x] Linux native release checked in isolated Xvfb/D-Bus/data/keyring at
+  1440×920, 1280×720 and 800×600. Verified restored Pause, targeted reply with
+  attachment, response after Resume, project text/image/video previews, Git,
+  team and connection pages. Fixed a GTK picker ownership crash and a thumbnail
+  seek past the end of short clips found during this native pass.
+- [x] Packaging fixtures passed. Every extracted bundle file matches the build;
+  all six native binaries/libraries resolve their runtime dependencies.
+- [x] Final scoped Astra review approved source, packaged artifact, migration
+  receipts and native captures. All required corrections are resolved. Staged
+  credential-pattern scan: zero findings across 52 owned files; diff checks pass.
+
+Package: `app/orgbot_1.6.0_amd64.deb`, Ubuntu 24.04/amd64, glibc >=2.39.
+Size: 13,740,336 bytes.
+SHA-256: `36667833725d592cce6216e866bd8ab15e8b4cfb3245fb766395dab693a1e854`.
+Engine SHA-256: `92164b0d5435a9bef807fd5c1868fa98f4cc76825938e278d56f96b03a7bc782`.
+Temporary evidence: `/tmp/orgbots-desktop-qa/` and `/tmp/orgbots-*.log`.
+
+## Current acceptance limits
+
+No live paid-model collaboration, all-provider tool compatibility, video playback,
+multi-day endurance, Wayland/GPU performance or Android device check was performed.
+Native CLI integrations retain their own permissions; read-only room tools are
+not OS isolation from inherited integrations. Legacy SSE and unsupported MCP
+policy formats remain reported as unsupported. The app and PC must remain running;
+reopening a saved room requires Resume. Active work consumes subscription/API
+allowance, and dividing work does not guarantee fewer total tokens. No paid model
+requests were made during validation. System installation remains for the owner.
+
+---
+
+# Historical: Linux specialist workspace 1.5.2 — 2026-10-25
 
 ## Delivered behavior
 

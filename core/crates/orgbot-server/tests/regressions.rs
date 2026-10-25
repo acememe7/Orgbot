@@ -115,6 +115,7 @@ async fn a_stalled_model_does_not_block_snapshot_human_input_or_pause() {
             author: "Alex".into(),
             body: body.into(),
             task: None,
+            reply_to: None,
         }));
         let next = tokio::time::timeout(Duration::from_secs(1), requests.recv())
             .await.unwrap().unwrap();
@@ -358,7 +359,7 @@ async fn broken_api_streams_recover_without_replaying_workspace_operations() {
     ));
     let mut events = handle.subscribe();
     let run = tokio::spawn(session.run());
-    assert!(handle.try_send(Control::HumanMessage { files: vec![], author: "Alex".into(), body: "Write my research".into(), task: None }));
+    assert!(handle.try_send(Control::HumanMessage { files: vec![], author: "Alex".into(), body: "Write my research".into(), task: None, reply_to: None }));
     let call = tokio::time::timeout(Duration::from_secs(5), calls.recv()).await.unwrap().unwrap();
     assert_eq!(call.name, "workspace_write");
     call.reply.send(orgbot_tools::ToolOutcome { content: "write verified exactly once".into(), is_error: false }).unwrap();

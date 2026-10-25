@@ -10,7 +10,7 @@
 //! layer.
 
 use orgbot_engine::digest::RoomDigest;
-use orgbot_proto::ids::DecisionId;
+use orgbot_proto::ids::{DecisionId, MessageId};
 use orgbot_proto::event::{EventEnvelope, Seq};
 use orgbot_proto::room::RoomPhase;
 use orgbot_proto::{AgentId, AgentStatus, Room, Task, TaskId};
@@ -46,6 +46,9 @@ pub enum ClientMessage {
     SendMessage {
         #[serde(default)]
         files: Vec<String>,
+        /// The message being replied to, when this is part of a thread.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<MessageId>,
         /// The person's display name.
         author: String,
         /// The message text.
@@ -205,6 +208,7 @@ mod tests {
         let messages = [
             ClientMessage::SendMessage {
                 files: vec![],
+                reply_to: None,
                 author: "Alex".into(),
                 body: "how's it going?".into(),
                 task: None,
@@ -222,6 +226,28 @@ mod tests {
                 message
             );
         }
+    }
+
+    #[test]
+    fn older_human_message_payloads_default_reply_to() {
+        let message: ClientMessage = serde_json::from_str(
+            r#"{"type":"send_message","author":"Alex","body":"hello"}"#,
+        )
+        .unwrap();
+        assert!(matches!(message, ClientMessage::SendMessage { reply_to: None, .. }));
+    }
+
+    #[test]
+    fn send_message_round_trips_a_reply_target() {
+        let message = ClientMessage::SendMessage {
+            files: vec![],
+            reply_to: Some(MessageId::new()),
+            author: "Alex".into(),
+            body: "Following up".into(),
+            task: None,
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(serde_json::from_str::<ClientMessage>(&json).unwrap(), message);
     }
 
     #[test]

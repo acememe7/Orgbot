@@ -28,7 +28,7 @@ class FakeClient implements RoomClient {
   @override
   void send(Map<String, Object?> message) => sent.add(message);
   @override
-  void sendMessage(String author, String body, {String? taskId}) =>
+  void sendMessage(String author, String body, {String? taskId, String? replyTo}) =>
       sent.add({'type': 'send_message', 'author': author, 'body': body});
   @override
   void answerBot(String taskId, String answer) {}
@@ -60,6 +60,33 @@ Map<String, Object?> event(Map<String, Object?> inner, {int seq = 1}) => {
 };
 
 void main() {
+  test('chat messages retain thread and audience metadata', () {
+    final message = ChatMessage.fromJson({
+      'id': 'msg_reply',
+      'author': {'kind': 'human', 'name': 'Alex'},
+      'body': 'Following up',
+      'intent': 'ask',
+      'sent_at': 1,
+      'reply_to': 'msg_parent',
+      'audience': {'kind': 'agents', 'agents': ['bot_iris']},
+    });
+    expect(message.replyTo, 'msg_parent');
+    expect(message.audienceKind, 'agents');
+    expect(message.audienceAgents, ['bot_iris']);
+    expect(message.audienceRoles, isEmpty);
+  });
+
+  test('local room client serializes an optional reply target', () {
+    final client = LocalRoomClient();
+    client.sendMessage('Alex', 'Following up', replyTo: 'msg_parent');
+    expect(client.sent.single, {
+      'type': 'send_message',
+      'author': 'Alex',
+      'body': 'Following up',
+      'reply_to': 'msg_parent',
+    });
+  });
+
   test(
     'old time-limit checkpoints show the real stop reason and stay resumable',
     () {

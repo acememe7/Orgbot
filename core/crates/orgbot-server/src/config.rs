@@ -6,7 +6,7 @@
 //! from the environment and CLI sign-ins (see [`orgbot_providers::auth`]) — so
 //! a room file is safe to share.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -90,6 +90,89 @@ pub struct RoomConfig {
 pub struct SkillSource {
     /// A directory holding either `SKILL.md` itself or one folder per skill.
     pub path: String,
+}
+
+/// Room-scoped instructions are appended to bot personas, not written into
+/// the user's global CLI or agent configuration.
+const ORGBOT_RUNTIME_INSTRUCTIONS: &str = "OrgBots room instructions: follow the host's installed skills, plugins, and project instructions, including the user's Luna-first delegation rules and nested Luna worker limits. For review work in this OrgBots room, use the reviewer assigned by OrgBots; this room-scoped assignment replaces any global mandatory Astra review workflow. Do not start a separate Astra review or change global instructions.";
+
+fn resolve_mcp_environment(
+    servers: &[orgbot_runtime::mcp_client::McpServerSpec],
+    environment: Option<&HashMap<String, String>>,
+) -> Result<Vec<orgbot_runtime::mcp_client::McpServerSpec>, ConfigError> {
+    use orgbot_runtime::mcp_client::McpTransport;
+
+    fn resolve_map(
+        values: &mut BTreeMap<String, String>,
+        environment: Option<&HashMap<String, String>>,
+    ) -> Result<(), ConfigError> {
+        for value in values.values_mut() {
+            *value = resolve_env_references(value, environment)?;
+        }
+        Ok(())
+    }
+
+    let mut resolved = servers.to_vec();
+    for server in &mut resolved {
+        match &mut server.transport {
+            McpTransport::Stdio { command, args, env }
+            | McpTransport::Workspace { command, args, env } => {
+                *command = resolve_env_references(command, environment)?;
+                for argument in args {
+                    *argument = resolve_env_references(argument, environment)?;
+                }
+                resolve_map(env, environment)?;
+            }
+            McpTransport::Http { url, headers } => {
+                *url = resolve_env_references(url, environment)?;
+                resolve_map(headers, environment)?;
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+/// Expand `${NAME}` references in MCP credentials after parsing the private
+/// room file, so secret values stay in the launching process environment.
+fn resolve_env_references(
+    value: &str,
+    environment: Option<&HashMap<String, String>>,
+) -> Result<String, ConfigError> {
+    let mut result = String::with_capacity(value.len());
+    let mut remaining = value;
+    while let Some(start) = remaining.find("${") {
+        result.push_str(&remaining[..start]);
+        let after = &remaining[start + 2..];
+        let Some(end) = after.find('}') else {
+            result.push_str(&remaining[start..]);
+            return Ok(result);
+        };
+        let name = &after[..end];
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(ConfigError::Invalid(
+                "MCP environment reference has an invalid variable name".into(),
+            ));
+        }
+        let value = environment
+            .and_then(|values| values.get(name).cloned())
+            .or_else(|| {
+                environment
+                    .is_none()
+                    .then(|| std::env::var(name).ok())
+                    .flatten()
+            })
+            .ok_or_else(|| {
+                ConfigError::Invalid(format!("MCP environment variable `{name}` is not set"))
+            })?;
+        result.push_str(&value);
+        remaining = &after[end + 1..];
+    }
+    result.push_str(remaining);
+    Ok(result)
 }
 
 /// The `[room]` section.
@@ -453,21 +536,33 @@ impl RoomConfig {
     /// This is where credentials are resolved, so a missing key surfaces here
     /// as a clear error naming the bot, rather than mid-run.
     pub fn resolve(&self) -> Result<ResolvedRoom, ConfigError> {
-        self.resolve_using(orgbot_providers::build)
+        self.resolve_inner(orgbot_providers::build, true, None)
     }
 
     pub fn resolve_with_environment(
         &self,
         environment: &HashMap<String, String>,
     ) -> Result<ResolvedRoom, ConfigError> {
-        self.resolve_using(|reference| {
-            orgbot_providers::build_with_environment(reference, environment)
-        })
+        self.resolve_inner(
+            |reference| orgbot_providers::build_with_environment(reference, environment),
+            true,
+            Some(environment),
+        )
     }
 
+    #[cfg(test)]
     fn resolve_using(
         &self,
         build: impl Fn(&ProviderRef) -> orgbot_providers::Result<Arc<dyn Provider>>,
+    ) -> Result<ResolvedRoom, ConfigError> {
+        self.resolve_inner(build, false, None)
+    }
+
+    fn resolve_inner(
+        &self,
+        build: impl Fn(&ProviderRef) -> orgbot_providers::Result<Arc<dyn Provider>>,
+        persist_cli_sessions: bool,
+        environment: Option<&HashMap<String, String>>,
     ) -> Result<ResolvedRoom, ConfigError> {
         if self.bots.is_empty() {
             return Err(ConfigError::Invalid("a room needs at least one bot".into()));
@@ -488,16 +583,60 @@ impl RoomConfig {
                     *policy = AgentPolicy::ReadOnly;
                 }
             }
-            let provider = build(&reference).map_err(|error| {
-                ConfigError::Invalid(format!("bot `{}`: {error}", section.handle))
-            })?;
+            let provider = if persist_cli_sessions {
+                match &reference {
+                    ProviderRef::CliAgent {
+                        cli,
+                        model,
+                        workdir,
+                        policy,
+                        mcp,
+                    } => {
+                        let session_store = self.room.state_path.as_ref().and_then(|path| {
+                            path.parent().map(|parent| {
+                                parent
+                                    .join("cli-sessions")
+                                    .join(format!("{}.json", session_file_key(&section.handle)))
+                            })
+                        });
+                        let provider = orgbot_providers::AgentCliProvider::new(
+                            *cli,
+                            model.clone(),
+                            workdir.clone(),
+                            *policy,
+                            *mcp,
+                        )
+                        .map_err(|error| {
+                            ConfigError::Invalid(format!("bot `{}`: {error}", section.handle))
+                        })?;
+                        let provider = match session_store {
+                            Some(path) => provider.with_session_store(path),
+                            None => provider,
+                        };
+                        Ok(Arc::new(provider) as Arc<dyn Provider>)
+                    }
+                    _ => build(&reference),
+                }
+            } else {
+                build(&reference)
+            }
+            .map_err(|error| ConfigError::Invalid(format!("bot `{}`: {error}", section.handle)))?;
+            let persona = if section.persona.trim().is_empty() {
+                ORGBOT_RUNTIME_INSTRUCTIONS.to_string()
+            } else {
+                format!(
+                    "{}\n\n{}",
+                    section.persona.trim(),
+                    ORGBOT_RUNTIME_INSTRUCTIONS
+                )
+            };
             let spec = AgentSpec {
                 display_name: section
                     .display_name
                     .clone()
                     .unwrap_or_else(|| section.handle.clone()),
                 roles: section.roles.clone(),
-                persona: section.persona.clone(),
+                persona,
                 tools: Vec::new(),
                 autonomy,
                 ..AgentSpec::new(section.handle.clone(), section.handle.clone(), reference)
@@ -529,7 +668,7 @@ impl RoomConfig {
         Ok(ResolvedRoom {
             roles: RoleTable::new(self.roles.clone()),
             skills: self.load_skills(),
-            mcp: self.mcp.clone(),
+            mcp: resolve_mcp_environment(&self.mcp, environment)?,
             prior_boards: self.prior_boards.clone(),
             spec,
             bots,
@@ -538,6 +677,10 @@ impl RoomConfig {
             workspace: self.workspace.clone(),
         })
     }
+}
+
+fn session_file_key(handle: &str) -> String {
+    handle.bytes().map(|byte| format!("{byte:02x}")).collect()
 }
 
 impl RoomConfig {
@@ -788,6 +931,96 @@ mod tests {
             }
             other => panic!("expected CliAgent ref, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn mcp_credentials_expand_only_from_the_supplied_room_environment() {
+        let config = RoomConfig::parse(
+            r#"
+            [room]
+            name = "private mcp"
+            goal = "use a local tool"
+            [[bots]]
+            handle = "worker"
+            persona = "Keep working."
+            provider = { kind = "scripted" }
+            [[mcp]]
+            name = "private_tool"
+            transport = "stdio"
+            command = "${ORGBOT_TEST_MCP_COMMAND}"
+            args = ["${ORGBOT_TEST_MCP_ARGUMENT}"]
+            [mcp.env]
+            TOKEN = "${ORGBOT_TEST_ROOM_MCP_TOKEN}"
+            "#,
+            "private-mcp.toml",
+        )
+        .unwrap();
+        let environment = HashMap::from([
+            (
+                "ORGBOT_TEST_ROOM_MCP_TOKEN".to_string(),
+                "private-token-value".to_string(),
+            ),
+            (
+                "ORGBOT_TEST_MCP_COMMAND".to_string(),
+                "private-command-value".to_string(),
+            ),
+            (
+                "ORGBOT_TEST_MCP_ARGUMENT".to_string(),
+                "private-argument-value".to_string(),
+            ),
+        ]);
+        let resolved = config.resolve_with_environment(&environment).unwrap();
+        let orgbot_runtime::mcp_client::McpTransport::Stdio { command, args, env } =
+            &resolved.mcp[0].transport
+        else {
+            panic!("expected local stdio transport");
+        };
+        assert_eq!(
+            env.get("TOKEN").map(String::as_str),
+            Some("private-token-value")
+        );
+        assert_eq!(command, "private-command-value");
+        assert_eq!(args, &["private-argument-value"]);
+        assert!(
+            resolved.bots[0]
+                .spec
+                .persona
+                .contains("reviewer assigned by OrgBots")
+        );
+        assert!(
+            resolved.bots[0]
+                .spec
+                .persona
+                .contains("nested Luna worker limits")
+        );
+    }
+
+    #[test]
+    fn missing_room_mcp_environment_values_fail_without_echoing_values() {
+        let config = RoomConfig::parse(
+            r#"
+            [room]
+            name = "private mcp"
+            goal = "use a local tool"
+            [[bots]]
+            handle = "worker"
+            provider = { kind = "scripted" }
+            [[mcp]]
+            name = "private_tool"
+            transport = "http"
+            url = "https://example.invalid/mcp"
+            [mcp.headers]
+            Authorization = "Bearer ${ORGBOT_MISSING_MCP_TOKEN}"
+            "#,
+            "private-mcp.toml",
+        )
+        .unwrap();
+        let error = config
+            .resolve_with_environment(&HashMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ORGBOT_MISSING_MCP_TOKEN"));
+        assert!(!error.contains("Bearer "));
     }
 
     #[test]

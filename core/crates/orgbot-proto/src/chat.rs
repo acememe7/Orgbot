@@ -252,6 +252,18 @@ mod tests {
     }
 
     #[test]
+    fn a_direct_reply_wakes_only_the_replied_to_bot() {
+        let (room, speaker, target, bystander) =
+            (room(), AgentId::new(), AgentId::new(), AgentId::new());
+        let mut msg = ChatMessage::say(room, speaker, "here is the answer")
+            .to_agents(vec![target]);
+        msg.reply_to = Some(crate::MessageId::new());
+        assert!(msg.wakes(target, &[]));
+        assert!(!msg.wakes(bystander, &[]));
+        assert!(!msg.wakes(speaker, &[]));
+    }
+
+    #[test]
     fn role_addressed_messages_reach_every_holder() {
         let msg = ChatMessage::say(room(), AgentId::new(), "need a review");
         let audience = Audience::Roles {

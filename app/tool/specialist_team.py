@@ -25,8 +25,8 @@ def validate_preset(preset: dict[str, Any]) -> None:
     if preset.get("schema_version") != 1:
         raise ValueError("unsupported specialist team schema_version")
     bots = preset.get("bots")
-    if not isinstance(bots, list) or len(bots) != 7:
-        raise ValueError("specialist team preset must contain exactly 7 bots")
+    if not isinstance(bots, list) or len(bots) != 10:
+        raise ValueError("specialist team preset must contain exactly 10 bots")
 
     required_fields = {
         "id", "name", "handle", "persona", "provider", "model", "apiKey",
@@ -54,8 +54,8 @@ def validate_preset(preset: dict[str, Any]) -> None:
             raise ValueError("specialist bot powers must be explicit booleans")
 
     limits = preset.get("room_limits")
-    if limits != {"max_turns": 100, "parallel_turns": 1}:
-        raise ValueError("specialist team room limits must be 100 turns and one parallel turn")
+    if limits != {"max_turns": 0, "parallel_turns": 4}:
+        raise ValueError("specialist team room limits must be continuous sessions and four parallel turns")
     if not isinstance(preset.get("routing_memory"), str) or not preset["routing_memory"].strip():
         raise ValueError("specialist team routing_memory must be a nonempty string")
 
@@ -93,6 +93,11 @@ def replace_with_specialist_team(
 
     result = copy.deepcopy(library)
     bots = copy.deepcopy(selected["bots"])
+    old_bots = {bot.get("id"): bot for bot in library.get("bots", []) if isinstance(bot, dict)}
+    for bot in bots:
+        old = old_bots.get(bot["id"], {})
+        if old.get("provider") == bot["provider"] and isinstance(old.get("apiKey"), str):
+            bot["apiKey"] = old["apiKey"]
     bot_ids = [bot["id"] for bot in bots]
     result["bots"] = bots
     limits = selected["room_limits"]

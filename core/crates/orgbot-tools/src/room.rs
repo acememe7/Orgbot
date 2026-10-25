@@ -68,10 +68,11 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
         tool(
             "post_message",
             "Say something in the group chat. Everyone sees the transcript, but only \
-             the bots you address are woken to respond. Use `to_agents` or `to_roles` \
-             when you need a specific answer, and set `intent` to \"ask\" so they know \
-             a reply is expected. Talking is not a substitute for a handoff: if you \
-             need someone to *do* work, use offer_handoff.",
+             the bots you address are woken to respond. Use `@handle`, a unique `@display_name`, `to_agents`, or \
+             `to_roles` to direct attention. Set `reply_to` to thread a reply; when no \
+             recipient is explicit, it addresses the original author. Set `intent` to \
+             \"ask\" so they know a reply is expected. For work that another bot needs \
+             to perform, use offer_handoff.",
             schema::object(
                 vec![
                     ("body", schema::string("What to say.")),
@@ -92,6 +93,12 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                         schema::string_array("Roles to address, e.g. [\"reviewer\"]."),
                     ),
                     ("task", schema::string("The task id this is about, if any.")),
+                    (
+                        "reply_to",
+                        schema::string(
+                            "Message id this replies to; replies without explicit recipients address its author.",
+                        ),
+                    ),
                 ],
                 &["body"],
             ),
@@ -695,6 +702,25 @@ fn post_message(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
     let room = engine.room_id();
     let mut message = ChatMessage::say(room, actor, body).with_intent(intent);
 
+    let parent_author = match optional_str(input, "reply_to") {
+        Some(raw) => {
+            let reply_to = match parse_id::<orgbot_proto::MessageId>(raw, "reply_to", "message") {
+                Ok(id) => id,
+                Err(message) => return ToolOutcome::error(message),
+            };
+            let Some(parent) = engine
+                .transcript()
+                .iter()
+                .find(|message| message.id == reply_to)
+            else {
+                return ToolOutcome::error("There is no message with that id in this room.");
+            };
+            message.reply_to = Some(reply_to);
+            Some(parent.author.clone())
+        }
+        None => None,
+    };
+
     let handles = string_list(input, "to_agents");
     let roles = string_list(input, "to_roles");
     if !handles.is_empty() {
@@ -717,6 +743,44 @@ fn post_message(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
         message.audience = Audience::Agents { agents: targets };
     } else if !roles.is_empty() {
         message.audience = Audience::Roles { roles };
+    } else {
+        let mentions = message_handles(&message.body);
+        if let Some(mentions) = mentions {
+            if mentions.is_empty() {
+                message.audience = Audience::Everyone;
+            } else {
+                let mut targets = Vec::new();
+                for handle in mentions {
+                    let agent = match engine.agent_by_handle(&handle) {
+                        Some(agent) => agent,
+                        None => match resolve_display_name(engine, &handle) {
+                            Ok(Some(agent)) => agent,
+                            Ok(None) => {
+                                return ToolOutcome::error(format!(
+                                    "There is no bot named `{handle}`. Call room_status to see who is here."
+                                ));
+                            }
+                            Err(()) => {
+                                return ToolOutcome::error(format!(
+                                    "The display name `{handle}` is ambiguous. Use the bot's @handle from room_status."
+                                ));
+                            }
+                        },
+                    };
+                    targets.push(agent.id);
+                }
+                message.audience = Audience::Agents { agents: targets };
+            }
+        } else if let Some(author) = parent_author {
+            message.audience = match author {
+                orgbot_proto::Author::Agent { agent } => Audience::Agents {
+                    agents: vec![agent],
+                },
+                orgbot_proto::Author::Human { .. } | orgbot_proto::Author::System => {
+                    Audience::Human
+                }
+            };
+        }
     }
 
     if let Some(raw) = optional_str(input, "task") {
@@ -732,6 +796,42 @@ fn post_message(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
         Ok(_) => ToolOutcome::ok("Posted."),
         Err(error) => explain(error),
     }
+}
+
+fn resolve_display_name<'a>(
+    engine: &'a Engine,
+    name: &str,
+) -> Result<Option<&'a orgbot_proto::AgentSpec>, ()> {
+    let mut matches = engine
+        .agents()
+        .filter(|agent| agent.display_name.eq_ignore_ascii_case(name));
+    let first = matches.next();
+    if matches.next().is_some() {
+        Err(())
+    } else {
+        Ok(first)
+    }
+}
+
+fn message_handles(body: &str) -> Option<Vec<String>> {
+    let mut handles = Vec::new();
+    let mut found = false;
+    for word in body.split(|c: char| !(c.is_alphanumeric() || matches!(c, '@' | '_' | '-'))) {
+        let Some(handle) = word.strip_prefix('@').filter(|handle| !handle.is_empty()) else {
+            continue;
+        };
+        found = true;
+        if handle.eq_ignore_ascii_case("all") {
+            return Some(Vec::new());
+        }
+        if !handles
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(handle))
+        {
+            handles.push(handle.to_string());
+        }
+    }
+    found.then_some(handles)
 }
 
 fn room_status(engine: &Engine, actor: AgentId) -> ToolOutcome {

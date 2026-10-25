@@ -257,6 +257,7 @@ async fn dispatch(session: &SessionHandle, message: ClientMessage) -> bool {
             body,
             task,
             files,
+            reply_to,
         } => {
             session
                 .send(Control::HumanMessage {
@@ -264,6 +265,7 @@ async fn dispatch(session: &SessionHandle, message: ClientMessage) -> bool {
                     body,
                     task,
                     files,
+                    reply_to,
                 })
                 .await
         }

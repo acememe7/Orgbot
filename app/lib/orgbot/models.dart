@@ -93,6 +93,8 @@ class BotDef {
   /// The job this bot holds. A property of the bot, not of a room — the same
   /// reviewer reviews wherever it is seated.
   String role;
+  List<String> additionalRoles;
+  List<String> get roles => {role, ...additionalRoles}.toList();
 
   /// Permissions overriding the role's defaults, when you have deliberately
   /// changed them. Null means "whatever the role says".
@@ -107,6 +109,7 @@ class BotDef {
     this.model = '',
     this.apiKey = '',
     this.role = Roles.defaultKey,
+    this.additionalRoles = const [],
     this.powers,
   }) : id = id ?? genId('bot'),
        handle = handle == null || handle.isEmpty ? '' : handle;
@@ -130,6 +133,7 @@ class BotDef {
     'model': model,
     'apiKey': apiKey,
     'role': role,
+    'additional_roles': additionalRoles,
     'powers': powers?.toJson(),
   };
 
@@ -142,6 +146,9 @@ class BotDef {
     model: json['model'] as String? ?? '',
     apiKey: json['apiKey'] as String? ?? '',
     role: json['role'] as String? ?? Roles.defaultKey,
+    additionalRoles: (json['additional_roles'] as List? ?? [])
+        .whereType<String>()
+        .toList(),
     powers: json['powers'] is Map
         ? RolePowers.fromJson((json['powers'] as Map).cast<String, Object?>())
         : null,
@@ -166,9 +173,9 @@ class RoomSlot {
 /// misbehaving room and an unbounded bill.
 const int defaultMaxTurns = 2000;
 
-/// Conservative defaults for a room started with local desktop CLIs.
-const int desktopDefaultMaxTurns = 100;
-const List<int> desktopTurnBudgetChoices = [100, 250, 500, 2000, 0];
+/// Desktop sessions continue until completion or an explicit pause.
+const int desktopDefaultMaxTurns = 0;
+const List<int> desktopTurnBudgetChoices = [0, 100, 500, 2000];
 
 /// Turn budgets offered in the UI. `0` means no limit.
 const List<int> turnBudgetChoices = [500, 2000, 5000, 20000, 0];
@@ -189,8 +196,7 @@ const List<int> turnBudgetChoices = [500, 2000, 5000, 20000, 0];
 /// something chosen, by someone who can see what the room has drawn.
 const int defaultParallelTurns = 2;
 
-/// Desktop rooms start one agent at a time; higher concurrency remains opt-in.
-const int desktopDefaultParallelTurns = 1;
+const int desktopDefaultParallelTurns = 4;
 
 /// Concurrency settings offered in the UI.
 ///

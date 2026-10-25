@@ -170,7 +170,7 @@ void main() {
       }
 
       await tester.pumpWidget(
-        app(EngineRoomScreen(room: room, library: library)),
+        app(EngineRoomScreen(room: room, library: library, desktopLayout: false)),
       );
       await tester.pumpAndSettle();
       final filesPage = tester.widget<TabBarView>(
@@ -193,7 +193,7 @@ void main() {
       for (final brightness in Brightness.values) {
         await tester.pumpWidget(
           app(
-            EngineRoomScreen(room: room, library: library),
+            EngineRoomScreen(room: room, library: library, desktopLayout: false),
             scale: 1.6,
             brightness: brightness,
           ),

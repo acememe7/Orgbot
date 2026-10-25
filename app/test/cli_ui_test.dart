@@ -11,6 +11,11 @@ import 'package:orgbot_app/ui/orgbot_screen.dart';
 import 'package:orgbot_app/ui/polish.dart';
 import 'package:orgbot_app/ui/sign_in_screen.dart';
 
+Future<void> pumpUiTransition(WidgetTester tester) async {
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 250));
+}
+
 void main() {
   testWidgets(
     'desktop navigation stays mounted and team rows compact at width',
@@ -38,7 +43,7 @@ void main() {
         MaterialApp(home: OrgBotScreen(library: library, desktopClis: true)),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Bots').last);
+      await tester.tap(find.text('Team').first);
       await tester.pump();
       expect(
         find.byKey(ValueKey('desktop-bot-${library.bots.single.id}')),
@@ -52,9 +57,9 @@ void main() {
       await tester.pump();
       expect(find.textContaining('deliberately long teammate'), findsOneWidget);
 
-      await tester.tap(find.text('Setup').last);
+      await tester.tap(find.text('Connections & tools').first);
       await tester.pump();
-      await tester.tap(find.text('Bots').last);
+      await tester.tap(find.text('Team').first);
       await tester.pump();
       expect(
         tester
@@ -112,9 +117,11 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('Setup'), findsWidgets);
-      await tester.tap(find.text('Setup').last);
-      await tester.pumpAndSettle();
+      expect(find.text('Connections & tools'), findsOneWidget);
+      await tester.tap(find.text('Connections & tools').first);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.text('Setup'), findsOneWidget);
       expect(find.text('Codex CLI'), findsOneWidget);
       expect(find.text('Claude Code'), findsOneWidget);
       expect(find.text('Grok CLI'), findsOneWidget);
@@ -123,7 +130,8 @@ void main() {
         find.byKey(const ValueKey('cli-setup')),
         const Offset(0, -900),
       );
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
       expect(find.text('DeepSeek API'), findsOneWidget);
       expect(find.text('Ollama Cloud API'), findsOneWidget);
       expect(find.text('Accounts'), findsNothing);
@@ -131,13 +139,13 @@ void main() {
 
       await tester.ensureVisible(find.text('Add').first);
       await tester.tap(find.text('Add').first);
-      await tester.pumpAndSettle();
+      await pumpUiTransition(tester);
       await tester.enterText(
         find.byType(TextFormField),
         'deepseek-private-test',
       );
       await tester.tap(find.text('Save key'));
-      await tester.pumpAndSettle();
+      await pumpUiTransition(tester);
       expect(credentials.forProvider(ProviderKind.deepseek)?.token, isNotEmpty);
       final reloadedCredentials = Credentials();
       await reloadedCredentials.load();
@@ -154,8 +162,8 @@ void main() {
       expect(find.text('API key saved securely'), findsOneWidget);
       expect(find.text('deepseek-private-test'), findsNothing);
 
-      await tester.tap(find.text('Bots'));
-      await tester.pumpAndSettle();
+      await tester.tap(find.text('Team').first);
+      await pumpUiTransition(tester);
       await tester.tap(find.byTooltip('New bot'));
       await tester.pump(const Duration(milliseconds: 400));
       expect(find.textContaining('sign-in not verified'), findsNothing);
@@ -186,22 +194,22 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
       await tester.tap(find.text('Save'));
-      await tester.pumpAndSettle();
+      await pumpUiTransition(tester);
       final savedBot = library.bots.singleWhere(
         (bot) => bot.name == 'DeepSeek teammate',
       );
       expect(savedBot.provider, ProviderKind.deepseek);
       expect(savedBot.apiKey, isEmpty);
 
-      await tester.tap(find.text('Setup').last);
-      await tester.pumpAndSettle();
+      await tester.tap(find.text('Connections & tools').first);
+      await pumpUiTransition(tester);
       await tester.ensureVisible(find.byTooltip('Remove DeepSeek API key'));
       await tester.tap(find.byTooltip('Remove DeepSeek API key'));
-      await tester.pumpAndSettle();
+      await pumpUiTransition(tester);
       expect(credentials.forProvider(ProviderKind.deepseek), isNull);
 
-      await tester.tap(find.text('Bots'));
-      await tester.pumpAndSettle();
+      await tester.tap(find.text('Team').first);
+      await pumpUiTransition(tester);
 
       await tester.tap(find.text('Legacy'));
       await tester.pump(const Duration(milliseconds: 400));

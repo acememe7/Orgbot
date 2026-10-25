@@ -28,7 +28,7 @@ class _Silent implements RoomClient {
   @override
   void send(Map<String, Object?> message) {}
   @override
-  void sendMessage(String author, String body, {String? taskId}) {}
+  void sendMessage(String author, String body, {String? taskId, String? replyTo}) {}
   @override
   void answerBot(String taskId, String answer) {}
   @override

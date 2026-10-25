@@ -172,7 +172,7 @@ void main() {
             child: MaterialApp(
               debugShowCheckedModeBanner: false,
               theme: orgBotTheme(Brightness.dark),
-              home: OrgBotScreen(library: library),
+              home: OrgBotScreen(library: library, desktopClis: false),
             ),
           ),
         );

@@ -20,6 +20,8 @@ import 'brand.dart';
 import 'engine_room_screen.dart';
 import 'room_history_screen.dart';
 import 'role_icons.dart';
+import 'desktop_integrations_view.dart';
+import '../workspace/desktop_files.dart';
 import '../orgbot/roles.dart';
 
 class OrgBotScreen extends StatefulWidget {
@@ -40,6 +42,7 @@ class OrgBotScreen extends StatefulWidget {
 class _OrgBotScreenState extends State<OrgBotScreen>
     with SingleTickerProviderStateMixin {
   int _tab = 0;
+  String? _selectedRoomId;
   final _pages = PageController();
   final _search = List.generate(2, (_) => TextEditingController());
   late final AnimationController _desktopPageFade;
@@ -74,7 +77,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
       _tab = index;
     });
     if (_desktopClis) {
-      _pages.jumpToPage(index);
+      if (_pages.hasClients) _pages.jumpToPage(index);
       if (MediaQuery.disableAnimationsOf(context)) {
         _desktopPageFade.value = 1;
       } else {
@@ -99,6 +102,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
       builder: (context, _) {
         final lib = widget.library;
         final scheme = Theme.of(context).colorScheme;
+        if (_desktopClis) return _desktop(lib, credentials);
         return Scaffold(
           appBar: AppBar(
             toolbarHeight: 62,
@@ -227,6 +231,260 @@ class _OrgBotScreenState extends State<OrgBotScreen>
           ),
         );
       },
+    );
+  }
+
+  Widget _desktop(Library lib, Credentials? credentials) {
+    final scheme = Theme.of(context).colorScheme;
+    final compact = MediaQuery.sizeOf(context).width < 760;
+    final selected = lib.rooms
+        .where((r) => r.id == _selectedRoomId)
+        .firstOrNull;
+    return Scaffold(
+      body: SafeArea(
+        child: Row(
+          children: [
+            SizedBox(
+              width: compact ? 64 : 224,
+              child: compact
+                  ? Material(
+                      color: scheme.surfaceContainerLow,
+                      child: Column(
+                        children: [
+                          const SizedBox(height: 20),
+                          IconButton(
+                            tooltip: 'Your profile',
+                            onPressed: _profile,
+                            icon: const BrandMark(size: 26),
+                          ),
+                          IconButton(
+                            tooltip: 'New session',
+                            onPressed: lib.loaded ? _newRoom : null,
+                            icon: const Icon(Icons.add),
+                          ),
+                          Expanded(
+                            child: ListView(
+                              children: [
+                                for (final room in lib.rooms)
+                                  IconButton(
+                                    tooltip: room.name,
+                                    onPressed: () => _runRoom(room),
+                                    icon: Icon(
+                                      _selectedRoomId == room.id && _tab == 0
+                                          ? Icons.chat_bubble
+                                          : Icons.chat_bubble_outline,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: 'Team',
+                            onPressed: () => _selectTab(1),
+                            icon: const Icon(Icons.people_outline),
+                          ),
+                          IconButton(
+                            tooltip: 'Connections & tools',
+                            onPressed: () => _selectTab(2),
+                            icon: const Icon(Icons.tune),
+                          ),
+                          const SizedBox(height: 14),
+                        ],
+                      ),
+                    )
+                  : Material(
+                      color: scheme.surfaceContainerLow,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 24, 12, 24),
+                            child: Row(
+                              children: [
+                                const BrandMark(size: 28),
+                                const SizedBox(width: 10),
+                                const Expanded(
+                                  child: Text(
+                                    'OrgBots',
+                                    style: TextStyle(
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Your profile',
+                                  onPressed: lib.loaded ? _profile : null,
+                                  icon: const Icon(
+                                    Icons.account_circle_outlined,
+                                    size: 20,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: OutlinedButton.icon(
+                              onPressed: lib.loaded ? _newRoom : null,
+                              icon: const Icon(Icons.add, size: 18),
+                              label: const Text('New session'),
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 20),
+                            child: Text(
+                              'Sessions',
+                              style: TextStyle(
+                                color: scheme.onSurfaceVariant,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Expanded(
+                            child: !lib.loaded
+                                ? const Center(
+                                    child: CircularProgressIndicator(),
+                                  )
+                                : ListView.builder(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                    ),
+                                    itemCount: lib.rooms.length,
+                                    itemBuilder: (context, i) {
+                                      final room = lib.rooms[i];
+                                      final session = lib.sessions[room.id];
+                                      return ListTile(
+                                        dense: true,
+                                        selected:
+                                            _tab == 0 &&
+                                            selected?.id == room.id,
+                                        selectedTileColor: scheme
+                                            .primaryContainer
+                                            .withValues(alpha: .45),
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(
+                                            8,
+                                          ),
+                                        ),
+                                        title: Text(
+                                          room.name,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        subtitle: Text(
+                                          session?.store?.runStateLabel ??
+                                              'Saved',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        onTap: () => _runRoom(room),
+                                        trailing: IconButton(
+                                          tooltip: 'Session settings',
+                                          icon: const Icon(
+                                            Icons.more_horiz,
+                                            size: 18,
+                                          ),
+                                          onPressed: () => _roomDialog(room),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                          ),
+                          const Divider(height: 1),
+                          for (final entry in [
+                            (1, Icons.people_outline, 'Team'),
+                            (2, Icons.tune, 'Connections & tools'),
+                          ])
+                            ListTile(
+                              selected: _tab == entry.$1,
+                              leading: Icon(entry.$2, size: 20),
+                              title: Text(
+                                entry.$3,
+                                style: const TextStyle(fontSize: 13),
+                              ),
+                              onTap: () => _selectTab(entry.$1),
+                            ),
+                          const SizedBox(height: 10),
+                        ],
+                      ),
+                    ),
+            ),
+            VerticalDivider(width: 1, color: scheme.outlineVariant),
+            Expanded(
+              child: Column(
+                children: [
+                  if (lib.error != null)
+                    MaterialBanner(
+                      content: Text(lib.error!),
+                      actions: [
+                        TextButton(
+                          onPressed: lib.loaded ? lib.save : lib.load,
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  Expanded(
+                    child: _tab == 0 && selected != null
+                        ? EngineRoomScreen(
+                            key: ObjectKey(selected),
+                            room: selected,
+                            library: lib,
+                            embedded: true,
+                          )
+                        : _tab == 0
+                        ? Center(
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 480),
+                              child: Padding(
+                                padding: const EdgeInsets.all(32),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'A place to do the work.',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.headlineLarge,
+                                    ),
+                                    const SizedBox(height: 16),
+                                    Text(
+                                      'Open a session to continue with your team, project files and saved context.',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.bodyLarge,
+                                    ),
+                                    const SizedBox(height: 24),
+                                    FilledButton.icon(
+                                      onPressed: lib.loaded ? _newRoom : null,
+                                      icon: const Icon(Icons.add),
+                                      label: const Text('New session'),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          )
+                        : Column(
+                            children: [
+                              _pageHeader(_tab, lib),
+                              Expanded(
+                                child: _tab == 1
+                                    ? _botsList(lib)
+                                    : _CliSetup(credentials: credentials),
+                              ),
+                            ],
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -443,7 +701,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      '@$handle · ${b.roleDef.label}',
+                      '@$handle · ${b.roles.map((key) => Roles.byKey(key).label).join(', ')}',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -535,7 +793,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      '@$handle · ${bot.roleDef.label}',
+                      '@$handle · ${bot.roles.map((key) => Roles.byKey(key).label).join(', ')}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -976,8 +1234,31 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                       if (canRunAgentClis)
                         TextField(
                           controller: path,
-                          decoration: const InputDecoration(
+                          decoration: InputDecoration(
                             labelText: 'Project path (system CLIs)',
+                            suffixIcon: IconButton(
+                              tooltip: 'Choose project folder',
+                              icon: const Icon(Icons.folder_open),
+                              onPressed: () async {
+                                try {
+                                  final folder =
+                                      await DesktopFiles.chooseProjectFolder();
+                                  if (folder != null && context.mounted) {
+                                    path.text = folder;
+                                  }
+                                } catch (error) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          'Could not choose folder: $error',
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                }
+                              },
+                            ),
                           ),
                         )
                       else
@@ -1042,11 +1323,13 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                             handle: b.handle.isEmpty ? b.name : b.handle,
                             radius: 18,
                           ),
-                          title: Text(
-                            '@' + (b.handle.isEmpty ? b.name : b.handle),
-                          ),
+                          title: Text(b.name),
                           subtitle: Text(
-                            b.roleDef.label + ' · ' + b.provider.label,
+                            b.roles
+                                    .map((role) => Roles.byKey(role).label)
+                                    .join(', ') +
+                                ' · ' +
+                                b.provider.label,
                           ),
                           onChanged: (v) => setLocal(() {
                             if (v == true) {
@@ -1122,9 +1405,20 @@ class _OrgBotScreenState extends State<OrgBotScreen>
   }
 
   void _runRoom(RoomDef room) {
+    if (_desktopClis) {
+      setState(() {
+        _selectedRoomId = room.id;
+        _tab = 0;
+      });
+      return;
+    }
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => EngineRoomScreen(room: room, library: widget.library),
+        builder: (_) => EngineRoomScreen(
+          room: room,
+          library: widget.library,
+          desktopLayout: _desktopClis,
+        ),
       ),
     );
   }
@@ -1235,6 +1529,7 @@ class _CliSetupState extends State<_CliSetup> {
             onEdit: () => _editApiKey(provider),
             onRemove: () => widget.credentials?.forget(provider),
           ),
+        const DesktopIntegrationsView(),
       ],
     ),
   );
@@ -1339,6 +1634,7 @@ class _BotEditorState extends State<_BotEditor> {
 
   late ProviderKind _provider;
   late String _role;
+  late Set<String> _additionalRoles;
   RolePowers? _powers;
   String _model = '';
   bool _custom = false;
@@ -1361,6 +1657,7 @@ class _BotEditorState extends State<_BotEditor> {
     _key = TextEditingController(text: b?.apiKey ?? '');
     _provider = b?.provider ?? ProviderKind.codex;
     _role = b?.role ?? Roles.defaultKey;
+    _additionalRoles = {...?b?.additionalRoles};
     _powers = b?.powers;
     _model = b?.model ?? '';
     _loadModels();
@@ -1679,6 +1976,29 @@ class _BotEditorState extends State<_BotEditor> {
         ),
         const SizedBox(height: 8),
         _powerChips(scheme, role),
+        ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          title: const Text('Additional roles', style: TextStyle(fontSize: 13)),
+          children: [
+            Wrap(
+              spacing: 6,
+              children: [
+                for (final extra in Roles.all.where((r) => r.key != _role))
+                  FilterChip(
+                    label: Text(extra.label),
+                    selected: _additionalRoles.contains(extra.key),
+                    onSelected: (value) => setState(() {
+                      if (value) {
+                        _additionalRoles.add(extra.key);
+                      } else {
+                        _additionalRoles.remove(extra.key);
+                      }
+                    }),
+                  ),
+              ],
+            ),
+          ],
+        ),
       ],
     );
   }
@@ -2053,6 +2373,9 @@ class _BotEditorState extends State<_BotEditor> {
               ? widget.existing?.apiKey ?? ''
               : '',
           role: _role,
+          additionalRoles: _additionalRoles
+              .where((role) => role != _role)
+              .toList(),
           powers: _powers,
         ),
       );

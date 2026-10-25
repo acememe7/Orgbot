@@ -29,21 +29,27 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use futures::StreamExt;
 use orgbot_providers::types::ToolDef;
 use orgbot_tools::ToolOutcome;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 /// The protocol version this client speaks.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26"];
 
 /// Separates the server's name from the tool's own.
 ///
 /// Two underscores because tool names are conventionally snake_case, and a
 /// single one would be ambiguous about where the server name ended.
 pub const NAMESPACE: &str = "__";
+
+/// Keep an unreachable optional tool server from holding room startup open for
+/// a minute. Multiple configured servers are also attempted concurrently.
+const MCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// How to reach one MCP server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +121,7 @@ enum Channel {
         url: String,
         headers: BTreeMap<String, String>,
         client: reqwest::Client,
+        session: Arc<Mutex<HttpSession>>,
     },
     /// A fresh invocation on the connected computer for every exchange.
     Workspace {
@@ -123,6 +130,12 @@ enum Channel {
         args: Vec<String>,
         env: BTreeMap<String, String>,
     },
+}
+
+#[derive(Default)]
+struct HttpSession {
+    session_id: Option<String>,
+    protocol_version: Option<String>,
 }
 
 struct StdioPipe {
@@ -141,7 +154,10 @@ pub struct McpClient {
 impl std::fmt::Debug for McpClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpClient")
-            .field("servers", &self.servers.iter().map(|s| &s.name).collect::<Vec<_>>())
+            .field(
+                "servers",
+                &self.servers.iter().map(|s| &s.name).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -157,10 +173,26 @@ impl McpClient {
         specs: &[McpServerSpec],
         workspace: Option<&crate::workspace::Workspace>,
     ) -> Self {
+        let workspace = workspace.cloned();
+        let attempts = futures::stream::iter(specs.iter().cloned())
+            .map(move |spec| {
+                let workspace = workspace.clone();
+                async move {
+                    let result = tokio::time::timeout(
+                        MCP_CONNECT_TIMEOUT,
+                        connect_one(&spec, workspace.as_ref()),
+                    )
+                    .await;
+                    (spec, result)
+                }
+            })
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await;
         let mut servers = Vec::new();
-        for spec in specs {
-            match connect_one(spec, workspace).await {
-                Ok(server) => {
+        for (spec, result) in attempts {
+            match result {
+                Ok(Ok(server)) => {
                     tracing::info!(
                         server = %server.name,
                         tools = server.tools.len(),
@@ -168,9 +200,10 @@ impl McpClient {
                     );
                     servers.push(server);
                 }
-                Err(error) => {
-                    // Not fatal, deliberately: see the note at the top.
-                    tracing::warn!(server = %spec.name, %error, "mcp server unavailable");
+                Ok(Err(_)) | Err(_) => {
+                    // Not fatal, deliberately: see the note at the top. Config
+                    // values and server errors can carry credentials.
+                    tracing::warn!(server = %spec.name, "mcp server unavailable; details withheld");
                 }
             }
         }
@@ -269,12 +302,15 @@ async fn connect_one(
             }
         }
         McpTransport::Stdio { command, args, env } => {
-            let mut child = tokio::process::Command::new(command)
-                .args(args)
+            let mut process = tokio::process::Command::new(command);
+            process.args(args);
+            strip_inherited_credentials(&mut process, std::env::vars_os().map(|(name, _)| name));
+            let mut child = process
                 .envs(env)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
                 .spawn()
                 .map_err(|e| format!("could not start `{command}`: {e}"))?;
             let stdin = child.stdin.take().ok_or("no stdin")?;
@@ -293,6 +329,7 @@ async fn connect_one(
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
                 .map_err(|e| e.to_string())?,
+            session: Arc::new(Mutex::new(HttpSession::default())),
         },
     };
 
@@ -306,7 +343,9 @@ async fn connect_one(
             },
         }))
         .await?;
-    channel.notify(json!({ "method": "notifications/initialized" })).await;
+    channel
+        .notify(json!({ "method": "notifications/initialized" }))
+        .await;
 
     let listed = channel.request(json!({ "method": "tools/list" })).await?;
     let tools = listed
@@ -339,6 +378,25 @@ async fn connect_one(
         tools,
         channel,
     })
+}
+
+fn strip_inherited_credentials(
+    command: &mut tokio::process::Command,
+    names: impl IntoIterator<Item = std::ffi::OsString>,
+) {
+    for name in names {
+        let normalized = name.to_string_lossy().to_ascii_uppercase();
+        if normalized.starts_with("ORGBOT_")
+            || normalized.contains("_API_KEY")
+            || normalized.contains("_TOKEN")
+            || normalized.contains("_SECRET")
+            || normalized.contains("_PASSWORD")
+            || normalized.contains("_CREDENTIAL")
+            || normalized.contains("_AUTHORIZATION")
+        {
+            command.env_remove(name);
+        }
+    }
 }
 
 impl Channel {
@@ -437,7 +495,9 @@ impl Channel {
                 url,
                 headers,
                 client,
+                session,
             } => {
+                let is_initialize = body["method"] == "initialize";
                 body["jsonrpc"] = json!("2.0");
                 body["id"] = json!(1);
                 let mut request = client
@@ -447,11 +507,30 @@ impl Channel {
                 for (key, value) in headers {
                     request = request.header(key, value);
                 }
+                {
+                    let session = session.lock().await;
+                    if let Some(session_id) = &session.session_id {
+                        request = request.header("mcp-session-id", session_id);
+                    }
+                    if let Some(protocol_version) = &session.protocol_version {
+                        request = request.header("mcp-protocol-version", protocol_version);
+                    }
+                }
                 let response = request
                     .json(&body)
                     .send()
                     .await
                     .map_err(|e| e.to_string())?;
+                {
+                    let mut current = session.lock().await;
+                    if let Some(session_id) = response
+                        .headers()
+                        .get("mcp-session-id")
+                        .and_then(|value| value.to_str().ok())
+                    {
+                        current.session_id = Some(session_id.to_owned());
+                    }
+                }
                 let text = response.text().await.map_err(|e| e.to_string())?;
                 let value = parse_http_body(&text)?;
                 if let Some(error) = value.get("error") {
@@ -461,7 +540,22 @@ impl Channel {
                         .unwrap_or("unknown error")
                         .to_string());
                 }
-                Ok(value.get("result").cloned().unwrap_or(Value::Null))
+                let result = value.get("result").cloned().unwrap_or(Value::Null);
+                if is_initialize {
+                    let negotiated = result
+                        .get("protocolVersion")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            "MCP initialize result omitted its protocol version".to_string()
+                        })?;
+                    if !SUPPORTED_PROTOCOL_VERSIONS.contains(&negotiated) {
+                        return Err(format!(
+                            "MCP server negotiated unsupported protocol version `{negotiated}`"
+                        ));
+                    }
+                    session.lock().await.protocol_version = Some(negotiated.to_owned());
+                }
+                Ok(result)
             }
         }
     }
@@ -482,10 +576,20 @@ impl Channel {
                 url,
                 headers,
                 client,
+                session,
             } => {
                 let mut request = client.post(url).header("content-type", "application/json");
                 for (key, value) in headers {
                     request = request.header(key, value);
+                }
+                {
+                    let session = session.lock().await;
+                    if let Some(session_id) = &session.session_id {
+                        request = request.header("mcp-session-id", session_id);
+                    }
+                    if let Some(protocol_version) = &session.protocol_version {
+                        request = request.header("mcp-protocol-version", protocol_version);
+                    }
                 }
                 let _ = request.json(&body).send().await;
             }
@@ -558,9 +662,7 @@ pub fn servers_in_codex_config(config: &str) -> Vec<McpServerSpec> {
 ///
 /// Returns nothing if there is no such file, which is the ordinary case for a
 /// machine that has never had a CLI installed on it.
-pub async fn discover_on_workspace(
-    workspace: &crate::workspace::Workspace,
-) -> Vec<McpServerSpec> {
+pub async fn discover_on_workspace(workspace: &crate::workspace::Workspace) -> Vec<McpServerSpec> {
     let outcome = workspace
         .call(
             orgbot_proto::AgentId::new(),
@@ -679,6 +781,48 @@ mod tests {
         assert!(matches!(spec.transport, McpTransport::Http { .. }));
     }
 
+    #[test]
+    fn stdio_mcp_process_does_not_inherit_orgbot_or_service_credentials() {
+        let mut command = tokio::process::Command::new("true");
+        command
+            .env("PATH", "/usr/bin")
+            .env("ORGBOT_MCP_0_TOKEN", "room-only-secret")
+            .env("OPENAI_API_KEY", "unrelated-service-secret")
+            .env("GITHUB_TOKEN", "unrelated-service-token")
+            .env("LANG", "en_US.UTF-8");
+        strip_inherited_credentials(
+            &mut command,
+            [
+                "PATH",
+                "ORGBOT_MCP_0_TOKEN",
+                "OPENAI_API_KEY",
+                "GITHUB_TOKEN",
+                "LANG",
+            ]
+            .map(std::ffi::OsString::from),
+        );
+        command.env("TOKEN", "explicitly-configured-mcp-token");
+        let environment: BTreeMap<_, _> = command
+            .as_std()
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(environment.get("ORGBOT_MCP_0_TOKEN"), Some(&None));
+        assert_eq!(environment.get("OPENAI_API_KEY"), Some(&None));
+        assert_eq!(environment.get("GITHUB_TOKEN"), Some(&None));
+        assert_eq!(
+            environment.get("TOKEN"),
+            Some(&Some("explicitly-configured-mcp-token".into()))
+        );
+        assert!(environment.contains_key("PATH"));
+        assert!(environment.contains_key("LANG"));
+    }
+
     /// A server that is not there must not take the room with it.
     #[tokio::test]
     async fn a_server_that_will_not_start_is_skipped_not_fatal() {
@@ -693,6 +837,126 @@ mod tests {
         .await;
         assert!(client.is_empty());
         assert!(client.tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_imported_http_mcp_completes_handshake_and_tool_call() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        const NEGOTIATED_PROTOCOL_VERSION: &str = "2025-03-26";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).await.unwrap();
+                let mut headers = BTreeMap::new();
+                let mut content_length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).await.unwrap();
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':') {
+                        match name.trim().to_ascii_lowercase().as_str() {
+                            "content-length" => content_length = value.trim().parse().unwrap(),
+                            _ => {
+                                headers.insert(
+                                    name.trim().to_ascii_lowercase(),
+                                    value.trim().to_owned(),
+                                );
+                            }
+                        }
+                    }
+                }
+                assert_eq!(
+                    headers.get("authorization").map(String::as_str),
+                    Some("Bearer synthetic-mcp-room-credential")
+                );
+                let mut body = vec![0; content_length];
+                reader.read_exact(&mut body).await.unwrap();
+                let message: Value = serde_json::from_slice(&body).unwrap();
+                let method = message["method"].as_str().unwrap();
+                if method == "initialize" {
+                    assert!(!headers.contains_key("mcp-session-id"));
+                } else {
+                    assert_eq!(
+                        headers.get("mcp-session-id").map(String::as_str),
+                        Some("synthetic-session")
+                    );
+                    assert_eq!(
+                        headers.get("mcp-protocol-version").map(String::as_str),
+                        Some(NEGOTIATED_PROTOCOL_VERSION)
+                    );
+                }
+                if method == "notifications/initialized" {
+                    assert!(message.get("id").is_none());
+                    let response =
+                        "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    reader
+                        .get_mut()
+                        .write_all(response.as_bytes())
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                let result = match method {
+                    "initialize" => {
+                        assert_eq!(message["params"]["protocolVersion"], PROTOCOL_VERSION);
+                        json!({ "protocolVersion": NEGOTIATED_PROTOCOL_VERSION })
+                    }
+                    "tools/list" => {
+                        json!({"tools": [{"name": "lookup", "description": "mock", "inputSchema": {"type": "object"}}]})
+                    }
+                    "tools/call" => {
+                        json!({"content": [{"type": "text", "text": "mock tool completed"}]})
+                    }
+                    other => panic!("unexpected MCP method {other}"),
+                };
+                let body = serde_json::to_vec(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": result,
+                }))
+                .unwrap();
+                let session_headers = if method == "initialize" {
+                    "Mcp-Session-Id: synthetic-session\r\n"
+                } else {
+                    ""
+                };
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{session_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                reader.get_mut().write_all(header.as_bytes()).await.unwrap();
+                reader.get_mut().write_all(&body).await.unwrap();
+                reader.get_mut().flush().await.unwrap();
+            }
+        });
+
+        let client = McpClient::connect(&[McpServerSpec {
+            name: "imported_docs".into(),
+            transport: McpTransport::Http {
+                url: format!("http://{address}/mcp"),
+                headers: BTreeMap::from([(
+                    "Authorization".into(),
+                    "Bearer synthetic-mcp-room-credential".into(),
+                )]),
+            },
+        }])
+        .await;
+        assert_eq!(client.len(), 1);
+        assert!(client.owns("imported_docs__lookup"));
+        assert_eq!(client.tools()[0].name, "imported_docs__lookup");
+        let outcome = client
+            .call("imported_docs__lookup", &json!({"query": "safe"}))
+            .await;
+        assert!(!outcome.is_error);
+        assert!(outcome.content.contains("mock tool completed"));
+        server.await.unwrap();
     }
 
     /// Text content is what a model reads; the envelope is not.
@@ -827,6 +1091,7 @@ some = true
                     url: String::new(),
                     headers: BTreeMap::new(),
                     client: reqwest::Client::new(),
+                    session: Arc::new(Mutex::new(HttpSession::default())),
                 },
             }],
         };

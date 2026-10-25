@@ -8,28 +8,19 @@
 //! [AgentPolicy]. Nothing is reimplemented here.
 //!
 //! Sessions make the bot's memory last. The first turn starts a fresh CLI
-//! session and records its id; every later turn resumes that same session, so
-//! the agent remembers its earlier work and conversation the way a human agent
-//! would. The id lives on the provider instance — one provider per bot per
-//! room run — which is exactly the lifetime of a bot's working memory in one
-//! room. (Persisting session ids across room runs, so a bot wakes up
-//! remembering last week's project, is a desktop-app concern: store the id
-//! with the room state and feed it back through the bot's configuration.)
+//! session and records its id; later turns resume that session. When a room has
+//! a private state path, the session id is also recorded per bot and restored
+//! only while provider, model, workdir, policy, and MCP mode still match.
 //!
-//! Two notes on what this adapter does *not* do yet:
-//!
-//! - Room tools. The CLI agent speaks its own tool protocol, not the room's
-//!   `claim_task` / `handoff_request` vocabulary, so a turn returns prose and
-//!   the engine treats it as such. Giving agent bots the room's board as MCP
-//!   tools is the next step.
-//! - Text is what crosses the boundary. The rich event stream an agent produces
+//! The room board can be served as MCP tools. Text is what crosses the boundary;
+//! the rich event stream an agent produces
 //!   (file edits, shell runs, tool results) is summarised into the agent's final
 //!   message. Full action telemetry can stream later over the same pipe.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use orgbot_proto::agent::{AgentPolicy, CliKind};
@@ -40,7 +31,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::error::{ProviderError, Result};
-use crate::provider::{emit, Provider};
+use crate::provider::{Provider, emit};
 use crate::types::{
     CompletionRequest, CompletionResponse, ContentBlock, Role, StopReason, StreamEvent, Turn, Usage,
 };
@@ -76,6 +67,29 @@ pub struct AgentCliProvider {
     mcp: bool,
     /// Turn ceiling.
     timeout: Duration,
+    /// Optional owner-only record that lets one bot resume its native session
+    /// after the room process is rebuilt.
+    session_store: Mutex<Option<SessionStore>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SessionStore {
+    path: PathBuf,
+    cli: CliKind,
+    model: String,
+    workdir: String,
+    policy: AgentPolicy,
+    mcp: bool,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PersistedSession {
+    cli: CliKind,
+    model: String,
+    workdir: String,
+    policy: AgentPolicy,
+    mcp: bool,
+    session_id: String,
 }
 
 impl AgentCliProvider {
@@ -118,7 +132,28 @@ impl AgentCliProvider {
             session: Mutex::new(None),
             last_socket: Mutex::new(None),
             timeout,
+            session_store: Mutex::new(None),
         })
+    }
+
+    /// Persist this bot's native session in the private room-state directory.
+    /// Existing state is restored only when provider, model, and canonical
+    /// working directory still match this bot's current configuration.
+    pub fn with_session_store(self, path: PathBuf) -> Self {
+        let workdir = canonical_workdir(&self.workdir);
+        let store = SessionStore {
+            path,
+            cli: self.cli,
+            model: self.model.clone(),
+            workdir,
+            policy: self.policy,
+            mcp: self.mcp,
+        };
+        if let Some(session_id) = read_session(&store) {
+            *self.session.lock().unwrap() = Some(session_id);
+        }
+        *self.session_store.lock().unwrap() = Some(store);
+        self
     }
 
     /// Whether `cli` is installed somewhere the adapter looks.
@@ -165,6 +200,79 @@ pub fn locate(cli: CliKind) -> Option<String> {
     None
 }
 
+fn canonical_workdir(workdir: &Path) -> String {
+    let path = if workdir.as_os_str().is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        workdir.to_path_buf()
+    };
+    std::fs::canonicalize(&path)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn read_session(store: &SessionStore) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::symlink_metadata(&store.path).ok()?;
+    if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
+        return None;
+    }
+    let state: PersistedSession = serde_json::from_slice(&std::fs::read(&store.path).ok()?).ok()?;
+    (state.cli == store.cli
+        && state.model == store.model
+        && state.workdir == store.workdir
+        && state.policy == store.policy
+        && state.mcp == store.mcp)
+        .then_some(state.session_id)
+}
+
+fn write_session(store: &SessionStore, session_id: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let parent = store
+        .path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("session store has no parent directory"))?;
+    std::fs::create_dir_all(parent)?;
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    let state = PersistedSession {
+        cli: store.cli,
+        model: store.model.clone(),
+        workdir: store.workdir.clone(),
+        policy: store.policy,
+        mcp: store.mcp,
+        session_id: session_id.to_owned(),
+    };
+    let bytes = serde_json::to_vec(&state)
+        .map_err(|error| std::io::Error::other(format!("session serialization failed: {error}")))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temporary = parent.join(format!(
+        ".orgbot-session-{}-{nonce}.tmp",
+        std::process::id()
+    ));
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, &store.path)
+        });
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+        return result;
+    }
+    std::fs::set_permissions(&store.path, std::fs::Permissions::from_mode(0o600))
+}
+
 fn is_executable(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
@@ -188,7 +296,7 @@ fn remove_app_credentials(
 
 fn is_orgbot_api_key(name: &std::ffi::OsStr) -> bool {
     let name = name.to_string_lossy();
-    name.starts_with("ORGBOT_") && name.ends_with("_API_KEY")
+    (name.starts_with("ORGBOT_") && name.ends_with("_API_KEY")) || name.starts_with("ORGBOT_MCP_")
 }
 
 /// The sandbox/permission flag this CLI expects for a policy.
@@ -402,7 +510,21 @@ impl AgentCliProvider {
                         detail: format!("reading output: {error}"),
                     })?;
                 let Some(line) = line else { break };
+                let previous_session = episode.session_id.clone();
                 ingest_line(provider.cli, &line, sink, episode);
+                if previous_session != episode.session_id {
+                    if let (Some(store), Some(session_id)) = (
+                        provider.session_store.lock().unwrap().clone(),
+                        episode.session_id.as_deref(),
+                    ) {
+                        write_session(&store, session_id).map_err(|error| {
+                            ProviderError::Process {
+                                provider: provider.cli.label().to_string(),
+                                detail: format!("could not persist native session state: {error}"),
+                            }
+                        })?;
+                    }
+                }
             }
             Ok::<(), ProviderError>(())
         };
@@ -639,15 +761,24 @@ fn write_agent_home(
     label: &str,
     add_server: impl Fn(&mut String, &std::path::Path, &str),
 ) -> Result<std::path::PathBuf> {
-    use std::os::unix::fs::symlink;
-
-    let relay = relay_binary()?;
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .ok_or_else(|| {
             ProviderError::Unsupported(format!("HOME is not set; cannot build a {label} overlay"))
         })?
         .join(dot_dir);
+    write_agent_home_at(socket, &home, label, add_server)
+}
+
+fn write_agent_home_at(
+    socket: &str,
+    home: &Path,
+    label: &str,
+    add_server: impl Fn(&mut String, &Path, &str),
+) -> Result<std::path::PathBuf> {
+    use std::os::unix::fs::symlink;
+
+    let relay = relay_binary()?;
     if !home.is_dir() {
         return Err(ProviderError::Unsupported(format!(
             "{} is not a directory; {label} is probably not set up",
@@ -655,15 +786,24 @@ fn write_agent_home(
         )));
     }
 
-    let overlay = std::env::temp_dir().join(format!(
-        "orgbot-{label}-{}-{}",
-        std::process::id(),
-        socket.replace(['/', '.'], "_")
-    ));
-    let _ = std::fs::remove_dir_all(&overlay);
-    std::fs::create_dir_all(&overlay).map_err(|error| {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let overlay =
+        std::env::temp_dir().join(format!("orgbot-{label}-{}-{nonce}", std::process::id()));
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder.create(&overlay).map_err(|error| {
         ProviderError::Unsupported(format!("cannot create {label} overlay: {error}"))
     })?;
+    if let Err(error) = std::fs::set_permissions(&overlay, std::fs::Permissions::from_mode(0o700)) {
+        let _ = std::fs::remove_dir_all(&overlay);
+        return Err(ProviderError::Unsupported(format!(
+            "cannot protect {label} overlay: {error}"
+        )));
+    }
 
     let mut config = String::new();
     for entry in std::fs::read_dir(&home).map_err(|error| {
@@ -683,9 +823,20 @@ fn write_agent_home(
         let _ = symlink(entry.path(), overlay.join(&name));
     }
     add_server(&mut config, &relay, socket);
-    std::fs::write(overlay.join("config.toml"), config).map_err(|error| {
-        ProviderError::Unsupported(format!("cannot write {label} overlay config: {error}"))
-    })?;
+    let config_path = overlay.join("config.toml");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&config_path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(config.as_bytes())
+        })
+        .map_err(|error| {
+            let _ = std::fs::remove_dir_all(&overlay);
+            ProviderError::Unsupported(format!("cannot write {label} overlay config: {error}"))
+        })?;
     Ok(overlay)
 }
 fn write_claude_mcp_config(socket: &str) -> Result<std::path::PathBuf> {
@@ -698,16 +849,30 @@ fn write_claude_mcp_config(socket: &str) -> Result<std::path::PathBuf> {
             }
         }
     });
-    let path = std::env::temp_dir().join(format!("orgbot-mcp-{}.json", std::process::id()));
+    use std::os::unix::fs::OpenOptionsExt;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let path = std::env::temp_dir().join(format!("orgbot-mcp-{}-{nonce}.json", std::process::id()));
     let bytes = serde_json::to_vec(&config).map_err(|error| {
         ProviderError::Unsupported(format!("MCP config serialisation failed: {error}"))
     })?;
-    std::fs::write(&path, bytes).map_err(|error| {
-        ProviderError::Unsupported(format!(
-            "cannot write MCP config {}: {error}",
-            path.display()
-        ))
-    })?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(&bytes)
+        })
+        .map_err(|error| {
+            ProviderError::Unsupported(format!(
+                "cannot write MCP config {}: {error}",
+                path.display()
+            ))
+        })?;
     Ok(path)
 }
 
@@ -828,6 +993,9 @@ fn build_args(
             CliKind::Claude => cmd.arg("--model").arg(model),
             CliKind::Codex | CliKind::Grok => cmd.arg("-m").arg(model),
         };
+    }
+    if cli == CliKind::Codex && model == "gpt-6.1-sol" {
+        cmd.arg("-c").arg("model_reasoning_effort=\"xhigh\"");
     }
 
     // Let the room's own tools through the permission gate.
@@ -970,7 +1138,10 @@ mod tests {
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect();
             assert!(args.windows(2).any(|pair| pair == ["-s", expected]));
-            assert!(args.windows(2).any(|pair| pair == ["-c", "approval_policy=\"never\""]));
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["-c", "approval_policy=\"never\""])
+            );
             assert!(!args.iter().any(|arg| arg == "--approve-for-me"));
         }
     }
@@ -998,7 +1169,10 @@ mod tests {
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect();
-            assert!(args.windows(2).any(|pair| pair == ["-c", "approval_policy=\"never\""]));
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["-c", "approval_policy=\"never\""])
+            );
             assert!(!args.iter().any(|arg| arg == "-s"));
             assert!(!args.iter().any(|arg| arg == "--approve-for-me"));
             assert!(!args.iter().any(|arg| arg == "--full-auto"));
@@ -1007,6 +1181,209 @@ mod tests {
             let prompt_index = args.iter().position(|arg| arg == "test").unwrap();
             assert!(override_index < session_index && session_index < prompt_index);
         }
+    }
+
+    #[test]
+    fn only_the_named_codex_model_gets_xhigh_effort() {
+        for (cli, model, expected) in [
+            (CliKind::Codex, "gpt-6.1-sol", true),
+            (CliKind::Codex, "gpt-6.1", false),
+            (CliKind::Claude, "gpt-6.1-sol", false),
+            (CliKind::Grok, "gpt-6.1-sol", false),
+        ] {
+            let mut command = Command::new("agent");
+            build_args(
+                &mut command,
+                cli,
+                "work",
+                None,
+                model,
+                AgentPolicy::ReadOnly,
+                None,
+                false,
+            );
+            let arguments: Vec<String> = command
+                .as_std()
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                arguments
+                    .windows(2)
+                    .any(|pair| pair == ["-c", "model_reasoning_effort=\"xhigh\""]),
+                expected,
+                "{cli:?} {model}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_session_is_owner_only_and_bound_to_provider_model_and_workdir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "orgbot-session-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("bot.json");
+        let store = SessionStore {
+            path: path.clone(),
+            cli: CliKind::Codex,
+            model: "gpt-6.1-sol".into(),
+            workdir: "/tmp/project".into(),
+            policy: AgentPolicy::WorkspaceWrite,
+            mcp: true,
+        };
+        write_session(&store, "session-id").unwrap();
+        assert_eq!(read_session(&store).as_deref(), Some("session-id"));
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let mut mismatched = store.clone();
+        mismatched.model = "gpt-6.1".into();
+        assert!(read_session(&mismatched).is_none());
+        mismatched.model = store.model.clone();
+        mismatched.cli = CliKind::Claude;
+        assert!(read_session(&mismatched).is_none());
+        mismatched.cli = store.cli;
+        mismatched.workdir = "/tmp/other".into();
+        assert!(read_session(&mismatched).is_none());
+        mismatched.workdir = store.workdir.clone();
+        mismatched.policy = AgentPolicy::ReadOnly;
+        assert!(read_session(&mismatched).is_none());
+        mismatched.policy = store.policy;
+        mismatched.mcp = false;
+        assert!(read_session(&mismatched).is_none());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_mcp_overlay_copies_config_into_owner_only_temp_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = std::env::temp_dir().join(format!(
+            "orgbot-cli-home-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("config.toml"),
+            "api_key = \"synthetic-secret\"\n",
+        )
+        .unwrap();
+        std::fs::write(source.join("auth.json"), "{}").unwrap();
+        let overlay = write_agent_home_at("/tmp/room.sock", &source, "test", |config, _, _| {
+            config.push_str("\n[mcp_servers.orgbot_room]\nenabled = true\n");
+        })
+        .unwrap();
+        let copied = std::fs::read_to_string(overlay.join("config.toml")).unwrap();
+        assert!(copied.contains("synthetic-secret"));
+        assert!(copied.contains("mcp_servers.orgbot_room"));
+        assert_eq!(
+            std::fs::metadata(&overlay).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(overlay.join("config.toml"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(
+            std::fs::symlink_metadata(overlay.join("auth.json"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        std::fs::remove_dir_all(overlay).unwrap();
+        std::fs::remove_dir_all(source).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn first_session_id_is_saved_before_an_interrupted_episode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "orgbot-interrupted-session-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join("fake-codex");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"session-before-timeout\"}'\nexec sleep 2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state_path = directory.join("bot.json");
+        let store = SessionStore {
+            path: state_path.clone(),
+            cli: CliKind::Codex,
+            model: "gpt-6.1-sol".into(),
+            workdir: canonical_workdir(Path::new("/tmp")),
+            policy: AgentPolicy::WorkspaceWrite,
+            mcp: false,
+        };
+        let provider = AgentCliProvider {
+            cli: CliKind::Codex,
+            bin: binary.to_string_lossy().into_owned(),
+            model: store.model.clone(),
+            workdir: PathBuf::from("/tmp"),
+            policy: store.policy,
+            session: Mutex::new(None),
+            last_socket: Mutex::new(None),
+            mcp: store.mcp,
+            timeout: Duration::from_millis(50),
+            session_store: Mutex::new(Some(store.clone())),
+        };
+        let mut episode = Episode::default();
+        let result = provider
+            .run_episode("prompt", None, &None, &mut episode, None, None)
+            .await;
+        assert!(
+            result.is_err(),
+            "the fake CLI should exceed its turn timeout"
+        );
+        assert_eq!(
+            read_session(&store).as_deref(),
+            Some("session-before-timeout")
+        );
+        let resumed = AgentCliProvider::new(
+            store.cli,
+            store.model.clone(),
+            "/tmp",
+            store.policy,
+            store.mcp,
+        )
+        .unwrap()
+        .with_session_store(state_path);
+        assert_eq!(
+            resumed.session_id().as_deref(),
+            Some("session-before-timeout")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1036,6 +1413,7 @@ mod tests {
             "DEEPSEEK_API_KEY",
             "ORGBOT_DEEPSEEK_TWO_API_KEY",
             "ORGBOT_OLLAMA_API_KEY",
+            "ORGBOT_MCP_0_AUTHORIZATION",
         ]
         .map(std::ffi::OsString::from);
         remove_app_credentials(&mut cmd, app_names);
@@ -1055,8 +1433,13 @@ mod tests {
             "DEEPSEEK_API_KEY",
             "ORGBOT_DEEPSEEK_TWO_API_KEY",
             "ORGBOT_OLLAMA_API_KEY",
+            "ORGBOT_MCP_0_AUTHORIZATION",
         ] {
-            assert_eq!(environment.get(removed), Some(&None), "{removed} is removed");
+            assert_eq!(
+                environment.get(removed),
+                Some(&None),
+                "{removed} is removed"
+            );
         }
         for kept in [
             "PATH",
@@ -1064,7 +1447,10 @@ mod tests {
             "OPENAI_API_KEY",
             "ORGBOT_CLI_TURN_TIMEOUT_SECS",
         ] {
-            assert!(environment.get(kept).is_some_and(Option::is_some), "{kept} remains");
+            assert!(
+                environment.get(kept).is_some_and(Option::is_some),
+                "{kept} remains"
+            );
         }
     }
 
@@ -1147,12 +1533,14 @@ mod tests {
                     .map(|arg| arg.to_string_lossy().into_owned())
                     .collect();
                 assert_eq!(args.iter().filter(|arg| *arg == "--allow").count(), 2);
-                assert!(args
-                    .windows(2)
-                    .any(|pair| pair == ["--allow", ROOM_TOOL_PATTERN]));
-                assert!(args
-                    .windows(2)
-                    .any(|pair| pair == ["--allow", ROOM_TOOL_WILDCARD]));
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair == ["--allow", ROOM_TOOL_PATTERN])
+                );
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair == ["--allow", ROOM_TOOL_WILDCARD])
+                );
             }
         }
     }
@@ -1175,11 +1563,14 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--permission-mode", "dontAsk"]));
-        assert!(args
-            .windows(3)
-            .any(|triple| { triple == ["--allowedTools", ROOM_TOOL_PATTERN, ROOM_TOOL_WILDCARD] }));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--permission-mode", "dontAsk"])
+        );
+        assert!(
+            args.windows(3).any(|triple| {
+                triple == ["--allowedTools", ROOM_TOOL_PATTERN, ROOM_TOOL_WILDCARD]
+            })
+        );
     }
 }

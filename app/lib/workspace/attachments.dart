@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import '../protocol/models.dart';
 import '../state/room_archive.dart';
+import 'desktop_files.dart';
 
 const attachmentChannel = MethodChannel('orgbot/attachments');
 
@@ -15,6 +16,7 @@ class RoomAttachments {
       Directory('${(await RoomArchive.directory(roomId)).path}/attachments');
 
   Future<List<ChatFile>> pick() async {
+    if (Platform.isLinux) return DesktopFiles.pickAttachments(roomId);
     final picked =
         await attachmentChannel.invokeListMethod<Object?>('pick', {
           'room': roomId,
@@ -62,10 +64,12 @@ class RoomAttachments {
     return File(path);
   }
 
-  Future<void> open(ChatFile file) => attachmentChannel.invokeMethod<void>(
-    'open',
-    {'room': roomId, 'id': file.id},
-  );
+  Future<void> open(ChatFile file) => Platform.isLinux
+      ? DesktopFiles.openAttachment(roomId, file.id)
+      : attachmentChannel.invokeMethod<void>('open', {
+          'room': roomId,
+          'id': file.id,
+        });
 
   Future<void> saveDraft(List<ChatFile> files) async {
     final dir = await directory;

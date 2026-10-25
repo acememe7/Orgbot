@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=OrgBot
+Name=OrgBots
 GenericName=AI agent rooms
 Comment=A group chat of AI bots working a shared task board
 Exec=orgbot
