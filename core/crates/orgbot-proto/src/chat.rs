@@ -135,6 +135,24 @@ pub struct ChatFile {
 }
 
 impl ChatMessage {
+    /// A message from the room's human operator.
+    pub fn human(room: RoomId, name: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            id: MessageId::new(),
+            room,
+            author: Author::Human { name: name.into() },
+            audience: Audience::Everyone,
+            intent: MessageIntent::Say,
+            body: body.into(),
+            task: None,
+            handoff: None,
+            reply_to: None,
+            attachments: Vec::new(),
+            files: Vec::new(),
+            sent_at: Timestamp::now(),
+        }
+    }
+
     /// A broadcast message from a bot.
     pub fn say(room: RoomId, agent: AgentId, body: impl Into<String>) -> Self {
         Self {

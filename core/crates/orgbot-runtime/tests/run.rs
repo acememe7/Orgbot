@@ -167,6 +167,35 @@ fn room(goal: &str) -> Orchestrator {
     })
 }
 
+#[tokio::test]
+async fn an_owner_question_waits_without_spending_planning_turns_or_completing() {
+    use orgbot_engine::Command;
+    let mut room = room("wait for the owner");
+    let lead = spec("lead", &["coordinator"], Autonomy::coordinator());
+    let id = lead.id;
+    room.seat(lead, Arc::new(ScriptedProvider::new(vec![]))).unwrap();
+    room.start().unwrap();
+    room.engine_mut().apply(Command::AskOwner {
+        by: id,
+        task: None,
+        question: "Which direction should we take?".into(),
+        options: vec!["Desktop".into(), "Mobile".into()],
+    }).unwrap();
+    assert!(!room.is_actionable(id), "waiting must not trigger more planning calls");
+    assert!(room.step(None).await.is_none());
+    assert_eq!(room.turns_used(), 0);
+    let created = room.engine_mut().apply(Command::CreateTask {
+        title: "Previous work".into(), brief: String::new(), by: None,
+        required_role: None, priority: orgbot_proto::task::Priority::Normal,
+        acceptance_criteria: vec![], depends_on: vec![], origin: TaskOrigin::plain(),
+    }).unwrap();
+    let task = created.iter().find_map(|event| match &event.event {
+        orgbot_proto::Event::TaskCreated { task } => Some(task.id), _ => None,
+    }).unwrap();
+    room.engine_mut().apply(Command::RetireTask { task, reason: "Fixture".into() }).unwrap();
+    assert!(!room.is_complete(), "pending owner questions keep a finished board open");
+}
+
 // ----------------------------------------------------------- the bot behaviours
 
 /// A coordinator: plans once, then delivers approved work.

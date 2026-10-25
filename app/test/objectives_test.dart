@@ -28,13 +28,18 @@ class _Silent implements RoomClient {
   @override
   void send(Map<String, Object?> message) {}
   @override
-  void sendMessage(String author, String body, {String? taskId, String? replyTo}) {}
+  void sendMessage(
+    String author,
+    String body, {
+    String? taskId,
+    String? replyTo,
+  }) {}
   @override
   void answerBot(String taskId, String answer) {}
   @override
   void answerDecision(String decision, String chosen, {String note = ''}) =>
-      answered.add((decision: decision, chosen: chosen));
-  final answered = <({String decision, String chosen})>[];
+      answered.add((decision: decision, chosen: chosen, note: note));
+  final answered = <({String decision, String chosen, String note})>[];
   @override
   void pause({String reason = ''}) {}
   @override
@@ -60,47 +65,47 @@ Map<String, Object?> digestJson({
   int needsYou = 0,
   int rawRecords = 18,
   bool expansion = false,
-}) =>
-    {
-      'objectives': [
-        for (var i = 0; i < objectives; i++)
-          {
-            'task': 'task_$i',
-            'title': 'objective $i',
-            'progress': {'done': 2, 'total': 4},
-            'status': i == 0 && needsYou > 0 ? 'needs you' : 'in progress',
-            'blocker': i == 0 ? 'waiting on B3-C source recovery' : null,
-            'owners': ['bot_1'],
-            'needs_operator': i == 0 && needsYou > 0,
-            'records': ['task_r1', 'task_r2'],
-          },
-      ],
-      'counts': {
-        'objectives': objectives,
-        'active': 1,
-        'waiting_internally': 1,
-        'needs_you': needsYou,
-        'delivered': 1,
-        'raw_records': rawRecords,
+  bool tasklessDecision = false,
+}) => {
+  'objectives': [
+    for (var i = 0; i < objectives; i++)
+      {
+        'task': 'task_$i',
+        'title': 'objective $i',
+        'progress': {'done': 2, 'total': 4},
+        'status': i == 0 && needsYou > 0 ? 'needs you' : 'in progress',
+        'blocker': i == 0 ? 'waiting on B3-C source recovery' : null,
+        'owners': ['bot_1'],
+        'needs_operator': !tasklessDecision && i == 0 && needsYou > 0,
+        'records': ['task_r1', 'task_r2'],
       },
-      'needs_you': [
-        for (var i = 0; i < needsYou; i++)
-          {
-            'id': 'dec_${i + 1}',
-            'task': 'task_$i',
-            'title': 'provision the VPS',
-            'because': 'it provisions paid infrastructure',
-            'options': ['Approve', 'Decline'],
-          },
-      ],
-      'critical_path': ['task_0', 'task_1'],
-      'health': {
-        'inflation_ratio': expansion ? 9.0 : 1.5,
-        'supporting_records': 12,
-        'closed_as_duplicate': 1,
-        'coordination_expansion': expansion,
+  ],
+  'counts': {
+    'objectives': objectives,
+    'active': 1,
+    'waiting_internally': 1,
+    'needs_you': needsYou,
+    'delivered': 1,
+    'raw_records': rawRecords,
+  },
+  'needs_you': [
+    for (var i = 0; i < needsYou; i++)
+      {
+        'id': 'dec_${i + 1}',
+        if (!tasklessDecision) 'task': 'task_$i',
+        'title': tasklessDecision ? 'a decision for you' : 'provision the VPS',
+        'because': 'it provisions paid infrastructure',
+        'options': ['Approve', 'Decline'],
       },
-    };
+  ],
+  'critical_path': ['task_0', 'task_1'],
+  'health': {
+    'inflation_ratio': expansion ? 9.0 : 1.5,
+    'supporting_records': 12,
+    'closed_as_duplicate': 1,
+    'coordination_expansion': expansion,
+  },
+};
 
 void main() {
   group('parsing what the engine sends', () {
@@ -113,8 +118,10 @@ void main() {
       expect(digest.objectives.first.progress.label, '2 / 4 stages');
       expect(digest.objectives.first.progress.fraction, 0.5);
       expect(digest.objectives.first.needsOperator, isTrue);
-      expect(digest.needsYou.single.because,
-          'it provisions paid infrastructure');
+      expect(
+        digest.needsYou.single.because,
+        'it provisions paid infrastructure',
+      );
       expect(digest.needsYou.single.options, ['Approve', 'Decline']);
       expect(digest.criticalPath, ['task_0', 'task_1']);
     });
@@ -140,14 +147,14 @@ void main() {
       expect(store.digest.isEmpty, isTrue);
 
       store.restore([
-        {'type': 'digest', 'digest': digestJson(objectives: 3)}
+        {'type': 'digest', 'digest': digestJson(objectives: 3)},
       ]);
       expect(store.digest.counts.objectives, 3);
 
       // A later, smaller digest replaces rather than merges: the digest is a
       // fold over every task and cannot be patched.
       store.restore([
-        {'type': 'digest', 'digest': digestJson(objectives: 1)}
+        {'type': 'digest', 'digest': digestJson(objectives: 1)},
       ]);
       expect(store.digest.objectives.length, 1);
     });
@@ -160,7 +167,7 @@ void main() {
           'roster': [],
           'tasks': [],
           'digest': digestJson(),
-        }
+        },
       ]);
       expect(store.digest.counts.objectives, 2);
     });
@@ -168,50 +175,69 @@ void main() {
 
   group('the view', () {
     Widget wrap(RoomStore store) => MaterialApp(
-          home: Scaffold(body: ObjectivesPane(store: store)),
-        );
+      home: Scaffold(body: ObjectivesPane(store: store)),
+    );
 
-    testWidgets('it leads with outcomes, not the record count',
-        (tester) async {
-      final store = storeWith([{'type': 'digest', 'digest': digestJson()}]);
+    testWidgets('it leads with outcomes, not the record count', (tester) async {
+      final store = storeWith([
+        {'type': 'digest', 'digest': digestJson()},
+      ]);
       await tester.pumpWidget(wrap(store));
 
       expect(find.text('objective 0'), findsOneWidget);
       expect(find.text('objectives done'), findsOneWidget);
       // The raw total is available, but never the headline.
-      expect(find.text('Show all 18 work records'), findsNothing,
-          reason: 'no callback was given, so the affordance is hidden');
+      expect(
+        find.text('Show all 18 work records'),
+        findsNothing,
+        reason: 'no callback was given, so the affordance is hidden',
+      );
     });
 
     testWidgets('a quiet room says nothing needs you', (tester) async {
-      final store = storeWith([{'type': 'digest', 'digest': digestJson()}]);
+      final store = storeWith([
+        {'type': 'digest', 'digest': digestJson()},
+      ]);
       await tester.pumpWidget(wrap(store));
 
       expect(find.text('Nothing needs you.'), findsOneWidget);
       expect(find.text('Needs you'), findsNothing, reason: 'no inbox needed');
     });
 
-    testWidgets('a real decision is surfaced with its reason and options',
-        (tester) async {
+    testWidgets('a real decision is surfaced with its reason and options', (
+      tester,
+    ) async {
       final store = storeWith([
-        {'type': 'digest', 'digest': digestJson(needsYou: 1)}
+        {'type': 'digest', 'digest': digestJson(needsYou: 1)},
       ]);
       await tester.pumpWidget(wrap(store));
 
       expect(find.text('1 decision needs you.'), findsOneWidget);
       expect(find.text('Needs you'), findsOneWidget);
-      expect(
-        find.text(
-            'Decision required because: it provisions paid infrastructure'),
-        findsOneWidget,
-      );
+      expect(find.text('it provisions paid infrastructure'), findsOneWidget);
       expect(find.text('Approve'), findsOneWidget);
+    });
+
+    testWidgets('a taskless question displays without a placeholder task', (
+      tester,
+    ) async {
+      final store = storeWith([
+        {
+          'type': 'digest',
+          'digest': digestJson(needsYou: 1, tasklessDecision: true),
+        },
+      ]);
+      await tester.pumpWidget(wrap(store));
+
+      expect(find.text('it provisions paid infrastructure'), findsOneWidget);
+      expect(find.text('provision the VPS'), findsNothing);
+      expect(find.text('a decision for you'), findsNothing);
     });
 
     /// Every card says it, so nobody has to work it out.
     testWidgets('each objective states whether it needs you', (tester) async {
       final store = storeWith([
-        {'type': 'digest', 'digest': digestJson(needsYou: 1)}
+        {'type': 'digest', 'digest': digestJson(needsYou: 1)},
       ]);
       await tester.pumpWidget(wrap(store));
 
@@ -219,9 +245,12 @@ void main() {
       expect(find.text('Needs you: no'), findsOneWidget);
     });
 
-    testWidgets('the records behind an objective are one tap away',
-        (tester) async {
-      final store = storeWith([{'type': 'digest', 'digest': digestJson()}]);
+    testWidgets('the records behind an objective are one tap away', (
+      tester,
+    ) async {
+      final store = storeWith([
+        {'type': 'digest', 'digest': digestJson()},
+      ]);
       await tester.pumpWidget(wrap(store));
 
       expect(find.text('2 records behind it'), findsNWidgets(2));
@@ -232,7 +261,7 @@ void main() {
 
     testWidgets('runaway coordination is called out', (tester) async {
       final store = storeWith([
-        {'type': 'digest', 'digest': digestJson(expansion: true)}
+        {'type': 'digest', 'digest': digestJson(expansion: true)},
       ]);
       await tester.pumpWidget(wrap(store));
 
@@ -246,18 +275,23 @@ void main() {
       expect(find.textContaining('9.0 records per objective'), findsOneWidget);
     });
 
-    testWidgets('the full board is reachable when a way there is given',
-        (tester) async {
-      final store = storeWith([{'type': 'digest', 'digest': digestJson()}]);
+    testWidgets('the full board is reachable when a way there is given', (
+      tester,
+    ) async {
+      final store = storeWith([
+        {'type': 'digest', 'digest': digestJson()},
+      ]);
       var opened = false;
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: ObjectivesPane(
-            store: store,
-            onShowAllRecords: () => opened = true,
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ObjectivesPane(
+              store: store,
+              onShowAllRecords: () => opened = true,
+            ),
           ),
         ),
-      ));
+      );
 
       await tester.scrollUntilVisible(
         find.text('Show all 18 work records'),
@@ -288,11 +322,13 @@ void _answerTests() {
       final client = _Silent();
       final store = RoomStore(client);
       store.restore([
-        {'type': 'digest', 'digest': digestJson(needsYou: 1)}
+        {'type': 'digest', 'digest': digestJson(needsYou: 1)},
       ]);
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(body: ObjectivesPane(store: store)),
-      ));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: ObjectivesPane(store: store)),
+        ),
+      );
 
       await tester.tap(find.text('Approve'));
       await tester.pump();
@@ -305,6 +341,163 @@ void _answerTests() {
         reason: 'the answer is addressed to the question, not to a task',
       );
     });
+
+    testWidgets('a custom answer is delivered with the same decision id', (
+      tester,
+    ) async {
+      final client = _Silent();
+      final store = RoomStore(client);
+      store.restore([
+        {'type': 'digest', 'digest': digestJson(needsYou: 1)},
+      ]);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: ObjectivesPane(store: store)),
+        ),
+      );
+
+      final customAnswer = find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField &&
+            widget.decoration?.labelText == 'Custom answer',
+      );
+      await tester.enterText(customAnswer, 'Keep it local');
+      await tester.pump();
+      expect(
+        tester
+            .widget<FilledButton>(find.widgetWithText(FilledButton, 'Send'))
+            .onPressed,
+        isNotNull,
+      );
+      await tester.tap(find.text('Send'));
+      await tester.pump();
+
+      expect(client.answered, hasLength(1));
+      expect(client.answered.single.decision, 'dec_1');
+      expect(client.answered.single.chosen, 'Custom answer');
+      expect(client.answered.single.note, 'Keep it local');
+    });
+
+    testWidgets('duplicate visible question cards cannot submit twice', (
+      tester,
+    ) async {
+      final client = _Silent();
+      final store = RoomStore(client);
+      store.restore([
+        {'type': 'digest', 'digest': digestJson(needsYou: 1)},
+      ]);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                Expanded(
+                  child: NeedsYouPanel(
+                    decisions: store.digest.needsYou,
+                    store: store,
+                  ),
+                ),
+                Expanded(
+                  child: NeedsYouPanel(
+                    decisions: store.digest.needsYou,
+                    store: store,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Approve').first);
+      await tester.tap(find.text('Approve').last);
+      await tester.pump();
+
+      expect(client.answered, hasLength(1));
+    });
+
+    testWidgets('an unacknowledged answer unlocks a retry', (tester) async {
+      final client = _Silent();
+      final store = RoomStore(client);
+      store.restore([
+        {'type': 'digest', 'digest': digestJson(needsYou: 1)},
+      ]);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: ObjectivesPane(store: store)),
+        ),
+      );
+
+      await tester.tap(find.text('Approve'));
+      await tester.pump();
+      expect(find.text('Sending…'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 13));
+      expect(
+        find.text('No update arrived. Choose an answer to retry.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Approve'));
+      await tester.pump();
+
+      expect(client.answered, hasLength(2));
+    });
+
+    testWidgets('answer timeout survives disposing and remounting its panel', (
+      tester,
+    ) async {
+      final client = _Silent();
+      final store = RoomStore(client);
+      store.restore([
+        {'type': 'digest', 'digest': digestJson(needsYou: 1)},
+      ]);
+      var showPanel = true;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) => Column(
+                children: [
+                  if (showPanel)
+                    Expanded(
+                      child: NeedsYouPanel(
+                        decisions: store.digest.needsYou,
+                        store: store,
+                      ),
+                    ),
+                  TextButton(
+                    onPressed: () => setState(() => showPanel = !showPanel),
+                    child: const Text('Toggle panel'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Approve'));
+      await tester.pump();
+      expect(find.text('Sending…'), findsOneWidget);
+      await tester.tap(find.text('Toggle panel'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 13));
+      await tester.tap(find.text('Toggle panel'));
+      await tester.pump();
+
+      expect(
+        find.text('No update arrived. Choose an answer to retry.'),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.widgetWithText(OutlinedButton, 'Approve'),
+            )
+            .onPressed,
+        isNotNull,
+      );
+      expect(client.answered, hasLength(1));
+    });
   });
 }
 
@@ -313,14 +506,14 @@ void _answerTests() {
 void _viewTests() {
   group('views', () {
     Widget wrap(RoomStore store) => MaterialApp(
-          home: Scaffold(body: ObjectivesPane(store: store)),
-        );
+      home: Scaffold(body: ObjectivesPane(store: store)),
+    );
 
     /// The point of the split: a real decision must not sit among ninety-five
     /// records that are all fine.
     testWidgets('Needs me shows only what waits on a person', (tester) async {
       final store = storeWith([
-        {'type': 'digest', 'digest': digestJson(objectives: 4, needsYou: 1)}
+        {'type': 'digest', 'digest': digestJson(objectives: 4, needsYou: 1)},
       ]);
       await tester.pumpWidget(wrap(store));
 
@@ -328,28 +521,60 @@ void _viewTests() {
       await tester.tap(find.text('Needs me 1'));
       await tester.pumpAndSettle();
 
-      expect(find.text('objective 0'), findsOneWidget, reason: 'the one that needs you');
-      expect(find.text('objective 1'), findsNothing, reason: 'and nothing else');
+      expect(
+        find.text('objective 0'),
+        findsOneWidget,
+        reason: 'the one that needs you',
+      );
+      expect(
+        find.text('objective 1'),
+        findsNothing,
+        reason: 'and nothing else',
+      );
     });
 
     /// An empty slice explains itself, and the good case says so warmly.
     testWidgets('an empty Needs me is reassuring, not blank', (tester) async {
       final store = storeWith([
-        {'type': 'digest', 'digest': digestJson()}
+        {'type': 'digest', 'digest': digestJson()},
       ]);
       await tester.pumpWidget(wrap(store));
 
       await tester.tap(find.text('Needs me 0'));
       await tester.pumpAndSettle();
-      expect(
-        find.textContaining('Nothing needs you'),
-        findsWidgets,
-      );
+      expect(find.textContaining('Nothing needs you'), findsWidgets);
+    });
+
+    testWidgets('mobile Needs me keeps a taskless question answerable', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final store = storeWith([
+        {
+          'type': 'digest',
+          'digest': digestJson(
+            objectives: 0,
+            needsYou: 1,
+            tasklessDecision: true,
+          ),
+        },
+      ]);
+      await tester.pumpWidget(wrap(store));
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Needs me 1'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('it provisions paid infrastructure'), findsOneWidget);
+      expect(find.text('Nothing needs you.'), findsNothing);
+      expect(find.text('Approve'), findsOneWidget);
     });
 
     testWidgets('the chain deciding completion is shown', (tester) async {
       final store = storeWith([
-        {'type': 'digest', 'digest': digestJson()}
+        {'type': 'digest', 'digest': digestJson()},
       ]);
       await tester.pumpWidget(wrap(store));
 
@@ -361,18 +586,33 @@ void _viewTests() {
       expect(find.text('What decides when this finishes'), findsOneWidget);
     });
 
-    testWidgets('who is doing what is shown, and idle capacity called out',
-        (tester) async {
+    testWidgets('who is doing what is shown, and idle capacity called out', (
+      tester,
+    ) async {
       final digest = digestJson();
       digest['utilization'] = {
         'bots': [
-          {'agent': 'bot_1', 'handle': 'eng1', 'doing': 'working', 'holding': 2, 'free': false},
-          {'agent': 'bot_2', 'handle': 'eng2', 'doing': 'idle', 'holding': 0, 'free': true},
+          {
+            'agent': 'bot_1',
+            'handle': 'eng1',
+            'doing': 'working',
+            'holding': 2,
+            'free': false,
+          },
+          {
+            'agent': 'bot_2',
+            'handle': 'eng2',
+            'doing': 'idle',
+            'holding': 0,
+            'free': true,
+          },
         ],
         'idle': 1,
         'unclaimed': 4,
       };
-      final store = storeWith([{'type': 'digest', 'digest': digest}]);
+      final store = storeWith([
+        {'type': 'digest', 'digest': digest},
+      ]);
       await tester.pumpWidget(wrap(store));
 
       await tester.scrollUntilVisible(
@@ -394,7 +634,13 @@ void _viewTests() {
       final digest = digestJson();
       digest['utilization'] = {
         'bots': [
-          {'agent': 'bot_1', 'handle': 'eng1', 'doing': 'idle', 'holding': 0, 'free': true},
+          {
+            'agent': 'bot_1',
+            'handle': 'eng1',
+            'doing': 'idle',
+            'holding': 0,
+            'free': true,
+          },
         ],
         'idle': 1,
         'unclaimed': 3,
@@ -403,7 +649,9 @@ void _viewTests() {
           ['ops', 1],
         ],
       };
-      final store = storeWith([{'type': 'digest', 'digest': digest}]);
+      final store = storeWith([
+        {'type': 'digest', 'digest': digest},
+      ]);
       await tester.pumpWidget(wrap(store));
 
       await tester.scrollUntilVisible(
@@ -426,7 +674,7 @@ void _viewTests() {
     /// Detail views stay focused: no critical path or roster strip there.
     testWidgets('the extra panels belong to the overview only', (tester) async {
       final store = storeWith([
-        {'type': 'digest', 'digest': digestJson(objectives: 3)}
+        {'type': 'digest', 'digest': digestJson(objectives: 3)},
       ]);
       await tester.pumpWidget(wrap(store));
 
@@ -443,26 +691,36 @@ void _viewTests() {
 void _graphTests() {
   group('the graph', () {
     Widget wrap(RoomStore store) => MaterialApp(
-          home: Scaffold(body: ObjectivesPane(store: store)),
-        );
+      home: Scaffold(body: ObjectivesPane(store: store)),
+    );
 
     RoomStore withBoard() => storeWith([
+      {
+        'type': 'snapshot',
+        'room': {'id': 'room_1', 'name': 'test', 'goal': 'g'},
+        'roster': [],
+        'tasks': [
           {
-            'type': 'snapshot',
-            'room': {'id': 'room_1', 'name': 'test', 'goal': 'g'},
-            'roster': [],
-            'tasks': [
-              {'id': 'task_r1', 'title': 'rebuild', 'state': 'ready', 'depends_on': ['task_r2']},
-              {'id': 'task_r2', 'title': 'recover the source', 'state': 'in_progress'},
-            ],
-            'digest': digestJson(objectives: 1),
-          }
-        ]);
+            'id': 'task_r1',
+            'title': 'rebuild',
+            'state': 'ready',
+            'depends_on': ['task_r2'],
+          },
+          {
+            'id': 'task_r2',
+            'title': 'recover the source',
+            'state': 'in_progress',
+          },
+        ],
+        'digest': digestJson(objectives: 1),
+      },
+    ]);
 
     /// A chain should read as a chain, not as a list that happens to be in
     /// order.
-    testWidgets('expanding a card shows what each record waits on',
-        (tester) async {
+    testWidgets('expanding a card shows what each record waits on', (
+      tester,
+    ) async {
       final store = withBoard();
       await tester.pumpWidget(wrap(store));
 

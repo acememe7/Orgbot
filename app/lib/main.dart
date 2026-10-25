@@ -62,9 +62,9 @@ ThemeData orgBotTheme(Brightness brightness, {bool desktop = false}) {
       builders: {
         TargetPlatform.android: WorkspacePageTransitions(),
         TargetPlatform.iOS: WorkspacePageTransitions(),
-        TargetPlatform.linux: WorkspacePageTransitions(),
-        TargetPlatform.macOS: WorkspacePageTransitions(),
-        TargetPlatform.windows: WorkspacePageTransitions(),
+        TargetPlatform.linux: DesktopPageTransitions(),
+        TargetPlatform.macOS: DesktopPageTransitions(),
+        TargetPlatform.windows: DesktopPageTransitions(),
       },
     ),
     colorScheme: scheme,

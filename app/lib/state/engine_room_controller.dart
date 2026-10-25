@@ -171,7 +171,7 @@ class EngineRoomController extends ChangeNotifier {
       if (_store == null && restoring) {
         final preview = LocalRoomClient();
         _client = preview;
-        _store = RoomStore(preview)
+        _store = RoomStore(preview, notificationRoomId: room.id)
           ..restore(await RoomArchive.savedFrames(room.id));
         _store!.addListener(_changed);
         if (!_disposed) notifyListeners();
@@ -344,7 +344,7 @@ class EngineRoomController extends ChangeNotifier {
       }
       _archive?.append([message]);
     });
-    final store = RoomStore(client);
+    final store = RoomStore(client, notificationRoomId: room.id);
     _store = store;
     store.addListener(_changed);
 
@@ -387,7 +387,7 @@ class EngineRoomController extends ChangeNotifier {
     _archiveSubscription = client.messages.listen(
       (message) => _archive?.append([message]),
     );
-    final store = RoomStore(client);
+    final store = RoomStore(client, notificationRoomId: room.id);
     _store = store;
     store.addListener(_changed);
 
@@ -607,10 +607,7 @@ class EngineRoomController extends ChangeNotifier {
     if (shared != null) request['shared'] = shared;
     if (query != null) request['query'] = query;
     if (targetProject != null) request['target_project'] = targetProject;
-    client.send({
-      'type': 'memory',
-      'request': request,
-    });
+    client.send({'type': 'memory', 'request': request});
     try {
       final result = await response.future.timeout(const Duration(seconds: 22));
       if (result['ok'] != true) {

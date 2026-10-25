@@ -856,7 +856,7 @@ impl RoomSession {
                 };
                 // A refused answer is not worth stopping the room for: the
                 // question stays open and the person can try again.
-                let _ = self
+                let result = self
                     .orchestrator
                     .engine_mut()
                     .apply(Command::AnswerDecision {
@@ -867,29 +867,54 @@ impl RoomSession {
                             at: orgbot_proto::Timestamp::now(),
                         },
                     });
+                let events = match result {
+                    Ok(events) => events,
+                    Err(error) => {
+                        let _ = self.events.send(ServerMessage::Error {
+                            message: format!("Answer was not accepted: {error}"),
+                        });
+                        return ControlFlow::Continue;
+                    }
+                };
+                // A lost acknowledgement may retry an already recorded answer.
+                if !events.iter().any(|event| {
+                    matches!(event.event, orgbot_proto::Event::DecisionAnswered { .. })
+                }) {
+                    let _ = self.events.send(ServerMessage::Digest {
+                        digest: Box::new(self.orchestrator.engine().digest()),
+                    });
+                    return ControlFlow::Continue;
+                }
                 // Put the answer in the transcript too. The board already
                 // knows, but a bot reading back over the room should see the
                 // decision where it was made, not have to infer it from a
                 // task quietly becoming claimable.
-                let room = self.orchestrator.engine().room_id();
-                let _ = self.orchestrator.engine_mut().apply(Command::PostMessage {
-                    message: Box::new(ChatMessage {
-                        id: orgbot_proto::MessageId::new(),
-                        room,
-                        author: Author::Human {
-                            name: "operator".into(),
-                        },
-                        audience: Audience::Everyone,
-                        intent: MessageIntent::Answer,
-                        body: decided,
-                        task: None,
-                        handoff: None,
-                        reply_to: None,
-                        attachments: vec![],
-                        files: vec![],
-                        sent_at: Timestamp::now(),
-                    }),
-                });
+                if !events
+                    .iter()
+                    .any(|event| matches!(event.event, orgbot_proto::Event::MessagePosted { .. }))
+                {
+                    let room = self.orchestrator.engine().room_id();
+                    let _ = self.orchestrator.engine_mut().apply(Command::PostMessage {
+                        message: Box::new(ChatMessage {
+                            id: orgbot_proto::MessageId::new(),
+                            room,
+                            author: Author::Human {
+                                name: "operator".into(),
+                            },
+                            audience: Audience::Everyone,
+                            intent: MessageIntent::Answer,
+                            body: decided,
+                            task: None,
+                            handoff: None,
+                            reply_to: None,
+                            attachments: vec![],
+                            files: vec![],
+                            sent_at: Timestamp::now(),
+                        }),
+                    });
+                }
+                self.orchestrator.wake();
+                self.settled = false;
                 self.broadcast_new_events();
             }
             Control::Stop => return ControlFlow::Stop(RunOutcome::Idle),
@@ -1161,6 +1186,7 @@ fn touches_the_board(event: &orgbot_proto::event::Event) -> bool {
             | Event::TaskTransitioned { .. }
             | Event::TaskAuthorized { .. }
             | Event::DecisionAsked { .. }
+            | Event::DecisionQuestionJoined { .. }
             | Event::DecisionAnswered { .. }
             | Event::ReviewRecorded { .. }
             | Event::ArtifactAdded { .. }
@@ -1303,6 +1329,70 @@ mod tests {
             .resolve()
             .unwrap();
         RoomSession::build(resolved).unwrap()
+    }
+
+    #[tokio::test]
+    async fn owner_answer_wakes_room_and_reaches_only_its_asking_agent() {
+        let (mut session, handle) = session();
+        let asker = session.orchestrator.engine().agents().next().unwrap().id;
+        let raised = session
+            .orchestrator
+            .engine_mut()
+            .apply(Command::AskOwner {
+                by: asker,
+                task: None,
+                question: "Which prototype should we develop?".into(),
+                options: vec!["Desktop".into(), "Mobile".into()],
+            })
+            .unwrap();
+        let decision = raised
+            .iter()
+            .find_map(|event| match &event.event {
+                orgbot_proto::Event::DecisionAsked { decision } => Some(decision.id),
+                _ => None,
+            })
+            .unwrap();
+        session.settled = true;
+        session.handle(Control::AnswerDecision {
+            decision,
+            chosen: "Desktop".into(),
+            note: "Keyboard first".into(),
+        });
+        assert!(!session.settled);
+        let engine = session.orchestrator.engine();
+        assert_eq!(engine.transcript().len(), 1);
+        let reply = &engine.transcript()[0];
+        assert_eq!(
+            reply.audience,
+            Audience::Agents {
+                agents: vec![asker]
+            }
+        );
+        assert!(reply.body.contains("Keyboard first"));
+        assert!(engine.digest().needs_you.is_empty());
+        drop(engine);
+        let mut updates = handle.subscribe();
+        session.settled = true;
+        session.handle(Control::AnswerDecision {
+            decision,
+            chosen: "Desktop".into(),
+            note: "Keyboard first".into(),
+        });
+        assert!(session.settled, "a repeated answer must not wake the room");
+        assert_eq!(session.orchestrator.engine().transcript().len(), 1);
+        assert!(
+            matches!(updates.try_recv(), Ok(ServerMessage::Digest { digest }) if digest.needs_you.is_empty())
+        );
+        session.handle(Control::AnswerDecision {
+            decision: orgbot_proto::ids::DecisionId::new(),
+            chosen: "Ignore this invalid answer".into(),
+            note: String::new(),
+        });
+        assert!(matches!(
+            updates.try_recv(),
+            Ok(ServerMessage::Error { .. })
+        ));
+        assert_eq!(session.orchestrator.engine().transcript().len(), 1);
     }
 
     #[derive(Debug)]
@@ -1866,6 +1956,7 @@ mod tests {
             .unwrap()
             .clone();
         lead.roles = vec!["writer".into()];
+        lead.autonomy = orgbot_proto::agent::Autonomy::default();
         session.orchestrator.engine_mut().update_agent(lead);
         let planner = orgbot_proto::AgentSpec::new(
             "planner",
@@ -2004,13 +2095,11 @@ mod tests {
     fn attachment_import_allowlist_tracks_only_committed_message_files() {
         let (mut session, _handle) = session();
         let id = "att_0123456789abcdef0123456789abcdef".to_string();
-        assert!(
-            !session
-                .committed_attachment_ids
-                .read()
-                .unwrap()
-                .contains(&id)
-        );
+        assert!(!session
+            .committed_attachment_ids
+            .read()
+            .unwrap()
+            .contains(&id));
         let (room, author) = {
             let engine = session.orchestrator.engine();
             (engine.room_id(), engine.agent_by_handle("lead").unwrap().id)
@@ -2033,13 +2122,11 @@ mod tests {
             })
             .unwrap();
         session.broadcast_new_events();
-        assert!(
-            session
-                .committed_attachment_ids
-                .read()
-                .unwrap()
-                .contains(&id)
-        );
+        assert!(session
+            .committed_attachment_ids
+            .read()
+            .unwrap()
+            .contains(&id));
     }
 
     #[test]

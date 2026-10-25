@@ -4,21 +4,28 @@
 // side of the bargain — nothing without a reason, nothing twice, and nothing
 // at all when it is switched off.
 
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:orgbot_app/orgbot/attention.dart';
 
 Map<String, Object?> event({
   String id = 'ev_1',
   String? reason,
   String body = 'something happened',
-}) =>
-    {
-      'type': 'event',
-      'envelope': {'id': id, 'seq': 1, 'event': {'event': 'message_posted'}},
-      if (reason != null) 'notification': {'reason': reason, 'body': body},
-    };
+}) => {
+  'type': 'event',
+  'envelope': {
+    'id': id,
+    'seq': 1,
+    'event': {'event': 'message_posted'},
+  },
+  if (reason != null) 'notification': {'reason': reason, 'body': body},
+};
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   group('what gets through', () {
     test('an event with no notification tells nobody', () async {
       final attentions = Attentions();
@@ -26,12 +33,14 @@ void main() {
       expect(attentions.latest, isNull);
     });
 
-    test('a reason the app does not know is ignored rather than guessed at',
-        () async {
-      final attentions = Attentions();
-      await attentions.consider(event(reason: 'something_new'));
-      expect(attentions.latest, isNull);
-    });
+    test(
+      'a reason the app does not know is ignored rather than guessed at',
+      () async {
+        final attentions = Attentions();
+        await attentions.consider(event(reason: 'something_new'));
+        expect(attentions.latest, isNull);
+      },
+    );
 
     test('a decision reaches you', () async {
       final attentions = Attentions();
@@ -83,6 +92,78 @@ void main() {
       final attentions = Attentions()..enabled = false;
       await attentions.consider(event(reason: 'decision_needed'));
       expect(attentions.latest, isNull);
+    });
+  });
+
+  group('notification routing', () {
+    test('a click waits for the app route handler and is consumed once', () {
+      final attentions = Attentions();
+      const target = AttentionTarget(
+        roomId: 'room_saved_1',
+        reason: Attention.decision,
+        eventId: 'event_1',
+      );
+      attentions.handleNotificationResponse(
+        NotificationResponse(
+          notificationResponseType:
+              NotificationResponseType.selectedNotification,
+          payload: jsonEncode(target.toJson()),
+        ),
+      );
+
+      final queued = attentions.takePendingRoute();
+      expect(queued?.roomId, target.roomId);
+      expect(queued?.reason, target.reason);
+      expect(queued?.eventId, target.eventId);
+      expect(attentions.takePendingRoute(), isNull);
+    });
+
+    test('clicks dispatch to the registered route handler', () {
+      final attentions = Attentions();
+      const target = AttentionTarget(
+        roomId: 'room_saved_2',
+        reason: Attention.stuck,
+        eventId: 'event_2',
+      );
+      final routed = <AttentionTarget>[];
+      attentions.onRouteRequested = routed.add;
+
+      attentions.handleNotificationResponse(
+        NotificationResponse(
+          notificationResponseType:
+              NotificationResponseType.selectedNotification,
+          payload: jsonEncode(target.toJson()),
+        ),
+      );
+
+      expect(routed, hasLength(1));
+      expect(routed.single.roomId, target.roomId);
+      expect(routed.single.reason, Attention.stuck);
+    });
+
+    test('malformed payloads and action responses do not route', () {
+      final attentions = Attentions();
+      final routed = <AttentionTarget>[];
+      attentions.onRouteRequested = routed.add;
+      attentions.handleNotificationResponse(
+        const NotificationResponse(
+          notificationResponseType:
+              NotificationResponseType.selectedNotification,
+          payload: '{invalid',
+        ),
+      );
+      attentions.handleNotificationResponse(
+        const NotificationResponse(
+          notificationResponseType:
+              NotificationResponseType.selectedNotificationAction,
+          payload:
+              '{"room_id":"room_saved_3","reason":"decision",'
+              '"event_id":"event_3"}',
+          actionId: 'mark-read',
+        ),
+      );
+
+      expect(routed, isEmpty);
     });
   });
 

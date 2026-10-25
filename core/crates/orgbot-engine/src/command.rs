@@ -180,6 +180,18 @@ pub enum Command {
         authorization: AuthorizationState,
     },
 
+    /// Ask the operator a question without granting or changing authority.
+    AskOwner {
+        /// The bot asking.
+        by: AgentId,
+        /// A task the asker owns, when the question concerns active work.
+        task: Option<TaskId>,
+        /// The question shown to the operator.
+        question: String,
+        /// Suggested answers. An empty list leaves the answer free-form.
+        options: Vec<String>,
+    },
+
     /// Record the operator's answer to a question, releasing whatever it
     /// unblocks. One answer clears every task waiting on that same question.
     AnswerDecision {
@@ -252,6 +264,7 @@ impl Command {
             Self::SupersedeTask { .. } => "supersede_task",
             Self::RetireTask { .. } => "retire_task",
             Self::SetAuthorization { .. } => "set_authorization",
+            Self::AskOwner { .. } => "ask_owner",
             Self::AnswerDecision { .. } => "answer_decision",
             Self::RecordTurn { .. } => "record_turn",
             Self::ReportError { .. } => "report_error",
@@ -276,6 +289,7 @@ impl Command {
             | Self::SubmitForReview { task, .. }
             | Self::AddArtifact { task, .. }
             | Self::RecordReview { task, .. } => Some(*task),
+            Self::AskOwner { task: Some(task), .. } => Some(*task),
             _ => None,
         }
     }
@@ -294,7 +308,7 @@ impl Command {
                 // Speaking is always allowed. A paused or finished room still
                 // has a transcript, and a message that is silently refused
                 // leaves the person staring at a chat that swallowed it.
-                | Self::PostMessage { .. }
+            | Self::PostMessage { .. }
         )
     }
 }

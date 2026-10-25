@@ -24,6 +24,8 @@ import 'role_icons.dart';
 import 'desktop_integrations_view.dart';
 import '../workspace/desktop_files.dart';
 import '../orgbot/roles.dart';
+import '../orgbot/attention.dart';
+import '../state/room_store.dart';
 
 class OrgBotScreen extends StatefulWidget {
   final Library library;
@@ -49,6 +51,9 @@ class _OrgBotScreenState extends State<OrgBotScreen>
   final _pages = PageController();
   final _search = List.generate(2, (_) => TextEditingController());
   late final AnimationController _desktopPageFade;
+  late final Attentions _attentions;
+  AttentionTarget? _pendingAttention;
+  int _attentionRequest = 0;
   bool get _desktopClis => widget.desktopClis ?? canRunAgentClis;
 
   @override
@@ -59,17 +64,52 @@ class _OrgBotScreenState extends State<OrgBotScreen>
       duration: const Duration(milliseconds: 110),
       value: 1,
     );
+    _attentions = RoomStore.attentions;
+    _pendingAttention = _attentions.takePendingRoute();
+    _attentions.onRouteRequested = _openAttention;
+    widget.library.addListener(_routePendingAttention);
     widget.library.load();
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _routePendingAttention(),
+    );
   }
 
   @override
   void dispose() {
+    widget.library.removeListener(_routePendingAttention);
+    if (_attentions.onRouteRequested == _openAttention) {
+      _attentions.onRouteRequested = null;
+    }
     _pages.dispose();
     _desktopPageFade.dispose();
     for (final search in _search) {
       search.dispose();
     }
     super.dispose();
+  }
+
+  void _routePendingAttention() {
+    final target = _pendingAttention;
+    if (target == null || !mounted || !widget.library.loaded) return;
+    _pendingAttention = null;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _openAttention(target);
+    });
+  }
+
+  void _openAttention(AttentionTarget target) {
+    if (!mounted) return;
+    if (!widget.library.loaded) {
+      _pendingAttention = target;
+      return;
+    }
+    final room = widget.library.rooms
+        .where((room) => room.id == target.roomId)
+        .firstOrNull;
+    if (room == null) return;
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    _attentionRequest++;
+    _runRoom(room);
   }
 
   void _selectTab(int index) {
@@ -512,82 +552,104 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                         ],
                       ),
                     Expanded(
-                      child: IndexedStack(
-                        index: _tab,
-                        children: [
-                          selected != null
-                              ? EngineRoomScreen(
-                                  key: ObjectKey(selected),
-                                  room: selected,
-                                  library: lib,
-                                  embedded: true,
-                                  desktopLayout: true,
-                                )
-                              : Center(
-                                  child: ConstrainedBox(
-                                    constraints: const BoxConstraints(
-                                      maxWidth: 500,
-                                    ),
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(32),
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            'Your workspace.',
-                                            style: Theme.of(
-                                              context,
-                                            ).textTheme.headlineLarge,
-                                          ),
-                                          const SizedBox(height: 12),
-                                          Text(
-                                            'Open a session or start something new with your team.',
-                                            style: TextStyle(
-                                              color: scheme.onSurfaceVariant,
-                                              height: 1.6,
+                      child: FadeTransition(
+                        opacity: _desktopPageFade,
+                        child: IndexedStack(
+                          index: _tab,
+                          children:
+                              [
+                                    selected != null
+                                        ? EngineRoomScreen(
+                                            key: ObjectKey(selected),
+                                            room: selected,
+                                            library: lib,
+                                            embedded: true,
+                                            desktopLayout: true,
+                                            attentionRequest: _attentionRequest,
+                                          )
+                                        : Center(
+                                            child: ConstrainedBox(
+                                              constraints: const BoxConstraints(
+                                                maxWidth: 500,
+                                              ),
+                                              child: Padding(
+                                                padding: const EdgeInsets.all(
+                                                  32,
+                                                ),
+                                                child: Column(
+                                                  mainAxisSize:
+                                                      MainAxisSize.min,
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(
+                                                      'Your workspace.',
+                                                      style: Theme.of(
+                                                        context,
+                                                      ).textTheme.headlineLarge,
+                                                    ),
+                                                    const SizedBox(height: 12),
+                                                    Text(
+                                                      'Open a session or start something new with your team.',
+                                                      style: TextStyle(
+                                                        color: scheme
+                                                            .onSurfaceVariant,
+                                                        height: 1.6,
+                                                      ),
+                                                    ),
+                                                    const SizedBox(height: 24),
+                                                    FilledButton.icon(
+                                                      onPressed: lib.loaded
+                                                          ? _newRoom
+                                                          : null,
+                                                      icon: const Icon(
+                                                        Icons.add,
+                                                        size: 18,
+                                                      ),
+                                                      label: const Text(
+                                                        'New session',
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
                                             ),
                                           ),
-                                          const SizedBox(height: 24),
-                                          FilledButton.icon(
-                                            onPressed: lib.loaded
-                                                ? _newRoom
-                                                : null,
-                                            icon: const Icon(
-                                              Icons.add,
-                                              size: 18,
+                                    for (final page in [1, 2])
+                                      !_visitedDesktopPages.contains(page)
+                                          ? const SizedBox.shrink()
+                                          : Center(
+                                              child: ConstrainedBox(
+                                                constraints:
+                                                    const BoxConstraints(
+                                                      maxWidth: 1120,
+                                                    ),
+                                                child: Column(
+                                                  children: [
+                                                    _pageHeader(page, lib),
+                                                    Expanded(
+                                                      child: page == 1
+                                                          ? _botsList(lib)
+                                                          : _CliSetup(
+                                                              credentials:
+                                                                  credentials,
+                                                            ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
                                             ),
-                                            label: const Text('New session'),
-                                          ),
-                                        ],
-                                      ),
+                                  ]
+                                  .asMap()
+                                  .entries
+                                  .map(
+                                    (entry) => TickerMode(
+                                      enabled: entry.key == _tab,
+                                      child: entry.value,
                                     ),
-                                  ),
-                                ),
-                          for (final page in [1, 2])
-                            !_visitedDesktopPages.contains(page)
-                                ? const SizedBox.shrink()
-                                : Center(
-                                    child: ConstrainedBox(
-                                      constraints: const BoxConstraints(
-                                        maxWidth: 1120,
-                                      ),
-                                      child: Column(
-                                        children: [
-                                          _pageHeader(page, lib),
-                                          Expanded(
-                                            child: page == 1
-                                                ? _botsList(lib)
-                                                : _CliSetup(
-                                                    credentials: credentials,
-                                                  ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-                        ],
+                                  )
+                                  .toList(),
+                        ),
                       ),
                     ),
                   ],
@@ -1527,10 +1589,16 @@ class _OrgBotScreenState extends State<OrgBotScreen>
 
   void _runRoom(RoomDef room) {
     if (_desktopClis) {
+      final changed = _selectedRoomId != room.id || _tab != 0;
       setState(() {
         _selectedRoomId = room.id;
         _tab = 0;
       });
+      if (changed && !MediaQuery.disableAnimationsOf(context)) {
+        _desktopPageFade.forward(from: 0);
+      } else {
+        _desktopPageFade.value = 1;
+      }
       return;
     }
     Navigator.of(context).push(
@@ -1539,6 +1607,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
           room: room,
           library: widget.library,
           desktopLayout: _desktopClis,
+          attentionRequest: _attentionRequest,
         ),
       ),
     );

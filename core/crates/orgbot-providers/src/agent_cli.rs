@@ -644,7 +644,7 @@ fn compose_prompt(
 fn ingest_line(
     cli: CliKind,
     line: &str,
-    _sink: &Option<mpsc::Sender<StreamEvent>>,
+    sink: &Option<mpsc::Sender<StreamEvent>>,
     episode: &mut Episode,
 ) {
     let trimmed = line.trim();
@@ -655,14 +655,18 @@ fn ingest_line(
         return; // A banner or warning on stdout; nothing to do.
     };
     match cli {
-        CliKind::Codex => ingest_codex_line(&value, episode),
-        CliKind::Claude | CliKind::Grok => ingest_messages_line(&value, episode),
+        CliKind::Codex => ingest_codex_line(&value, sink, episode),
+        CliKind::Claude | CliKind::Grok => ingest_messages_line(&value, sink, episode),
     }
 }
 
 /// Codex --json events: thread.started gives the session id, item.completed
 /// carries finished messages, and turn.completed reports usage.
-fn ingest_codex_line(value: &Value, episode: &mut Episode) {
+fn ingest_codex_line(
+    value: &Value,
+    sink: &Option<mpsc::Sender<StreamEvent>>,
+    episode: &mut Episode,
+) {
     let Some(kind) = value.get("type").and_then(Value::as_str) else {
         return;
     };
@@ -686,6 +690,25 @@ fn ingest_codex_line(value: &Value, episode: &mut Episode) {
                 episode.structured_error = bounded_error_message(message);
             }
         }
+        "item.started" => {
+            let Some(item) = value.get("item") else {
+                return;
+            };
+            let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+                return;
+            };
+            let Some(label) = codex_activity_label(item_type) else {
+                return;
+            };
+            let id = item.get("id").and_then(Value::as_str).unwrap_or(item_type);
+            send_activity(
+                sink,
+                StreamEvent::ToolUseStart {
+                    id: id.chars().take(96).collect(),
+                    name: label.into(),
+                },
+            );
+        }
         "item.completed" => {
             let Some(item) = value.get("item") else {
                 return;
@@ -693,6 +716,24 @@ fn ingest_codex_line(value: &Value, episode: &mut Episode) {
             let Some(item_type) = item.get("type").and_then(Value::as_str) else {
                 return;
             };
+            if codex_activity_label(item_type).is_some() {
+                let id = item.get("id").and_then(Value::as_str).unwrap_or(item_type);
+                let failed = item
+                    .get("exit_code")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|code| code != 0)
+                    || item
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .is_some_and(|status| matches!(status, "failed" | "error" | "cancelled"));
+                send_activity(
+                    sink,
+                    StreamEvent::ToolUseEnd {
+                        id: id.chars().take(96).collect(),
+                        succeeded: !failed,
+                    },
+                );
+            }
             // The agent's finished message carries its answer. A question the
             // agent needs answered is carried the same way and must reach the
             // room as text too.
@@ -712,7 +753,11 @@ fn ingest_codex_line(value: &Value, episode: &mut Episode) {
 /// Claude (stream-json) and Grok (streaming-messages-json) both speak the
 /// Anthropic wire shape as NDJSON: an init line names the session, and
 /// assistant lines carry whole messages whose content blocks hold the text.
-fn ingest_messages_line(value: &Value, episode: &mut Episode) {
+fn ingest_messages_line(
+    value: &Value,
+    sink: &Option<mpsc::Sender<StreamEvent>>,
+    episode: &mut Episode,
+) {
     // The init event names the session on both fresh and resumed runs.
     if let Some(id) = value.get("session_id").and_then(Value::as_str) {
         episode.session_id = Some(id.to_string());
@@ -733,7 +778,37 @@ fn ingest_messages_line(value: &Value, episode: &mut Episode) {
         }
         return;
     }
-    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+    let line_type = value.get("type").and_then(Value::as_str);
+    if line_type == Some("stream_event") {
+        if let Some(event) = value.get("event") {
+            if event.get("type").and_then(Value::as_str) == Some("content_block_start") {
+                let block = event.get("content_block");
+                if block
+                    .and_then(|block| block.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("tool_use")
+                {
+                    let id = block
+                        .and_then(|block| block.get("id"))
+                        .and_then(Value::as_str);
+                    let name = block
+                        .and_then(|block| block.get("name"))
+                        .and_then(Value::as_str);
+                    if let (Some(id), Some(name)) = (id, name) {
+                        send_activity(
+                            sink,
+                            StreamEvent::ToolUseStart {
+                                id: id.chars().take(96).collect(),
+                                name: safe_tool_label(name),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        return;
+    }
+    if !matches!(line_type, Some("assistant" | "user")) {
         return;
     }
     let Some(message) = value.get("message") else {
@@ -743,17 +818,78 @@ fn ingest_messages_line(value: &Value, episode: &mut Episode) {
         return;
     };
     for block in blocks {
-        if block.get("type").and_then(Value::as_str) == Some("text") {
-            if let Some(text) = block.get("text").and_then(Value::as_str) {
-                if !text.is_empty() {
-                    episode.text.push_str(text);
-                    episode.text.push('\n');
+        match block.get("type").and_then(Value::as_str) {
+            Some("tool_use") if line_type == Some("assistant") => {
+                if let (Some(id), Some(name)) = (
+                    block.get("id").and_then(Value::as_str),
+                    block.get("name").and_then(Value::as_str),
+                ) {
+                    send_activity(
+                        sink,
+                        StreamEvent::ToolUseStart {
+                            id: id.chars().take(96).collect(),
+                            name: safe_tool_label(name),
+                        },
+                    );
                 }
             }
+            Some("tool_result") if line_type == Some("user") => {
+                if let Some(id) = block.get("tool_use_id").and_then(Value::as_str) {
+                    send_activity(
+                        sink,
+                        StreamEvent::ToolUseEnd {
+                            id: id.chars().take(96).collect(),
+                            succeeded: block.get("is_error").and_then(Value::as_bool) != Some(true),
+                        },
+                    );
+                }
+            }
+            Some("text") if line_type == Some("assistant") => {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        episode.text.push_str(text);
+                        episode.text.push('\n');
+                    }
+                }
+            }
+            _ => {}
         }
     }
     if let Some(usage) = message.get("usage") {
         episode.usage = usage_from_json(usage);
+    }
+}
+
+fn codex_activity_label(item_type: &str) -> Option<&'static str> {
+    match item_type {
+        "command_execution" => Some("Run command"),
+        "file_change" | "apply_patch" => Some("Edit files"),
+        "mcp_tool_call" => Some("Use a connected tool"),
+        "web_search_call" | "web_search" => Some("Search the web"),
+        "web_fetch" => Some("Read a web page"),
+        "image_generation_call" => Some("Generate an image"),
+        _ => None,
+    }
+}
+
+fn safe_tool_label(name: &str) -> String {
+    let label = name
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ':' | ' ')
+        })
+        .take(48)
+        .collect::<String>();
+    if label.trim().is_empty() {
+        "Use a tool".into()
+    } else {
+        label
+    }
+}
+
+fn send_activity(sink: &Option<mpsc::Sender<StreamEvent>>, event: StreamEvent) {
+    if let Some(sink) = sink {
+        let _ = sink.try_send(event);
     }
 }
 
@@ -1301,6 +1437,83 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
         assert_eq!(
             episode.session_id.as_deref(),
             Some("01a067dc-92a1-7513-89d6-df5767f0ceda")
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_activity_reports_only_bounded_tool_names_and_outcomes() {
+        let (sink, mut events) = mpsc::channel(8);
+        let mut episode = Episode::default();
+        ingest_line(
+            CliKind::Claude,
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hidden reasoning secret"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"echo owner-token"}}]}}"#,
+            &Some(sink.clone()),
+            &mut episode,
+        );
+        ingest_line(
+            CliKind::Claude,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"owner-token","is_error":false}]}}"#,
+            &Some(sink),
+            &mut episode,
+        );
+        let start = events.try_recv().unwrap();
+        let end = events.try_recv().unwrap();
+        assert_eq!(
+            start,
+            StreamEvent::ToolUseStart {
+                id: "toolu_1".into(),
+                name: "Bash".into(),
+            }
+        );
+        assert_eq!(
+            end,
+            StreamEvent::ToolUseEnd {
+                id: "toolu_1".into(),
+                succeeded: true,
+            }
+        );
+        let serialized = serde_json::to_string(&[start, end]).unwrap();
+        assert!(!serialized.contains("owner-token"));
+        assert!(!serialized.contains("hidden reasoning secret"));
+        assert!(episode.text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn codex_process_activity_uses_categories_without_command_text() {
+        let (sink, mut events) = mpsc::channel(8);
+        let mut episode = Episode::default();
+        ingest_line(
+            CliKind::Codex,
+            r#"{"type":"item.started","item":{"id":"item-1","type":"command_execution","command":"curl https://private.invalid?token=secret"}}"#,
+            &Some(sink.clone()),
+            &mut episode,
+        );
+        ingest_line(
+            CliKind::Codex,
+            r#"{"type":"item.completed","item":{"id":"item-1","type":"command_execution","exit_code":0}}"#,
+            &Some(sink),
+            &mut episode,
+        );
+        let start = events.try_recv().unwrap();
+        let end = events.try_recv().unwrap();
+        assert_eq!(
+            start,
+            StreamEvent::ToolUseStart {
+                id: "item-1".into(),
+                name: "Run command".into(),
+            }
+        );
+        assert_eq!(
+            end,
+            StreamEvent::ToolUseEnd {
+                id: "item-1".into(),
+                succeeded: true,
+            }
+        );
+        assert!(
+            !serde_json::to_string(&[start, end])
+                .unwrap()
+                .contains("private.invalid")
         );
     }
 

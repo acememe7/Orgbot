@@ -28,8 +28,12 @@ class FakeClient implements RoomClient {
   @override
   void send(Map<String, Object?> message) => sent.add(message);
   @override
-  void sendMessage(String author, String body, {String? taskId, String? replyTo}) =>
-      sent.add({'type': 'send_message', 'author': author, 'body': body});
+  void sendMessage(
+    String author,
+    String body, {
+    String? taskId,
+    String? replyTo,
+  }) => sent.add({'type': 'send_message', 'author': author, 'body': body});
   @override
   void answerBot(String taskId, String answer) {}
   @override
@@ -68,7 +72,10 @@ void main() {
       'intent': 'ask',
       'sent_at': 1,
       'reply_to': 'msg_parent',
-      'audience': {'kind': 'agents', 'agents': ['bot_iris']},
+      'audience': {
+        'kind': 'agents',
+        'agents': ['bot_iris'],
+      },
     });
     expect(message.replyTo, 'msg_parent');
     expect(message.audienceKind, 'agents');
@@ -643,5 +650,215 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(notifications, 1);
     expect(identical(store.messages, confirmed), isTrue);
+  });
+
+  test('process activity is bounded and token deltas do not fan out', () async {
+    final client = FakeClient();
+    final store = RoomStore(client);
+    addTearDown(store.dispose);
+    client.emit({
+      'type': 'snapshot',
+      'roster': [
+        {
+          'id': 'bot_a',
+          'handle': 'iris',
+          'display_name': 'Iris',
+          'roles': [],
+          'status': 'idle',
+        },
+      ],
+      'tasks': [],
+    });
+    await Future<void>.delayed(Duration.zero);
+    var notifications = 0;
+    store.addListener(() => notifications++);
+
+    client.emit({
+      'type': 'stream',
+      'agent': 'bot_a',
+      'event': {'type': 'thinking'},
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(store.activity.single.streaming, isTrue);
+    expect(notifications, 1);
+    for (var i = 0; i < 100; i++) {
+      client.emit({
+        'type': 'stream',
+        'agent': 'bot_a',
+        'event': {'type': 'text_delta', 'text': 'token $i'},
+      });
+    }
+    await Future<void>.delayed(Duration.zero);
+    expect(notifications, 1, reason: 'token frames must not rebuild the UI');
+
+    for (var i = 0; i < 20; i++) {
+      client.emit({
+        'type': 'stream',
+        'agent': 'bot_a',
+        'event': {
+          'type': 'tool_use_start',
+          'id': 'tool_$i',
+          'name': 'workspace_read',
+        },
+      });
+      client.emit({
+        'type': 'stream',
+        'agent': 'bot_a',
+        'event': {'type': 'tool_use_end', 'id': 'tool_$i', 'succeeded': true},
+      });
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 24));
+    final steps = store.activity.single.steps;
+    expect(steps, hasLength(12));
+    expect(steps.first.id, 'tool_8');
+    expect(steps.last.id, 'tool_19');
+    expect(
+      steps.every((step) => !step.running && step.succeeded == true),
+      isTrue,
+    );
+    expect(store.activity.single.activeStep, isNull);
+    expect(notifications, greaterThan(1));
+
+    client.emit({
+      'type': 'stream',
+      'agent': 'bot_a',
+      'event': {
+        'type': 'tool_use_start',
+        'id': 'tool_unconfirmed',
+        'name': 'workspace_write',
+      },
+    });
+    client.emit({
+      'type': 'stream',
+      'agent': 'bot_a',
+      'event': {'type': 'done'},
+    });
+    await Future<void>.delayed(Duration.zero);
+    final interrupted = store.activity.single.steps.last;
+    expect(interrupted.id, 'tool_unconfirmed');
+    expect(interrupted.running, isFalse);
+    expect(interrupted.succeeded, isNull);
+  });
+
+  test('large history restore batches notifications into one update', () {
+    final client = FakeClient();
+    final store = RoomStore(client);
+    addTearDown(store.dispose);
+    var notifications = 0;
+    store.addListener(() => notifications++);
+    store.restore([
+      {
+        'type': 'snapshot',
+        'head': 500,
+        'room': {
+          'id': 'room_1',
+          'spec': {'name': 'History', 'goal': 'Restore history'},
+          'phase': 'running',
+        },
+        'roster': [],
+        'tasks': [],
+      },
+      for (var i = 1; i <= 500; i++)
+        event({
+          'event': 'message_posted',
+          'message': {
+            'id': 'msg_$i',
+            'room': 'room_1',
+            'author': {'kind': 'human', 'name': 'You'},
+            'audience': {'kind': 'everyone'},
+            'intent': 'say',
+            'body': 'Restored line $i',
+            'sent_at': i,
+          },
+        }, seq: i),
+    ]);
+    expect(store.messages, hasLength(500));
+    expect(store.messages.last.body, 'Restored line 500');
+    expect(notifications, 1);
+  });
+
+  test('large reconnect replay coalesces transcript notifications', () async {
+    final client = FakeClient();
+    final store = RoomStore(client);
+    addTearDown(store.dispose);
+    client.emit({'type': 'snapshot', 'head': 500, 'roster': [], 'tasks': []});
+    await Future<void>.delayed(Duration.zero);
+    var notifications = 0;
+    store.addListener(() => notifications++);
+    for (var i = 1; i <= 500; i++) {
+      client.emit(
+        event({
+          'event': 'message_posted',
+          'message': {
+            'id': 'replay_$i',
+            'room': 'room_1',
+            'author': {'kind': 'agent', 'agent': 'bot_a'},
+            'audience': {'kind': 'everyone'},
+            'intent': 'say',
+            'body': 'Replay line $i',
+            'sent_at': i,
+          },
+        }, seq: i),
+      );
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 24));
+    expect(store.messages, hasLength(500));
+    expect(notifications, 1);
+  });
+
+  test('parallel model activity remains independent per agent', () async {
+    final client = FakeClient();
+    final store = RoomStore(client);
+    addTearDown(store.dispose);
+    client.emit({
+      'type': 'snapshot',
+      'roster': [
+        for (final id in ['bot_a', 'bot_b'])
+          {
+            'id': id,
+            'handle': id,
+            'display_name': id,
+            'roles': [],
+            'status': 'working',
+          },
+      ],
+      'tasks': [],
+    });
+    await Future<void>.delayed(Duration.zero);
+    var notifications = 0;
+    store.addListener(() => notifications++);
+
+    void stream(String agent, Map<String, Object?> event) =>
+        client.emit({'type': 'stream', 'agent': agent, 'event': event});
+
+    stream('bot_a', {'type': 'thinking'});
+    stream('bot_b', {'type': 'thinking'});
+    stream('bot_a', {'type': 'retry', 'attempt': 1, 'max_retries': 3});
+    stream('bot_b', {'type': 'thinking'});
+    stream('bot_b', {
+      'type': 'tool_use_start',
+      'id': 'parallel-tool',
+      'name': 'workspace_read',
+    });
+    stream('bot_b', {
+      'type': 'tool_use_end',
+      'id': 'parallel-tool',
+      'succeeded': true,
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 24));
+
+    final activity = {for (final item in store.activity) item.agent.id: item};
+    expect(activity['bot_a']!.streaming, isTrue);
+    expect(activity['bot_a']!.retryStatus, 'Reconnecting (1/3)');
+    expect(activity['bot_b']!.streaming, isTrue);
+    expect(activity['bot_b']!.steps.single.succeeded, isTrue);
+    expect(notifications, 4, reason: 'token-independent state changes only');
+
+    stream('bot_a', {'type': 'done'});
+    await Future<void>.delayed(Duration.zero);
+    expect(activity['bot_a']!.streaming, isFalse);
+    expect(activity['bot_a']!.retryStatus, isNull);
+    expect(activity['bot_b']!.streaming, isTrue);
+    expect(notifications, 5);
   });
 }

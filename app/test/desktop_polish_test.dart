@@ -7,6 +7,9 @@ import 'package:orgbot_app/main.dart';
 import 'package:orgbot_app/orgbot/library.dart';
 import 'package:orgbot_app/orgbot/models.dart';
 import 'package:orgbot_app/ui/orgbot_screen.dart';
+import 'package:orgbot_app/ui/engine_room_screen.dart';
+import 'package:orgbot_app/orgbot/attention.dart';
+import 'package:orgbot_app/state/room_store.dart';
 import 'room_chat_ui_test.dart' show FakeClient, seeded;
 import 'room_layout_test.dart' show PreviewRoom;
 
@@ -116,8 +119,26 @@ void main() {
     expect(find.byTooltip('Collapse tools'), findsNothing);
     await tester.tap(find.text('Team').first);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Desktop refinement').first);
+    expect(
+      TickerMode.valuesOf(
+        tester.element(find.byType(EngineRoomScreen, skipOffstage: false)),
+      ).enabled,
+      isFalse,
+    );
+    RoomStore.attentions.onRouteRequested?.call(
+      AttentionTarget(
+        roomId: room.id,
+        reason: Attention.decision,
+        eventId: 'owner-needed',
+      ),
+    );
     await tester.pumpAndSettle();
+    expect(
+      TickerMode.valuesOf(
+        tester.element(find.byType(EngineRoomScreen)),
+      ).enabled,
+      isTrue,
+    );
     expect(
       find.text('Keep this draft while I inspect the project.'),
       findsOneWidget,

@@ -41,7 +41,7 @@ static void my_application_set_icon(GtkWindow* window) {
   }
   g_autofree gchar* directory = g_path_get_dirname(executable);
   g_autofree gchar* icon = g_build_filename(
-      directory, "data", "flutter_assets", "assets", "logo.png", nullptr);
+      directory, "data", "flutter_assets", "assets", "orgbots-desktop.png", nullptr);
   if (g_file_test(icon, G_FILE_TEST_EXISTS)) {
     gtk_window_set_icon_from_file(window, icon, nullptr);
   }

@@ -70,6 +70,11 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            Include artifact IDs and concrete product context when delegating.\n\
          - Do not choose the owner's geography, audience, budget or personal identity for them. \
            Ask when it materially affects the work; label any provisional assumption.\n\
+         - When you need an owner decision, use ask_owner with a concise question and \
+           2-6 distinct options, even before any task is claimed. Custom answers are \
+           supported. Include a task only when you own it. An answer never bypasses \
+           configured tool or filesystem permissions. Continue from the answer instead \
+           of asking the same question again.\n\
          - Avoid repeating another bot's status or asking it to confirm a requirement already stated. \
            Contribute new evidence, a decision, or completed work.\n\
          - If you need someone to *do* something, use offer_handoff, not a chat \
@@ -143,6 +148,19 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
          Someone who has been away for a day should be able to read your first \
          line and know where things stand. If the only honest first line is \
          `nothing needs you`, say that.\n",
+    );
+
+    #[cfg(target_os = "linux")]
+    out.push_str(
+        "\nFile retention: never permanently delete project files without explicit \
+         owner permission. For recoverable removal use the installed shell command \
+         `orgbot-trash move --project PROJECT -- PATH...`, with each argument safely \
+         quoted. It moves files to the HDD trash by project. Do not use rm, unlink, \
+         deletion patches, git clean, or other deletion shortcuts. If the command or \
+         HDD is unavailable, preserve the files and ask the owner. The independent \
+         cleanup timer removes trash only after seven full days; never create an AI \
+         task to clear it or run cleanup yourself. This policy does not grant extra \
+         filesystem permissions.\n",
     );
 
     if spec.roles.iter().any(|role| role == "coordinator") {

@@ -1,3 +1,72 @@
+# OrgBots Linux desktop 1.8.0 — 2026-10-25
+
+- [x] Short desktop transitions honor reduced motion. Hidden pages stop their
+  animation tickers while retaining drafts and state. Linux uses the generated
+  desktop/window/package icon; Android keeps its existing logo.
+- [x] Collapsible activity shows public working status and tool start/end
+  outcomes, capped at 12 recent steps per bot. Parallel agents keep independent
+  status. Hidden reasoning and tool arguments/output are not displayed.
+  History restore of 500 messages produces one store update; replay of 500
+  events produces one batched update; 100 text deltas produce zero preview
+  updates. Final messages still arrive. Activity changes batch at 16 ms.
+- [x] Agents can ask the owner a durable question with 2–6 choices and custom
+  input, with or without a claimed task. Answers reach only the asking agents;
+  repeated answers acknowledge current state without waking unrelated agents.
+  These questions never grant authorization. Pending questions prevent empty
+  planning turns and premature room completion. Lost-answer retry, disposal,
+  taskless mobile filtering and duplicate controls have regression coverage.
+- [x] Linux notification routing opens the saved room and focuses its question.
+  The native hook presents the existing window. GUI-closed/background-only
+  notification delivery is not implemented. The installed Linux plugin's real
+  D-Bus Notify and ActionInvoked path passed against a synthetic notification
+  service, preserving room/event payload and the default open action. This is
+  protocol/callback proof, not a GNOME visual-toast or click-to-focus check.
+  Reproduce: `dbus-run-session -- env ORGBOTS_PRIVATE_DBUS_TEST=1 flutter test
+  --no-pub test/attention_dbus_smoke_test.dart` from `app/`. The test is skipped
+  by default; log: `/tmp/orgbots-1.8-notification-dbus-final.log`.
+- [x] Standalone `orgbot-trash` and daily user timer installed. Actual hardened
+  service: Result=success, ExecMainStatus=0; timer enabled and active. Sixteen
+  isolated tests cover seven-full-day retention, restore, mount checks and
+  unsafe-entry rejection. No user files were moved or purged. See [TRASH.md](TRASH.md).
+- [x] Rust workspace: 793 passed, zero failed, one ignored. After review fixes,
+  the affected server suite passed 97 tests (one ignored), followed by the
+  final duplicate-answer acknowledgement regression. Release/debug engines built.
+  A pre-existing fallback fixture depended on random agent-ID ordering; its
+  setup now leaves only its intended planner eligible.
+- [x] Final Flutter: 285 passed, three external SSH checks skipped; analyzer
+  clean. Python preset: six passed; trash: 16 passed; packaging fixture passed.
+  Logs: `/tmp/orgbots-1.8-flutter-final.log`, `orgbots-1.8-analyze-final.log`,
+  `orgbots-1.8-rust-full.log`, `orgbots-1.8-server-final.log`,
+  `orgbots-1.8-answer-idempotent.log` (all under `/tmp/`).
+- [x] X11/Nvidia scripted profile: ten agents, 500 messages, 250 ms activity
+  bursts; 550 frames over 30 seconds. UI build p50 0.651 ms, p95 4.307 ms,
+  max 8.504 ms; raster p50 3.271 ms, p95 16.788 ms, max 66.781 ms.
+  These are measured frame durations, not a 60 FPS guarantee. Wide and 800 px
+  desktop views are readable; 375 px desktop mode remains cramped.
+  Evidence: `/tmp/orgbots-activity-parallel-final-20261025/`.
+- [x] Final release/package built. All 28 extracted bundle files, engine and
+  icon match their sources; six native ELF dependencies resolve. Actual package
+  launched with an isolated synthetic keyring/old-roster fixture. Keys, room
+  memberships, history and tasks survived; Astra/Julian coordinator roles are
+  visible. Normal window close and readback passed. Evidence:
+  `/tmp/orgbots-1.8-package-qa/`, `/tmp/orgbots-1.8-artifact.json`.
+- [x] Credential-pattern scan: zero findings across 54 owned staged files;
+  staged diff checks pass. Unrelated README, lockfile and Tauri work is excluded.
+- [x] Final scoped Astra source, integration, notification-fixture, visual,
+  artifact and verification-claims review approved. All required findings are
+  resolved; the external acceptance limits below remain open.
+
+Package: `app/orgbot_1.8.0_amd64.deb`, 15,299,964 bytes.
+SHA-256: `004d4726ef5b646a7d1084ddc8c5b35471c61bb61f9213d1e1cc1902246ffa41`.
+Engine SHA-256: `689045cb75fd6f784ef2a277e809338dc4239b2739ae141f6aa920816f9c38e9`.
+
+No paid-provider calls, GUI package install, real-library mutation or push were
+performed for 1.8.0. The separately authorized cleanup script/timer is installed.
+Restart existing room services deliberately to adopt the new engine; installing
+an app package does not replace already-running service processes.
+
+---
+
 # OrgBots coordination and continuity 1.7.1 — 2026-10-25
 
 - [x] Astra and Julian (Opus 5.5) coordinate and create role-specific tasks;

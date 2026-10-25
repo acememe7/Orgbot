@@ -328,6 +328,21 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             ),
         ),
         tool(
+            "ask_owner",
+            "Ask the owner for information or a choice when the room cannot safely proceed. \
+             Offer 2–6 distinct options; the owner can also type a custom answer. Include a task \
+             only when you own active work that must wait. An answer supplies information; it does \
+             not bypass tool, filesystem, or other configured permissions.",
+            schema::object(
+                vec![
+                    ("question", schema::string("The concise question to show the owner.")),
+                    ("options", schema::string_array("2–6 distinct suggested answers.")),
+                    ("task", schema::string("Your active task to block while waiting, if any.")),
+                ],
+                &["question", "options"],
+            ),
+        ),
+        tool(
             "block_on",
             "Park your task because it cannot proceed. Prefer this over waiting in \
              silence: the engine tracks who is waiting on whom and will detect a \
@@ -342,8 +357,9 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                     ),
                     (
                         "question_for_human",
-                        schema::string("A question only a person can answer."),
+                        schema::string("A question for the owner. It creates a durable decision and releases your task when answered."),
                     ),
+                    ("options", schema::string_array("2–6 distinct suggested answers for question_for_human; omitted means free-form.")),
                 ],
                 &["task"],
             ),
@@ -584,6 +600,7 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
         "accept_handoff" => accept_handoff(engine, actor, input),
         "reject_handoff" => reject_handoff(engine, actor, input),
         "complete_handoff" => complete_handoff(engine, actor, input),
+        "ask_owner" => ask_owner(engine, actor, input),
         "block_on" => block_on(engine, actor, input),
         "release_task" => release_task(engine, actor, input),
         "create_task" => create_task(engine, actor, input),
@@ -627,6 +644,23 @@ fn string_list(input: &Value, field: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn optional_string_list(input: &Value, field: &str) -> Result<Vec<String>, String> {
+    let Some(value) = input.get(field) else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        return Err(format!("`{field}` must be an array of strings."));
+    };
+    items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("Every `{field}` item must be a string."))
+        })
+        .collect()
 }
 
 /// Parse an id, explaining the expected shape on failure.
@@ -1569,19 +1603,97 @@ fn complete_handoff(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolO
     }
 }
 
+fn ask_owner(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
+    let question = match required_str(input, "question") {
+        Ok(value) => value.to_string(),
+        Err(message) => return ToolOutcome::error(message),
+    };
+    let options = match optional_string_list(input, "options") {
+        Ok(options) => options,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    if !(2..=6).contains(&options.len()) {
+        return ToolOutcome::error("Offer between 2 and 6 distinct options. The owner can still type a custom answer.");
+    }
+    let task = match input.get("task") {
+        Some(Value::Null) | None => None,
+        Some(_) => match task_arg(input, "task") {
+            Ok(task) => Some(task),
+            Err(message) => return ToolOutcome::error(message),
+        },
+    };
+    match engine.apply(Command::AskOwner {
+        by: actor,
+        task,
+        question,
+        options,
+    }) {
+        Ok(events) => {
+            let decision = events.iter().find_map(|event| match &event.event {
+                orgbot_proto::Event::DecisionAsked { decision } => Some(decision.id),
+                _ => None,
+            });
+            match decision {
+                Some(id) => ToolOutcome::ok(format!(
+                    "Owner question {id} is waiting for an answer. Continue with other work."
+                )),
+                None => events
+                    .iter()
+                    .find_map(|event| match &event.event {
+                        orgbot_proto::Event::MessagePosted { message } => {
+                            Some(ToolOutcome::ok(message.body.clone()))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        ToolOutcome::ok(
+                            "That question is already waiting for an answer. Continue with other work.",
+                        )
+                    }),
+            }
+        }
+        Err(error) => explain(error),
+    }
+}
+
 fn block_on(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
     let task = match task_arg(input, "task") {
         Ok(task) => task,
         Err(message) => return ToolOutcome::error(message),
     };
-    let reason = if let Some(raw) = optional_str(input, "waiting_for_task") {
+    let waiting_for_task = optional_str(input, "waiting_for_task");
+    let question_for_human = optional_str(input, "question_for_human");
+    if waiting_for_task.is_some() && question_for_human.is_some() {
+        return ToolOutcome::error("Choose one blocker: `waiting_for_task` or `question_for_human`, not both.");
+    }
+    if let Some(prompt) = question_for_human {
+        let options = match optional_string_list(input, "options") {
+            Ok(options) => options,
+            Err(message) => return ToolOutcome::error(message),
+        };
+        return match engine.apply(Command::AskOwner {
+            by: actor,
+            task: Some(task),
+            question: prompt.to_string(),
+            options,
+        }) {
+            Ok(events) => {
+                if let Some(reply) = events.iter().find_map(|event| match &event.event {
+                    orgbot_proto::Event::MessagePosted { message } => Some(message.body.clone()),
+                    _ => None,
+                }) {
+                    ToolOutcome::ok(reply)
+                } else {
+                    ToolOutcome::ok("Blocked on the owner’s answer. The task will resume when the answer arrives.")
+                }
+            }
+            Err(error) => explain(error),
+        };
+    }
+    let reason = if let Some(raw) = waiting_for_task {
         match parse_id::<TaskId>(raw, "waiting_for_task", "task") {
             Ok(other) => BlockReason::AwaitingTask { task: other },
             Err(message) => return ToolOutcome::error(message),
-        }
-    } else if let Some(prompt) = optional_str(input, "question_for_human") {
-        BlockReason::AwaitingHuman {
-            prompt: prompt.to_string(),
         }
     } else {
         return ToolOutcome::error(

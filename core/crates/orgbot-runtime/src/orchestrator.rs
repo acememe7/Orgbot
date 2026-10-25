@@ -343,6 +343,7 @@ impl Orchestrator {
             .agent(agent)
             .is_some_and(|spec| spec.autonomy.may_create_tasks)
             && engine.tasks().next().is_none()
+            && engine.decisions().pending().next().is_none()
         {
             return Some(Wake::Planning);
         }
@@ -875,6 +876,9 @@ impl Orchestrator {
 
     /// As [`Self::is_complete`], against an engine already in hand.
     fn is_complete_of(&self, engine: &Engine) -> bool {
+        if engine.decisions().pending().next().is_some() {
+            return false;
+        }
         // A settled board does not answer a new question. Give each available
         // addressee a turn before applying the board's completion rule again.
         if self.rotation.iter().any(|agent| {

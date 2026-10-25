@@ -393,3 +393,28 @@ class WorkspacePageTransitions extends CupertinoPageTransitionsBuilder {
           child,
         );
 }
+
+/// Desktop navigation changes context without sliding the whole workspace.
+class DesktopPageTransitions extends PageTransitionsBuilder {
+  const DesktopPageTransitions();
+
+  @override
+  Duration get transitionDuration => const Duration(milliseconds: 160);
+
+  @override
+  Duration get reverseTransitionDuration => const Duration(milliseconds: 120);
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) => MediaQuery.disableAnimationsOf(context)
+      ? child
+      : FadeTransition(
+          opacity: animation.drive(CurveTween(curve: Curves.easeOutCubic)),
+          child: child,
+        );
+}

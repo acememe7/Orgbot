@@ -17,10 +17,66 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../protocol/models.dart';
 import '../../state/room_store.dart';
+import '../polish.dart';
+
+final Expando<_AnswerState> _answerStates = Expando<_AnswerState>();
+
+_AnswerState _answersFor(RoomStore store) =>
+    _answerStates[store] ??= _AnswerState();
+
+class _AnswerState extends ChangeNotifier {
+  final Set<String> pending = <String>{};
+  final Set<String> retryReady = <String>{};
+  final Map<String, Timer> _timers = <String, Timer>{};
+  int _attachedPanels = 0;
+
+  void attachPanel() {
+    _attachedPanels++;
+  }
+
+  void detachPanel() {
+    _attachedPanels--;
+    if (_attachedPanels == 0) {
+      for (final timer in _timers.values) {
+        timer.cancel();
+      }
+      _timers.clear();
+      retryReady.addAll(pending);
+      pending.clear();
+    }
+  }
+
+  bool begin(String id) {
+    if (!pending.add(id)) return false;
+    retryReady.remove(id);
+    _timers[id] = Timer(const Duration(seconds: 12), () => _expire(id));
+    notifyListeners();
+    return true;
+  }
+
+  void _expire(String id) {
+    _timers.remove(id);
+    if (pending.remove(id)) {
+      retryReady.add(id);
+      notifyListeners();
+    }
+  }
+
+  void settleAbsentFrom(Set<String> liveIds) {
+    for (final id in pending.where((id) => !liveIds.contains(id)).toList()) {
+      pending.remove(id);
+      retryReady.remove(id);
+      _timers.remove(id)?.cancel();
+    }
+    retryReady.removeWhere((id) => !liveIds.contains(id));
+  }
+}
 
 /// Which slice of the room is being looked at.
 ///
@@ -39,11 +95,7 @@ enum WorkView {
 
 /// Objectives, progress, and the decisions only you can make.
 class ObjectivesPane extends StatefulWidget {
-  const ObjectivesPane({
-    super.key,
-    required this.store,
-    this.onShowAllRecords,
-  });
+  const ObjectivesPane({super.key, required this.store, this.onShowAllRecords});
 
   final RoomStore store;
 
@@ -59,16 +111,18 @@ class _ObjectivesPaneState extends State<ObjectivesPane> {
 
   /// The cards this view shows.
   List<ObjectiveCard> _visible(RoomDigest digest) => switch (_view) {
-        WorkView.overview => digest.objectives,
-        WorkView.active => digest.objectives
-            .where((c) => c.owners.isNotEmpty && !c.needsOperator)
-            .toList(),
-        WorkView.needsMe =>
-          digest.objectives.where((c) => c.needsOperator).toList(),
-        WorkView.blocked => digest.objectives
-            .where((c) => c.blocker != null && !c.needsOperator)
-            .toList(),
-      };
+    WorkView.overview => digest.objectives,
+    WorkView.active =>
+      digest.objectives
+          .where((c) => c.owners.isNotEmpty && !c.needsOperator)
+          .toList(),
+    WorkView.needsMe =>
+      digest.objectives.where((c) => c.needsOperator).toList(),
+    WorkView.blocked =>
+      digest.objectives
+          .where((c) => c.blocker != null && !c.needsOperator)
+          .toList(),
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -92,9 +146,9 @@ class _ObjectivesPaneState extends State<ObjectivesPane> {
           padding: const EdgeInsets.fromLTRB(14, 14, 14, 28),
           children: [
             _Headline(counts: digest.counts),
-            if (digest.needsYou.isNotEmpty && _view != WorkView.blocked) ...[
+            if (digest.needsYou.isNotEmpty && _view == WorkView.overview) ...[
               const SizedBox(height: 16),
-              _NeedsYou(decisions: digest.needsYou, store: store),
+              NeedsYouPanel(decisions: digest.needsYou, store: store),
             ],
             const SizedBox(height: 16),
             _ViewPicker(
@@ -103,9 +157,14 @@ class _ObjectivesPaneState extends State<ObjectivesPane> {
               onPick: (view) => setState(() => _view = view),
             ),
             const SizedBox(height: 14),
-            if (cards.isEmpty)
+            if (digest.needsYou.isNotEmpty && _view == WorkView.needsMe) ...[
+              NeedsYouPanel(decisions: digest.needsYou, store: store),
+              const SizedBox(height: 14),
+            ],
+            if (cards.isEmpty &&
+                !(_view == WorkView.needsMe && digest.needsYou.isNotEmpty))
               _NothingHere(view: _view)
-            else
+            else if (cards.isNotEmpty)
               for (final card in cards)
                 _ObjectiveTile(card: card, store: store),
             if (_view == WorkView.overview) ...[
@@ -194,8 +253,8 @@ class _Headline extends StatelessWidget {
                   quiet
                       ? 'Nothing needs you.'
                       : counts.needsYou == 1
-                          ? '1 decision needs you.'
-                          : '${counts.needsYou} decisions need you.',
+                      ? '1 decision needs you.'
+                      : '${counts.needsYou} decisions need you.',
                   style: TextStyle(
                     fontSize: 13.5,
                     fontWeight: FontWeight.w600,
@@ -244,84 +303,234 @@ class _Count extends StatelessWidget {
 }
 
 /// The operator's inbox: only things a person must actually answer.
-class _NeedsYou extends StatelessWidget {
-  const _NeedsYou({required this.decisions, required this.store});
+class NeedsYouPanel extends StatefulWidget {
+  const NeedsYouPanel({
+    super.key,
+    required this.decisions,
+    required this.store,
+    this.compact = false,
+    this.focusNode,
+  });
 
   final List<PendingDecision> decisions;
   final RoomStore store;
+  final bool compact;
+  final FocusNode? focusNode;
+
+  @override
+  State<NeedsYouPanel> createState() => _NeedsYouPanelState();
+}
+
+class _NeedsYouPanelState extends State<NeedsYouPanel> {
+  final Map<String, TextEditingController> _responses = {};
+  late _AnswerState _answerState;
+
+  @override
+  void initState() {
+    super.initState();
+    _answerState = _answersFor(widget.store)
+      ..attachPanel()
+      ..addListener(_onAnswerStateChanged);
+  }
+
+  void _onAnswerStateChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didUpdateWidget(covariant NeedsYouPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final liveIds = widget.decisions.map((decision) => decision.id).toSet();
+    if (oldWidget.store != widget.store) {
+      _answerState.removeListener(_onAnswerStateChanged);
+      _answerState.detachPanel();
+      _answerState = _answersFor(widget.store)
+        ..attachPanel()
+        ..addListener(_onAnswerStateChanged);
+    }
+    _answerState.settleAbsentFrom(liveIds);
+    for (final id in _responses.keys.toList()) {
+      if (!liveIds.contains(id)) {
+        _responses.remove(id)?.dispose();
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _answerState.removeListener(_onAnswerStateChanged);
+    _answerState.detachPanel();
+    for (final response in _responses.values) {
+      response.dispose();
+    }
+    super.dispose();
+  }
+
+  void _answer(PendingDecision decision, String chosen, {String note = ''}) {
+    if (!_answerState.begin(decision.id)) return;
+    widget.store.answerDecision(decision.id, chosen, note: note);
+  }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.all(14),
+    final liveIds = widget.decisions.map((decision) => decision.id).toSet();
+    _answerState.settleAbsentFrom(liveIds);
+    if (widget.decisions.isEmpty) return const SizedBox.shrink();
+
+    final body = Container(
+      padding: EdgeInsets.all(widget.compact ? 11 : 14),
       decoration: BoxDecoration(
-        color: scheme.errorContainer.withValues(alpha: 0.35),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: scheme.error.withValues(alpha: 0.4)),
+        color: scheme.primaryContainer.withValues(alpha: 0.42),
+        borderRadius: BorderRadius.circular(widget.compact ? 10 : 14),
+        border: Border.all(color: scheme.primary.withValues(alpha: 0.28)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(Icons.pan_tool_outlined, size: 16, color: scheme.error),
+              Icon(Icons.help_outline, size: 16, color: scheme.primary),
               const SizedBox(width: 8),
               Text(
                 'Needs you',
                 style: TextStyle(
                   fontWeight: FontWeight.w700,
                   fontSize: 13,
-                  color: scheme.error,
+                  color: scheme.primary,
                 ),
               ),
             ],
           ),
-          for (final decision in decisions) ...[
-            const SizedBox(height: 12),
-            Text(
-              decision.title,
-              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-            ),
-            const SizedBox(height: 3),
-            Text(
-              // The sentence the room had to be able to write before it was
-              // allowed to interrupt anyone.
-              'Decision required because: ' + decision.because,
-              style: const TextStyle(fontSize: 12.5, height: 1.35),
-            ),
-            if (decision.options.isNotEmpty) ...[
-              const SizedBox(height: 9),
-              Wrap(
-                spacing: 8,
-                runSpacing: 6,
-                children: [
-                  for (final option in decision.options)
-                    OutlinedButton(
-                      // One tap answers the question, not the card: every
-                      // task the question was holding is released together.
-                      onPressed: () =>
-                          store.answerDecision(decision.id, option),
-                      style: OutlinedButton.styleFrom(
-                        visualDensity: VisualDensity.compact,
-                      ),
-                      child: Text(option),
-                    ),
-                ],
+          for (final decision in widget.decisions) ...[
+            const SizedBox(height: 10),
+            _DecisionAnswerCard(
+              key: ValueKey(decision.id),
+              decision: decision,
+              response: _responses.putIfAbsent(
+                decision.id,
+                TextEditingController.new,
               ),
-            ] else ...[
-              const SizedBox(height: 9),
-              OutlinedButton(
-                onPressed: () => store.answerDecision(decision.id, 'Approve'),
-                style: OutlinedButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                ),
-                child: const Text('Approve'),
-              ),
-            ],
+              busy: _answerState.pending.contains(decision.id),
+              retryReady: _answerState.retryReady.contains(decision.id),
+              onAnswer: (chosen, note) => _answer(decision, chosen, note: note),
+            ),
           ],
         ],
       ),
+    );
+
+    return AnimatedSize(
+      duration: motionDuration(context, 160),
+      curve: Curves.easeOutCubic,
+      alignment: Alignment.topCenter,
+      child: widget.compact
+          ? ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 250),
+              child: SingleChildScrollView(
+                child: Focus(focusNode: widget.focusNode, child: body),
+              ),
+            )
+          : Focus(focusNode: widget.focusNode, child: body),
+    );
+  }
+}
+
+class _DecisionAnswerCard extends StatelessWidget {
+  const _DecisionAnswerCard({
+    super.key,
+    required this.decision,
+    required this.response,
+    required this.busy,
+    required this.retryReady,
+    required this.onAnswer,
+  });
+
+  final PendingDecision decision;
+  final TextEditingController response;
+  final bool busy;
+  final bool retryReady;
+  final void Function(String chosen, String note) onAnswer;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (decision.task.isNotEmpty) ...[
+          Text(
+            decision.title,
+            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+          ),
+          const SizedBox(height: 3),
+        ],
+        Text(
+          decision.because,
+          style: const TextStyle(fontSize: 12.5, height: 1.35),
+        ),
+        if (decision.options.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              for (final option in decision.options)
+                OutlinedButton(
+                  onPressed: busy ? null : () => onAnswer(option, ''),
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  child: Text(option),
+                ),
+            ],
+          ),
+        ],
+        const SizedBox(height: 8),
+        ValueListenableBuilder<TextEditingValue>(
+          valueListenable: response,
+          builder: (context, value, _) => Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: response,
+                  enabled: !busy,
+                  maxLength: 1000,
+                  minLines: 1,
+                  maxLines: 3,
+                  decoration: InputDecoration(
+                    labelText: 'Custom answer',
+                    isDense: true,
+                    counterText: '',
+                    border: const OutlineInputBorder(),
+                    focusedBorder: OutlineInputBorder(
+                      borderSide: BorderSide(color: scheme.primary),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(
+                onPressed: busy || value.text.trim().isEmpty
+                    ? null
+                    : () => onAnswer('Custom answer', value.text.trim()),
+                child: Text(busy ? 'Sending…' : 'Send'),
+              ),
+            ],
+          ),
+        ),
+        if (busy || retryReady)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              retryReady
+                  ? 'No update arrived. Choose an answer to retry.'
+                  : 'Answer sent. Waiting for the room to update.',
+              style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -444,9 +653,7 @@ class _ObjectiveTileState extends State<_ObjectiveTile> {
                 // that made the old board tiring.
                 const SizedBox(height: 7),
                 Text(
-                  card.needsOperator
-                      ? 'Needs you: YES'
-                      : 'Needs you: no',
+                  card.needsOperator ? 'Needs you: YES' : 'Needs you: no',
                   style: TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -517,8 +724,10 @@ class _RecordLine extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final task = _task(id);
     final handoff = store.handoffs
-        .where((h) =>
-            h.taskId == id && (h.state == 'offered' || h.state == 'accepted'))
+        .where(
+          (h) =>
+              h.taskId == id && (h.state == 'offered' || h.state == 'accepted'),
+        )
         .cast<Handoff?>()
         .firstOrNull;
 
@@ -545,8 +754,10 @@ class _RecordLine extends StatelessWidget {
               Expanded(
                 child: Text(
                   task?.title ?? id,
-                  style:
-                      TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ),
               ),
             ],
@@ -680,8 +891,8 @@ class _Empty extends StatelessWidget {
         padding: const EdgeInsets.all(32),
         child: ConstrainedBox(
           constraints: BoxConstraints(
-            minHeight: constraints.maxHeight.isFinite &&
-                    constraints.maxHeight > 64
+            minHeight:
+                constraints.maxHeight.isFinite && constraints.maxHeight > 64
                 ? constraints.maxHeight - 64
                 : 0,
           ),
@@ -706,7 +917,7 @@ class _Empty extends StatelessWidget {
               Text(
                 hasTasks
                     ? 'The room is working, but has not grouped its work into '
-                        'outcomes yet.'
+                          'outcomes yet.'
                     : 'Objectives appear here as the room takes on work.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -746,11 +957,11 @@ class _ViewPicker extends StatelessWidget {
   /// How many cards each view holds, so the labels are informative rather
   /// than a set of identical tabs.
   int _count(WorkView view) => switch (view) {
-        WorkView.overview => counts.objectives,
-        WorkView.active => counts.active,
-        WorkView.needsMe => counts.needsYou,
-        WorkView.blocked => counts.waitingInternally,
-      };
+    WorkView.overview => counts.objectives,
+    WorkView.active => counts.active,
+    WorkView.needsMe => counts.needsYou,
+    WorkView.blocked => counts.waitingInternally,
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -806,9 +1017,7 @@ class _Chip extends StatelessWidget {
               ? colour.withValues(alpha: 0.16)
               : scheme.surfaceContainerHighest.withValues(alpha: 0.5),
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: selected ? colour : scheme.outlineVariant,
-          ),
+          border: Border.all(color: selected ? colour : scheme.outlineVariant),
         ),
         child: Text(
           label,
@@ -835,18 +1044,18 @@ class _NothingHere extends StatelessWidget {
     final (icon, line) = switch (view) {
       WorkView.overview => (Icons.inbox_outlined, 'No objectives yet.'),
       WorkView.active => (
-          Icons.pause_circle_outline,
-          'Nothing is being worked on right now.'
-        ),
+        Icons.pause_circle_outline,
+        'Nothing is being worked on right now.',
+      ),
       // The good case, and worth saying warmly rather than as an absence.
       WorkView.needsMe => (
-          Icons.check_circle_outline,
-          'Nothing needs you. The room is getting on with it.'
-        ),
+        Icons.check_circle_outline,
+        'Nothing needs you. The room is getting on with it.',
+      ),
       WorkView.blocked => (
-          Icons.check_circle_outline,
-          'Nothing is waiting on anything.'
-        ),
+        Icons.check_circle_outline,
+        'Nothing is waiting on anything.',
+      ),
     };
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 30),
@@ -879,9 +1088,14 @@ class _CriticalPath extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final titles = digest.criticalPath
-        .map((id) =>
-            store.tasks.where((t) => t.id == id).map((t) => t.title).firstOrNull ??
-            id)
+        .map(
+          (id) =>
+              store.tasks
+                  .where((t) => t.id == id)
+                  .map((t) => t.title)
+                  .firstOrNull ??
+              id,
+        )
         .toList();
 
     return Container(
@@ -898,12 +1112,14 @@ class _CriticalPath extends StatelessWidget {
             children: [
               Icon(Icons.timeline, size: 15, color: scheme.primary),
               const SizedBox(width: 8),
-              Text(
-                'What decides when this finishes',
-                style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 12.5,
-                  color: scheme.primary,
+              Expanded(
+                child: Text(
+                  'What decides when this finishes',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12.5,
+                    color: scheme.primary,
+                  ),
                 ),
               ),
             ],
@@ -921,7 +1137,9 @@ class _CriticalPath extends StatelessWidget {
                       i == 0 ? '→' : '↓',
                       style: TextStyle(
                         fontSize: 12,
-                        color: i == 0 ? scheme.primary : scheme.onSurfaceVariant,
+                        color: i == 0
+                            ? scheme.primary
+                            : scheme.onSurfaceVariant,
                       ),
                     ),
                   ),
@@ -1032,13 +1250,13 @@ class _UtilizationStrip extends StatelessWidget {
   final Utilization utilization;
 
   Color _tone(ColorScheme scheme, String doing) => switch (doing) {
-        'working' => scheme.primary,
-        'reviewing' => Colors.purple,
-        'waiting' => Colors.amber,
-        'faulted' => scheme.error,
-        'offline' => scheme.outline,
-        _ => scheme.onSurfaceVariant,
-      };
+    'working' => scheme.primary,
+    'reviewing' => Colors.purple,
+    'waiting' => Colors.amber,
+    'faulted' => scheme.error,
+    'offline' => scheme.outline,
+    _ => scheme.onSurfaceVariant,
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -1074,8 +1292,10 @@ class _UtilizationStrip extends StatelessWidget {
             children: [
               for (final bot in utilization.bots)
                 Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 5,
+                  ),
                   decoration: BoxDecoration(
                     color: _tone(scheme, bot.doing).withValues(alpha: 0.13),
                     borderRadius: BorderRadius.circular(7),

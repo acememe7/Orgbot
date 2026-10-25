@@ -154,8 +154,11 @@ class _BotRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final activeStep = entry.activeStep;
     final (color, label) = entry.streaming && entry.retryStatus != null
         ? (Colors.amber, entry.retryStatus!)
+        : entry.streaming && activeStep != null
+        ? (Colors.lightBlue, activeStep.label)
         : _status(entry.agent.status, entry.streaming, entry.lastError != null);
 
     return Container(
@@ -292,6 +295,84 @@ class _BotRow extends StatelessWidget {
                 fontSize: 11,
                 height: 1.3,
                 color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+          if (entry.steps.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Theme(
+              data: Theme.of(context).copyWith(
+                dividerColor: Colors.transparent,
+                visualDensity: VisualDensity.compact,
+              ),
+              child: Material(
+                color: Colors.transparent,
+                child: ExpansionTile(
+                  key: PageStorageKey<String>('process-${entry.agent.id}'),
+                  tilePadding: EdgeInsets.zero,
+                  childrenPadding: const EdgeInsets.only(bottom: 4),
+                  minTileHeight: 38,
+                  title: Text(
+                    activeStep == null
+                        ? 'Process · ${entry.steps.length} recent steps'
+                        : 'Process · ${activeStep.label}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                  children: [
+                    for (final step in entry.steps.reversed)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 3),
+                        child: Row(
+                          children: [
+                            Icon(
+                              step.running
+                                  ? Icons.sync
+                                  : step.succeeded == false
+                                  ? Icons.error_outline
+                                  : step.succeeded == true
+                                  ? Icons.check_circle_outline
+                                  : Icons.stop_circle_outlined,
+                              size: 14,
+                              color: step.running
+                                  ? Colors.lightBlue
+                                  : step.succeeded == false
+                                  ? scheme.error
+                                  : scheme.onSurfaceVariant,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                step.label,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 11),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              step.running
+                                  ? 'running'
+                                  : step.succeeded == false
+                                  ? 'failed'
+                                  : step.succeeded == true
+                                  ? 'done'
+                                  : 'stopped',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: scheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ),
           ],

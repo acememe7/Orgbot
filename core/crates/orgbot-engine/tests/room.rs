@@ -1669,13 +1669,13 @@ fn a_genuinely_new_question_still_reaches_the_operator() {
 }
 
 #[test]
-fn answering_something_already_settled_is_refused() {
+fn retrying_an_answer_after_a_lost_ack_is_idempotent() {
     let mut f = fixture();
     let task = f.open_task("provision the VPS", None);
     let decision = asked_decision(&f.gate(task, "it provisions paid infrastructure"));
     f.approve(decision);
 
-    let err = f.reject(Command::AnswerDecision {
+    let retry = f.apply(Command::AnswerDecision {
         decision,
         answer: Answer {
             chosen: "Decline".into(),
@@ -1683,7 +1683,8 @@ fn answering_something_already_settled_is_refused() {
             at: Timestamp::now(),
         },
     });
-    assert!(matches!(err, EngineError::NotReady { .. }), "got {err:?}");
+    assert!(retry.is_empty(), "a duplicate answer must not wake anyone twice");
+    assert_eq!(f.engine.task(task).unwrap().authorization, AuthorizationState::Authorized);
 }
 
 /// The room is rebuilt from its own log, so what it has already asked has to

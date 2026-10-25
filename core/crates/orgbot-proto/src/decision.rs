@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{DecisionId, RoomId, TaskId};
+use crate::ids::{AgentId, DecisionId, RoomId, TaskId};
 use crate::time::Timestamp;
 
 /// What an approval covers.
@@ -197,6 +197,9 @@ pub struct Decision {
     pub room: RoomId,
     /// Completes "Operator decision required because: ___".
     pub because: String,
+    /// Informational owner question, rather than a request for an authority grant.
+    #[serde(default)]
+    pub owner_question: bool,
     /// The answers offered, for a one-tap reply.
     #[serde(default)]
     pub options: Vec<String>,
@@ -206,6 +209,10 @@ pub struct Decision {
     /// The task that prompted it, when one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<TaskId>,
+    /// Bots waiting for the operator's answer, including questions asked
+    /// before a task was claimed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asked_by: Vec<AgentId>,
     /// The answer, once given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<Answer>,
@@ -229,9 +236,11 @@ impl Decision {
             id: DecisionId::new(),
             room,
             because: because.into(),
+            owner_question: false,
             options: Vec::new(),
             envelope: Envelope::default(),
             task: None,
+            asked_by: Vec::new(),
             answer: None,
             asked_at: Timestamp::now(),
             superseded_by: None,
@@ -264,7 +273,17 @@ impl Decision {
     /// container is not the same question as asking to rebuild it somewhere
     /// new, and only the second deserves to reach anyone.
     pub fn fingerprint(&self) -> String {
-        let mut parts = vec![normalise(&self.because), self.envelope.environment.clone()];
+        let mut parts = vec![
+            if self.owner_question { "question" } else { "authorization" }.to_string(),
+            normalise(&self.because),
+            self.envelope.environment.clone(),
+        ];
+        if self.owner_question {
+            let mut options: Vec<String> =
+                self.options.iter().map(|option| normalise(option)).collect();
+            options.sort();
+            parts.extend(options);
+        }
         let mut allowed = self.envelope.allowed.clone();
         allowed.sort();
         parts.extend(allowed);

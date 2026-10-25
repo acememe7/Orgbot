@@ -1,0 +1,11 @@
+[Unit]
+Description=Clear expired OrgBots recoverable trash entries
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/lib/orgbot/orgbot-trash.py cleanup
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths="/mnt/hdd/OrgBots Trash"

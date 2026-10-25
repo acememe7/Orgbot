@@ -197,6 +197,8 @@ pub enum BlockReason {
     AwaitingTask { task: TaskId },
     /// Waiting for a person to answer.
     AwaitingHuman { prompt: String },
+    /// Waiting for an answer to a durable operator question.
+    AwaitingDecision { decision: crate::ids::DecisionId },
     /// Waiting on something the engine does not model.
     Other { detail: String },
 }
@@ -213,7 +215,7 @@ impl BlockReason {
 
     /// Whether only a human can clear this block.
     pub const fn needs_human(&self) -> bool {
-        matches!(self, Self::AwaitingHuman { .. })
+        matches!(self, Self::AwaitingHuman { .. } | Self::AwaitingDecision { .. })
     }
 }
 
@@ -504,6 +506,19 @@ impl Task {
             AuthorizationState::Authorized => {}
         }
 
+        if self.state == TaskState::Blocked {
+            if let Some(reason) = self
+                .blocked_on
+                .iter()
+                .find(|reason| matches!(reason, BlockReason::AwaitingDecision { .. }))
+            {
+                return Readiness::BlockedOperator {
+                    because: describe_block(reason),
+                    options: Vec::new(),
+                };
+            }
+        }
+
         // 4. Whatever the workflow state says last.
         if let Some(by) = self.assignee {
             // Rework reads differently from first-pass work: "in progress"
@@ -580,6 +595,7 @@ fn describe_block(reason: &BlockReason) -> String {
         BlockReason::AwaitingHandoff { .. } => "a handoff to be accepted".into(),
         BlockReason::AwaitingTask { .. } => "another task to finish".into(),
         BlockReason::AwaitingHuman { prompt } => prompt.clone(),
+        BlockReason::AwaitingDecision { .. } => "an operator question to be answered".into(),
         BlockReason::Other { detail } => detail.clone(),
     }
 }
@@ -751,6 +767,22 @@ mod tests {
         };
         let json = serde_json::to_string(&original).unwrap();
         assert_eq!(serde_json::from_str::<TaskTransition>(&json).unwrap(), original);
+    }
+
+    #[test]
+    fn legacy_awaiting_human_block_reason_still_deserializes() {
+        let reason: BlockReason = serde_json::from_value(serde_json::json!({
+            "kind": "awaiting_human",
+            "prompt": "Which region should I use?"
+        }))
+        .unwrap();
+        assert_eq!(
+            reason,
+            BlockReason::AwaitingHuman {
+                prompt: "Which region should I use?".into()
+            }
+        );
+        assert!(reason.needs_human());
     }
 }
 

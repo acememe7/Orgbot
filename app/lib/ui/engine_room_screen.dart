@@ -41,6 +41,7 @@ class EngineRoomScreen extends StatefulWidget {
     this.displayName,
     this.embedded = false,
     this.desktopLayout,
+    this.attentionRequest = 0,
   });
 
   final defs.RoomDef room;
@@ -48,6 +49,7 @@ class EngineRoomScreen extends StatefulWidget {
   final String? displayName;
   final bool embedded;
   final bool? desktopLayout;
+  final int attentionRequest;
 
   @override
   State<EngineRoomScreen> createState() => _EngineRoomScreenState();
@@ -74,10 +76,12 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   bool _startRequested = false;
   ChatMessage? _replyTo;
   final FocusNode _composeFocus = FocusNode();
+  final FocusNode _attentionFocus = FocusNode(debugLabel: 'Room needs you');
   final _projectKey = GlobalKey();
   final _conversationKey = GlobalKey();
   bool _showInspector = false;
   bool _openedInspector = false;
+  bool _awaitingQuestionFocus = false;
   int _inspector = 0;
   double _inspectorWidth = 360;
   bool get _desktop => widget.desktopLayout ?? canRunAgentClis;
@@ -101,12 +105,42 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
     _controller.trustHost = (host, type, key) async =>
         mounted && await trustWorkspaceHost(context, host, type, key);
     _controller.addListener(_onChange);
+    if (widget.attentionRequest > 0) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _requestAttention());
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (!canRunAgentClis) {
         unawaited(_controller.start());
       } else if (_desktopStartable) {
         unawaited(_checkFreshRoomHistory());
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant EngineRoomScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.attentionRequest != oldWidget.attentionRequest) {
+      _requestAttention();
+    }
+  }
+
+  void _requestAttention() {
+    if (!mounted) return;
+    final hasQuestion = _controller.store?.digest.needsYou.isNotEmpty ?? false;
+    setState(() {
+      _inspector = 1;
+      _showInspector = !hasQuestion;
+      _awaitingQuestionFocus = !hasQuestion;
+    });
+    if (hasQuestion) _focusQuestionRail();
+  }
+
+  void _focusQuestionRail() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _controller.store?.digest.needsYou.isNotEmpty == true) {
+        _attentionFocus.requestFocus();
       }
     });
   }
@@ -154,7 +188,17 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   }
 
   void _onChange() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    final questionArrived =
+        _awaitingQuestionFocus &&
+        (_controller.store?.digest.needsYou.isNotEmpty ?? false);
+    setState(() {
+      if (questionArrived) {
+        _showInspector = false;
+        _awaitingQuestionFocus = false;
+      }
+    });
+    if (questionArrived) _focusQuestionRail();
   }
 
   Future<void> _loadAttachments() async {
@@ -224,6 +268,7 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
     _controller.trustHost = null;
     _input.dispose();
     _composeFocus.dispose();
+    _attentionFocus.dispose();
     _memory.dispose();
     _scroll.dispose();
     super.dispose();
@@ -559,6 +604,13 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
       children: [
         if (!_controller.isRunning && _controller.phase != RoomLaunch.failed)
           const LinearProgressIndicator(minHeight: 2),
+        if (_desktop)
+          NeedsYouPanel(
+            decisions: store.digest.needsYou,
+            store: store,
+            compact: true,
+            focusNode: _attentionFocus,
+          ),
         Expanded(
           child: Transcript(
             store: store,

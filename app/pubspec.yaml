@@ -82,6 +82,7 @@ flutter:
   # runtime with an unhelpful "unable to load asset".
   assets:
     - assets/logo.png
+    - assets/orgbots-desktop.png
     - assets/fonts/OFL.txt
     - tool/specialist-team.json
     # Playbooks the bots can reach for. Shipped with the app because a phone

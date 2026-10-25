@@ -8,7 +8,9 @@
 use orgbot_engine::{Command, Engine};
 use orgbot_proto::agent::{Autonomy, ProviderRef};
 use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
-use orgbot_proto::{AgentId, AgentSpec, ChatMessage, TaskState};
+use orgbot_proto::decision::Answer;
+use orgbot_proto::event::Event;
+use orgbot_proto::{AgentId, AgentSpec, ChatMessage, TaskState, Timestamp};
 use orgbot_tools::{definitions_for, dispatch, ToolOutcome};
 use serde_json::{json, Value};
 
@@ -859,7 +861,7 @@ fn a_deadlock_broken_during_a_block_is_reported_back_to_the_bot() {
     let mut f = fixture();
     let (lead, worker, worker2) = (f.lead, f.worker, f.worker2);
 
-    let mut start = |title: &str, who: AgentId, f: &mut Fixture| {
+    let start = |title: &str, who: AgentId, f: &mut Fixture| {
         let task = id_in(
             &f.ok(lead, "create_task", json!({"title": title, "brief": "b"})),
             "task",
@@ -886,6 +888,151 @@ fn a_deadlock_broken_during_a_block_is_reported_back_to_the_bot() {
         message.contains("circular wait"),
         "the bot must be told, or it will sit there: {message}"
     );
+}
+
+#[test]
+fn a_bot_can_ask_the_owner_and_resume_its_blocked_task_from_the_answer() {
+    let mut f = fixture();
+    let task = f.make(json!({"title":"choose a storage region", "brief":"deploy safely"}));
+    let task_id = task.parse().unwrap();
+    f.ok(f.worker, "claim_task", json!({"task":task}));
+    f.ok(f.worker, "start_task", json!({"task":task}));
+
+    let outcome = f.call(
+        f.worker,
+        "ask_owner",
+        json!({
+            "question":"Which region should I use?",
+            "options":["eu-west", "eu-central"],
+            "task":task
+        }),
+    );
+    assert!(!outcome.is_error, "{}", outcome.content);
+    let decision = f.engine.decisions().pending().next().unwrap().id;
+    assert_eq!(f.engine.digest().needs_you.len(), 1);
+    assert_eq!(f.engine.task(task_id).unwrap().state, TaskState::Blocked);
+    assert!(f.engine.task(task_id).unwrap().blocked_on.iter().any(|reason| {
+        matches!(reason, orgbot_proto::BlockReason::AwaitingDecision { decision: id } if *id == decision)
+    }));
+
+    let events = f.engine.apply(Command::AnswerDecision {
+        decision,
+        answer: Answer {
+            chosen: "Custom answer".into(),
+            note: "eu-north".into(),
+            at: Timestamp::now(),
+        },
+    }).unwrap();
+    assert_eq!(f.engine.task(task_id).unwrap().state, TaskState::InProgress);
+    assert!(f.engine.task(task_id).unwrap().blocked_on.is_empty());
+    assert!(events.iter().any(|event| match &event.event {
+        Event::MessagePosted { message } => message.wakes(f.worker, &[])
+            && message.body.contains("eu-north"),
+        _ => false,
+    }), "the answer must wake the asking agent");
+    assert!(f.engine.decisions().pending().next().is_none());
+}
+
+#[test]
+fn block_on_human_question_uses_the_durable_question_flow() {
+    let mut f = fixture();
+    let task = f.make(json!({"title":"choose a storage region", "brief":"deploy safely"}));
+    f.ok(f.worker, "claim_task", json!({"task":task}));
+    f.ok(f.worker, "start_task", json!({"task":task}));
+
+    let result = f.call(
+        f.worker,
+        "block_on",
+        json!({
+            "task":task,
+            "question_for_human":"Which region should I use?",
+            "options":["eu-west", "eu-central"]
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content);
+    assert_eq!(f.engine.decisions().pending().count(), 1);
+    assert!(f.engine.task(task.parse().unwrap()).unwrap().needs_operator());
+}
+
+#[test]
+fn owner_questions_reject_invalid_choice_lists_without_creating_a_decision() {
+    let mut f = fixture();
+    let error = f.err(
+        f.worker,
+        "ask_owner",
+        json!({"question":"Choose?", "options":["Yes", " yes "]}),
+    );
+    assert!(error.contains("distinct"), "{error}");
+    assert_eq!(f.engine.decisions().pending().count(), 0);
+}
+
+#[test]
+fn a_coordinator_can_ask_before_claiming_work() {
+    let mut f = fixture();
+    let result = f.call(
+        f.lead,
+        "ask_owner",
+        json!({"question":"Should I split the plan?", "options":["Yes", "No"]}),
+    );
+    assert!(!result.is_error, "{}", result.content);
+    assert_eq!(f.engine.digest().needs_you.len(), 1);
+    let decision = f.engine.decisions().pending().next().unwrap().id;
+    let events = f.engine.apply(Command::AnswerDecision {
+        decision,
+        answer: Answer {
+            chosen: "Yes".into(),
+            note: String::new(),
+            at: Timestamp::now(),
+        },
+    }).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        Event::MessagePosted { message } if message.wakes(f.lead, &[])
+    )));
+}
+
+#[test]
+fn joining_an_existing_question_is_durable_and_answers_all_askers() {
+    let mut f = fixture();
+    let options = json!(["eu-west", "eu-central"]);
+    f.ok(
+        f.lead,
+        "ask_owner",
+        json!({"question":"Which region should we use?", "options":options}),
+    );
+    let task = f.make(json!({"title":"deploy", "brief":"deploy safely"}));
+    let task_id: orgbot_proto::TaskId = task.parse().unwrap();
+    f.ok(f.worker, "claim_task", json!({"task":task}));
+    f.ok(f.worker, "start_task", json!({"task":task}));
+    f.ok(
+        f.worker,
+        "ask_owner",
+        json!({"question":"Which region should we use?", "options":options, "task":task}),
+    );
+
+    assert_eq!(f.engine.decisions().pending().count(), 1);
+    let decision = f.engine.decisions().pending().next().unwrap();
+    assert!(decision.asked_by.contains(&f.lead));
+    assert!(decision.asked_by.contains(&f.worker));
+    assert_eq!(decision.task, Some(task_id));
+    let decision_id = decision.id;
+
+    let restored = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec())
+        .expect("joined askers survive replay");
+    let restored_decision = restored.decisions().pending().next().unwrap();
+    assert!(restored_decision.asked_by.contains(&f.lead));
+    assert!(restored_decision.asked_by.contains(&f.worker));
+    assert_eq!(restored_decision.task, Some(task_id));
+
+    f.engine.apply(Command::AnswerDecision {
+        decision: decision_id,
+        answer: Answer {
+            chosen: "Custom answer".into(),
+            note: "eu-north".into(),
+            at: Timestamp::now(),
+        },
+    }).unwrap();
+    assert_eq!(f.engine.task(task_id).unwrap().state, TaskState::InProgress);
 }
 
 // --------------------------------------------------------- attaching work

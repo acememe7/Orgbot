@@ -350,6 +350,11 @@ void attachments_method_call(FlMethodChannel*, FlMethodCall* call,
 void workspace_method_call(FlMethodChannel*, FlMethodCall* call,
                             gpointer user_data) {
   auto* context = static_cast<ChannelContext*>(user_data);
+  if (g_strcmp0(fl_method_call_get_name(call), "present_window") == 0) {
+    gtk_window_present(context->parent);
+    fl_method_call_respond_success(call, nullptr, nullptr);
+    return;
+  }
   if (g_strcmp0(fl_method_call_get_name(call), "choose_directory") == 0) {
     show_picker(context, call, TRUE);
     return;

@@ -296,6 +296,10 @@ impl Bot {
                     .map(|path| path.to_string_lossy().into_owned()),
             );
 
+            if let Some(tx) = &sink {
+                let _ = tx.send(StreamEvent::Thinking).await;
+            }
+
             let response = match self.mcp_rx.as_mut() {
                 Some(rx) => {
                     let (response, mcp_ok, mcp_err) = complete_with_mcp(
@@ -431,6 +435,14 @@ impl Bot {
                 } else {
                     engine.with(|engine| orgbot_tools::dispatch(engine, self.spec.id, name, input))
                 };
+                if let Some(tx) = &sink {
+                    let _ = tx
+                        .send(StreamEvent::ToolUseEnd {
+                            id: id.to_string(),
+                            succeeded: !outcome.is_error,
+                        })
+                        .await;
+                }
                 report.tool_calls += 1;
                 if outcome.is_error {
                     report.tool_errors += 1;
@@ -857,8 +869,8 @@ mod tests {
     use super::*;
     use crate::mcp_client::{McpServerSpec, McpTransport};
     use orgbot_engine::Engine;
-    use orgbot_providers::types::Role;
     use orgbot_providers::ScriptedProvider;
+    use orgbot_providers::types::Role;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -944,7 +956,10 @@ mod tests {
         bot.take_turn(&engine, None).await.unwrap();
         let requests = provider.requests();
         let second_request = requests.last().unwrap();
-        assert_eq!(first_request.system.as_bytes(), second_request.system.as_bytes());
+        assert_eq!(
+            first_request.system.as_bytes(),
+            second_request.system.as_bytes()
+        );
 
         let user_situations = second_request
             .messages
@@ -1121,7 +1136,8 @@ mod tests {
                 let response_body = response.map_or_else(String::new, |v| v.to_string());
                 let reply = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    response_body.len(), response_body
+                    response_body.len(),
+                    response_body
                 );
                 let _ = stream.get_mut().write_all(reply.as_bytes()).await;
                 let _ = stream.get_mut().flush().await;
@@ -1343,17 +1359,21 @@ mod tests {
         };
         assert!(!base.made_progress(), "an empty turn is not progress");
 
-        assert!(TurnReport {
-            said: Some("done".into()),
-            ..base.clone()
-        }
-        .made_progress());
+        assert!(
+            TurnReport {
+                said: Some("done".into()),
+                ..base.clone()
+            }
+            .made_progress()
+        );
 
-        assert!(TurnReport {
-            tool_calls: 1,
-            ..base.clone()
-        }
-        .made_progress());
+        assert!(
+            TurnReport {
+                tool_calls: 1,
+                ..base.clone()
+            }
+            .made_progress()
+        );
 
         assert!(
             !TurnReport {
@@ -1375,9 +1395,9 @@ mod mcp_tests {
     use orgbot_engine::{Command, Engine};
 
     use crate::shared::SharedEngine;
+    use orgbot_proto::AgentSpec;
     use orgbot_proto::agent::ProviderRef;
     use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
-    use orgbot_proto::AgentSpec;
     use orgbot_providers::types::{
         CompletionRequest, CompletionResponse, ContentBlock, StopReason, Usage,
     };
@@ -1503,6 +1523,7 @@ mod mcp_tests {
         let interrupt = bot.input_interrupt.clone();
         let (tx, mut rx) = mpsc::channel(8);
         let running = tokio::spawn(async move { bot.take_turn(&engine, Some(tx)).await });
+        assert_eq!(rx.recv().await.unwrap(), StreamEvent::Thinking);
         assert!(matches!(
             rx.recv().await.unwrap(),
             StreamEvent::Retry { attempt: 1, .. }
@@ -1543,6 +1564,7 @@ mod mcp_tests {
         let engine = SharedEngine::new(engine_with(&spec));
         let mut bot = Bot::new(spec, provider.clone());
         let token = bot.input_interrupt.clone();
+        let (activity_tx, mut activity_rx) = mpsc::channel(16);
         let (tx, mut calls) = mpsc::channel(2);
         bot.attach_workspace(Workspace::new(
             WorkspaceSpec {
@@ -1554,7 +1576,7 @@ mod mcp_tests {
             tx,
         ));
         let mut running = tokio::spawn(async move {
-            let result = bot.take_turn(&engine, None).await;
+            let result = bot.take_turn(&engine, Some(activity_tx)).await;
             (bot, engine, result)
         });
         let call = calls.recv().await.unwrap();
@@ -1574,6 +1596,18 @@ mod mcp_tests {
             .unwrap();
         let (mut bot, engine, result) = running.await.unwrap();
         let report = result.unwrap();
+        let mut activity_events = Vec::new();
+        while let Ok(event) = activity_rx.try_recv() {
+            activity_events.push(event);
+        }
+        assert!(activity_events.contains(&StreamEvent::ToolUseStart {
+            id: "write1".into(),
+            name: "workspace_write".into(),
+        }));
+        assert!(activity_events.contains(&StreamEvent::ToolUseEnd {
+            id: "write1".into(),
+            succeeded: true,
+        }));
         assert_eq!(report.stop_reason, StopReason::Other("human_input".into()));
         assert_eq!(report.tool_calls, 1);
         assert_eq!(
@@ -1592,9 +1626,11 @@ mod mcp_tests {
         bot.input_interrupt = tokio_util::sync::CancellationToken::new();
         bot.take_turn(&engine, None).await.unwrap();
         assert!(calls.try_recv().is_err(), "the write must not be replayed");
-        assert!(serde_json::to_string(&provider.requests()[1].messages)
-            .unwrap()
-            .contains("write committed once"));
+        assert!(
+            serde_json::to_string(&provider.requests()[1].messages)
+                .unwrap()
+                .contains("write committed once")
+        );
     }
 
     #[tokio::test]

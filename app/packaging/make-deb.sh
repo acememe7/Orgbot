@@ -49,7 +49,7 @@ chmod 755 "$STAGE/usr/lib/$NAME/orgbot_app"
 install -m755 "$ENGINE" "$STAGE/usr/lib/$NAME/orgbot-engine"
 ln -s "/usr/lib/$NAME/orgbot-engine" "$STAGE/usr/bin/orgbot-engine"
 install -m644 packaging/orgbot.desktop "$STAGE/usr/share/applications/orgbot.desktop"
-install -m644 assets/logo.png "$STAGE/usr/share/icons/hicolor/256x256/apps/$NAME.png"
+install -m644 packaging/orgbots-icon-256.png "$STAGE/usr/share/icons/hicolor/256x256/apps/$NAME.png"
 ln -s "/usr/lib/$NAME/orgbot_app" "$STAGE/usr/bin/$NAME"
 
 INSTALLED_KB=$(du -sk "$STAGE/usr" | cut -f1)

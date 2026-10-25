@@ -19,6 +19,12 @@ pub enum EngineError {
     #[error("no bot {agent} in this room")]
     UnknownAgent { agent: AgentId },
 
+    #[error("invalid owner question: {reason}")]
+    InvalidOwnerQuestion { reason: String },
+
+    #[error("invalid owner answer: {reason}")]
+    InvalidOwnerAnswer { reason: String },
+
     #[error("no handoff {handoff}")]
     UnknownHandoff { handoff: HandoffId },
 

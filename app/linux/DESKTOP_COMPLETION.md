@@ -1,3 +1,33 @@
+# Linux desktop completion record — 1.8.0
+
+Desktop motion, Linux branding, collapsible per-agent activity and durable owner
+questions are implemented. Questions provide choices and custom input, resume
+only their asking agents, and retain retry behavior across view changes.
+The separate HDD trash script and timer are installed and verified; cleanup is
+not an agent task and consumes no model allowance.
+
+Final Flutter (285 passed, three external SSH skips), analyzer, affected Rust
+checks, release builds, package contents and isolated native launch/readback
+passed. Detailed counts, frame timings, hashes and evidence are recorded in
+[VALIDATION.md](VALIDATION.md). The real Linux notification plugin passed Notify/click-callback checks against
+an isolated synthetic D-Bus service; this does not establish GNOME toast/focus
+acceptance. The staged credential-pattern scan found no credentials in 54 owned
+files. Final scoped Astra review approved the source, integration, notification fixture,
+visuals, package evidence and documentation; all required findings are resolved.
+
+The 30-second scripted activity profile measures UI p95 4.307 ms and raster
+p95 16.788 ms, with larger rendering spikes. Wide and 800 px desktop views were
+inspected; 375 px desktop mode is cramped. This does not establish uniform
+60 FPS, multi-day, Wayland or physical Android acceptance. Notifications require
+the GUI to remain running. The trash workflow cannot intercept arbitrary `rm`
+or other application deletions; use inactive files and the documented command.
+
+The GUI package is built, not installed. The owner-authorized standalone cleanup
+timer is enabled and active. No paid inference or user-file deletion was used
+for this verification. See [REMAINING.md](REMAINING.md) and [TRASH.md](TRASH.md).
+
+---
+
 # Linux desktop completion record — 1.7.0
 
 The seven feature gaps from 1.6.1 are implemented. Scope and external acceptance

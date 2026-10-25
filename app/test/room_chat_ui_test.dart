@@ -290,6 +290,42 @@ void main() {
     );
   });
 
+  testWidgets('the activity rail exposes a collapsible process timeline', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(500, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    final client = FakeClient();
+    final store = seeded(client);
+    client.emit({
+      'type': 'stream',
+      'agent': 'bot_a',
+      'event': {
+        'type': 'tool_use_start',
+        'id': 'process-1',
+        'name': 'Run command',
+      },
+    });
+    client.emit({
+      'type': 'stream',
+      'agent': 'bot_a',
+      'event': {'type': 'tool_use_end', 'id': 'process-1', 'succeeded': true},
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: ActivityRail(store: store)),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Process · 1 recent steps'), findsOneWidget);
+    await tester.tap(find.text('Process · 1 recent steps'));
+    await tester.pumpAndSettle();
+    expect(find.text('Run command'), findsOneWidget);
+    expect(find.text('done'), findsOneWidget);
+  });
+
   testWidgets('the board strip lists tasks with their owner', (tester) async {
     final client = FakeClient();
     final store = seeded(client);

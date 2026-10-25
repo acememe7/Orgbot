@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily cleanup of expired OrgBots trash entries
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+Unit=orgbot-trash-cleanup.service
+
+[Install]
+WantedBy=timers.target

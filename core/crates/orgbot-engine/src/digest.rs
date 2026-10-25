@@ -18,9 +18,9 @@
 //!   objective must not make the room look less complete than it was before
 //!   anyone reviewed anything. Only work that carries the outcome counts
 //!   toward the denominator.
-//! - **`needs_you` is the operator's whole world.** It counts tasks whose
-//!   authorization genuinely waits on a person, and nothing else. An internal
-//!   blocker is progress, not a request.
+//! - **`needs_you` is the operator's whole world.** It counts decisions that
+//!   genuinely wait on a person, whether or not a task is attached. An
+//!   internal blocker is progress, not a request.
 
 use std::collections::{HashMap, HashSet};
 
@@ -107,8 +107,9 @@ pub struct PendingDecision {
     /// releases every task held by the same question, so answering a *task*
     /// would be answering the wrong thing.
     pub id: DecisionId,
-    /// The task that cannot proceed.
-    pub task: TaskId,
+    /// The task that cannot proceed, when this question blocks a task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskId>,
     /// What that task is.
     pub title: String,
     /// Completes "Operator decision required because: ___".
@@ -347,9 +348,7 @@ pub fn digest<'a>(
             let held = decision.task.and_then(|id| by_id.get(&id));
             PendingDecision {
                 id: decision.id,
-                task: decision.task.unwrap_or_else(|| {
-                    held.map_or_else(TaskId::new, |task| task.id)
-                }),
+                task: decision.task.or_else(|| held.map(|task| task.id)),
                 title: held.map_or_else(
                     || "a decision for you".to_string(),
                     |task| task.title.clone(),
@@ -698,6 +697,7 @@ mod tests {
         let room = room();
         let goal = objective(room, "deploy the service");
         let mut waiting = under(room, "provision the VPS", TaskKind::Subtask, goal.id);
+        let waiting_id = waiting.id;
         waiting.authorization = AuthorizationState::AwaitingOperator {
             because: "it provisions paid infrastructure".into(),
             options: vec!["Approve".into(), "Decline".into()],
@@ -733,8 +733,23 @@ mod tests {
         );
         assert_eq!(view.needs_you[0].because, "it provisions paid infrastructure");
         assert_eq!(view.needs_you[0].options.len(), 2);
+        assert_eq!(view.needs_you[0].task, Some(waiting_id));
         assert_eq!(view.needs_you[0].title, "provision the VPS");
         assert_eq!(view.counts.needs_you, 1);
+    }
+
+    #[test]
+    fn taskless_owner_question_has_no_fabricated_task_id() {
+        let room = room();
+        let question = orgbot_proto::decision::Decision::ask(room, "Which direction?");
+        let mut log = DecisionLog::default();
+        log.decisions.push(question);
+
+        let view = digest(std::iter::empty(), &log);
+        assert_eq!(view.needs_you.len(), 1);
+        assert_eq!(view.needs_you[0].task, None);
+        let json = serde_json::to_value(&view.needs_you[0]).unwrap();
+        assert!(json.get("task").is_none());
     }
 
     /// A room busy with its own work asks for nothing.

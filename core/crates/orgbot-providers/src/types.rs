@@ -326,6 +326,8 @@ impl CompletionResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
+    /// A model request has started; this is a generic status, not reasoning text.
+    Thinking,
     /// An interrupted API response is being retried; partial output is discarded.
     Retry { attempt: u32, max_retries: u32 },
     /// More prose.
@@ -344,6 +346,13 @@ pub enum StreamEvent {
         id: String,
         /// Tool name.
         name: String,
+    },
+    /// A tool call finished. Arguments and tool output are deliberately omitted.
+    ToolUseEnd {
+        /// Correlation id from `ToolUseStart`.
+        id: String,
+        /// Whether the tool completed without reporting an error.
+        succeeded: bool,
     },
     /// The turn finished.
     Done {

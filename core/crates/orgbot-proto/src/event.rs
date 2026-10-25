@@ -76,6 +76,15 @@ pub enum Event {
         /// The question, with the authority an approval would grant.
         decision: Box<Decision>,
     },
+    /// Another bot joined an already-pending owner question.
+    DecisionQuestionJoined {
+        /// The pending question.
+        decision: DecisionId,
+        /// The newly joined asker.
+        by: AgentId,
+        /// Active task that will wait for the answer, if any.
+        task: Option<TaskId>,
+    },
     /// The operator answered.
     DecisionAnswered {
         /// The question answered.
@@ -179,6 +188,7 @@ impl Event {
             Self::TaskCreated { .. } => "task_created",
             Self::TaskAuthorized { .. } => "task_authorized",
             Self::DecisionAsked { .. } => "decision_asked",
+            Self::DecisionQuestionJoined { .. } => "decision_question_joined",
             Self::DecisionAnswered { .. } => "decision_answered",
             Self::TaskTransitioned { .. } => "task_transitioned",
             Self::HandoffOffered { .. } => "handoff_offered",

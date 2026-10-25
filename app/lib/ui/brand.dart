@@ -16,9 +16,12 @@ class BrandMark extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(size * 0.24),
       child: Image.asset(
-        'assets/logo.png',
+        Theme.of(context).platform == TargetPlatform.linux
+            ? 'assets/orgbots-desktop.png'
+            : 'assets/logo.png',
         width: size,
         height: size,
+        cacheWidth: (size * MediaQuery.devicePixelRatioOf(context)).ceil(),
         filterQuality: FilterQuality.medium,
         // A missing asset must not take the screen down; fall back to the
         // icon so the layout still holds.

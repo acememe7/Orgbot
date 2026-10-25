@@ -154,6 +154,21 @@ impl Engine {
                 Event::DecisionAsked { decision } => {
                     engine.decisions.decisions.push(*decision.clone());
                 }
+                Event::DecisionQuestionJoined { decision, by, task } => {
+                    if let Some(question) = engine
+                        .decisions
+                        .decisions
+                        .iter_mut()
+                        .find(|question| question.id == *decision)
+                    {
+                        if !question.asked_by.contains(by) {
+                            question.asked_by.push(*by);
+                        }
+                        if question.task.is_none() {
+                            question.task = *task;
+                        }
+                    }
+                }
                 Event::DecisionAnswered { decision, answer } => {
                     engine.decisions.answer(*decision, answer.clone());
                 }
@@ -1466,7 +1481,9 @@ impl Engine {
                     }
                     // A human or an unmodelled dependency is outside the graph:
                     // the engine cannot reason about when it will clear.
-                    BlockReason::AwaitingHuman { .. } | BlockReason::Other { .. } => {}
+                    BlockReason::AwaitingHuman { .. }
+                    | BlockReason::AwaitingDecision { .. }
+                    | BlockReason::Other { .. } => {}
                 }
             }
         }
@@ -1636,6 +1653,13 @@ impl Engine {
                 task,
                 authorization,
             } => self.set_authorization(task, authorization),
+
+            Command::AskOwner {
+                by,
+                task,
+                question,
+                options,
+            } => self.ask_owner(by, task, question, options),
 
             Command::AnswerDecision { decision, answer } => self.answer_decision(decision, answer),
 
@@ -1901,6 +1925,9 @@ impl Engine {
             let mut decision = Decision::ask(self.room.id, because.clone());
             decision.options = options.clone();
             decision.task = Some(task);
+            if let Some(assignee) = self.require_task(task)?.assignee {
+                decision.asked_by.push(assignee);
+            }
             // Record which rules were in force. Old work should be read
             // against the rules that governed it, not the ones adopted since.
             decision.governed_by = self.governance.stamp();
@@ -1955,6 +1982,145 @@ impl Engine {
         match evidence {
             Some(finding) => self.raise_evidence_for(task, &finding),
             None => Ok(Vec::new()),
+        }
+    }
+
+    fn ask_owner(
+        &mut self,
+        by: AgentId,
+        task: Option<TaskId>,
+        question: String,
+        options: Vec<String>,
+    ) -> Result<Vec<EventEnvelope>> {
+        self.require_agent(by)?;
+        let question = question.trim();
+        if question.is_empty() || question.chars().count() > 2_000 {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "question must contain 1–2000 characters".into(),
+            });
+        }
+        let options: Vec<String> = options
+            .into_iter()
+            .map(|option| option.trim().to_string())
+            .collect();
+        if !options.is_empty() {
+            if !(2..=6).contains(&options.len()) {
+                return Err(EngineError::InvalidOwnerQuestion {
+                    reason: "provide between 2 and 6 options, or none for a free-form answer".into(),
+                });
+            }
+            let mut seen = BTreeSet::new();
+            for option in &options {
+                let normalized = option.trim().to_lowercase();
+                if normalized.is_empty() || normalized.chars().count() > 120 {
+                    return Err(EngineError::InvalidOwnerQuestion {
+                        reason: "each option must contain 1–120 characters".into(),
+                    });
+                }
+                if !seen.insert(normalized) {
+                    return Err(EngineError::InvalidOwnerQuestion {
+                        reason: "options must be distinct".into(),
+                    });
+                }
+            }
+        }
+        if let Some(task) = task {
+            self.require_assignee(task, by)?;
+            let record = self.require_task(task)?;
+            let transition = TaskTransition::Block {
+                reason: BlockReason::AwaitingDecision {
+                    decision: DecisionId::new(),
+                },
+            };
+            if !record.state.can_apply(&transition) {
+                return Err(EngineError::NotReady {
+                    task,
+                    reason: format!("cannot ask while task is {}", record.state.as_str()),
+                });
+            }
+        }
+
+        let mut proposed = Decision::ask(self.room.id, question);
+        proposed.owner_question = true;
+        proposed.options = options;
+        proposed.task = task;
+        proposed.asked_by.push(by);
+        proposed.governed_by = self.governance.stamp();
+        match self.decisions.ask(proposed) {
+            Settled::Asked(id) => {
+                let decision = self
+                    .decisions
+                    .decisions
+                    .iter()
+                    .find(|decision| decision.id == id)
+                    .expect("new decision is in the log")
+                    .clone();
+                let mut events = vec![self.emit(Event::DecisionAsked {
+                    decision: Box::new(decision),
+                })];
+                if let Some(task) = task {
+                    events.extend(self.transition(
+                        task,
+                        TaskTransition::Block {
+                            reason: BlockReason::AwaitingDecision { decision: id },
+                        },
+                        Some(by),
+                    )?);
+                }
+                Ok(events)
+            }
+            Settled::AlreadyAsked(prior) => {
+                let prior_id = prior.id;
+                let mut joined = false;
+                if let Some(stored) = self
+                    .decisions
+                    .decisions
+                    .iter_mut()
+                    .find(|decision| decision.id == prior_id)
+                {
+                    if !stored.asked_by.contains(&by) {
+                        stored.asked_by.push(by);
+                        joined = true;
+                    }
+                    if stored.task.is_none() && task.is_some() {
+                        stored.task = task;
+                        joined = true;
+                    }
+                }
+                let mut events = if joined {
+                    vec![self.emit(Event::DecisionQuestionJoined {
+                        decision: prior_id,
+                        by,
+                        task,
+                    })]
+                } else {
+                    Vec::new()
+                };
+                if let Some(task) = task {
+                    events.extend(self.transition(
+                        task,
+                        TaskTransition::Block {
+                            reason: BlockReason::AwaitingDecision {
+                                decision: prior_id,
+                            },
+                        },
+                        Some(by),
+                    )?);
+                }
+                Ok(events)
+            }
+            Settled::Already(prior) => {
+                let answer = prior.answer.expect("settled decision has an answer");
+                let mut body = format!("The owner previously answered: {}", answer.chosen);
+                if !answer.note.is_empty() {
+                    body.push_str(" — ");
+                    body.push_str(&answer.note);
+                }
+                let message = ChatMessage::human(self.room.id, "Owner", body)
+                    .to_agents(vec![by])
+                    .with_intent(orgbot_proto::chat::MessageIntent::Answer);
+                self.post_message(message)
+            }
         }
     }
 
@@ -2020,6 +2186,26 @@ impl Engine {
         decision: DecisionId,
         answer: Answer,
     ) -> Result<Vec<EventEnvelope>> {
+        if answer.chosen.trim().is_empty() || answer.chosen.chars().count() > 120 {
+            return Err(EngineError::InvalidOwnerAnswer {
+                reason: "answer must contain 1–120 characters".into(),
+            });
+        }
+        if answer.note.chars().count() > 2_000 {
+            return Err(EngineError::InvalidOwnerAnswer {
+                reason: "custom answer text must be at most 2000 characters".into(),
+            });
+        }
+        if self
+            .decisions
+            .decisions
+            .iter()
+            .any(|item| item.id == decision && item.answer.is_some())
+        {
+            // A retry after a lost acknowledgement must not release or wake
+            // the same participants twice.
+            return Ok(Vec::new());
+        }
         if !self.decisions.answer(decision, answer.clone()) {
             return Err(EngineError::NotReady {
                 task: TaskId::new(),
@@ -2041,14 +2227,27 @@ impl Engine {
             answer: answer.clone(),
         })];
 
+        if !settled.asked_by.is_empty() {
+            let mut body = format!("The owner answered: {}", answer.chosen);
+            if !answer.note.trim().is_empty() {
+                body.push_str(" — ");
+                body.push_str(answer.note.trim());
+            }
+            let reply = ChatMessage::human(self.room.id, "Owner", body)
+                .to_agents(settled.asked_by.clone())
+                .with_intent(orgbot_proto::chat::MessageIntent::Answer);
+            events.extend(self.post_message(reply)?);
+        }
+
         // Release every task held by this exact question.
-        let held: Vec<TaskId> = self
+        let held_authorizations: Vec<TaskId> = self
             .tasks
             .values()
             .filter(|task| match &task.authorization {
                 AuthorizationState::AwaitingOperator { because, .. } => {
                     let mut probe = Decision::ask(self.room.id, because.clone());
                     probe.envelope = settled.envelope.clone();
+                    probe.options = settled.options.clone();
                     probe.fingerprint() == settled.fingerprint()
                 }
                 _ => false,
@@ -2056,12 +2255,27 @@ impl Engine {
             .map(|task| task.id)
             .collect();
 
-        for task in held {
+        for task in held_authorizations {
             if let Some(record) = self.tasks.get_mut(&task) {
                 record.authorization = AuthorizationState::Authorized;
                 record.updated_at = Timestamp::now();
             }
             events.push(self.emit(Event::TaskAuthorized { task, decision }));
+        }
+
+        let held_questions: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| {
+                task.state == TaskState::Blocked
+                    && task.blocked_on.iter().any(|reason| {
+                        matches!(reason, BlockReason::AwaitingDecision { decision: held } if *held == decision)
+                    })
+            })
+            .map(|task| task.id)
+            .collect();
+        for task in held_questions {
+            events.extend(self.transition(task, TaskTransition::Unblock, None)?);
         }
         Ok(events)
     }

@@ -39,6 +39,17 @@ class BotActivity {
   bool streaming = false;
   String? retryStatus;
 
+  /// Recent bounded process and tool steps for the expandable activity rail.
+  final List<ActivityStep> steps = [];
+  final Set<String> _seenStepIdsThisTurn = {};
+
+  ActivityStep? get activeStep {
+    for (final step in steps.reversed) {
+      if (step.running) return step;
+    }
+    return null;
+  }
+
   /// The most recent failure from this bot's backend, if it is failing.
   ///
   /// Without this a bot whose provider cannot start looks identical to one
@@ -58,28 +69,78 @@ class BotActivity {
   int handoffsSent = 0;
 }
 
+/// A privacy-safe summary of one model/tool operation. Arguments and results
+/// are never retained here.
+class ActivityStep {
+  ActivityStep({required this.id, required this.label, required this.startedAt})
+    : updatedAt = startedAt;
+
+  final String id;
+  final String label;
+  final DateTime startedAt;
+  DateTime updatedAt;
+  bool running = true;
+  bool? succeeded;
+}
+
 /// Observable room state.
 class RoomStore extends ChangeNotifier {
-  RoomStore(this._client) {
+  RoomStore(this._client, {this.notificationRoomId}) {
     _messagesSub = _client.messages.listen(_onMessage);
     _connectionSub = _client.connectionState.listen((state) {
       _connection = state;
-      notifyListeners();
+      _notifyChanged();
     });
   }
 
   final RoomLink _client;
+  String? notificationRoomId;
+  int _notificationBatchDepth = 0;
+  bool _notificationBatchDirty = false;
+  Timer? _coalescedNotification;
+
+  void _notifyChanged({bool coalesce = false}) {
+    if (_notificationBatchDepth > 0) {
+      _notificationBatchDirty = true;
+      return;
+    }
+    if (coalesce) {
+      if (_coalescedNotification != null) return;
+      _coalescedNotification = Timer(const Duration(milliseconds: 16), () {
+        _coalescedNotification = null;
+        if (hasListeners) super.notifyListeners();
+      });
+      return;
+    }
+    _coalescedNotification?.cancel();
+    _coalescedNotification = null;
+    super.notifyListeners();
+  }
+
   late final StreamSubscription<Map<String, Object?>> _messagesSub;
   late final StreamSubscription<LinkState> _connectionSub;
 
   void restore(Iterable<Map<String, Object?>> frames) {
-    for (final frame in frames) {
-      _onMessage(frame);
+    _notificationBatchDepth++;
+    try {
+      for (final frame in frames) {
+        _onMessage(frame, deliverAttention: false);
+      }
+    } finally {
+      _notificationBatchDepth--;
+      if (_notificationBatchDepth == 0 && _notificationBatchDirty) {
+        _notificationBatchDirty = false;
+        _coalescedNotification?.cancel();
+        _coalescedNotification = null;
+        super.notifyListeners();
+      }
     }
   }
 
   @override
   void dispose() {
+    _coalescedNotification?.cancel();
+    _coalescedNotification = null;
     _messagesSub.cancel();
     _connectionSub.cancel();
     super.dispose();
@@ -205,7 +266,7 @@ class RoomStore extends ChangeNotifier {
       ),
     );
     _invalidateMessages();
-    notifyListeners();
+    _notifyChanged();
   }
 
   /// Drop a pending message once the room has confirmed the same text.
@@ -248,12 +309,62 @@ class RoomStore extends ChangeNotifier {
     entry.lastActionAt = DateTime.now();
   }
 
+  static const int _maxActivitySteps = 12;
+
+  bool _startActivityStep(BotActivity activity, String id, String label) {
+    // Some CLIs send a start notification and then repeat the completed
+    // assistant block. Suppress that duplicate within this model request;
+    // a fresh Thinking event permits IDs to be reused on the next request.
+    if (!activity._seenStepIdsThisTurn.add(id)) return false;
+    activity.steps.add(
+      ActivityStep(id: id, label: label, startedAt: DateTime.now()),
+    );
+    if (activity.steps.length > _maxActivitySteps) {
+      activity.steps.removeRange(0, activity.steps.length - _maxActivitySteps);
+    }
+    return true;
+  }
+
+  bool _finishActivityStep(
+    BotActivity activity,
+    String id, {
+    required bool succeeded,
+  }) {
+    ActivityStep? step;
+    for (final candidate in activity.steps.reversed) {
+      if (candidate.id == id && candidate.running) {
+        step = candidate;
+        break;
+      }
+    }
+    if (step == null || (!step.running && step.succeeded == succeeded)) {
+      return false;
+    }
+    step
+      ..running = false
+      ..succeeded = succeeded
+      ..updatedAt = DateTime.now();
+    return true;
+  }
+
+  bool _finishOpenSteps(BotActivity activity) {
+    var changed = false;
+    for (final step in activity.steps.where((step) => step.running)) {
+      step
+        ..running = false
+        ..succeeded = null
+        ..updatedAt = DateTime.now();
+      changed = true;
+    }
+    return changed;
+  }
+
   void noteWorkspace(String agent, String tool) {
     _note(
       agent,
       "${tool.replaceAll('workspace_', '').replaceAll('_', ' ')} on working computer",
     );
-    notifyListeners();
+    _notifyChanged();
   }
 
   /// Pending handoffs, for a status strip.
@@ -278,7 +389,10 @@ class RoomStore extends ChangeNotifier {
 
   // ---- inbound message handling --------------------------------------------
 
-  void _onMessage(Map<String, Object?> message) {
+  void _onMessage(
+    Map<String, Object?> message, {
+    bool deliverAttention = true,
+  }) {
     switch (message['type'] as String?) {
       case 'snapshot':
         _applySnapshot(message);
@@ -286,12 +400,26 @@ class RoomStore extends ChangeNotifier {
         // Replaced wholesale: a fold over every task cannot be patched from
         // one event.
         _applyDigest((message['digest'] as Map?)?.cast<String, Object?>());
-        notifyListeners();
+        _notifyChanged();
       case 'event':
         // The engine decided whether this is worth telling anyone about; this
         // only delivers it.
-        unawaited(attentions.consider(message));
+        final envelope = (message['envelope'] as Map?)?.cast<String, Object?>();
+        final seq = (envelope?['seq'] as num?)?.toInt() ?? 0;
+        final freshLiveEvent =
+            deliverAttention &&
+            seq != 0 &&
+            seq > _appliedTo &&
+            seq > _snapshotHead;
         _applyEvent((message['envelope'] as Map?)?.cast<String, Object?>());
+        if (freshLiveEvent) {
+          unawaited(
+            attentions.consider(
+              message,
+              roomId: notificationRoomId ?? _room?.id,
+            ),
+          );
+        }
       case 'phase':
         _applyPhase(message['phase'] as String?);
       case 'stream':
@@ -303,47 +431,60 @@ class RoomStore extends ChangeNotifier {
           // A delayed stream completion can arrive after the durable idle event.
           // It must clear the indicator, never start another "thinking" state.
           final streamEvent = message['event'] as Map?;
-          if (streamEvent?['type'] == 'done') {
+          final eventType = streamEvent?['type'] as String?;
+          if (eventType == 'done') {
             final activity = _activity[agentId];
             if (activity != null &&
-                (activity.streaming || activity.retryStatus != null)) {
+                (activity.streaming ||
+                    activity.retryStatus != null ||
+                    activity.activeStep != null)) {
               activity.streaming = false;
               activity.retryStatus = null;
-              notifyListeners();
+              _finishOpenSteps(activity);
+              _notifyChanged();
             }
             return;
           }
-          // Exactly one bot holds a turn at a time, so a delta from this one
-          // means every other is no longer composing. Without clearing them
-          // the flags accumulate and the room claims nine bots are thinking.
-          var changed = false;
-          final retryStatus = streamEvent?['type'] == 'retry'
+          // Rooms can run several providers at once. A frame from one bot must
+          // never erase another bot's in-flight state; each entry is cleared
+          // by its own done/error/idle event.
+          final retryStatus = eventType == 'retry'
               ? 'Reconnecting (${streamEvent?['attempt']}/${streamEvent?['max_retries']})'
               : null;
-          for (final entry in _activity.entries) {
-            final streaming = entry.key == agentId;
-            if (entry.value.streaming != streaming) {
-              entry.value.streaming = streaming;
-              changed = true;
-            }
-            final retry = entry.key == agentId ? retryStatus : null;
-            if (entry.value.retryStatus != retry) {
-              entry.value.retryStatus = retry;
-              changed = true;
-            }
-          }
           final existed = _activity.containsKey(agentId);
           final activity = _activity.putIfAbsent(
             agentId,
             () => BotActivity(_agents[agentId]!),
           );
-          if (!existed) {
-            changed = true;
-          }
+          var changed = !existed;
+          if (!activity.streaming) changed = true;
           activity.streaming = true;
+          if (activity.retryStatus != retryStatus) changed = true;
           activity.retryStatus = retryStatus;
+          if (eventType == 'thinking') {
+            activity._seenStepIdsThisTurn.clear();
+          }
+          var stepChanged = false;
+          if (eventType == 'tool_use_start') {
+            final id = streamEvent?['id'] as String?;
+            final name = streamEvent?['name'] as String?;
+            if (id != null && name != null) {
+              stepChanged = _startActivityStep(activity, id, name);
+            }
+          } else if (eventType == 'tool_use_end') {
+            final id = streamEvent?['id'] as String?;
+            if (id != null) {
+              stepChanged = _finishActivityStep(
+                activity,
+                id,
+                succeeded: streamEvent?['succeeded'] as bool? ?? false,
+              );
+            }
+          }
           if (changed) {
-            notifyListeners();
+            _notifyChanged();
+          } else if (stepChanged) {
+            _notifyChanged(coalesce: true);
           }
         }
       case 'closed':
@@ -351,11 +492,11 @@ class RoomStore extends ChangeNotifier {
         _room?.phase = _limitReached || _closedReason == 'the room was paused'
             ? RoomPhase.paused
             : RoomPhase.completed;
-        notifyListeners();
+        _notifyChanged();
       case 'error':
         // A lag notice: ask for a fresh snapshot to catch back up.
         lastError = message['message'] as String?;
-        notifyListeners();
+        _notifyChanged();
     }
   }
 
@@ -396,14 +537,14 @@ class RoomStore extends ChangeNotifier {
     _invalidateMessages();
     _artifacts.clear();
     _handoffs.clear();
-    notifyListeners();
+    _notifyChanged();
   }
 
   void _applyPhase(String? raw) {
     final room = _room;
     if (room == null) return;
     room.phase = RoomPhase.parse(raw);
-    notifyListeners();
+    _notifyChanged();
   }
 
   void _applyEvent(Map<String, Object?>? envelope) {
@@ -452,6 +593,9 @@ class RoomStore extends ChangeNotifier {
           final entry = _activity.putIfAbsent(id!, () => BotActivity(agent));
           // A turn has finished once the bot is no longer working.
           if (agent.status != AgentStatus.working) entry.streaming = false;
+          if (agent.status != AgentStatus.working) {
+            _finishOpenSteps(entry);
+          }
         }
       case 'handoff_offered':
         final json = (event['handoff'] as Map?)?.cast<String, Object?>();
@@ -489,11 +633,9 @@ class RoomStore extends ChangeNotifier {
           entry.lastErrorAt = at == null
               ? null
               : DateTime.fromMillisecondsSinceEpoch(at);
-          for (final other in _activity.values) {
-            other.streaming = false;
-          }
           entry.errorStreak = (event['attempt'] as num?)?.toInt() ?? 1;
           entry.streaming = false;
+          _finishOpenSteps(entry);
           _note(agentId, 'turn failed: ${entry.lastError}');
           entry.lastActionAt = entry.lastErrorAt;
         }
@@ -515,7 +657,7 @@ class RoomStore extends ChangeNotifier {
     }
 
     // Keep the room's turn counter roughly current from any event burst.
-    notifyListeners();
+    _notifyChanged(coalesce: seq != 0 && seq <= _snapshotHead);
   }
 
   void _applyTaskTransition(Map<String, Object?> event) {

@@ -12,6 +12,44 @@ import 'package:orgbot_app/ui/polish.dart';
 import 'package:orgbot_app/ui/sign_in_screen.dart';
 
 void main() {
+  testWidgets('desktop routes fade briefly and reduced motion is immediate', (
+    tester,
+  ) async {
+    const transitions = DesktopPageTransitions();
+    final route = MaterialPageRoute<void>(
+      builder: (_) => const Text('Details'),
+    );
+    for (final reduced in [false, true]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MediaQuery(
+            data: MediaQueryData(disableAnimations: reduced),
+            child: Builder(
+              key: const ValueKey('route-fixture'),
+              builder: (context) => transitions.buildTransitions(
+                route,
+                context,
+                const AlwaysStoppedAnimation<double>(0.5),
+                const AlwaysStoppedAnimation<double>(0),
+                const Text('Details'),
+              ),
+            ),
+          ),
+        ),
+      );
+      final fades = find.descendant(
+        of: find.byKey(const ValueKey('route-fixture')),
+        matching: find.byType(FadeTransition),
+      );
+      expect(fades, reduced ? findsNothing : findsOneWidget);
+      expect(find.text('Details'), findsOneWidget);
+    }
+    expect(
+      transitions.transitionDuration.inMilliseconds,
+      lessThanOrEqualTo(180),
+    );
+  });
+
   testWidgets(
     'press feedback cancels on a drag and reduced motion is stationary',
     (tester) async {
