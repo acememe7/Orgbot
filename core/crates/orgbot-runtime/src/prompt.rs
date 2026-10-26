@@ -53,6 +53,38 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
     }
 
     out.push_str(
+        "\nRule loading for this OrgBots task:\n\
+         - Read applicable owner/project instruction entrypoints and keep core \
+           engineering, quality, permission, credential, file-retention and review \
+           requirements. Where available, engineering-protocol.md and master-taste.md \
+           remain core. Unknown mandatory rules remain mandatory.\n\
+         - Select domain manuals from the actual assigned work, affected files and \
+           data risk, not your model name or job title: design-language.md and \
+           frontend-craft.md for UI/interaction/game presentation; website-rules.md \
+           for websites; unity-protocol.md for Unity; unreal-protocol.md for Unreal; \
+           deadzone-networking.md for the specified peer-network architecture; \
+           deadzone-matchmaking.md for its matchmaking. Load production-guardrails.md \
+           for security-sensitive work, authentication, secrets, private data, \
+           databases, billing, uploads, deployment or backup/restore.\n\
+         - In OrgBots, this task scope replaces blanket startup reads of those \
+           domain manuals. It does not waive their requirements when applicable \
+           or an owner's explicit request to read one. Load additional relevant \
+           rules before acting when the task changes; if applicability is uncertain, \
+           inspect the relevant rule's scope. Never edit host rules or profiles to \
+           save context.\n\
+         - Use skill names/summaries to choose a relevant playbook, then load that \
+           body with use_skill or its available file reader. Do not dump the whole \
+           skill catalog or read every manual. Reuse unchanged rules already read \
+           in this session; avoid recursively reloading cross-references. Record \
+           selected domain rules and their reason in the existing verification \
+           artifact, not repeated status messages.\n\
+         - This room assigns specialists and independent reviewers. Use its tasks \
+           and handoffs; do not create a second external review/delegation workflow \
+           merely because a general CLI rule describes one. The room's permissions \
+           and independent-approval gate still apply.\n\n",
+    );
+
+    out.push_str(
         "\nHow work moves through this room:\n\
          1. Take an open task with claim_task, then start_task.\n\
          2. Do the work. Record what you produce with add_artifact — the actual \

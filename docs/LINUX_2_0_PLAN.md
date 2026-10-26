@@ -124,3 +124,27 @@ See `apt-distribution.md` for the one-time client setup and maintenance window.
 The installed application, public package and website were not changed by this
 pilot. Earlier verification records above describe their original scoped runs;
 they do not supersede these live failures.
+
+## Task-scoped rules and input accounting — 2026-10-26
+
+Scope: route available domain manuals by the assigned task while retaining core
+permissions, safety and engineering requirements. Reuse the existing skill index
+and on-demand `use_skill` path. Put the shared policy in the stable system brief
+so API and CLI agents receive it, without adding task-dependent text to the
+cached prefix. Preserve all host/private rule files and tool availability.
+
+- [x] Verify prompt delivery; release engine build, 109 runtime tests and 30
+  native CLI provider tests pass. Two pre-existing unused-variable warnings
+  remain in runtime restart tests; no new code diagnostics.
+- [x] Check actual selected rule reads in one bounded Sol episode: core and
+  production rules read; no UI/game manuals observed; six unchanged tests pass.
+  The room pauses at its one-turn budget with both tasks awaiting review.
+- [x] Record per-response usage and attribution limits in the
+  [context audit](benchmarks/2026-10-26-context-audit.md). Host config and twelve
+  instruction files retain their pre-probe hashes. This is instruction-based
+  selection, not a filter that removes files or guaranteed quota savings.
+- [x] Obtain Astra review and save the verified milestone locally. Scoped review
+  approved the policy, evidence, arithmetic and stated limitations.
+
+The reviewer command restriction and native CLI resume parser defect remain
+separate workflow blockers; this work does not relax those safety boundaries.

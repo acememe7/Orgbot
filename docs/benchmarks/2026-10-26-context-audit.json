@@ -1,0 +1,404 @@
+{
+  "date": "2026-10-26",
+  "source_report": "2026-10-26-astra-sol-deepseek.md",
+  "status": "context_audit_with_bounded_rule_policy_probe",
+  "usage_method": {
+    "source": "native Codex session token_usage_record events",
+    "provider_input_field_includes_cache_read": true,
+    "disjoint_input_calculation": "input_tokens - cached_input_tokens",
+    "units": "tokens",
+    "reported_values_are_estimates": false,
+    "text_surface_sizes_are_token_attribution": false
+  },
+  "sessions": [
+    {
+      "model": "gpt-6-astra",
+      "role": "independent reviewer",
+      "response_requests": 11,
+      "first_raw_input_tokens": 21957,
+      "last_raw_input_tokens": 79530,
+      "last_cache_read_tokens": 79232,
+      "last_disjoint_input_tokens": 298,
+      "totals": {
+        "disjoint_input_tokens": 76239,
+        "cache_read_tokens": 509568,
+        "cache_write_tokens": 0,
+        "output_tokens": 5356
+      },
+      "per_response": [
+        {
+          "disjoint_input_tokens": 21957,
+          "cache_read_tokens": 0,
+          "output_tokens": 168
+        },
+        {
+          "disjoint_input_tokens": 4101,
+          "cache_read_tokens": 21888,
+          "output_tokens": 295
+        },
+        {
+          "disjoint_input_tokens": 9228,
+          "cache_read_tokens": 26112,
+          "output_tokens": 246
+        },
+        {
+          "disjoint_input_tokens": 4286,
+          "cache_read_tokens": 35456,
+          "output_tokens": 503
+        },
+        {
+          "disjoint_input_tokens": 6881,
+          "cache_read_tokens": 40064,
+          "output_tokens": 311
+        },
+        {
+          "disjoint_input_tokens": 6114,
+          "cache_read_tokens": 47104,
+          "output_tokens": 693
+        },
+        {
+          "disjoint_input_tokens": 8446,
+          "cache_read_tokens": 53760,
+          "output_tokens": 186
+        },
+        {
+          "disjoint_input_tokens": 5481,
+          "cache_read_tokens": 62208,
+          "output_tokens": 561
+        },
+        {
+          "disjoint_input_tokens": 6574,
+          "cache_read_tokens": 68096,
+          "output_tokens": 1142
+        },
+        {
+          "disjoint_input_tokens": 2873,
+          "cache_read_tokens": 75648,
+          "output_tokens": 934
+        },
+        {
+          "disjoint_input_tokens": 298,
+          "cache_read_tokens": 79232,
+          "output_tokens": 317
+        }
+      ]
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "role": "implementation",
+      "response_requests": 14,
+      "first_raw_input_tokens": 27692,
+      "last_raw_input_tokens": 85263,
+      "last_cache_read_tokens": 84992,
+      "last_disjoint_input_tokens": 271,
+      "totals": {
+        "disjoint_input_tokens": 66951,
+        "cache_read_tokens": 842624,
+        "cache_write_tokens": 0,
+        "output_tokens": 8614
+      },
+      "per_response": [
+        {
+          "disjoint_input_tokens": 15404,
+          "cache_read_tokens": 12288,
+          "output_tokens": 205
+        },
+        {
+          "disjoint_input_tokens": 7802,
+          "cache_read_tokens": 27776,
+          "output_tokens": 378
+        },
+        {
+          "disjoint_input_tokens": 3780,
+          "cache_read_tokens": 35840,
+          "output_tokens": 436
+        },
+        {
+          "disjoint_input_tokens": 8877,
+          "cache_read_tokens": 39936,
+          "output_tokens": 431
+        },
+        {
+          "disjoint_input_tokens": 5831,
+          "cache_read_tokens": 49024,
+          "output_tokens": 249
+        },
+        {
+          "disjoint_input_tokens": 8535,
+          "cache_read_tokens": 54912,
+          "output_tokens": 268
+        },
+        {
+          "disjoint_input_tokens": 8694,
+          "cache_read_tokens": 63488,
+          "output_tokens": 1071
+        },
+        {
+          "disjoint_input_tokens": 2865,
+          "cache_read_tokens": 73088,
+          "output_tokens": 235
+        },
+        {
+          "disjoint_input_tokens": 1931,
+          "cache_read_tokens": 76032,
+          "output_tokens": 1355
+        },
+        {
+          "disjoint_input_tokens": 296,
+          "cache_read_tokens": 79104,
+          "output_tokens": 499
+        },
+        {
+          "disjoint_input_tokens": 839,
+          "cache_read_tokens": 79744,
+          "output_tokens": 1569
+        },
+        {
+          "disjoint_input_tokens": 1320,
+          "cache_read_tokens": 81920,
+          "output_tokens": 1445
+        },
+        {
+          "disjoint_input_tokens": 506,
+          "cache_read_tokens": 84480,
+          "output_tokens": 200
+        },
+        {
+          "disjoint_input_tokens": 271,
+          "cache_read_tokens": 84992,
+          "output_tokens": 273
+        }
+      ]
+    }
+  ],
+  "surface_sizes_bytes": {
+    "three_tool_schema": 39259,
+    "astra_system_brief": 7546,
+    "sol_system_brief": 6994,
+    "astra_base_instruction_strings": 21221,
+    "sol_base_instruction_strings": 21572,
+    "astra_developer_message_text_total": 51291,
+    "sol_developer_message_text_total": 70028,
+    "astra_user_message_text_total": 10979,
+    "sol_user_message_text_total": 8798,
+    "astra_tool_call_arguments_total": 9561,
+    "sol_tool_call_arguments_total": 17166,
+    "astra_tool_result_strings_total": 238575,
+    "sol_tool_result_strings_total": 225704,
+    "rule_related_captured_outputs": {
+      "astra_bytes_by_call": [
+        40175,
+        20002,
+        25199,
+        40174,
+        26067,
+        33196
+      ],
+      "sol_bytes_by_call": [
+        17791,
+        40173,
+        26506,
+        40173,
+        40172
+      ],
+      "truncated_capture_observed": true
+    },
+    "caveat": "Surface byte categories can overlap and do not quantify token contribution. Captured tool outputs include truncation."
+  },
+  "rule_loading_guidance": {
+    "status": "implemented_in_shared_system_brief",
+    "enforced_filter": false,
+    "guidance": "Keep core safety and execution constraints available for every task; load domain-specific guidance when the task requires it.",
+    "removal_or_safety_claim_established": false,
+    "source": "core/crates/orgbot-runtime/src/prompt.rs",
+    "live_checked_provider": "Codex CLI / GPT-6.1 Sol",
+    "host_config_and_instruction_files_unchanged": 13
+  },
+  "diagnostics": [
+    {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "low",
+      "input_tokens": 33602,
+      "cache_read_tokens": 0,
+      "output_tokens": 5
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "low",
+      "input_tokens": 33249,
+      "cache_read_tokens": 0,
+      "output_tokens": 5
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "low",
+      "input_tokens": 26832,
+      "cache_read_tokens": 0,
+      "output_tokens": 5
+    }
+  ],
+  "deepseek_cost_arithmetic": {
+    "reported_estimate_usd": 0.00608,
+    "reported_estimate_cents": 0.608,
+    "invoice_reconciled": false
+  },
+  "limitations": [
+    "The pilot did not complete an accepted baseline/team pair; this audit cannot establish savings from splitting work.",
+    "The native input counts do not attribute tokens to individual prompt, schema, or tool-result sources.",
+    "Two diagnostic native session logs were absent from retained evidence; diagnostic stdout contains their usage records.",
+    "No hidden reasoning, raw prompts, credentials, or private filesystem paths are included.",
+    "The follow-up is one deliberately bounded Sol implementation episode, not an accepted reviewed room or a repeated controlled savings comparison.",
+    "Provider cache state, implementation choices and request count differ; observed token changes cannot be attributed entirely to the policy.",
+    "The shared policy was live checked with Codex/Sol only; Claude, Grok and API model adherence was not measured.",
+    "The CLI still injects its own base instructions and skill/tool catalog; the large selected production manual was read more than once."
+  ],
+  "bounded_policy_probe": {
+    "fixture": "scripts/benchmarks/experiments/astra-sol-deepseek/tasks.json",
+    "template": "baseline.toml with max_total_turns changed from 30 to 1",
+    "source_base_commit": "43e9407",
+    "source_change": "shared task-scoped rule-loading policy",
+    "engine_sha256": "06bd3587a0ed15b639f65e44bc545824464fa5163bc8c5505381345e89bdd913",
+    "room_phase": "paused",
+    "intentional_turn_limit": 1,
+    "native_cli_episode_allowance": 1,
+    "cli_episodes": 1,
+    "native_responses": 13,
+    "latency_ms": 212422.12,
+    "unchanged_tests_passed": 6,
+    "tasks_in_review": 2,
+    "review_completed": false,
+    "usage": {
+      "input_tokens": 65485,
+      "output_tokens": 8573,
+      "cache_read_tokens": 668032,
+      "cache_write_tokens": 0
+    },
+    "response_usage": [
+      {
+        "cache_read_tokens": 0,
+        "output_tokens": 225,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 28046,
+        "raw_input_tokens": 28046
+      },
+      {
+        "cache_read_tokens": 28032,
+        "output_tokens": 413,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 6994,
+        "raw_input_tokens": 35026
+      },
+      {
+        "cache_read_tokens": 35200,
+        "output_tokens": 486,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 3929,
+        "raw_input_tokens": 39129
+      },
+      {
+        "cache_read_tokens": 39424,
+        "output_tokens": 387,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 8723,
+        "raw_input_tokens": 48147
+      },
+      {
+        "cache_read_tokens": 48384,
+        "output_tokens": 172,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 2793,
+        "raw_input_tokens": 51177
+      },
+      {
+        "cache_read_tokens": 51200,
+        "output_tokens": 629,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 9971,
+        "raw_input_tokens": 61171
+      },
+      {
+        "cache_read_tokens": 61568,
+        "output_tokens": 377,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 556,
+        "raw_input_tokens": 62124
+      },
+      {
+        "cache_read_tokens": 62336,
+        "output_tokens": 1802,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 1551,
+        "raw_input_tokens": 63887
+      },
+      {
+        "cache_read_tokens": 65536,
+        "output_tokens": 329,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 235,
+        "raw_input_tokens": 65771
+      },
+      {
+        "cache_read_tokens": 65920,
+        "output_tokens": 1487,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 863,
+        "raw_input_tokens": 66783
+      },
+      {
+        "cache_read_tokens": 68096,
+        "output_tokens": 1774,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 1235,
+        "raw_input_tokens": 69331
+      },
+      {
+        "cache_read_tokens": 70912,
+        "output_tokens": 254,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 385,
+        "raw_input_tokens": 71297
+      },
+      {
+        "cache_read_tokens": 71424,
+        "output_tokens": 238,
+        "cache_write_tokens": 0,
+        "disjoint_input_tokens": 204,
+        "raw_input_tokens": 71628
+      }
+    ],
+    "rule_policy_present_in_native_user_prompt": true,
+    "core_manuals_observed": [
+      "AGENTS.md",
+      "engineering-protocol.md",
+      "master-taste.md"
+    ],
+    "domain_manuals_observed": [
+      "production-guardrails.md"
+    ],
+    "domain_manuals_not_observed": [
+      "design-language.md",
+      "frontend-craft.md",
+      "website-rules.md",
+      "unity-protocol.md",
+      "unreal-protocol.md",
+      "deadzone-networking.md",
+      "deadzone-matchmaking.md"
+    ],
+    "agent_recorded_rule_selection": [
+      "aece-rules skill references/AGENTS.md (core owner policy)",
+      "engineering-protocol.md (Python module execution and verification)",
+      "master-taste.md (minimal changes and explicit errors)",
+      "production-guardrails.md (local persistence and data preservation)",
+      "ponytail full (smallest complete standard-library implementation)"
+    ],
+    "agent_recorded_production_reason": "local persistence and data preservation",
+    "native_first_raw_input": 28046,
+    "native_last_raw_input": 71628,
+    "new_deepseek_api_calls": 0
+  },
+  "rule_reads_observed": [
+    "production and legal guidance was read for a small Python task",
+    "design and frontend guidance was read for a non-frontend task",
+    "engineering and general agent rules were also read"
+  ]
+}
