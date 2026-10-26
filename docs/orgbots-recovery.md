@@ -139,3 +139,14 @@ restore verification. No recurring schedule, failure notice, RPO/RTO
 measurement, or full disaster recovery test has been performed. The archive
 verifier passed synthetic fixture tests and this archive's independent restore;
 this does not establish full production recoverability.
+
+## Latest release backup
+
+Release `ecc3628` and its active vhost were copied from the deployed host after
+manifest verification, then uploaded to the same private owner-only Drive folder
+on 26 October 2026. The downloaded archive is 327,581 bytes with SHA-256
+`165c7fac6dce6733e6247e7856df2e2ac40e4eff3081eb51948b183d1e197a6c`.
+All 20 files passed manifest checks and restored into
+`/tmp/orgbots-drive-restore-ecc3628`. This backup includes the origin peer
+restriction; the older `414104c` archive is retained for historical rollback.
+No recurring upload, automatic retention deletion, or failure-alert job was enabled.

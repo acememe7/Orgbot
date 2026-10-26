@@ -108,4 +108,39 @@ Host-wide SSH restriction, a TLS-1.3-only edge, complete WAF coverage, recurring
 Drive uploads/failure alerts, and qualified legal/transfer review remain open.
 Shared-host SSH was not changed without a tested recovery path. Field Core Web
 Vitals and search results require real traffic and time. The public PageSpeed
-API returned HTTP 429 during this follow-up; no score is claimed from that call.
+API initially returned HTTP 429. The PageSpeed website subsequently completed
+the audit described below.
+
+## Published follow-up verification
+
+Release `ecc3628e6e1ce89243fcff498df18f823564b75d` was pushed to both `main`
+and `master` and deployed on 26 October 2026. Both GitHub Actions checks passed
+(runs `40369939735` and `40369939013`). All 19 deployed website files matched
+the release manifest; the public home HTML also matched the source byte for byte.
+
+Browser checks at measured widths of 375, 768 and 1440 pixels found no document
+overflow. Mobile menu/Escape, privacy close/reopen/focus return, and copying the
+installation command passed. No site-origin console errors were captured;
+unrelated extension warnings were excluded. The raw public HTML contains no
+injected beacon. Browser network tracing was unavailable, so no complete network
+capture is claimed. The disabled-source fixture and same-origin CSP provide
+additional enforcement. A default Python urllib request was blocked by
+Cloudflare error 1010; normal browser, curl, Search Console and Lighthouse
+requests succeeded. The unchanged robots file remained in Cloudflare's cache.
+
+[PageSpeed mobile report](https://pagespeed.web.dev/analysis/https-orgbots-theaecestudio-com/p98snw071s?form_factor=mobile)
+and [desktop report](https://pagespeed.web.dev/analysis/https-orgbots-theaecestudio-com/p98snw071s?form_factor=desktop)
+were captured on 26 October 2026 at 18:37 WAT using Lighthouse 13.5.0. Mobile
+(emulated Moto G Power, slow 4G) scored 98 performance / 100 accessibility /
+100 best practices / 100 SEO, with LCP 1.2 s, TBT 0 ms and CLS 0. Desktop scored
+100 in all four categories, with LCP 0.3 s, TBT 0 ms and CLS 0. These are one-run
+lab observations, not a guarantee or field Core Web Vitals result. Field data
+was unavailable. Image sizing, cache lifetimes and render-blocking CSS remain
+reported opportunities; no new framework or build pipeline was added for them.
+
+The deployed release and active restricted vhost were archived to private
+Google Drive, downloaded and restored into a new isolated folder: 20 files,
+327,581 bytes, SHA-256
+`165c7fac6dce6733e6247e7856df2e2ac40e4eff3081eb51948b183d1e197a6c`.
+The earlier release backup remains retained. Automatic Drive scheduling is not
+configured; the server has no authorized uploader identity or failure channel.
