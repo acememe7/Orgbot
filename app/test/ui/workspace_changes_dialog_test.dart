@@ -128,7 +128,7 @@ void main() {
 
       expect(
         find.text(
-          'These exact project files will be moved to HDD Trash before the changes are applied:',
+          'These exact project files will be moved to your configured recovery folder before the changes are applied:',
         ),
         findsOneWidget,
       );

@@ -7,9 +7,11 @@ SERVICE_SOURCE="$SCRIPT_DIR/orgbot-trash-cleanup.service"
 TIMER_SOURCE="$SCRIPT_DIR/orgbot-trash-cleanup.timer"
 BIN_DIR="$HOME/.local/bin"
 LIB_DIR="$HOME/.local/lib/orgbot"
-UNIT_DIR="$HOME/.config/systemd/user"
+CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
+if [[ "$CONFIG_HOME" != /* ]]; then CONFIG_HOME="$HOME/.config"; fi
+UNIT_DIR="$CONFIG_HOME/systemd/user"
 
-for command in python3 systemctl mktemp cmp ln; do
+for command in python3 systemctl mktemp cmp ln cp mv grep; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'Required command not found: %s\n' "$command" >&2
     exit 2
@@ -17,7 +19,7 @@ for command in python3 systemctl mktemp cmp ln; do
 done
 
 for directory in "$HOME/.local" "$BIN_DIR" "$HOME/.local/lib" "$LIB_DIR" \
-                 "$HOME/.config" "$HOME/.config/systemd" "$UNIT_DIR"; do
+                 "$CONFIG_HOME" "$CONFIG_HOME/systemd" "$UNIT_DIR"; do
   if [[ -L "$directory" ]]; then
     printf 'Refusing symlink installation directory: %s\n' "$directory" >&2
     exit 2
@@ -37,53 +39,74 @@ exec /usr/bin/python3 "$HOME/.local/lib/orgbot/orgbot-trash.py" "$@"
 EOF
 chmod 755 "$wrapper"
 
+managed_existing_target() {
+  local target=$1 kind=$2
+  case "$kind" in
+    helper) grep -Fq 'Recoverable, project-grouped file trash' "$target" ;;
+    wrapper) grep -Fq '$HOME/.local/lib/orgbot/orgbot-trash.py' "$target" ;;
+    service) grep -Fq 'Clear expired OrgBots recoverable trash entries' "$target" ;;
+    timer) grep -Fq 'Daily cleanup of expired OrgBots trash entries' "$target" ;;
+  esac
+}
+
 check_target() {
-  local source=$1 target=$2 mode=$3
+  local source=$1 target=$2 mode=$3 kind=$4
   if [[ -e "$target" || -L "$target" ]]; then
     if [[ -f "$target" && ! -L "$target" && $(stat -c '%u' -- "$target") == "$(id -u)" \
-          && $(stat -c '%a' -- "$target") == "$mode" ]] && cmp -s -- "$source" "$target"; then
-      return
+          && $(stat -c '%a' -- "$target") == "$mode" ]]; then
+      if cmp -s -- "$source" "$target" || managed_existing_target "$target" "$kind"; then return; fi
     fi
     printf 'Refusing to overwrite existing target: %s\n' "$target" >&2
     exit 2
   fi
 }
 
-install_if_absent_or_identical() {
-  local source=$1 target=$2 mode=$3 parent temporary
+backup_dir=""
+backup_existing() {
+  local target=$1 name
+  [[ -n "$backup_dir" ]] || { backup_dir=$(mktemp -d "$LIB_DIR/.trash-upgrade-backup.XXXXXX"); chmod 700 "$backup_dir"; }
+  name=$(basename -- "$target")
+  cp -p -- "$target" "$backup_dir/$name"
+}
+
+install_or_update() {
+  local source=$1 target=$2 mode=$3 kind=$4 parent temporary
   parent=$(dirname -- "$target")
   if [[ -e "$target" || -L "$target" ]]; then
-    if [[ -f "$target" && ! -L "$target" ]] && cmp -s -- "$source" "$target"; then
-      return
-    fi
-    printf 'Refusing to overwrite existing target: %s\n' "$target" >&2
-    exit 2
+    cmp -s -- "$source" "$target" && return
+    managed_existing_target "$target" "$kind" || { printf 'Refusing to overwrite existing target: %s\n' "$target" >&2; exit 2; }
+    backup_existing "$target"
   fi
   temporary=$(mktemp "$parent/.orgbot-trash-install.XXXXXX")
   cp -- "$source" "$temporary"
   chmod "$mode" "$temporary"
-  if ! ln -- "$temporary" "$target"; then
-    rm -f -- "$temporary"
-    printf 'Target appeared during installation; preserved it: %s\n' "$target" >&2
-    exit 2
-  fi
-  rm -f -- "$temporary"
+  mv -f -- "$temporary" "$target"
 }
 
-check_target "$SCRIPT_SOURCE" "$LIB_DIR/orgbot-trash.py" 755
-check_target "$wrapper" "$BIN_DIR/orgbot-trash" 755
-check_target "$SERVICE_SOURCE" "$UNIT_DIR/orgbot-trash-cleanup.service" 644
-check_target "$TIMER_SOURCE" "$UNIT_DIR/orgbot-trash-cleanup.timer" 644
+check_target "$SCRIPT_SOURCE" "$LIB_DIR/orgbot-trash.py" 755 helper
+check_target "$wrapper" "$BIN_DIR/orgbot-trash" 755 wrapper
+check_target "$SERVICE_SOURCE" "$UNIT_DIR/orgbot-trash-cleanup.service" 644 service
+check_target "$TIMER_SOURCE" "$UNIT_DIR/orgbot-trash-cleanup.timer" 644 timer
 
-# Validate the mounted HDD and create its private trash root before installing
-# a timer that can permanently clear expired entries.
+# Resolve and persist the selected root before replacing the old helper. This
+# preserves legacy-HDD selection and prevents the newly installed helper from
+# mistaking itself for evidence of an older HDD-only installation.
+config_json=$(python3 "$SCRIPT_SOURCE" config)
+readarray -d '' -t selected_values < <(python3 -c 'import json,sys; c=json.load(sys.stdin); sys.stdout.buffer.write(c["root"].encode()+b"\0"+(b"1" if c["requires_selection"] else b"0")+b"\0")' <<<"$config_json")
+selected_root=${selected_values[0]}
+if [[ ${selected_values[1]} != 0 ]]; then
+  printf 'Trash location requires explicit owner selection before installation.\n' >&2
+  exit 2
+fi
+python3 "$SCRIPT_SOURCE" configure --root "$selected_root" --defer-systemd >/dev/null
 python3 "$SCRIPT_SOURCE" list >/dev/null
 
-install_if_absent_or_identical "$SCRIPT_SOURCE" "$LIB_DIR/orgbot-trash.py" 755
-install_if_absent_or_identical "$wrapper" "$BIN_DIR/orgbot-trash" 755
-install_if_absent_or_identical "$SERVICE_SOURCE" "$UNIT_DIR/orgbot-trash-cleanup.service" 644
-install_if_absent_or_identical "$TIMER_SOURCE" "$UNIT_DIR/orgbot-trash-cleanup.timer" 644
+install_or_update "$SCRIPT_SOURCE" "$LIB_DIR/orgbot-trash.py" 755 helper
+install_or_update "$wrapper" "$BIN_DIR/orgbot-trash" 755 wrapper
+install_or_update "$SERVICE_SOURCE" "$UNIT_DIR/orgbot-trash-cleanup.service" 644 service
+install_or_update "$TIMER_SOURCE" "$UNIT_DIR/orgbot-trash-cleanup.timer" 644 timer
 
-systemctl --user daemon-reload
+python3 "$LIB_DIR/orgbot-trash.py" sync-systemd
 systemctl --user enable --now orgbot-trash-cleanup.timer
 printf 'Installed %s and enabled orgbot-trash-cleanup.timer\n' "$BIN_DIR/orgbot-trash"
+if [[ -n "$backup_dir" ]]; then printf 'Previous managed files retained in %s\n' "$backup_dir"; fi

@@ -3,6 +3,8 @@
 // OrgBot home: your bots, and rooms as group chats of those bots.
 library;
 
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'allowances_view.dart';
@@ -24,6 +26,7 @@ import 'role_icons.dart';
 import 'desktop_integrations_view.dart';
 import 'themes.dart';
 import '../workspace/desktop_files.dart';
+import 'trash_storage_settings.dart';
 import '../orgbot/roles.dart';
 import '../orgbot/attention.dart';
 import '../state/room_store.dart';
@@ -1763,6 +1766,10 @@ class _CliSetupState extends State<_CliSetup> {
         const AllowancesView(),
         const SizedBox(height: 24),
         const AppearancePicker(),
+        if (Platform.isLinux) ...[
+          const SizedBox(height: 16),
+          const TrashStorageSettings(),
+        ],
       ],
     ),
   );

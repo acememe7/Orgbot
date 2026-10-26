@@ -16,9 +16,51 @@ mix these providers. In-app Codex/ChatGPT and Grok sign-in belongs to Android.
 The headless Rust engine also supports Anthropic API and custom
 OpenAI-compatible configurations through TOML room files.
 
+## Why I built OrgBots
+
+I built OrgBots because I got tired of switching between AI apps and terminals
+to finish one task. Using Claude, Codex and Grok on the same project meant
+passing messages between them, asking each to read the other's work, and
+watching them repeat investigations that someone had already done.
+
+OrgBots puts those agents in one room around the project:
+
+- **Shared handoffs:** specialists pass task briefs, findings and artifact
+  references to each other instead of making me relay every update.
+- **Visible usage:** input, output and cache usage are recorded when providers
+  report them, with API estimates separated from subscription equivalents.
+- **Protected changes:** agents work in separate project copies. Integration
+  checks for conflicting edits and requires approval for project-file removals.
+
+It is meant to reduce coordination work and unnecessary repetition. Whether it
+saves total tokens or money is a question for the benchmarks, not a promise.
+
+## Why OrgBots? Comparing workflows
+
+A CLI is a good fit for direct work with one provider. Buzz is a broader shared
+workspace for people and agents. OrgBots focuses on coordinating different
+providers around a local Linux project.
+
+| Area | CLI coding agents | [Buzz by Block](https://github.com/block/buzz) | OrgBots |
+|---|---|---|---|
+| Main workflow | Direct coding sessions; some CLIs also support subagents | Shared rooms, channels, Git activity and workflows for people and agents | Local project rooms with specialist roles, handoffs and review |
+| Setup | Install and authenticate the CLI | Connect to a shared relay or deploy your own | Signed Ubuntu package plus your chosen CLI accounts or API keys; no relay account |
+| Agent workspaces | Codex and Claude Code offer optional Git worktrees | Workspace behavior depends on the connected agent harness | Automatic per-agent project copies and three-way conflict checks |
+| Review and recovery | Depends on CLI permissions and the workflow you configure | Agent identities, room membership and an auditable event log | Independent task review, explicit project-removal approval and recoverable originals |
+| Usage reporting | Varies by CLI and provider | Depends on the provider and agent integration; not assessed here | Reported token/cache usage, API cost estimates and separate subscription equivalents |
+| Provider setup | Generally configured within each CLI | Agent integrations include Claude Code, Codex and Goose | Codex, Claude and Grok CLIs; DeepSeek and Ollama Cloud API keys |
+
+Comparison checked on 26 October 2026 against the
+[Buzz README](https://github.com/block/buzz/blob/main/README.md),
+[Buzz architecture](https://github.com/block/buzz/blob/main/ARCHITECTURE.md),
+[Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference) and
+[Codex documentation](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan).
+This describes workflow differences, not a security ranking or a cost benchmark.
+
 ## Install on Ubuntu
 
-The published desktop package is **OrgBots 2.0.0 for Ubuntu 24.04 amd64**.
+The desktop package targets **Ubuntu 24.04 amd64**. Version 2.0.1 adds a
+configurable recovery folder; see the [release record](docs/apt-distribution.md).
 Set up the signed third-party APT repository once on each computer:
 
 ```bash
@@ -47,7 +89,7 @@ the model CLIs.
 
 | Platform | Delivery status |
 |---|---|
-| Ubuntu 24.04 amd64 | Published signed APT package, version 2.0.0 |
+| Ubuntu 24.04 amd64 | Signed APT package |
 | Android arm64, API 24+ | Source build instructions below; Flutter/Android version 1.3.2+18 |
 | Windows and macOS | Distribution deferred |
 | Tauri shell (`desktop/`) | Separate development shell; not the supported Linux package |
@@ -108,6 +150,28 @@ Astra and Julian coordinate within their areas and can cross-check significant
 findings. The preset avoids automatic review loops and duplicate nested Astra
 reviews; bounded Luna delegation remains available.
 
+### Shared context and testing
+
+Each agent keeps its own provider session. OrgBots supplies a fresh room digest
+with the current task board, relevant recent events, pending handoffs and review
+work. Handoffs carry a brief, expected results and artifact IDs; agents read the
+artifact contents when needed. Old board snapshots are replaced rather than
+accumulated as if they were still current.
+
+For example, Astra can record a security finding as an artifact and hand Julian
+a focused architecture question with that artifact attached. Julian receives
+the handoff and reads the relevant evidence. This does not automatically share
+private model reasoning or produce a diff summary of every file, and agents
+still inspect source when their task requires it.
+
+Workers run focused checks and attach commands, results and unrun checks before
+review. Quinn handles reproduction and broader QA when useful. The assigned
+reviewer owns verification of the combined project, running checks where its
+permissions allow or handing execution to Quinn and inspecting the results.
+Read-only reviewers keep generated outputs outside project files. This is an
+agent workflow, not an automatic pre-integration shell hook or a mechanically
+enforced guarantee that tests passed.
+
 ### Usage report
 
 Open a room, select **Work**, then find **What this has drawn**. It shows
@@ -144,13 +208,20 @@ The design puts every coordination rule in one tested place:
 The engine records coordination events and serves snapshots with replay for reconnecting clients. Flutter saves each run under **Room options → Saved run history**. Linux room services retain checkpoints, agent memory and CLI session identity across restarts; paused rooms stay paused, and interrupted operations are not blindly replayed.
 
 Linux 2.0 adds protected per-agent working copies with conflict checks, explicit
-file-removal approval and HDD retention, opt-in sandboxed API commands, background
+file-removal approval and recoverable originals, opt-in sandboxed API commands, background
 service notifications, and portable room/project backups restored paused.
-Replacing or removing existing project files requires the configured writable
-ext4 HDD at `/mnt/hdd`; recovery copies go to `/mnt/hdd/OrgBots Trash`. Missing
-storage stops those changes. The sandbox protects workspace writes but still
+New installations keep recovery copies in `~/.local/share/orgbots/trash`
+(or `$XDG_DATA_HOME/orgbots/trash`). Choose another private folder under
+**Connections & tools → File recovery**, including `/mnt/hdd/OrgBots Trash` on an HDD.
+Existing HDD selections stay in place; unavailable selected storage stops
+replacement/removal instead of falling back to another disk. Older package-only
+installations ask you to select storage explicitly. A folder containing recovery
+entries cannot be switched until those entries are resolved. The optional daily
+cleanup timer keeps entries for seven full days before clearing eligible entries
+on day eight or later. See the [recovery guide](app/linux/TRASH.md).
+The sandbox protects workspace writes but still
 allows network access and reading host files; remote tool effects are outside
-the HDD retention boundary. Portable backups are private, unencrypted and
+the local recovery boundary. Portable backups are private, unencrypted and
 limited to 64 MiB; histories can contain secrets you pasted. See
 [workspace boundaries](docs/WORKSPACE_SAFETY.md) and
 [acceptance coverage](scripts/LINUX_ACCEPTANCE.md).
@@ -167,7 +238,7 @@ core/crates/              Rust workspace crates
   orgbot-server          TOML rooms, a WebSocket host, and the `orgbot` CLI
   orgbot-ffi             Android in-process engine and workspace tool bridge
 app/                      Flutter client for Linux + standalone Android
-  packaging/              Debian package, protected workspaces and HDD trash helpers
+  packaging/              Debian package, protected workspaces and recovery helpers
   tool/                   specialist team preset and migration helpers
 desktop/                  Separate Tauri development shell
 scripts/                  installer, acceptance/SSH fixtures and benchmark harness

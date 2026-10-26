@@ -167,7 +167,7 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Text(
-                    'These exact project files will be moved to HDD Trash before the changes are applied:',
+                    'These exact project files will be moved to your configured recovery folder before the changes are applied:',
                   ),
                   const SizedBox(height: 12),
                   for (final path in removals)

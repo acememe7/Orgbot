@@ -76,7 +76,7 @@ before replacement. The helper receives the reviewed file SHA-256 and verifies
 it before moving the source; a changed or replaced file is retained. A target
 that was absent during conflict checking is never moved to trash: if it appears
 before integration, the operation fails and preserves it. If the trusted trash
-helper is missing, cannot verify its HDD mount, or rejects the path, the
+helper is missing, cannot verify its selected storage, or rejects the path, the
 workspace helper stops without replacing existing bytes. An
 out-of-tree journal records each planned operation and its progress so an
 interrupted application leaves preserved originals recoverable.
@@ -84,11 +84,15 @@ interrupted application leaves preserved originals recoverable.
 process exits; project and state paths are read-only from inside `run`.
 
 On Debian installs, `orgbot-trash` is packaged at `/usr/bin/orgbot-trash` with
-its implementation at `/usr/lib/orgbot/orgbot-trash.py`. Before applying
-workspace changes, mount the owner HDD at `/mnt/hdd` as writable ext4. The
-helper stores recovery copies under `/mnt/hdd/OrgBots Trash`; it fails closed
-when that mount is unavailable, read-only, a different filesystem, or cannot
-be verified. Installing OrgBots does not create or mount the HDD destination.
+its implementation at `/usr/lib/orgbot/orgbot-trash.py`. From 2.0.1, new users
+default to their local data directory; **Connections & tools → File recovery** selects a
+different private recovery folder. All helper operations share the same
+owner-private configuration. Existing HDD installations retain
+`/mnt/hdd/OrgBots Trash` and its ext4 mount requirement; ambiguous package-only
+upgrades require an explicit selection. A configured filesystem that is absent,
+read-only, replaced or unverifiable causes the helper to stop without fallback.
+Changing roots never moves or purges existing entries. See
+[recoverable trash](../app/linux/TRASH.md) for selection and retention details.
 
 Agent deletions are listed as pending and remain unapplied unless the trusted
 owner flow passes the exact `review_token` returned by `status` after the owner
@@ -128,7 +132,7 @@ tool and arguments. Approval binds the exact agent, arguments, configuration and
 room; its use is durably recorded before dispatch. Private CLI profiles inherit
 only the room bridge, leaving original host configurations untouched. Review-only
 agents cannot invoke external MCP tools. Approving a remote tool permits its
-external effects; those effects do not pass through the local HDD trash helper.
+external effects; those effects do not pass through the local trash helper.
 
 Run the fixture suite with:
 

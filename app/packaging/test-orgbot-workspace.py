@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -113,6 +114,35 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual([path.read_text(encoding="utf-8") for path in backups], ["original\n"])
         journal = json.loads((work.parent / "apply-journal.json").read_text(encoding="utf-8"))
         self.assertEqual(journal["phase"], "complete")
+
+    def test_apply_uses_configured_real_trash_and_keeps_deletion_gate(self):
+        home = self.root / "home"
+        home.mkdir(mode=0o700)
+        recovery = self.root / "recovery"
+        helper = MODULE_PATH.with_name("orgbot-trash.py")
+        environment = {
+            "HOME": str(home),
+            "XDG_CONFIG_HOME": str(home / "config"),
+            "XDG_DATA_HOME": str(home / "data"),
+        }
+        with patch.dict(os.environ, environment):
+            subprocess.run([sys.executable, str(helper), "configure", "--root", str(recovery)],
+                           check=True, capture_output=True, text=True)
+            work = self.prepare()
+            (work / "src/main.py").write_text("tested update\n", encoding="utf-8")
+            (work / "README.md").unlink()
+            applied = workspace._apply(str(self.state), "dev", review_token=None)
+            self.assertTrue(applied["ok"])
+            self.assertEqual((self.project / "src/main.py").read_text(), "tested update\n")
+            self.assertTrue((self.project / "README.md").exists())
+            status = workspace._status(str(self.state), "dev")
+            self.assertEqual(status["deleted"], ["README.md"])
+            applied = workspace._apply(str(self.state), "dev", review_token=status["review_token"])
+            self.assertTrue(applied["ok"])
+            self.assertFalse((self.project / "README.md").exists())
+            payloads = sorted(path.read_text() for path in recovery.glob("projects/*/*/payload/*"))
+            self.assertEqual(payloads, ["keep me\n", "original\n"])
+            self.assertTrue((home / "config/orgbots/trash.json").is_file())
 
     def test_apply_then_refresh_does_not_overwrite_another_agents_update(self):
         first = self.prepare("agent-a")

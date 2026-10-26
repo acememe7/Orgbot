@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+# Older packages required HDD storage without recording a per-user preference.
+if [ -f /usr/lib/orgbot/orgbot-trash.py ] &&
+   grep -Fq 'TRASH_ROOT = Path("/mnt/hdd/OrgBots Trash")' /usr/lib/orgbot/orgbot-trash.py &&
+   ! grep -Fq 'requires_selection' /usr/lib/orgbot/orgbot-trash.py; then
+    if [ -L /var/lib/orgbots ]; then
+        echo 'Refusing a symlink at /var/lib/orgbots' >&2
+        exit 1
+    fi
+    install -d -m 0755 /var/lib/orgbots
+    if [ ! -e /var/lib/orgbots/legacy-trash-policy ]; then
+        (umask 022; set -C; : > /var/lib/orgbots/legacy-trash-policy)
+    fi
+fi

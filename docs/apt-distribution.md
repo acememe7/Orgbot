@@ -24,8 +24,8 @@ scripts/build-apt-repo.sh \
   --output /tmp/orgbots-apt \
   --gnupghome /secure/path/orgbots-archive-key \
   --key FULL_40_OR_64_CHARACTER_FINGERPRINT \
-  app/orgbots_2.0.0_amd64.deb \
-  app/orgbot_2.0.0_all.deb
+  app/orgbots_2.0.1_amd64.deb \
+  app/orgbot_2.0.1_all.deb
 ```
 
 The output path must not already exist. The script emits both packages under
@@ -48,8 +48,10 @@ generated repository contents at the root of that directory, so
 `apt/dists/stable/InRelease` and `apt/pool/` exist in the branch. Before using
 the workflow, an owner with repository administration must enable Pages with
 GitHub Actions as its source. The workflow verifies both signatures and runs
-an isolated APT metadata refresh before deploying. It copies only the `apt/`
-tree into the published artifact. It has no automatic push trigger and holds no
+an isolated APT metadata refresh before deploying. It preserves the `apt/`
+tree and adds a root page forwarding visitors to `orgbots.theaecestudio.com`.
+The forwarder source is taken from the workflow's exact source revision.
+It has no automatic push trigger and holds no
 signing secret; signing happens before the branch update.
 
 To prepare a publication directory, invoke the builder with a fresh destination
@@ -105,8 +107,9 @@ This is a signed third-party repository, not an entry in Ubuntu's built-in
 archive. A new computer needs the one-time setup above before
 `sudo apt install orgbots` can find the package.
 
-Protected replacement/removal also requires the owner's writable ext4 HDD
-mounted at `/mnt/hdd`; originals are retained in `/mnt/hdd/OrgBots Trash`.
-If that mount is absent, integration stops rather than discarding originals.
-Packaging does not configure disks or enable an automatic cleanup timer on
-other people's computers. See [workspace safety](WORKSPACE_SAFETY.md).
+From 2.0.1, recovery storage is configurable and defaults to local user storage
+for new installations. Existing HDD selections are preserved; an ambiguous
+upgrade from the older package requires explicit selection. Missing configured
+storage stops integration instead of discarding originals. Packaging does not
+mount disks or enable an automatic cleanup timer. See
+[workspace safety](WORKSPACE_SAFETY.md).

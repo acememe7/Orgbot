@@ -17,6 +17,7 @@ cp "$SOURCE/version" "$APP/packaging/version"
 cp "$SOURCE/../assets/logo.png" "$APP/assets/logo.png"
 cp "$SOURCE/orgbots-icon-256.png" "$APP/packaging/orgbots-icon-256.png"
 cp "$SOURCE/orgbot-trash.py" "$APP/packaging/orgbot-trash.py"
+cp "$SOURCE/orgbots.preinst" "$APP/packaging/orgbots.preinst"
 printf '#!/usr/bin/env python3\n' > "$APP/packaging/orgbot-workspace.py"
 printf '#!/bin/sh\nexit 0\n' > "$APP/build/linux/x64/release/bundle/orgbot_app"
 printf 'plugin\n' > "$APP/build/linux/x64/release/bundle/lib/libplugin.so"
@@ -95,6 +96,7 @@ rg -Fqx 'usr/bin/orgbot-trash -> /usr/lib/orgbot/orgbot-trash.py' "$TMP/links"
 rg -Fqx 'usr/lib/orgbot/orgbot-workspace.py' "$TMP/files"
 rg -Fqx 'usr/lib/orgbot/orgbot-trash.py' "$TMP/files"
 rg -Fqx 'usr/lib/orgbot/orgbot-trash.py 755' "$TMP/modes"
+rg -Fqx 'DEBIAN/preinst 755' "$TMP/modes"
 rg -Fqx 'usr/share/doc/orgbots/copyright' "$TMP/files"
 rg -Fqx 'usr/lib/orgbot/data/flutter_assets/assets/fonts/OFL.txt' "$TMP/files"
 rg -Fqx 'usr/share/doc/orgbot/copyright' "$TMP/transitional-files"
@@ -111,4 +113,33 @@ test -z "$(ls -A "$TMP/staging")"
 ORGBOT_ENGINE="$TMP/orgbot-engine" "$APP/packaging/make-deb.sh" 2.0.0 >/dev/null
 rg -q '^Version: 2\.0\.0$' "$TMP/control"
 test -z "$(ls -A "$TMP/staging")"
+python3 - "$SOURCE/orgbots.preinst" "$TMP/upgrade" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+source, base = map(Path, sys.argv[1:])
+base.mkdir()
+helper = base / 'usr/lib/orgbot/orgbot-trash.py'
+helper.parent.mkdir(parents=True)
+script = base / 'preinst'
+script.write_text(source.read_text().replace('/usr/lib/orgbot', str(helper.parent))
+                  .replace('/var/lib/orgbots', str(base / 'var/lib/orgbots')))
+marker = base / 'var/lib/orgbots/legacy-trash-policy'
+
+def upgrade():
+    subprocess.run(['sh', str(script), 'upgrade'], check=True)
+
+upgrade()
+assert not marker.exists()
+helper.write_text('TRASH_ROOT = Path("/mnt/hdd/OrgBots Trash")\nrequires_selection = True\n')
+upgrade()
+assert not marker.exists()
+helper.write_text('TRASH_ROOT = Path("/mnt/hdd/OrgBots Trash")\n')
+upgrade()
+assert marker.is_file() and marker.stat().st_mode & 0o777 == 0o644
+marker.write_text('existing policy\n')
+upgrade()
+assert marker.read_text() == 'existing policy\n'
+PY
 echo "Linux .deb package rename and compatibility checks passed"

@@ -13,6 +13,7 @@ import math
 import os
 import re
 import stat
+import subprocess
 import sys
 import time
 import uuid
@@ -20,11 +21,28 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-TRASH_ROOT = Path("/mnt/hdd/OrgBots Trash")
+LEGACY_TRASH_ROOT = Path("/mnt/hdd/OrgBots Trash")
 HDD_MOUNT = Path("/mnt/hdd")
 RETENTION_SECONDS = 7 * 24 * 60 * 60
 SCHEMA = 1
 COPY_CHUNK = 1024 * 1024
+
+
+def _absolute_env_path(name: str, fallback: Path) -> Path:
+    value = os.environ.get(name)
+    candidate = Path(value) if value else fallback
+    return candidate if candidate.is_absolute() else fallback
+
+
+def _config_file() -> Path:
+    return _absolute_env_path("XDG_CONFIG_HOME", Path.home() / ".config") / "orgbots" / "trash.json"
+
+
+def _default_root() -> Path:
+    return _absolute_env_path("XDG_DATA_HOME", Path.home() / ".local" / "share") / "orgbots" / "trash"
+
+
+TRASH_ROOT = _default_root()
 
 
 class TrashError(RuntimeError):
@@ -84,45 +102,419 @@ def _effective_mount_options(path: Path) -> tuple[Path, str, set[str]] | None:
     return mountpoint, filesystem, options
 
 
-def _verify_hdd_mount() -> None:
-    if not os.path.ismount(HDD_MOUNT):
-        _fail("HDD mount /mnt/hdd is unavailable; trash operation stopped")
-    info = _mount_options(HDD_MOUNT)
-    if info is None or info[0] != "ext4":
-        _fail("/mnt/hdd is not the expected ext4 mount; trash operation stopped")
+LEGACY_POLICY = Path("/var/lib/orgbots/legacy-trash-policy")
+SYSTEMCTL_CANDIDATES = (Path("/usr/bin/systemctl"), Path("/bin/systemctl"))
 
+
+def _fs_identity(path: Path) -> dict[str, Any]:
+    effective = _effective_mount_options(path)
+    if effective is None:
+        _fail(f"Cannot identify the filesystem containing trash root: {path}")
+    mountpoint, filesystem, options = effective
     try:
-        root_info = TRASH_ROOT.lstat()
+        info = path.stat()
+        values = os.statvfs(path)
+    except OSError as exc:
+        _fail(f"Cannot inspect selected trash filesystem: {exc.strerror}")
+    return {
+        "mountpoint": str(mountpoint),
+        "filesystem": filesystem,
+        "fsid": int(values.f_fsid),
+        "device": int(info.st_dev),
+        "writable": "rw" in options and not (values.f_flag & getattr(os, "ST_RDONLY", 1)),
+    }
+
+
+def _config_paths() -> tuple[Path, Path]:
+    config = _config_file()
+    return config, config.parent
+
+
+def _check_components(path: Path, *, allow_missing_leaf: bool = False) -> None:
+    absolute = Path(os.path.abspath(path))
+    parent = absolute.parent if allow_missing_leaf else absolute
+    try:
+        fd = _open_absolute_dir(parent)
+        os.close(fd)
+    except OSError as exc:
+        _fail(f"Trash path has an unavailable or symlink component: {exc.strerror}")
+
+
+def _private_config_dir(path: Path, *, create: bool = False) -> None:
+    if create and not path.exists():
+        _create_absolute_dirs(path)
+    try:
+        fd = _open_absolute_dir(path)
+        info = os.fstat(fd)
+        os.close(fd)
+    except OSError as exc:
+        _fail(f"Unsafe configuration directory: {path}: {exc.strerror}")
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        _fail(f"Configuration directory must be user-owned and private (0700): {path}")
+
+
+def _create_absolute_dirs(path: Path) -> None:
+    absolute = Path(os.path.abspath(path))
+    fd = _open_dir("/")
+    try:
+        for component in absolute.parts[1:]:
+            try:
+                os.mkdir(component, 0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            next_fd = _open_dir(component, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+    finally:
+        os.close(fd)
+
+
+def _read_config() -> dict[str, Any] | None:
+    config_path, config_dir = _config_paths()
+    if not config_path.exists() and not config_path.is_symlink():
+        return None
+    _private_config_dir(config_dir)
+    fd = -1
+    try:
+        fd = os.open(config_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            _fail("Trash config must be a user-owned regular file with mode 0600")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 64 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        payload = json.loads(b"".join(chunks).decode("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        _fail(f"Cannot read trash config safely: {exc}")
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if not isinstance(payload, dict) or payload.get("schema") != SCHEMA or not isinstance(payload.get("root"), str) or not isinstance(payload.get("identity"), dict):
+        _fail("Trash config has an unsupported or invalid schema")
+    root = Path(payload["root"])
+    identity = payload["identity"]
+    if not root.is_absolute() or str(Path(os.path.normpath(root))) != payload["root"] or root == Path("/"):
+        _fail("Trash config root must be a normalized absolute path")
+    if not isinstance(identity.get("mountpoint"), str) or not Path(identity["mountpoint"]).is_absolute() or not isinstance(identity.get("filesystem"), str) or any(type(identity.get(key)) is not int for key in ("fsid", "device")):
+        _fail("Trash config filesystem identity is invalid")
+    return payload
+
+
+def _legacy_install_evidence() -> bool:
+    home = Path.home()
+    for path in (
+        home / ".local/lib/orgbot/orgbot-trash.py",
+        _absolute_env_path("XDG_CONFIG_HOME", home / ".config") / "systemd/user/orgbot-trash-cleanup.service",
+    ):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
+            return True
+    return False
+
+
+def _selected_config() -> tuple[Path, str, bool, dict[str, Any] | None]:
+    payload = _read_config()
+    if payload is not None:
+        return Path(payload["root"]), "configured", False, payload
+    if _legacy_install_evidence():
+        return LEGACY_TRASH_ROOT, "legacy-hdd", False, None
+    if LEGACY_POLICY.exists():
+        return _default_root(), "policy-requires-selection", True, None
+    return _default_root(), "default", False, None
+
+
+def _write_config(root: Path, identity: dict[str, Any]) -> None:
+    config_path, config_dir = _config_paths()
+    _private_config_dir(config_dir, create=True)
+    payload = {"schema": SCHEMA, "root": str(root), "identity": {key: identity[key] for key in ("mountpoint", "filesystem", "fsid", "device")}}
+    temporary = config_path.with_name(f".{config_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        data = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+        with os.fdopen(fd, "wb", closefd=False) as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(fd)
+        os.replace(temporary, config_path)
+        dir_fd = _open_absolute_dir(config_dir)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        os.close(fd)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _remove_config() -> None:
+    config_path, config_dir = _config_paths()
+    try:
+        config_path.unlink()
     except FileNotFoundError:
-        destination = HDD_MOUNT
-    except OSError as exc:
-        _fail(f"Cannot verify trash destination: {exc.strerror}")
-    else:
-        if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
-            _fail("Trash destination is not a real directory")
-        destination = TRASH_ROOT
+        return
+    dir_fd = _open_absolute_dir(config_dir)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
-    destination_mount = _effective_mount_options(destination)
-    if destination_mount is None:
-        _fail("Cannot identify the effective HDD destination mount; trash operation stopped")
-    mountpoint, filesystem, options = destination_mount
-    if filesystem != "ext4" or "rw" not in options:
-        _fail("HDD trash destination is read-only or not ext4; trash operation stopped")
-    if mountpoint != HDD_MOUNT and HDD_MOUNT not in mountpoint.parents:
-        _fail("Trash destination is outside the HDD mount; trash operation stopped")
+
+def _restore_config(previous: dict[str, Any] | None) -> None:
+    if previous is None:
+        _remove_config()
+    else:
+        _write_config(Path(previous["root"]), previous["identity"])
+
+
+def _commit_config(root: Path, identity: dict[str, Any], previous: dict[str, Any] | None, *, sync_systemd: bool = True) -> None:
+    _write_config(root, identity)
     try:
-        flags = os.statvfs(destination).f_flag
-    except OSError as exc:
-        _fail(f"Cannot verify HDD destination writability: {exc.strerror}")
-    if flags & getattr(os, "ST_RDONLY", 1):
-        _fail("HDD trash destination is read-only; trash operation stopped")
+        if sync_systemd:
+            _sync_systemd(root)
+    except Exception:
+        _restore_config(previous)
+        raise
+
+
+def _verify_identity(root: Path, expected: dict[str, Any] | None) -> None:
+    _check_components(root, allow_missing_leaf=True)
+    identity_path = root if root.exists() else root.parent
+    current = _fs_identity(identity_path)
+    if not current["writable"]:
+        _fail("Selected trash filesystem is read-only")
+    if expected is not None:
+        for key in ("filesystem", "fsid", "device"):
+            if current[key] != expected.get(key):
+                _fail("Selected trash filesystem identity changed or is unavailable; operation stopped")
+        if current["mountpoint"] not in (expected.get("mountpoint"), str(root)):
+            _fail("Selected trash mountpoint changed; operation stopped")
+
+
+def _config_result() -> dict[str, Any]:
+    root, source, requires_selection, _ = _selected_config()
+    return {"root": str(root), "source": source, "requires_selection": requires_selection}
+
+
+def _systemd_escape_path(value: str) -> str:
+    escaped = []
+    for char in value:
+        code = ord(char)
+        if char == "%":
+            escaped.append("%%")
+        elif char in ('\\', '"'):
+            escaped.append("\\" + char)
+        elif code <= 0x20 or code == 0x7f:
+            escaped.append(f"\\x{code:02x}")
+        else:
+            escaped.append(char)
+    return "\"" + "".join(escaped) + "\""
+
+
+def _systemctl_executable() -> Path | None:
+    return next((candidate for candidate in SYSTEMCTL_CANDIDATES if candidate.is_file() and os.access(candidate, os.X_OK)), None)
+
+
+def _require_manager_config_home(systemctl: Path, config_home: Path) -> None:
+    default_home = Path.home() / ".config"
     try:
-        hdd_device = HDD_MOUNT.stat().st_dev
-        destination_device = destination.stat().st_dev
-    except OSError as exc:
-        _fail(f"Cannot verify HDD destination filesystem: {exc.strerror}")
-    if destination_device != hdd_device:
-        _fail("Trash destination is not on the HDD ext4 filesystem; trash operation stopped")
+        result = subprocess.run(
+            [str(systemctl), "--user", "show-environment"],
+            timeout=10,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise TrashError("Cannot verify the user manager's XDG_CONFIG_HOME; refusing to configure its cleanup timer") from exc
+    if result.returncode != 0:
+        _fail("Cannot verify the user manager's XDG_CONFIG_HOME; refusing to configure its cleanup timer")
+    manager_config = None
+    for line in result.stdout.decode("utf-8", errors="replace").splitlines():
+        if line.startswith("XDG_CONFIG_HOME="):
+            manager_config = Path(line.partition("=")[2])
+            break
+    if manager_config is None:
+        manager_config = default_home
+    if manager_config != config_home:
+        _fail(f"User manager searches {manager_config}/systemd/user, but OrgBots units are under {config_home}/systemd/user; align XDG_CONFIG_HOME before installing or syncing the cleanup timer")
+
+
+def _sync_systemd(root: Path) -> None:
+    config_home = _absolute_env_path("XDG_CONFIG_HOME", Path.home() / ".config")
+    unit_dir = config_home / "systemd/user"
+    service = unit_dir / "orgbot-trash-cleanup.service"
+    if not service.exists():
+        return
+    if service.is_symlink() or service.stat().st_uid != os.getuid():
+        _fail("Refusing to update an unsafe cleanup service")
+    systemctl = _systemctl_executable()
+    if systemctl is None:
+        _fail("systemctl is required to apply the selected trash root to the cleanup timer")
+    _require_manager_config_home(systemctl, config_home)
+    data_home = _absolute_env_path("XDG_DATA_HOME", Path.home() / ".local/share")
+    helper = Path(__file__).resolve(strict=True)
+    helper_info = helper.stat()
+    if not stat.S_ISREG(helper_info.st_mode) or not os.access(helper, os.X_OK):
+        _fail("Current trash helper is not a trusted executable file")
+    dropin_dir = unit_dir / "orgbot-trash-cleanup.service.d"
+    _create_absolute_dirs(dropin_dir)
+    _private_config_dir(dropin_dir)
+    dropin = dropin_dir / "20-trash-root.conf"
+    old_content: bytes | None = None
+    if dropin.exists() or dropin.is_symlink():
+        info = dropin.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            _fail("Refusing to overwrite an unmanaged trash service drop-in")
+        old_content = dropin.read_bytes()
+        if b"# Managed by orgbot-trash" not in old_content:
+            _fail("Refusing to overwrite an unmanaged trash service drop-in")
+    content = (
+        "[Service]\n"
+        "# Managed by orgbot-trash\n"
+        "Environment=" + _systemd_escape_path("XDG_CONFIG_HOME=" + str(config_home)) + " " + _systemd_escape_path("XDG_DATA_HOME=" + str(data_home)) + "\n"
+        "ExecStart=\n"
+        "ExecStart=/usr/bin/python3 " + _systemd_escape_path(str(helper)) + " cleanup\n"
+        "ReadWritePaths=\n"
+        "ReadWritePaths=" + _systemd_escape_path(str(root)) + "\n"
+    )
+    temporary = dropin.with_name(f".{dropin.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, content.encode("utf-8"))
+        os.fsync(fd)
+        os.replace(temporary, dropin)
+    finally:
+        os.close(fd)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    try:
+        completed = subprocess.run(
+            [str(systemctl), "--user", "daemon-reload"],
+            timeout=10,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        result_error = "systemd rejected the trash-root cleanup configuration" if completed.returncode != 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        result_error = "systemd did not reload the trash-root cleanup configuration"
+    if result_error:
+        if old_content is None:
+            try:
+                dropin.unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            _write_dropin(dropin, old_content)
+        if systemctl is not None:
+            try:
+                subprocess.run([str(systemctl), "--user", "daemon-reload"], timeout=10, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        _fail(result_error)
+
+
+def _write_dropin(path: Path, content: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, content)
+        os.fsync(fd)
+        os.replace(temporary, path)
+        parent_fd = _open_absolute_dir(path.parent)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    finally:
+        os.close(fd)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _configure_root_locked_root(requested: Path, current_root: Path | None, previous: dict[str, Any] | None, *, sync_systemd: bool) -> dict[str, Any]:
+    if current_root is not None and current_root != requested and list_entries(current_root):
+        _fail("Cannot change trash location while the current trash contains entries")
+    if not requested.parent.exists() and requested == _default_root():
+        _create_absolute_dirs(requested.parent)
+        _private_dir(requested.parent)
+    _check_components(requested, allow_missing_leaf=True)
+    if not requested.parent.is_dir():
+        _fail("Trash root parent must already exist")
+    if requested.exists() or requested.is_symlink():
+        _private_dir(requested)
+    identity = _fs_identity(requested if requested.exists() else requested.parent)
+    if not identity["writable"]:
+        _fail("Selected trash filesystem is read-only")
+    if not requested.exists():
+        _private_dir(requested, create=True)
+    _private_dir(requested / "projects", create=True)
+    _commit_config(requested, identity, previous, sync_systemd=sync_systemd)
+    return _config_result()
+
+
+def _configure_root(raw_root: str, *, defer_systemd: bool = False) -> dict[str, Any]:
+    requested = Path(raw_root)
+    if not requested.is_absolute() or "\x00" in raw_root:
+        _fail("Trash root must be an absolute path")
+    requested = Path(os.path.normpath(raw_root))
+    if requested == Path("/"):
+        _fail("Trash root cannot be the filesystem root")
+    # Serialize competing root switches, then lock both roots in one stable
+    # order. Publishing the config while holding the destination lock prevents
+    # CLI operations from acting on a selection whose systemd sync can roll back.
+    with _selection_locked():
+        while True:
+            current, _, needs_selection, previous = _selected_config()
+            if needs_selection:
+                if requested == _default_root() and not requested.parent.exists():
+                    _create_absolute_dirs(requested.parent)
+                    _private_dir(requested.parent)
+                _prepare_root(requested, require_mount=True)
+                with _locked(requested):
+                    latest, _, still_needs_selection, previous = _selected_config()
+                    if not still_needs_selection:
+                        continue
+                    return _configure_root_locked_root(requested, None, previous, sync_systemd=not defer_systemd)
+            current_root = _prepare_root()
+            _prepare_root(requested, require_mount=True)
+            roots = sorted({current_root, requested}, key=lambda root: os.fspath(root))
+            with contextlib.ExitStack() as stack:
+                for root in roots:
+                    stack.enter_context(_locked(root))
+                latest, _, latest_needs_selection, latest_payload = _selected_config()
+                if latest_needs_selection or latest != current_root:
+                    continue
+                current_root = _prepare_root()
+                return _configure_root_locked_root(requested, current_root, latest_payload, sync_systemd=not defer_systemd)
+
+
+def _verify_hdd_mount() -> None:
+    expected = _fs_identity(HDD_MOUNT)
+    if not os.path.ismount(HDD_MOUNT) or expected["filesystem"] != "ext4":
+        _fail("Legacy HDD mount is unavailable or no longer ext4")
+    try:
+        root_info = LEGACY_TRASH_ROOT.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        _fail("Legacy HDD trash root is not a real directory")
+    destination = _fs_identity(LEGACY_TRASH_ROOT)
+    if destination["filesystem"] != "ext4" or not destination["writable"] or destination["device"] != expected["device"]:
+        _fail("Legacy HDD trash root is unavailable or has changed filesystem")
 
 
 def _private_dir(path: Path, *, create: bool = False) -> None:
@@ -142,23 +534,35 @@ def _private_dir(path: Path, *, create: bool = False) -> None:
         _fail(f"Unsafe trash directory: {path}")
     if info.st_uid != os.getuid():
         _fail(f"Trash directory is not owned by this user: {path}")
-    if stat.S_IMODE(info.st_mode) & 0o077:
+    if stat.S_IMODE(info.st_mode) != 0o700:
         _fail(f"Trash directory permissions must be private (0700): {path}")
 
 
-def _prepare_root(root: Path, *, require_mount: bool) -> Path:
-    root = Path(os.path.abspath(root))
-    if require_mount:
-        _verify_hdd_mount()
-        if root != TRASH_ROOT:
-            _fail("Production trash root cannot be overridden")
-    if require_mount:
-        if root.parent != HDD_MOUNT:
-            _fail("Trash root must be a direct child of /mnt/hdd")
-        mount_info = HDD_MOUNT.lstat()
-        if stat.S_ISLNK(mount_info.st_mode) or not stat.S_ISDIR(mount_info.st_mode):
-            _fail("HDD mount path is not a real directory")
+def _prepare_root(root: Path | None = None, *, require_mount: bool = True) -> Path:
+    if root is None:
+        root, source, requires_selection, payload = _selected_config()
+        if requires_selection:
+            _fail("Trash location requires explicit owner selection; run orgbot-trash configure --root ABSOLUTE_PATH")
     else:
+        source = "explicit-test-root"
+        payload = None
+    root = Path(os.path.abspath(root))
+    expected = payload["identity"] if payload is not None else None
+    if require_mount:
+        if source == "legacy-hdd":
+            if root != LEGACY_TRASH_ROOT or root.parent != HDD_MOUNT:
+                _fail("Legacy trash location does not match the supported HDD path")
+            _verify_hdd_mount()
+            _verify_identity(root, None)
+        else:
+            if source == "default" and not root.parent.exists():
+                _create_absolute_dirs(root.parent)
+                _private_dir(root.parent)
+            _verify_identity(root, expected)
+    else:
+        _check_components(root, allow_missing_leaf=True)
+        if not root.parent.exists():
+            _fail("Trash parent directory must already exist")
         parent_info = root.parent.lstat()
         if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid():
             _fail("Test trash parent must be a real directory owned by this user")
@@ -180,6 +584,41 @@ def _locked(root: Path) -> Iterator[None]:
         yield
     finally:
         os.close(fd)
+
+
+@contextlib.contextmanager
+def _selection_locked() -> Iterator[None]:
+    _, config_dir = _config_paths()
+    _private_config_dir(config_dir, create=True)
+    lock_path = config_dir / ".selection.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            _fail("Unsafe trash selection lock")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _selected_root_locked(*, persist_selection: bool = False) -> Iterator[Path]:
+    while True:
+        root, _, requires_selection, _ = _selected_config()
+        if requires_selection:
+            _fail("Trash location requires explicit owner selection; run orgbot-trash configure --root ABSOLUTE_PATH")
+        root = _prepare_root()
+        with _locked(root):
+            latest_root, _, latest_requires_selection, latest_payload = _selected_config()
+            if latest_requires_selection or latest_root != root:
+                continue
+            root = _prepare_root()
+            if persist_selection and latest_payload is None:
+                identity = _fs_identity(root)
+                _commit_config(root, identity, None)
+            yield root
+            return
 
 
 def _reject_overlap(path: Path, root: Path) -> None:
@@ -999,10 +1438,25 @@ def _cli() -> int:
     restore_parser.add_argument("entry_id")
     cleanup_parser = sub.add_parser("cleanup", help="Permanently remove validated entries older than seven days")
     cleanup_parser.add_argument("--dry-run", action="store_true")
+    sub.add_parser("config", help="Show the selected trash location as JSON")
+    configure_parser = sub.add_parser("configure", help="Select and pin a trash filesystem")
+    configure_parser.add_argument("--root", required=True, metavar="ABSOLUTE_PATH")
+    configure_parser.add_argument("--defer-systemd", action="store_true", help=argparse.SUPPRESS)
+    sub.add_parser("sync-systemd", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
-        root = _prepare_root(TRASH_ROOT, require_mount=True)
-        with _locked(root):
+        if args.command == "config":
+            print(json.dumps(_config_result(), sort_keys=True))
+            return 0
+        if args.command == "configure":
+            print(json.dumps(_configure_root(args.root, defer_systemd=args.defer_systemd), sort_keys=True))
+            return 0
+        if args.command == "sync-systemd":
+            with _selected_root_locked() as root:
+                _sync_systemd(root)
+            return 0
+        mutating = args.command in ("move", "restore") or (args.command == "cleanup" and not args.dry_run)
+        with _selected_root_locked(persist_selection=mutating) as root:
             if args.command == "move":
                 if args.expected_sha256 is not None and len(args.paths) != 1:
                     _fail("Expected SHA-256 can be used with exactly one source path")

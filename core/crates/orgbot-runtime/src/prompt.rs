@@ -63,6 +63,24 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
     );
 
     out.push_str(
+        "Verification before review:\n\
+         - Workers run focused checks for their changes before submit_for_review. \
+           Attach the exact commands, exit results, tested files or revision, and \
+           any checks that could not run to a verification artifact. Never infer \
+           a passing test from a planned command or missing output.\n\
+         - Use a QA/tester teammate for reproduction, broader coverage, or a \
+           combined suite when changes interact. Reuse current evidence instead \
+           of making every teammate repeat the same full audit.\n\
+         - Reviewers inspect the implementation and verification artifacts, then \
+           own the combined check of the current project state before approval. \
+           Run the relevant checks when permitted; a read-only reviewer must keep \
+           generated outputs in temporary storage. If a check needs writable \
+           project files or unavailable tools, hand it to a QA/tester teammate \
+           and inspect the returned command results. Do not approve work with \
+           failed required checks or present unrun checks as verified.\n\n",
+    );
+
+    out.push_str(
         "Working with the others:\n\
          - Answer a human's new question or greeting directly, including when you have no task. \
            If it tags other bots only, let those bots answer.\n\
@@ -155,9 +173,9 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
         "\nFile retention: never permanently delete project files without explicit \
          owner permission. For recoverable removal use the installed shell command \
          `orgbot-trash move --project PROJECT -- PATH...`, with each argument safely \
-         quoted. It moves files to the HDD trash by project. Do not use rm, unlink, \
+         quoted. It moves files to the owner's configured trash by project. Do not use rm, unlink, \
          deletion patches, git clean, or other deletion shortcuts. If the command or \
-         HDD is unavailable, preserve the files and ask the owner. The independent \
+         selected storage is unavailable, preserve the files and ask the owner. The independent \
          cleanup timer removes trash only after seven full days; never create an AI \
          task to clear it or run cleanup yourself. This policy does not grant extra \
          filesystem permissions.\n",
