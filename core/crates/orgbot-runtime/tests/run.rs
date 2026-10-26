@@ -641,6 +641,168 @@ async fn a_bot_is_scheduled_to_answer_a_question_addressed_to_it() {
 }
 
 #[tokio::test]
+async fn an_ask_to_everyone_is_answered_by_every_bot() {
+    // The roll call from the desktop: "@all say hi" must reach every seat, and
+    // each bot must be told the broadcast wants its own reply, addressed to
+    // the owner by the name they wrote under.
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "chat".into(),
+        goal: "answer questions".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    let handles = ["ada", "bo", "cy"];
+    let mut seats = Vec::new();
+    for handle in handles {
+        let reply = format!("hi from {handle}");
+        seats.push(
+            room.seat(
+                spec(handle, &["writer"], Autonomy::default()),
+                reactive(handle, move |_last, all| {
+                    if all.contains("to everyone, including you: reply")
+                        && all.contains("Answer it yourself in the chat")
+                        && all.contains("Address them as Aece")
+                    {
+                        say(&reply)
+                    } else {
+                        nothing()
+                    }
+                }),
+            )
+            .unwrap(),
+        );
+    }
+    room.start().unwrap();
+    assert!(room.next_actor().is_none());
+
+    let room_id = room.engine().room_id();
+    room.engine_mut()
+        .apply(orgbot_engine::Command::PostMessage {
+            message: Box::new(orgbot_proto::ChatMessage {
+                id: orgbot_proto::MessageId::new(),
+                room: room_id,
+                author: orgbot_proto::Author::Human {
+                    name: "Aece".into(),
+                },
+                audience: orgbot_proto::Audience::Everyone,
+                intent: orgbot_proto::MessageIntent::Ask,
+                body: "@all say hi".into(),
+                task: None,
+                handoff: None,
+                reply_to: None,
+                attachments: vec![],
+                files: vec![],
+                sent_at: orgbot_proto::Timestamp::now(),
+            }),
+        })
+        .unwrap();
+
+    let mut acted = Vec::new();
+    while room.next_actor().is_some() && acted.len() < 10 {
+        acted.push(room.step(None).await.expect("a bot should act").agent);
+    }
+    for seat in &seats {
+        assert!(acted.contains(seat), "every bot should take a turn");
+    }
+    for handle in handles {
+        assert!(
+            room.engine()
+                .transcript()
+                .iter()
+                .any(|m| m.body == format!("hi from {handle}")),
+            "@{handle} should have answered the roll call"
+        );
+    }
+}
+
+/// Streams its own handle, so a test can see whose turn a stream carries.
+#[derive(Debug)]
+struct NamedStreamer(&'static str);
+
+#[async_trait]
+impl Provider for NamedStreamer {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+        sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> orgbot_providers::Result<CompletionResponse> {
+        if let Some(sink) = sink {
+            let _ = sink
+                .send(StreamEvent::TextDelta {
+                    text: self.0.to_string(),
+                })
+                .await;
+        }
+        Ok(say(&format!("hi from {}", self.0)))
+    }
+}
+
+#[tokio::test]
+async fn a_batch_streams_the_bot_its_stream_is_labelled_with() {
+    // The server labels the live stream with the first bot `next_actors`
+    // picks. Seats are kept in id order, which is unrelated, so the stream
+    // must follow the pick and not the seat.
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "stream".into(),
+        goal: "answer".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    let mut seats = Vec::new();
+    for handle in ["ada", "bo", "cy", "di", "ed", "fi"] {
+        seats.push((
+            room.seat(
+                spec(handle, &["writer"], Autonomy::default()),
+                Arc::new(NamedStreamer(handle)),
+            )
+            .unwrap(),
+            handle,
+        ));
+    }
+    room.start().unwrap();
+    let room_id = room.engine().room_id();
+    room.engine_mut()
+        .apply(orgbot_engine::Command::PostMessage {
+            message: Box::new(orgbot_proto::ChatMessage {
+                id: orgbot_proto::MessageId::new(),
+                room: room_id,
+                author: orgbot_proto::Author::Human { name: "Aece".into() },
+                audience: orgbot_proto::Audience::Everyone,
+                intent: orgbot_proto::MessageIntent::Ask,
+                body: "@all hi".into(),
+                task: None,
+                handoff: None,
+                reply_to: None,
+                attachments: vec![],
+                files: vec![],
+                sent_at: orgbot_proto::Timestamp::now(),
+            }),
+        })
+        .unwrap();
+
+    while room.next_actor().is_some() {
+        let batch = room.batch_size().max(2);
+        let lead = room.next_actors(batch)[0];
+        let handle = seats.iter().find(|(id, _)| *id == lead).unwrap().1;
+        let (tx, mut rx) = mpsc::channel(64);
+        room.step_many(batch, Some(tx)).await;
+        let mut streamed = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let StreamEvent::TextDelta { text } = event {
+                streamed.push(text);
+            }
+        }
+        assert_eq!(streamed, vec![handle.to_string()]);
+    }
+}
+
+#[tokio::test]
 async fn an_ordinary_broadcast_statement_does_not_wake_the_room() {
     let mut room = Orchestrator::new(RoomSpec {
         name: "chat".into(),
@@ -786,6 +948,113 @@ impl Provider for McpClientProvider {
 
         Ok(say("claimed the task through the room MCP bridge"))
     }
+}
+
+/// An agent CLI that says hello through the room tool, then ends its run with
+/// its own summary of what it did, the way Claude Code and Codex do.
+#[derive(Debug)]
+struct McpPosterProvider;
+
+#[async_trait]
+impl Provider for McpPosterProvider {
+    fn name(&self) -> &str {
+        "mcp-poster"
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+        _sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> orgbot_providers::Result<CompletionResponse> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixStream;
+
+        let unsupported = |detail: String| orgbot_providers::ProviderError::Unsupported(detail);
+        let socket = request
+            .mcp_socket
+            .ok_or_else(|| unsupported("no mcp socket on request".into()))?;
+        let stream = UnixStream::connect(&socket)
+            .await
+            .map_err(|error| unsupported(format!("connect: {error}")))?;
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half).lines();
+        mcp_ask(
+            &mut write_half,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"room-test","version":"1"}}}"#,
+        )
+        .await?;
+        write_half
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .await
+            .map_err(|error| unsupported(format!("notify: {error}")))?;
+        let reply = mcp_ask(
+            &mut write_half,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"post_message","arguments":{"body":"Hi Aece, Ellis here."}}}"#,
+        )
+        .await?;
+        assert_ne!(
+            reply.pointer("/result/isError").and_then(Value::as_bool),
+            Some(true),
+            "post_message should be accepted: {reply}"
+        );
+        Ok(say("I posted a reply in the room."))
+    }
+}
+
+#[tokio::test]
+async fn a_cli_bot_that_posted_through_the_room_tool_is_not_echoed() {
+    let bot_spec = AgentSpec::new(
+        "ellis",
+        "Ellis",
+        ProviderRef::CliAgent {
+            cli: orgbot_proto::agent::CliKind::Claude,
+            model: String::new(),
+            workdir: String::new(),
+            policy: orgbot_proto::agent::AgentPolicy::ReadOnly,
+            mcp: true,
+        },
+    )
+    .with_roles(["writer"]);
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "echo-room".into(),
+        goal: "say hi once".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    room.seat(bot_spec, Arc::new(McpPosterProvider)).unwrap();
+    room.start().unwrap();
+    let room_id = room.engine().room_id();
+    room.engine_mut()
+        .apply(orgbot_engine::Command::PostMessage {
+            message: Box::new(orgbot_proto::ChatMessage {
+                id: orgbot_proto::MessageId::new(),
+                room: room_id,
+                author: orgbot_proto::Author::Human { name: "Aece".into() },
+                audience: orgbot_proto::Audience::Everyone,
+                intent: orgbot_proto::MessageIntent::Ask,
+                body: "@all reply hi".into(),
+                task: None,
+                handoff: None,
+                reply_to: None,
+                attachments: vec![],
+                files: vec![],
+                sent_at: orgbot_proto::Timestamp::now(),
+            }),
+        })
+        .unwrap();
+
+    room.step(None).await.expect("the bot answers");
+    let bodies: Vec<String> = room
+        .engine()
+        .transcript()
+        .iter()
+        .filter(|m| m.author.agent().is_some())
+        .map(|m| m.body.clone())
+        .collect();
+    assert_eq!(bodies, vec!["Hi Aece, Ellis here.".to_string()]);
 }
 
 #[tokio::test]

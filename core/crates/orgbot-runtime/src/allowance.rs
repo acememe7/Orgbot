@@ -84,6 +84,30 @@ struct Reservation {
     policy: Policy,
 }
 
+/// Recorded when a capped request used more than it reserved.
+const RESERVATION_OVERRUN: &str = "Provider exceeded its reservation; further requests paused";
+
+impl Policy {
+    /// Whether a token or money cap bounds this provider. Request counts and
+    /// on/off do not need a per-request reservation to be honest.
+    fn capped(&self) -> bool {
+        self.max_tokens > 0 || self.max_cost_microusd > 0
+    }
+}
+
+/// Lift a pause that an uncapped provider should never have been given.
+///
+/// Earlier builds paused any provider whose reply used more than its
+/// reservation, until the end of the window. Agent CLIs reserve nothing, so
+/// their first reply always "overran" and every Claude, Codex and Grok bot sat
+/// out the rest of the week.
+fn clear_spurious_overrun(record: &mut Record, policy: &Policy) {
+    if !policy.capped() && record.message == RESERVATION_OVERRUN {
+        record.cooldown_until = 0;
+        record.message.clear();
+    }
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -291,6 +315,7 @@ impl Allowances {
             .transaction(|ledger| {
                 let record = ledger.providers.entry(backend.into()).or_default();
                 rollover(record, &policy, time);
+                clear_spurious_overrun(record, &policy);
                 let delay = record
                     .window_start
                     .saturating_add(policy.window_secs)
@@ -361,12 +386,16 @@ impl Allowances {
                             .cost_microusd
                             .saturating_sub(reservation.cost)
                             .saturating_add(cost);
-                        if tokens > reservation.tokens || cost > reservation.cost {
+                        // Overrunning a reservation only matters when a cap
+                        // depends on it. Uncapped providers, including every
+                        // agent CLI, reserve nothing and always "overrun".
+                        if reservation.policy.capped()
+                            && (tokens > reservation.tokens || cost > reservation.cost)
+                        {
                             record.cooldown_until = record
                                 .window_start
                                 .saturating_add(reservation.policy.window_secs);
-                            record.message =
-                                "Provider exceeded its reservation; further requests paused".into();
+                            record.message = RESERVATION_OVERRUN.into();
                         }
                     }
                 }
@@ -399,6 +428,7 @@ impl Allowances {
             let policy = config.providers.get(backend).cloned().unwrap_or_default();
             let mut record = ledger.providers.get(backend).cloned().unwrap_or_default();
             rollover(&mut record, &policy, time);
+            clear_spurious_overrun(&mut record, &policy);
             let unavailable = !policy.enabled
                 || record.cooldown_until > time
                 || exceeds(record.requests, 1, policy.max_requests)
@@ -620,6 +650,52 @@ mod tests {
         assert_eq!(ledger.providers["deepseek"].unreported_requests, 1);
         assert!(ledger.providers["deepseek"].tokens > 0);
         assert_eq!(fixture.manager.routing(700002).unwrap()["deepseek"], None);
+    }
+
+    #[test]
+    fn an_uncapped_agent_cli_is_not_paused_by_its_first_reply() {
+        let fixture = Fixture::new(Policy::default());
+        let hold = fixture
+            .manager
+            .reserve("cli:claude", &mut request(), false, 700000)
+            .unwrap();
+        fixture
+            .manager
+            .settle("cli:claude", hold, &response(170_000, 2_000), 700001)
+            .unwrap();
+        assert_eq!(
+            fixture.manager.routing(700002).unwrap()["cli:claude"],
+            Some(0)
+        );
+        assert!(fixture
+            .manager
+            .reserve("cli:claude", &mut request(), false, 700002)
+            .is_ok());
+    }
+
+    #[test]
+    fn a_week_long_pause_from_the_old_overrun_rule_is_lifted() {
+        let fixture = Fixture::new(Policy::default());
+        let mut ledger = Ledger::default();
+        ledger.providers.insert(
+            "cli:grok".into(),
+            Record {
+                window_start: 604800,
+                requests: 1,
+                tokens: 31_113,
+                cooldown_until: 604800 * 2,
+                message: RESERVATION_OVERRUN.into(),
+                ..Default::default()
+            },
+        );
+        fs::write(&fixture.manager.ledger, serde_json::to_vec(&ledger).unwrap()).unwrap();
+        assert_eq!(fixture.manager.routing(700000).unwrap()["cli:grok"], Some(0));
+        assert!(fixture
+            .manager
+            .reserve("cli:grok", &mut request(), false, 700000)
+            .is_ok());
+        let ledger: Ledger = read_json(&fixture.manager.ledger).unwrap();
+        assert_eq!(ledger.providers["cli:grok"].cooldown_until, 0);
     }
 
     #[test]

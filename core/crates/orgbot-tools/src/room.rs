@@ -878,7 +878,7 @@ fn message_handles(body: &str) -> Option<Vec<String>> {
             continue;
         };
         found = true;
-        if handle.eq_ignore_ascii_case("all") {
+        if orgbot_proto::is_broadcast_tag(handle) {
             return Some(Vec::new());
         }
         if !handles

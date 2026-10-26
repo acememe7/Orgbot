@@ -9,11 +9,17 @@ import 'orgbot/library.dart';
 import 'orgbot/model_catalog.dart';
 import 'state/background_rooms.dart';
 import 'ui/orgbot_screen.dart';
+import 'ui/themes.dart';
 
 void main() => runApp(const OrgBotApp());
 
-ThemeData orgBotTheme(Brightness brightness, {bool desktop = false}) {
+ThemeData orgBotTheme(
+  Brightness brightness, {
+  bool desktop = false,
+  AppTheme appTheme = AppTheme.original,
+}) {
   final dark = brightness == Brightness.dark;
+  final palette = appTheme.palette(brightness);
   var scheme = ColorScheme.fromSeed(
     seedColor: const Color(0xFF65B8AB),
     brightness: brightness,
@@ -30,7 +36,9 @@ ThemeData orgBotTheme(Brightness brightness, {bool desktop = false}) {
     surfaceContainerLow: dark ? const Color(0xFF1A1E21) : Colors.white,
     outlineVariant: dark ? const Color(0xFF343B3F) : const Color(0xFFD7DFDA),
   );
-  if (desktop) {
+  if (palette != null) {
+    scheme = AppTheme.scheme(palette, brightness);
+  } else if (desktop) {
     scheme = scheme.copyWith(
       surface: dark ? const Color(0xFF191C1D) : const Color(0xFFFAF9F6),
       surfaceContainerLow: dark
@@ -50,7 +58,7 @@ ThemeData orgBotTheme(Brightness brightness, {bool desktop = false}) {
       onSurface: dark ? const Color(0xFFE7EAE6) : const Color(0xFF292F2C),
       onSurfaceVariant: dark
           ? const Color(0xFFA7B0AA)
-          : const Color(0xFF626D65),
+          : const Color(0xFF5A645D),
       outlineVariant: dark ? const Color(0xFF39413E) : const Color(0xFFD8DDD5),
     );
   }
@@ -68,7 +76,13 @@ ThemeData orgBotTheme(Brightness brightness, {bool desktop = false}) {
       },
     ),
     colorScheme: scheme,
-    scaffoldBackgroundColor: scheme.surface,
+    // Glass panels show the backdrop painted behind the whole app.
+    scaffoldBackgroundColor: appTheme.glass
+        ? Colors.transparent
+        : scheme.surface,
+    popupMenuTheme: PopupMenuThemeData(
+      color: palette?.solid ?? scheme.surfaceContainer,
+    ),
     appBarTheme: AppBarTheme(
       backgroundColor: scheme.surface,
       surfaceTintColor: Colors.transparent,
@@ -136,15 +150,15 @@ ThemeData orgBotTheme(Brightness brightness, {bool desktop = false}) {
       ),
     ),
     bottomSheetTheme: BottomSheetThemeData(
-      backgroundColor: scheme.surface,
-      modalBackgroundColor: scheme.surface,
+      backgroundColor: palette?.solid ?? scheme.surface,
+      modalBackgroundColor: palette?.solid ?? scheme.surface,
       showDragHandle: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
     ),
     dialogTheme: DialogThemeData(
-      backgroundColor: scheme.surface,
+      backgroundColor: palette?.solid ?? scheme.surface,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
     ),
     textButtonTheme: TextButtonThemeData(
@@ -301,6 +315,7 @@ class _OrgBotAppState extends State<OrgBotApp> {
     // setup. Desktop initialization still skips loading/renewing OAuth.
     ModelCatalog.credentials = _credentials;
     _initialize();
+    unawaited(Appearance.instance.load());
     BackgroundRooms.channel.setMethodCallHandler((call) async {
       if (call.method == 'pauseAll') {
         for (final room in _library.sessions.values.toList()) {
@@ -338,12 +353,43 @@ class _OrgBotAppState extends State<OrgBotApp> {
   }
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    title: 'OrgBots',
-    debugShowCheckedModeBanner: false,
-    theme: orgBotTheme(Brightness.light, desktop: canRunAgentClis),
-    darkTheme: orgBotTheme(Brightness.dark, desktop: canRunAgentClis),
-    themeMode: ThemeMode.system,
-    home: OrgBotScreen(library: _library, credentials: _credentials),
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: Appearance.instance,
+    builder: (context, _) {
+      final appearance = Appearance.instance;
+      final glass = appearance.theme.glass;
+      return MaterialApp(
+        title: 'OrgBots',
+        debugShowCheckedModeBanner: false,
+        theme: orgBotTheme(
+          Brightness.light,
+          desktop: canRunAgentClis,
+          appTheme: appearance.theme,
+        ),
+        darkTheme: orgBotTheme(
+          Brightness.dark,
+          desktop: canRunAgentClis,
+          appTheme: appearance.theme,
+        ),
+        themeMode: appearance.mode,
+        themeAnimationDuration: const Duration(milliseconds: 260),
+        themeAnimationCurve: Curves.easeOutCubic,
+        // The same tree with or without glass, so switching themes never
+        // rebuilds the open rooms from scratch.
+        builder: (context, child) => Stack(
+          fit: StackFit.expand,
+          children: [
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 260),
+              child: glass
+                  ? const GlassBackdrop(key: ValueKey('glass'))
+                  : const SizedBox.shrink(),
+            ),
+            ?child,
+          ],
+        ),
+        home: OrgBotScreen(library: _library, credentials: _credentials),
+      );
+    },
   );
 }

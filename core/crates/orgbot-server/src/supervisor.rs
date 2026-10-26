@@ -37,6 +37,10 @@ pub struct RoomServiceDescriptor {
 pub struct RoomServiceStatus {
     pub running: bool,
     pub descriptor: Option<RoomServiceDescriptor>,
+    /// The service is running an engine binary other than this one, usually
+    /// because an update replaced it on disk. Starting the room restarts it.
+    #[serde(default)]
+    pub outdated: bool,
 }
 
 fn room_id(directory: &Path) -> anyhow::Result<String> {
@@ -424,6 +428,30 @@ fn should_reuse_service(running: bool, service_systemd: bool, manager_available:
     running && service_systemd == manager_available
 }
 
+/// Whether a running systemd room service is executing a different engine
+/// than this process. A package upgrade unlinks the old binary, and the
+/// kernel then reports the running image as `<path> (deleted)`.
+fn service_outdated(unit: &str) -> bool {
+    let Ok(output) = systemctl(&["show", "--property=MainPID", "--value", unit]) else {
+        return false;
+    };
+    let pid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if pid.is_empty() || pid == "0" {
+        return false;
+    }
+    let Ok(running) = fs::read_link(format!("/proc/{pid}/exe")) else {
+        return false;
+    };
+    let Ok(current) = std::env::current_exe() else {
+        return false;
+    };
+    executable_outdated(&running.to_string_lossy(), &current.to_string_lossy())
+}
+
+fn executable_outdated(running: &str, current: &str) -> bool {
+    running.ends_with(" (deleted)") || running != current
+}
+
 fn health_check(address: &str) -> bool {
     use std::io::{Read, Write};
     let Ok(address) = address.parse::<SocketAddr>() else {
@@ -452,9 +480,11 @@ fn descriptor_address(url: &str) -> Option<&str> {
 fn descriptor_status(directory: &Path) -> anyhow::Result<RoomServiceStatus> {
     let descriptor = read_descriptor(directory)?;
     let running = descriptor_address(&descriptor.url).is_some_and(health_check);
+    let outdated = running && descriptor.systemd && service_outdated(&descriptor.unit);
     Ok(RoomServiceStatus {
         running,
         descriptor: Some(descriptor),
+        outdated,
     })
 }
 
@@ -496,10 +526,14 @@ pub fn start(
     };
     if let Some(previous) = &previous {
         let running = descriptor_address(&previous.url).is_some_and(health_check);
-        if should_reuse_service(running, previous.systemd, manager_available) {
+        // An outdated engine is restarted below; the room restores from its
+        // checkpoint, so the board and transcript carry over.
+        let outdated = running && previous.systemd && service_outdated(&previous.unit);
+        if !outdated && should_reuse_service(running, previous.systemd, manager_available) {
             return Ok(RoomServiceStatus {
                 running: true,
                 descriptor: Some(previous.clone()),
+                outdated: false,
             });
         }
         if previous.systemd && !manager_available {
@@ -591,6 +625,7 @@ pub fn start(
             return Ok(RoomServiceStatus {
                 running: true,
                 descriptor: Some(descriptor),
+                outdated: false,
             });
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -772,6 +807,14 @@ mod tests {
         received.recv_timeout(Duration::from_secs(2)).unwrap();
         thread.join().unwrap();
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_replaced_engine_binary_marks_the_service_outdated() {
+        let engine = "/usr/lib/orgbot/orgbot-engine";
+        assert!(executable_outdated(&format!("{engine} (deleted)"), engine));
+        assert!(executable_outdated("/opt/old/orgbot-engine", engine));
+        assert!(!executable_outdated(engine, engine));
     }
 
     #[test]

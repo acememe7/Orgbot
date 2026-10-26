@@ -627,7 +627,12 @@ impl Orchestrator {
         // Only one bot streams. The deltas from several turns arriving on one
         // channel would interleave into a paragraph none of them wrote; the
         // rest of the batch still posts its work to the room as usual.
+        //
+        // The stream goes to the first bot chosen, which is the bot callers
+        // tag it with (they peek `next_actors`). Handing it to whichever bot
+        // comes first in seat order instead labels one bot's work as another's.
         let mut streaming = sink;
+        let lead = chosen.first().copied();
         let turns = self
             .bots
             .iter_mut()
@@ -635,7 +640,11 @@ impl Orchestrator {
             .map(|(id, bot)| {
                 let id = *id;
                 let engine = engine.clone();
-                let sink = streaming.take();
+                let sink = if Some(id) == lead {
+                    streaming.take()
+                } else {
+                    None
+                };
                 async move { (id, bot.take_turn(&engine, sink).await) }
             })
             .collect::<Vec<_>>();

@@ -22,6 +22,13 @@ use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// The literal room server name, so `concat!` can build rules from it.
+macro_rules! room_server_name {
+    () => {
+        "orgbot_room"
+    };
+}
+
 use async_trait::async_trait;
 use orgbot_proto::agent::{AgentPolicy, CliKind};
 use serde_json::Value;
@@ -403,7 +410,7 @@ impl Provider for AgentCliProvider {
         } else {
             (None, None)
         };
-        let result = self
+        let mut result = self
             .run_episode(
                 &prompt,
                 resumed.as_deref(),
@@ -413,6 +420,30 @@ impl Provider for AgentCliProvider {
                 codex_home.as_deref(),
             )
             .await;
+        // A saved session the CLI no longer has (its history was pruned, or
+        // it lived in a home that is gone) must not halt the bot: forget it
+        // and take this turn as a fresh session, once.
+        if resumed.is_some()
+            && result
+                .as_ref()
+                .err()
+                .is_some_and(|error| is_missing_session(&error.to_string()))
+        {
+            tracing::warn!(cli = self.cli.binary(), "saved session is gone; starting a fresh one");
+            self.forget_session();
+            let fresh_prompt = compose_prompt(&request.system, situation.as_deref(), false, None);
+            episode = Episode::default();
+            result = self
+                .run_episode(
+                    &fresh_prompt,
+                    None,
+                    &sink,
+                    &mut episode,
+                    claude_config.as_deref(),
+                    codex_home.as_deref(),
+                )
+                .await;
+        }
         if let Some(path) = &claude_config {
             let _ = std::fs::remove_file(path);
         }
@@ -599,6 +630,15 @@ impl AgentCliProvider {
                     detail: format!("timed out after {}s", self.timeout.as_secs()),
                 })
             }
+        }
+    }
+
+    /// Drop the remembered native session, in memory and on disk.
+    fn forget_session(&self) {
+        *self.session.lock().unwrap() = None;
+        *self.session_system_brief.lock().unwrap() = None;
+        if let Some(store) = self.session_store.lock().unwrap().as_ref() {
+            let _ = std::fs::remove_file(&store.path);
         }
     }
 
@@ -975,7 +1015,7 @@ fn relay_binary() -> Result<std::path::PathBuf> {
 /// can never touch the board, which is exactly a room where nothing happens.
 fn write_grok_home(socket: &str) -> Result<std::path::PathBuf> {
     write_agent_home(socket, ".grok", "grok", |config, relay, socket| {
-        config.push_str("\n[mcp_servers.orgbot_room]\n");
+        config.push_str(concat!("\n[mcp_servers.", room_server_name!(), "]\n"));
         config.push_str(&format!(
             "command = {}\n",
             serde_json::to_string(&relay.to_string_lossy()).unwrap()
@@ -993,7 +1033,7 @@ fn write_codex_home(socket: &str) -> Result<std::path::PathBuf> {
 }
 
 fn append_codex_room_server(config: &mut String, relay: &Path, socket: &str) {
-    config.push_str("\n[mcp_servers.orgbot_room]\n");
+    config.push_str(concat!("\n[mcp_servers.", room_server_name!(), "]\n"));
     config.push_str(&format!(
         "command = {}\n",
         serde_json::to_string(&relay.to_string_lossy()).unwrap()
@@ -1104,7 +1144,7 @@ fn write_claude_mcp_config(socket: &str) -> Result<std::path::PathBuf> {
     let exe = relay_binary()?;
     let config = serde_json::json!({
         "mcpServers": {
-            "orgbot-room": {
+            (ROOM_SERVER_NAME): {
                 "command": exe.to_string_lossy(),
                 "args": ["room-mcp", "--socket", socket],
             }
@@ -1135,6 +1175,20 @@ fn write_claude_mcp_config(socket: &str) -> Result<std::path::PathBuf> {
             ))
         })?;
     Ok(path)
+}
+
+/// Whether a CLI failure means the session it was asked to resume is gone.
+fn is_missing_session(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "no rollout found",                // codex
+        "no conversation found",           // claude
+        "session not found",
+        "thread not found",
+        "could not find session",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 /// The newest instruction for the agent: the last user turn carrying prose.
@@ -1288,14 +1342,21 @@ fn build_args(
     }
 }
 
+/// The name every CLI registers the room's MCP server under.
+///
+/// The permission rules below are spelled from this name, so the two cannot
+/// drift apart: a server registered as `orgbot-room` while the rule allows
+/// `mcp__orgbot_room__*` leaves every room tool permission-blocked.
+const ROOM_SERVER_NAME: &str = room_server_name!();
+
 /// Matches every tool the room's MCP server exposes.
 ///
 /// Both Claude Code and Grok namespace MCP tools as `mcp__<server>__<tool>`
 /// in their permission rules; naming the server allows all of its tools.
-const ROOM_TOOL_PATTERN: &str = "mcp__orgbot_room";
+const ROOM_TOOL_PATTERN: &str = concat!("mcp__", room_server_name!());
 
 /// The same set, spelled as a wildcard for CLIs that want one.
-const ROOM_TOOL_WILDCARD: &str = "mcp__orgbot_room__*";
+const ROOM_TOOL_WILDCARD: &str = concat!("mcp__", room_server_name!(), "__*");
 
 #[cfg(test)]
 mod tests {
@@ -1940,6 +2001,53 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn a_session_the_cli_no_longer_has_is_dropped_and_the_turn_runs_fresh() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "orgbot-cli-missing-session-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join("fake-claude");
+        // Resuming fails the way the real CLIs do once a session is gone.
+        std::fs::write(
+            &binary,
+            r##"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--resume" ]; then
+    echo 'Error: No conversation found with session ID: gone-session' >&2
+    exit 1
+  fi
+done
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"fresh-session"}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}'
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = directory.join("sessions").join("bot.json");
+        let provider = fake_claude_provider(&binary, Some(store.clone()));
+        *provider.session.lock().unwrap() = Some("gone-session".into());
+
+        let response = provider
+            .complete(
+                CompletionRequest::new("claude-opus-5-5", "brief", vec![Turn::user("say hi")]),
+                None,
+            )
+            .await
+            .expect("the turn should run in a fresh session");
+        assert_eq!(response.content.len(), 1);
+        assert_eq!(provider.session_id().as_deref(), Some("fresh-session"));
+        assert!(std::fs::read_to_string(&store).unwrap().contains("fresh-session"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn a_failed_first_episode_retries_the_observed_native_session() {
         let directory = std::env::temp_dir().join(format!(
             "orgbot-cli-retry-session-{}-{}",
@@ -2267,6 +2375,21 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
                 );
             }
         }
+    }
+
+    #[test]
+    fn claude_registers_the_room_server_under_the_name_its_rules_allow() {
+        // A hyphen/underscore mismatch here permission-blocks every room tool
+        // for Claude bots while Codex and Grok bots keep working.
+        let path = write_claude_mcp_config("/tmp/orgbot-test.sock").unwrap();
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let servers = config["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 1);
+        let name = servers.keys().next().unwrap();
+        assert_eq!(ROOM_TOOL_PATTERN, format!("mcp__{name}"));
+        assert_eq!(ROOM_TOOL_WILDCARD, format!("mcp__{name}__*"));
     }
 
     #[test]

@@ -637,6 +637,14 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
           onCancelReply: () => setState(() => _replyTo = null),
           onSend: _send,
           mentions: [for (final bot in store.agents) bot.handle],
+          mentionOptions: [
+            for (final bot in store.agents)
+              MentionOption(
+                handle: bot.handle,
+                name: bot.displayName,
+                detail: bot.roles.map((r) => r.replaceAll('_', ' ')).join(', '),
+              ),
+          ],
           attachments: _files,
           attachmentRoot: _attachmentRoot,
           onAttach: Platform.isAndroid || (Platform.isLinux && _desktop)

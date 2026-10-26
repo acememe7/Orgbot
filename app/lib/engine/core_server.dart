@@ -245,7 +245,12 @@ Future<CoreServer> _startLinuxService(
     directory.path,
   ]);
   final current = _decodeServiceResult(existing, required: false);
-  final alreadyRunning = current != null && current['running'] == true;
+  // An outdated service (the engine was updated underneath it) is restarted
+  // by `start`, so it gets the current configuration as well.
+  final alreadyRunning =
+      current != null &&
+      current['running'] == true &&
+      current['outdated'] != true;
   if (!alreadyRunning) {
     final existingType = await FileSystemEntity.type(
       roomFile.path,

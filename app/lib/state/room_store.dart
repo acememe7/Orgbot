@@ -83,6 +83,16 @@ class ActivityStep {
   bool? succeeded;
 }
 
+/// A readable name for a tool call: `mcp__orgbot_room__list_tasks` reads as
+/// `room · list tasks`, `mcp__github__create_issue` as `github · create issue`.
+String toolLabel(String name) {
+  final mcp = RegExp(r'^mcp__([^_].*?)__(.+)$').firstMatch(name);
+  if (mcp == null) return name;
+  var server = mcp.group(1)!.replaceAll(RegExp(r'[-_]'), ' ');
+  if (server == 'orgbot room') server = 'room';
+  return '$server · ${mcp.group(2)!.replaceAll('_', ' ')}';
+}
+
 /// Observable room state.
 class RoomStore extends ChangeNotifier {
   RoomStore(this._client, {this.notificationRoomId}) {
@@ -100,6 +110,7 @@ class RoomStore extends ChangeNotifier {
   Timer? _coalescedNotification;
 
   void _notifyChanged({bool coalesce = false}) {
+    _invalidateViews();
     if (_notificationBatchDepth > 0) {
       _notificationBatchDirty = true;
       return;
@@ -191,7 +202,29 @@ class RoomStore extends ChangeNotifier {
   final List<ChatMessage> _pending = [];
   List<ChatMessage>? _messagesView;
 
-  void _invalidateMessages() => _messagesView = null;
+  Map<String, ChatMessage>? _messageIndex;
+  void _invalidateMessages() {
+    _messagesView = null;
+    _messageIndex = null;
+  }
+
+  // Sorted views, rebuilt at most once per change instead of on every read:
+  // message rows, the activity rail and the board all read them per build.
+  List<Agent>? _agentsView;
+  List<Task>? _tasksView;
+  List<BotActivity>? _activityView;
+  void _invalidateViews() {
+    _agentsView = null;
+    _tasksView = null;
+    _activityView = null;
+  }
+
+  /// A bot by id, without sorting the roster.
+  Agent? agentById(String? id) => id == null ? null : _agents[id];
+
+  /// A transcript message by id, including ones still pending.
+  ChatMessage? messageById(String id) =>
+      (_messageIndex ??= {for (final m in messages) m.id: m})[id];
 
   /// The highest log position applied so far.
   ///
@@ -204,7 +237,9 @@ class RoomStore extends ChangeNotifier {
   bool get isReplaying => _appliedTo < _snapshotHead;
 
   /// The roster, in a stable order (coordinators first, then by handle).
-  List<Agent> get agents {
+  List<Agent> get agents => _agentsView ??= List.unmodifiable(_sortedAgents());
+
+  List<Agent> _sortedAgents() {
     final list = _agents.values.toList();
     list.sort((a, b) {
       final ra = a.roles.contains('coordinator') ? 0 : 1;
@@ -217,7 +252,9 @@ class RoomStore extends ChangeNotifier {
 
   /// The board, most-recently-active first is not tracked; ordered by state
   /// group (active, waiting, open, done) then title so it reads like a board.
-  List<Task> get tasks {
+  List<Task> get tasks => _tasksView ??= List.unmodifiable(_sortedTasks());
+
+  List<Task> _sortedTasks() {
     final list = _tasks.values.toList();
     int rank(TaskState s) {
       if (s == TaskState.inProgress || s == TaskState.claimed) return 0;
@@ -295,9 +332,9 @@ class RoomStore extends ChangeNotifier {
       .toList();
 
   /// What each bot is doing, in roster order.
-  List<BotActivity> get activity => agents
-      .map((a) => _activity.putIfAbsent(a.id, () => BotActivity(a)))
-      .toList();
+  List<BotActivity> get activity => _activityView ??= List.unmodifiable(
+    agents.map((a) => _activity.putIfAbsent(a.id, () => BotActivity(a))),
+  );
 
   /// Note something a bot did, for the activity panel.
   void _note(String? agentId, String action) {
@@ -317,7 +354,7 @@ class RoomStore extends ChangeNotifier {
     // a fresh Thinking event permits IDs to be reused on the next request.
     if (!activity._seenStepIdsThisTurn.add(id)) return false;
     activity.steps.add(
-      ActivityStep(id: id, label: label, startedAt: DateTime.now()),
+      ActivityStep(id: id, label: toolLabel(label), startedAt: DateTime.now()),
     );
     if (activity.steps.length > _maxActivitySteps) {
       activity.steps.removeRange(0, activity.steps.length - _maxActivitySteps);
@@ -393,6 +430,7 @@ class RoomStore extends ChangeNotifier {
     Map<String, Object?> message, {
     bool deliverAttention = true,
   }) {
+    _invalidateViews();
     switch (message['type'] as String?) {
       case 'snapshot':
         _applySnapshot(message);

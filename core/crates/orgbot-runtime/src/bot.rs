@@ -302,7 +302,7 @@ impl Bot {
 
             let response = match self.mcp_rx.as_mut() {
                 Some(rx) => {
-                    let (response, mcp_ok, mcp_err) = complete_with_mcp(
+                    let (response, mcp) = complete_with_mcp(
                         &self.provider,
                         &self.tools,
                         engine,
@@ -312,8 +312,11 @@ impl Bot {
                         rx,
                     )
                     .await;
-                    report.tool_calls += mcp_ok;
-                    report.tool_errors += mcp_err;
+                    report.tool_calls += mcp.ok;
+                    report.tool_errors += mcp.err;
+                    // Said through the room tool already; the closing prose
+                    // is the CLI's own summary and must not be posted again.
+                    posted_to_chat |= mcp.posted;
                     response
                 }
                 // CLI providers execute their own tools inside complete(); only
@@ -771,6 +774,15 @@ fn is_safe_cut_point(turn: &Turn) -> bool {
             .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
 }
 
+/// What the room-MCP calls of one episode amounted to.
+#[derive(Debug, Default)]
+struct McpTally {
+    ok: usize,
+    err: usize,
+    /// A post_message call succeeded during the episode.
+    posted: bool,
+}
+
 /// Run one provider turn while also serving inbound room-MCP calls.
 ///
 /// Agent CLIs (claude -p, codex exec, grok -p) run their own tool loop inside
@@ -787,11 +799,10 @@ async fn complete_with_mcp(
     request: CompletionRequest,
     sink: Option<mpsc::Sender<StreamEvent>>,
     rx: &mut mpsc::Receiver<crate::mcp::McpCall>,
-) -> (Result<CompletionResponse, ProviderError>, usize, usize) {
+) -> (Result<CompletionResponse, ProviderError>, McpTally) {
     let mut session = crate::mcp::McpSession::new(tools.to_vec());
     let mut turn = std::pin::pin!(provider.complete(request, sink));
-    let mut calls_ok = 0usize;
-    let mut calls_err = 0usize;
+    let mut tally = McpTally::default();
     loop {
         tokio::select! {
             response = &mut turn => {
@@ -804,18 +815,14 @@ async fn complete_with_mcp(
                         let mut dispatch = |name: &str, args: &serde_json::Value| {
                             let outcome = engine
                                 .with(|engine| orgbot_tools::dispatch(engine, actor, name, args));
-                            if outcome.is_error {
-                                calls_err += 1;
-                            } else {
-                                calls_ok += 1;
-                            }
+                            tally.count(name, outcome.is_error);
                             outcome
                         };
                         session.handle(&call.request, &mut dispatch)
                     };
                     let _ = call.reply.send(reply);
                 }
-                return (response, calls_ok, calls_err);
+                return (response, tally);
             }
             inbound = rx.recv() => {
                 let Some(call) = inbound else { continue };
@@ -829,17 +836,24 @@ async fn complete_with_mcp(
                             result = %outcome.content.chars().take(160).collect::<String>(),
                             "mcp tool call"
                         );
-                        if outcome.is_error {
-                            calls_err += 1;
-                        } else {
-                            calls_ok += 1;
-                        }
+                        tally.count(name, outcome.is_error);
                         outcome
                     };
                     session.handle(&call.request, &mut dispatch)
                 };
                 let _ = call.reply.send(reply);
             }
+        }
+    }
+}
+
+impl McpTally {
+    fn count(&mut self, tool: &str, failed: bool) {
+        if failed {
+            self.err += 1;
+        } else {
+            self.ok += 1;
+            self.posted |= tool == "post_message";
         }
     }
 }

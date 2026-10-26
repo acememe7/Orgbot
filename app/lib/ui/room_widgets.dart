@@ -5,6 +5,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'dart:io';
@@ -14,6 +15,10 @@ import 'package:url_launcher/url_launcher.dart';
 import '../protocol/models.dart';
 import '../state/room_store.dart';
 import 'brand.dart';
+import 'polish.dart';
+import 'widgets/mentions.dart';
+
+export 'widgets/mentions.dart' show MentionOption;
 
 /// Who is doing what, right now.
 ///
@@ -82,7 +87,7 @@ class ActivityRail extends StatelessWidget {
           const SizedBox(width: 9),
           const Text(
             'Activity',
-            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5),
           ),
           const Spacer(),
           Text(
@@ -134,10 +139,15 @@ class ActivityRail extends StatelessWidget {
           const SizedBox(height: 8),
           ClipRRect(
             borderRadius: BorderRadius.circular(4),
-            child: LinearProgressIndicator(
-              value: tasks.isEmpty ? 0 : done / tasks.length,
-              minHeight: 5,
-              backgroundColor: scheme.surfaceContainerHighest,
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(end: tasks.isEmpty ? 0 : done / tasks.length),
+              duration: motionDuration(context, 320),
+              curve: Curves.easeOutCubic,
+              builder: (context, value, _) => LinearProgressIndicator(
+                value: value,
+                minHeight: 4,
+                backgroundColor: scheme.surfaceContainerHighest,
+              ),
             ),
           ),
         ],
@@ -161,12 +171,22 @@ class _BotRow extends StatelessWidget {
         ? (Colors.lightBlue, activeStep.label)
         : _status(entry.agent.status, entry.streaming, entry.lastError != null);
 
-    return Container(
+    final live = entry.streaming;
+    return AnimatedContainer(
+      duration: motionDuration(context, 180),
+      curve: Curves.easeOut,
       margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
       decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(18),
+        color: live
+            ? scheme.primary.withValues(alpha: 0.05)
+            : scheme.surfaceContainerLow.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: live
+              ? scheme.primary.withValues(alpha: 0.35)
+              : scheme.outlineVariant.withValues(alpha: 0.7),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -183,8 +203,10 @@ class _BotRow extends StatelessWidget {
                       entry.agent.displayName.isEmpty
                           ? '@${entry.agent.handle}'
                           : entry.agent.displayName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        fontWeight: FontWeight.w700,
+                        fontWeight: FontWeight.w600,
                         fontSize: 13,
                       ),
                     ),
@@ -193,6 +215,8 @@ class _BotRow extends StatelessWidget {
                         entry.agent.roles
                             .map((r) => r.replaceAll('_', ' '))
                             .join(', '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           fontSize: 11,
                           color: scheme.onSurfaceVariant,
@@ -201,8 +225,22 @@ class _BotRow extends StatelessWidget {
                   ],
                 ),
               ),
+              const SizedBox(width: 8),
               Flexible(
-                child: StatusPill(color: color, label: label),
+                child: AnimatedSwitcher(
+                  duration: motionDuration(context, 160),
+                  switchInCurve: Curves.easeOut,
+                  switchOutCurve: Curves.easeIn,
+                  layoutBuilder: (current, previous) => Stack(
+                    alignment: Alignment.centerRight,
+                    children: [...previous, ?current],
+                  ),
+                  child: StatusPill(
+                    key: ValueKey(label),
+                    color: color,
+                    label: label,
+                  ),
+                ),
               ),
             ],
           ),
@@ -488,6 +526,14 @@ class _TranscriptState extends State<Transcript>
   bool _interacting = false;
   bool _scheduled = false;
 
+  /// Messages present when the transcript opened never animate in; only
+  /// arrivals do, and each one only once.
+  Set<String>? _initialIds;
+  final Set<String> _arrived = {};
+
+  /// The failures the banner was closed for. A new failure shows it again.
+  String? _dismissedFailures;
+
   @override
   bool get wantKeepAlive => true;
 
@@ -562,9 +608,14 @@ class _TranscriptState extends State<Transcript>
       }
     }
     final messages = _messages;
+    _initialIds ??= {for (final m in messages) m.id};
     final boundary = messages.indexWhere((m) => m.id == _boundary);
     final split = boundary + 1;
     final composing = store.activity.where((a) => a.streaming).toList();
+    final failing = store.failing;
+    final failureKey = [
+      for (final f in failing) '${f.agent.id}@${f.lastErrorAt}',
+    ].join(',');
     final scheme = Theme.of(context).colorScheme;
 
     SliverChildBuilderDelegate children(
@@ -576,7 +627,6 @@ class _TranscriptState extends State<Transcript>
         (context, i) {
           final message = messages[index(i)];
           final bubble = _Bubble(
-            key: widget.desktop ? null : ValueKey(message.id),
             message: message,
             store: store,
             desktop: widget.desktop,
@@ -585,16 +635,19 @@ class _TranscriptState extends State<Transcript>
             onOpenAttachment: widget.onOpenAttachment,
             onReply: widget.onReply,
           );
+          final animate =
+              !_initialIds!.contains(message.id) && _arrived.add(message.id);
+          final arriving = _Arrival(animate: animate, child: bubble);
           return widget.desktop
               ? Align(
                   key: ValueKey(message.id),
                   alignment: Alignment.center,
                   child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 920),
-                    child: bubble,
+                    constraints: const BoxConstraints(maxWidth: 880),
+                    child: arriving,
                   ),
                 )
-              : bubble;
+              : KeyedSubtree(key: ValueKey(message.id), child: arriving);
         },
         childCount: count,
         findChildIndexCallback: (key) {
@@ -617,7 +670,19 @@ class _TranscriptState extends State<Transcript>
               }
             },
             onPointerCancel: (_) => _interacting = false,
-            onPointerSignal: (_) => _hold(),
+            onPointerSignal: (signal) {
+              // A wheel turned down at the bottom moves nothing and sends no
+              // scroll notifications, so it must not leave the pill showing.
+              if (signal is PointerScrollEvent && signal.scrollDelta.dy > 0) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!mounted || !widget.controller.hasClients) return;
+                  final atEnd = widget.controller.position.extentAfter <= 24;
+                  if (atEnd != _following) setState(() => _following = atEnd);
+                });
+                return;
+              }
+              _hold();
+            },
             child: NotificationListener<ScrollNotification>(
               onNotification: _scroll,
               child: ScrollConfiguration(
@@ -674,7 +739,7 @@ class _TranscriptState extends State<Transcript>
             ),
           ),
         ),
-        if (messages.isEmpty && composing.isEmpty && store.failing.isEmpty)
+        if (messages.isEmpty && composing.isEmpty && failing.isEmpty)
           const Positioned.fill(
             child: IgnorePointer(
               child: EmptyState(
@@ -685,20 +750,31 @@ class _TranscriptState extends State<Transcript>
               ),
             ),
           ),
-        if (store.failing.isNotEmpty)
+        if (failing.isNotEmpty && failureKey != _dismissedFailures)
           Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: _FailureBanner(failing: store.failing),
+            top: 8,
+            left: 16,
+            right: 16,
+            child: Center(
+              child: _PopIn(
+                child: _FailureBanner(
+                  failing: failing,
+                  onDismiss: () =>
+                      setState(() => _dismissedFailures = failureKey),
+                ),
+              ),
+            ),
           ),
         if (composing.isNotEmpty && _following)
           Positioned(
             left: 20,
             right: 20,
             bottom: 0,
-            child: ColoredBox(
-              color: scheme.surface,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: scheme.surface,
+                borderRadius: BorderRadius.circular(8),
+              ),
               child: _Typing(
                 handles: composing.map((a) => a.agent.handle).toList(),
                 status: composing.length == 1
@@ -713,10 +789,21 @@ class _TranscriptState extends State<Transcript>
             left: 0,
             right: 0,
             child: Center(
-              child: FilledButton.tonalIcon(
-                onPressed: _latest,
-                icon: const Icon(Icons.arrow_downward, size: 16),
-                label: const Text('Jump to latest'),
+              child: _PopIn(
+                child: FilledButton.tonalIcon(
+                  onPressed: _latest,
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(0, 32),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    shape: const StadiumBorder(),
+                    textStyle: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  icon: const Icon(Icons.arrow_downward, size: 15),
+                  label: const Text('Jump to latest'),
+                ),
               ),
             ),
           ),
@@ -828,22 +915,35 @@ class _Typing extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final who = handles.length == 1
         ? '@${handles.first} ${status ?? 'is thinking'}'
+        : handles.length <= 3
+        ? '${handles.map((h) => '@$h').join(', ')} are thinking'
         : '${handles.length} bots are thinking';
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
         children: [
-          BotAvatar(handle: handles.first, radius: 15),
-          const SizedBox(width: 11),
           SizedBox(
-            width: 13,
-            height: 13,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: scheme.onSurfaceVariant,
+            width: 30.0 + 18.0 * (handles.length.clamp(1, 3) - 1),
+            height: 30,
+            child: Stack(
+              children: [
+                for (var i = 0; i < handles.length.clamp(1, 3); i++)
+                  Positioned(
+                    left: 18.0 * i,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(color: scheme.surface, width: 1.5),
+                      ),
+                      child: BotAvatar(handle: handles[i], radius: 13.5),
+                    ),
+                  ),
+              ],
             ),
           ),
-          const SizedBox(width: 9),
+          const SizedBox(width: 10),
+          const _Dots(),
+          const SizedBox(width: 8),
           Expanded(
             child: Text(
               who,
@@ -858,9 +958,257 @@ class _Typing extends StatelessWidget {
   }
 }
 
+/// Three dots that breathe in turn. Still when motion is reduced.
+class _Dots extends StatefulWidget {
+  const _Dots();
+
+  @override
+  State<_Dots> createState() => _DotsState();
+}
+
+class _DotsState extends State<_Dots> with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _pulse.stop();
+    } else if (!_pulse.isAnimating) {
+      _pulse.repeat();
+    }
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.onSurfaceVariant;
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: _pulse,
+        builder: (context, _) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < 3; i++) ...[
+              if (i > 0) const SizedBox(width: 3),
+              Container(
+                width: 5,
+                height: 5,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: color.withValues(alpha: _alpha(i)),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  double _alpha(int i) {
+    if (!_pulse.isAnimating) return 0.7;
+    final t = (_pulse.value - i * 0.18) % 1.0;
+    // A short rise and a slower fall, so the motion reads as calm.
+    final wave = t < 0.3 ? t / 0.3 : (t < 0.7 ? 1 - (t - 0.3) / 0.4 : 0.0);
+    return 0.3 + 0.6 * wave;
+  }
+}
+
+/// Fades and lifts a newly arrived message into place once.
+///
+/// Only paint is animated: the row is laid out at its final size from the
+/// first frame, so scroll anchoring and following are unaffected.
+class _Arrival extends StatefulWidget {
+  const _Arrival({required this.animate, required this.child});
+
+  final bool animate;
+  final Widget child;
+
+  @override
+  State<_Arrival> createState() => _ArrivalState();
+}
+
+class _ArrivalState extends State<_Arrival>
+    with SingleTickerProviderStateMixin {
+  AnimationController? _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.animate) {
+      _controller = AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 220),
+      );
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final controller = _controller;
+    if (controller == null || controller.isAnimating || controller.isCompleted) {
+      return;
+    }
+    if (MediaQuery.disableAnimationsOf(context)) {
+      controller.value = 1;
+    } else {
+      controller.forward();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = _controller;
+    if (controller == null) return widget.child;
+    final curve = CurvedAnimation(
+      parent: controller,
+      curve: Curves.easeOutCubic,
+    );
+    return AnimatedBuilder(
+      animation: curve,
+      child: widget.child,
+      builder: (context, child) => controller.isCompleted
+          ? child!
+          : Opacity(
+              opacity: curve.value,
+              child: Transform.translate(
+                offset: Offset(0, 6 * (1 - curve.value)),
+                child: child,
+              ),
+            ),
+    );
+  }
+}
+
+/// A small entrance for floating controls: fade and a slight scale.
+class _PopIn extends StatefulWidget {
+  const _PopIn({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_PopIn> createState() => _PopInState();
+}
+
+class _PopInState extends State<_PopIn> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 160),
+  );
+  late final Animation<double> _curve = CurvedAnimation(
+    parent: _controller,
+    curve: Curves.easeOutCubic,
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_controller.isCompleted || _controller.isAnimating) return;
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _controller.value = 1;
+    } else {
+      _controller.forward();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FadeTransition(
+    opacity: _curve,
+    child: ScaleTransition(
+      scale: Tween(begin: 0.96, end: 1.0).animate(_curve),
+      child: widget.child,
+    ),
+  );
+}
+
+/// The message a reply answers, shown compactly above the reply.
+class _ReplyQuote extends StatelessWidget {
+  const _ReplyQuote({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsets.fromLTRB(8, 4, 10, 4),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.subdirectory_arrow_right_rounded,
+              size: 14, color: scheme.onSurfaceVariant),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Tracks pointer hover and keyboard focus within a row, for desktop actions
+/// that stay out of the way until you reach for them.
+class _HoverRow extends StatefulWidget {
+  const _HoverRow({required this.builder});
+
+  final Widget Function(BuildContext context, bool active) builder;
+
+  @override
+  State<_HoverRow> createState() => _HoverRowState();
+}
+
+class _HoverRowState extends State<_HoverRow> {
+  bool _hovered = false;
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) => MouseRegion(
+    onEnter: (_) => setState(() => _hovered = true),
+    onExit: (_) => setState(() => _hovered = false),
+    child: Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onFocusChange: (focused) => setState(() => _focused = focused),
+      child: widget.builder(context, _hovered || _focused),
+    ),
+  );
+}
+
 class _Bubble extends StatelessWidget {
   const _Bubble({
-    super.key,
     required this.message,
     required this.store,
     this.desktop = false,
@@ -911,34 +1259,154 @@ class _Bubble extends StatelessWidget {
         : store.handleFor(author.agentId);
     final displayName = isHuman
         ? name
-        : store.agents
-              .where((a) => a.id == author.agentId)
-              .firstOrNull
-              ?.displayName;
+        : store.agentById(author.agentId)?.displayName;
+    final shownName = displayName == null || displayName.isEmpty
+        ? name
+        : displayName;
     final parent = message.replyTo == null
         ? null
-        : store.messages.where((m) => m.id == message.replyTo).firstOrNull;
+        : store.messageById(message.replyTo!);
     final color = isHuman
         ? scheme.primary
         : handleColor(
             name,
             dark: Theme.of(context).brightness == Brightness.dark,
           );
-
+    final quote = message.replyTo == null
+        ? null
+        : _ReplyQuote(
+            label: parent == null
+                ? 'Reply to earlier message'
+                : '${parent.author.isHuman ? parent.author.name ?? 'You' : store.handleFor(parent.author.agentId)}: ${parent.body}',
+          );
     final time = message.sentAt.dateTime.toLocal();
+    final stamp = pending
+        ? 'Pending'
+        : message.sentAt.millis > 0
+        ? '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}'
+        : null;
+    final body = Opacity(
+      opacity: pending ? 0.6 : 1,
+      child: MessageText(text: message.body),
+    );
+    final files = [
+      for (final file in message.files)
+        AttachmentTile(
+          file: file,
+          root: attachmentRoot,
+          onOpen: onOpenAttachment == null
+              ? null
+              : () => onOpenAttachment!(file),
+        ),
+    ];
+    Widget reply({double size = 18}) => IconButton(
+      tooltip: 'Reply to $name',
+      visualDensity: VisualDensity.compact,
+      icon: Icon(Icons.reply, size: size),
+      onPressed: () => onReply!(message),
+    );
+
+    if (desktop) {
+      final avatar = isHuman
+          ? CircleAvatar(
+              radius: 14,
+              backgroundColor: color.withValues(alpha: 0.16),
+              child: Icon(Icons.person_outline, size: 16, color: color),
+            )
+          : BotAvatar(handle: name, radius: 14);
+      return _HoverRow(
+        builder: (context, active) => Container(
+          margin: const EdgeInsets.only(bottom: 2),
+          padding: const EdgeInsets.fromLTRB(10, 8, 6, 10),
+          decoration: BoxDecoration(
+            color: active
+                ? scheme.onSurface.withValues(alpha: 0.035)
+                : isHuman
+                ? scheme.primary.withValues(alpha: 0.045)
+                : null,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(padding: const EdgeInsets.only(top: 1), child: avatar),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      height: 28,
+                      child: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              shownName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 13.5,
+                                color: scheme.onSurface,
+                              ),
+                            ),
+                          ),
+                          if (!isHuman && shownName != name) ...[
+                            const SizedBox(width: 6),
+                            Text(
+                              '@$name',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: color,
+                              ),
+                            ),
+                          ],
+                          if (stamp != null) ...[
+                            const SizedBox(width: 8),
+                            Text(
+                              stamp,
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: scheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                          const Spacer(),
+                          if (!pending && onReply != null)
+                            AnimatedOpacity(
+                              opacity: active ? 1 : 0,
+                              duration: motionDuration(context, 120),
+                              child: reply(size: 17),
+                            ),
+                        ],
+                      ),
+                    ),
+                    ?quote,
+                    const SizedBox(height: 2),
+                    body,
+                    ...files,
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           children: [
             if (isHuman)
-              Icon(Icons.person_outline, size: desktop ? 17 : 19, color: color)
+              Icon(Icons.person_outline, size: 19, color: color)
             else
-              BotAvatar(handle: name, radius: desktop ? 10 : 12),
+              BotAvatar(handle: name, radius: 12),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                displayName == null || displayName.isEmpty ? name : displayName,
+                shownName,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -949,74 +1417,20 @@ class _Bubble extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            if (pending)
+            if (stamp != null)
               Text(
-                'Pending',
-                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
-              )
-            else if (message.sentAt.millis > 0)
-              Text(
-                '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}',
+                stamp,
                 style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
               ),
-            if (!pending && onReply != null)
-              IconButton(
-                tooltip: 'Reply to $name',
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.reply, size: 18),
-                onPressed: () => onReply!(message),
-              ),
+            if (!pending && onReply != null) reply(),
           ],
         ),
-        if (message.replyTo != null)
-          Container(
-            margin: const EdgeInsets.only(top: 8),
-            padding: const EdgeInsets.fromLTRB(10, 4, 6, 4),
-            decoration: BoxDecoration(
-              border: Border(left: BorderSide(color: scheme.primary, width: 2)),
-            ),
-            child: Text(
-              parent == null
-                  ? 'Reply to earlier message'
-                  : '${parent.author.isHuman ? parent.author.name ?? 'You' : store.handleFor(parent.author.agentId)}: ${parent.body}',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
-            ),
-          ),
-        SizedBox(height: desktop ? 7 : 10),
-        Opacity(
-          opacity: pending ? 0.7 : 1,
-          child: MessageText(text: message.body),
-        ),
-        for (final file in message.files)
-          AttachmentTile(
-            file: file,
-            root: attachmentRoot,
-            onOpen: onOpenAttachment == null
-                ? null
-                : () => onOpenAttachment!(file),
-          ),
+        ?quote,
+        const SizedBox(height: 10),
+        body,
+        ...files,
       ],
     );
-    if (desktop) {
-      final row = Padding(
-        padding: const EdgeInsets.fromLTRB(12, 3, 10, 6),
-        child: content,
-      );
-      return Padding(
-        padding: const EdgeInsets.only(bottom: 12),
-        child: isHuman
-            ? DecoratedBox(
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerLow.withValues(alpha: 0.45),
-                  borderRadius: BorderRadius.circular(7),
-                ),
-                child: row,
-              )
-            : row,
-      );
-    }
     return Container(
       margin: const EdgeInsets.only(bottom: 20),
       padding: isHuman
@@ -1024,7 +1438,7 @@ class _Bubble extends StatelessWidget {
           : const EdgeInsets.symmetric(vertical: 12),
       decoration: BoxDecoration(
         color: isHuman ? scheme.surfaceContainerLow : null,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(14),
         border: isHuman
             ? Border.all(color: scheme.outlineVariant.withValues(alpha: 0.6))
             : null,
@@ -1107,12 +1521,78 @@ class _SystemNoticeState extends State<_SystemNotice> {
 class MessageText extends StatelessWidget {
   final String text;
   const MessageText({super.key, required this.text});
+
+  // One style sheet per theme rather than one per message per build.
+  static final _sheets = Expando<MarkdownStyleSheet>();
+  static final _mentions = Expando<Map<String, MarkdownElementBuilder>>();
+
+  static MarkdownStyleSheet _sheetFor(ThemeData theme) =>
+      _sheets[theme] ??= _buildSheet(theme);
+
+  static MarkdownStyleSheet _buildSheet(ThemeData theme) {
+    final scheme = theme.colorScheme;
+    return MarkdownStyleSheet.fromTheme(theme).copyWith(
+      p: TextStyle(fontSize: 14.5, height: 1.55, color: scheme.onSurface),
+      h1: TextStyle(
+        fontSize: 20,
+        height: 1.4,
+        fontWeight: FontWeight.w600,
+        color: scheme.onSurface,
+      ),
+      h2: TextStyle(
+        fontSize: 17,
+        height: 1.4,
+        fontWeight: FontWeight.w600,
+        color: scheme.onSurface,
+      ),
+      h3: TextStyle(
+        fontSize: 15.5,
+        height: 1.4,
+        fontWeight: FontWeight.w600,
+        color: scheme.onSurface,
+      ),
+      a: TextStyle(
+        color: scheme.primary,
+        decoration: TextDecoration.underline,
+        decorationColor: scheme.primary.withValues(alpha: 0.5),
+      ),
+      code: TextStyle(
+        fontFamily: 'monospace',
+        fontSize: 13,
+        color: scheme.onSurface,
+        backgroundColor: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+      ),
+      codeblockDecoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      codeblockPadding: const EdgeInsets.all(12),
+      blockquoteDecoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      blockSpacing: 10,
+    );
+  }
+
+  static Map<String, MarkdownElementBuilder> _buildersFor(ThemeData theme) =>
+      _mentions[theme] ??= {
+        'mention': MentionBuilder(
+          TextStyle(
+            color: theme.colorScheme.primary,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      };
+
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
     return MarkdownBody(
       data: text,
       softLineBreak: true,
+      inlineSyntaxes: [MentionSyntax()],
+      builders: _buildersFor(theme),
       imageBuilder: (uri, title, alt) =>
           Text(alt?.isNotEmpty == true ? alt! : 'Image attachment'),
       onTapLink: (_, href, _) async {
@@ -1128,37 +1608,7 @@ class MessageText extends StatelessWidget {
           }
         }
       },
-      styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-        p: TextStyle(fontSize: 15, height: 1.55, color: scheme.onSurface),
-        h1: TextStyle(
-          fontSize: 21,
-          height: 1.4,
-          fontWeight: FontWeight.w600,
-          color: scheme.onSurface,
-        ),
-        h2: TextStyle(
-          fontSize: 18,
-          height: 1.4,
-          fontWeight: FontWeight.w600,
-          color: scheme.onSurface,
-        ),
-        h3: TextStyle(
-          fontSize: 16,
-          height: 1.4,
-          fontWeight: FontWeight.w600,
-          color: scheme.onSurface,
-        ),
-        code: TextStyle(
-          fontFamily: 'monospace',
-          fontSize: 13,
-          color: scheme.onSurface,
-        ),
-        codeblockDecoration: BoxDecoration(
-          color: scheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        blockSpacing: 12,
-      ),
+      styleSheet: _sheetFor(theme),
     );
   }
 }
@@ -1333,12 +1783,13 @@ Color taskColor(TaskState state) {
 }
 
 /// The message input.
-class Composer extends StatelessWidget {
+class Composer extends StatefulWidget {
   const Composer({
     super.key,
     required this.controller,
     required this.onSend,
     this.mentions = const [],
+    this.mentionOptions,
     this.attachments = const [],
     this.attachmentRoot,
     this.onAttach,
@@ -1355,7 +1806,10 @@ class Composer extends StatelessWidget {
 
   final TextEditingController controller;
   final VoidCallback onSend;
+
+  /// Bot handles that can be tagged. [mentionOptions] adds names and roles.
   final List<String> mentions;
+  final List<MentionOption>? mentionOptions;
   final List<ChatFile> attachments;
   final String? attachmentRoot;
   final VoidCallback? onAttach;
@@ -1369,20 +1823,158 @@ class Composer extends StatelessWidget {
   final VoidCallback? onCancelReply;
 
   @override
+  State<Composer> createState() => _ComposerState();
+}
+
+class _ComposerState extends State<Composer> {
+  FocusNode? _ownFocus;
+  FocusNode get _focus => widget.focusNode ?? (_ownFocus ??= FocusNode());
+  bool _focused = false;
+  MentionQuery? _query;
+  List<MentionOption> _suggestions = const [];
+  int _highlighted = 0;
+
+  /// The query the suggestions were dismissed for, so Esc sticks.
+  int? _dismissedAt;
+
+  List<MentionOption> get _options {
+    final options =
+        widget.mentionOptions ??
+        [for (final handle in widget.mentions) MentionOption(handle: handle)];
+    return [if (options.isNotEmpty) MentionOption.all, ...options];
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_textChanged);
+    _focus.addListener(_focusChanged);
+    _focused = _focus.hasFocus;
+    // A restored draft may already end in an `@`.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _textChanged();
+    });
+  }
+
+  @override
+  void didUpdateWidget(Composer old) {
+    super.didUpdateWidget(old);
+    if (old.controller != widget.controller) {
+      old.controller.removeListener(_textChanged);
+      widget.controller.addListener(_textChanged);
+    }
+    if (old.focusNode != widget.focusNode) {
+      (old.focusNode ?? _ownFocus)?.removeListener(_focusChanged);
+      _focus.addListener(_focusChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_textChanged);
+    _focus.removeListener(_focusChanged);
+    _ownFocus?.dispose();
+    super.dispose();
+  }
+
+  void _focusChanged() {
+    if (_focused == _focus.hasFocus) return;
+    setState(() => _focused = _focus.hasFocus);
+  }
+
+  void _textChanged() {
+    final query = MentionQuery.at(widget.controller.value);
+    if (query?.start != _dismissedAt) _dismissedAt = null;
+    final suggestions = query == null || _dismissedAt != null
+        ? const <MentionOption>[]
+        : _options.where((o) => o.matches(query.text)).toList();
+    if (query?.start == _query?.start &&
+        query?.text == _query?.text &&
+        suggestions.length == _suggestions.length) {
+      return;
+    }
+    setState(() {
+      _query = query;
+      _suggestions = suggestions;
+      _highlighted = 0;
+    });
+  }
+
+  void _accept(MentionOption option) {
+    final query = _query;
+    if (query == null) return;
+    widget.controller.value = query.complete(
+      widget.controller.value,
+      option.handle,
+    );
+    _focus.requestFocus();
+  }
+
+  void _move(int by) => setState(
+    () => _highlighted = (_highlighted + by) % _suggestions.length,
+  );
+
+  void _insertTag(String value) {
+    final controller = widget.controller;
+    final selection = controller.selection;
+    final start = selection.isValid ? selection.start : controller.text.length;
+    final end = selection.isValid ? selection.end : start;
+    final tag =
+        '${start > 0 && !RegExp(r'\s').hasMatch(controller.text[start - 1]) ? ' ' : ''}$value ';
+    controller.value = TextEditingValue(
+      text: controller.text.replaceRange(start, end, tag),
+      selection: TextSelection.collapsed(offset: start + tag.length),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final composer = Container(
-      margin: EdgeInsets.fromLTRB(desktop ? 24 : 16, 8, desktop ? 24 : 16, 12),
+    final desktop = widget.desktop;
+    final busy = widget.busy;
+    final attachments = widget.attachments;
+    final controller = widget.controller;
+    final suggesting = _suggestions.isNotEmpty && _focused;
+    final composer = AnimatedContainer(
+      duration: motionDuration(context, 140),
+      curve: Curves.easeOut,
+      margin: EdgeInsets.fromLTRB(desktop ? 24 : 16, 8, desktop ? 24 : 16, 4),
       padding: EdgeInsets.all(desktop ? 4 : 6),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerLow,
         borderRadius: BorderRadius.circular(desktop ? 10 : 18),
-        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.8)),
+        border: Border.all(
+          color: _focused
+              ? scheme.primary.withValues(alpha: 0.55)
+              : scheme.outlineVariant.withValues(alpha: 0.8),
+        ),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (replyTo != null)
+          AnimatedSize(
+            duration: motionDuration(context, 120),
+            curve: Curves.easeOut,
+            alignment: Alignment.bottomCenter,
+            child: suggesting
+                ? Padding(
+                    padding: const EdgeInsets.fromLTRB(2, 2, 2, 4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        MentionSuggestions(
+                          options: _suggestions,
+                          highlighted: _highlighted,
+                          onSelected: _accept,
+                          onHover: (i) => setState(() => _highlighted = i),
+                        ),
+                        const Divider(height: 1),
+                      ],
+                    ),
+                  )
+                : const SizedBox(width: double.infinity),
+          ),
+          if (widget.replyTo != null)
             Padding(
               padding: const EdgeInsets.only(left: 12, top: 4),
               child: Row(
@@ -1394,7 +1986,7 @@ class Composer extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Reply to ${replyAuthor ?? 'message'}',
+                          'Reply to ${widget.replyAuthor ?? 'message'}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
@@ -1404,7 +1996,7 @@ class Composer extends StatelessWidget {
                           ),
                         ),
                         Text(
-                          replyTo!.body,
+                          widget.replyTo!.body,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
@@ -1417,7 +2009,7 @@ class Composer extends StatelessWidget {
                   ),
                   IconButton(
                     tooltip: 'Cancel reply',
-                    onPressed: onCancelReply,
+                    onPressed: widget.onCancelReply,
                     icon: const Icon(Icons.close, size: 18),
                   ),
                 ],
@@ -1432,31 +2024,31 @@ class Composer extends StatelessWidget {
                   for (final file in attachments)
                     AttachmentTile(
                       file: file,
-                      root: attachmentRoot,
-                      onOpen: onOpenAttachment == null
+                      root: widget.attachmentRoot,
+                      onOpen: widget.onOpenAttachment == null
                           ? null
-                          : () => onOpenAttachment!(file),
-                      onRemove: busy || onRemoveAttachment == null
+                          : () => widget.onOpenAttachment!(file),
+                      onRemove: busy || widget.onRemoveAttachment == null
                           ? null
-                          : () => onRemoveAttachment!(file),
+                          : () => widget.onRemoveAttachment!(file),
                     ),
                 ],
               ),
             ),
           if (busy)
             Padding(
-              padding: EdgeInsets.all(8),
+              padding: const EdgeInsets.all(8),
               child: Row(
                 children: [
-                  SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 1.6),
                   ),
-                  SizedBox(width: 10),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      busyLabel,
+                      widget.busyLabel,
                       style: const TextStyle(fontSize: 12),
                     ),
                   ),
@@ -1466,13 +2058,14 @@ class Composer extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              if (onAttach != null || mentions.isNotEmpty)
+              if (widget.onAttach != null || widget.mentions.isNotEmpty ||
+                  (widget.mentionOptions?.isNotEmpty ?? false))
                 PopupMenuButton<String>(
                   tooltip: desktop ? 'Add files or mention' : 'Add to message',
                   enabled: !busy,
-                  icon: const Icon(Icons.add_rounded, size: 24),
+                  icon: const Icon(Icons.add_rounded, size: 22),
                   itemBuilder: (_) => [
-                    if (onAttach != null)
+                    if (widget.onAttach != null)
                       const PopupMenuItem(
                         value: 'file',
                         child: Row(
@@ -1483,59 +2076,68 @@ class Composer extends StatelessWidget {
                           ],
                         ),
                       ),
-                    if (onAttach != null && mentions.isNotEmpty)
+                    if (widget.onAttach != null && _options.isNotEmpty)
                       const PopupMenuDivider(),
-                    if (mentions.isNotEmpty)
-                      const PopupMenuItem(value: '@all', child: Text('@all')),
-                    for (final handle in mentions)
-                      PopupMenuItem(value: '@$handle', child: Text('@$handle')),
+                    for (final option in _options)
+                      PopupMenuItem(
+                        value: '@${option.handle}',
+                        child: Text(
+                          option.everyone
+                              ? '@all · everyone replies'
+                              : '@${option.handle}',
+                        ),
+                      ),
                   ],
                   onSelected: (value) {
                     if (value == 'file') {
-                      onAttach?.call();
+                      widget.onAttach?.call();
                       return;
                     }
-                    final selection = controller.selection;
-                    final start = selection.isValid
-                        ? selection.start
-                        : controller.text.length;
-                    final end = selection.isValid ? selection.end : start;
-                    final tag =
-                        '${start > 0 && !RegExp(r'\s').hasMatch(controller.text[start - 1]) ? ' ' : ''}$value ';
-                    controller.value = TextEditingValue(
-                      text: controller.text.replaceRange(start, end, tag),
-                      selection: TextSelection.collapsed(
-                        offset: start + tag.length,
-                      ),
-                    );
+                    _insertTag(value);
+                    _focus.requestFocus();
                   },
                 ),
               Expanded(
                 child: CallbackShortcuts(
                   bindings: {
-                    if (replyTo != null)
+                    if (suggesting) ...{
+                      const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
+                          _move(1),
+                      const SingleActivator(LogicalKeyboardKey.arrowUp): () =>
+                          _move(-1),
+                      const SingleActivator(LogicalKeyboardKey.enter): () =>
+                          _accept(_suggestions[_highlighted]),
+                      const SingleActivator(LogicalKeyboardKey.tab): () =>
+                          _accept(_suggestions[_highlighted]),
                       const SingleActivator(LogicalKeyboardKey.escape): () =>
-                          onCancelReply?.call(),
+                          setState(() {
+                            _dismissedAt = _query?.start;
+                            _suggestions = const [];
+                          }),
+                    } else if (widget.replyTo != null)
+                      const SingleActivator(LogicalKeyboardKey.escape): () =>
+                          widget.onCancelReply?.call(),
                     const SingleActivator(
                       LogicalKeyboardKey.enter,
                       control: true,
                     ): () {
-                      if (!busy) onSend();
+                      if (!busy) widget.onSend();
                     },
                   },
                   child: TextField(
                     controller: controller,
-                    focusNode: focusNode,
+                    focusNode: _focus,
                     enabled: !busy,
                     minLines: 1,
                     maxLines: 5,
                     style: const TextStyle(fontSize: 14, height: 1.5),
                     textInputAction: TextInputAction.send,
                     onSubmitted: (_) {
+                      if (suggesting) return;
                       if (!busy &&
                           (controller.text.trim().isNotEmpty ||
                               attachments.isNotEmpty)) {
-                        onSend();
+                        widget.onSend();
                       }
                     },
                     decoration: InputDecoration(
@@ -1565,19 +2167,20 @@ class Composer extends StatelessWidget {
                         busy ||
                             (value.text.trim().isEmpty && attachments.isEmpty)
                         ? null
-                        : onSend,
+                        : widget.onSend,
                     style: FilledButton.styleFrom(
-                      minimumSize: Size.square(desktop ? 40 : 44),
+                      minimumSize: Size.square(desktop ? 36 : 44),
                       shape: desktop
                           ? RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(8),
+                              borderRadius: BorderRadius.circular(7),
                             )
                           : const CircleBorder(),
-                      padding: EdgeInsets.all(desktop ? 10 : 12),
+                      padding: EdgeInsets.all(desktop ? 8 : 12),
+                      animationDuration: motionDuration(context, 120),
                     ),
                     child: Icon(
                       desktop ? Icons.send_rounded : Icons.arrow_upward_rounded,
-                      size: desktop ? 18 : 20,
+                      size: desktop ? 17 : 20,
                     ),
                   ),
                 ),
@@ -1587,14 +2190,30 @@ class Composer extends StatelessWidget {
         ],
       ),
     );
+    final hint = Padding(
+      padding: EdgeInsets.fromLTRB(desktop ? 30 : 22, 0, desktop ? 30 : 22, 8),
+      child: Text(
+        suggesting
+            ? '↑ ↓ to choose · Enter or Tab to insert · Esc to close'
+            : '@all asks every bot · @name asks one · Ctrl+Enter sends',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+      ),
+    );
+    final column = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [composer, if (desktop && _options.isNotEmpty) hint else const SizedBox(height: 8)],
+    );
     return desktop
         ? Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 968),
-              child: composer,
+              child: column,
             ),
           )
-        : composer;
+        : column;
   }
 }
 
@@ -1715,67 +2334,94 @@ class AttachmentTile extends StatelessWidget {
 /// start — a project folder that does not exist, or a CLI that is not signed
 /// in — and the message from the provider usually names it exactly.
 class _FailureBanner extends StatelessWidget {
-  const _FailureBanner({required this.failing});
+  const _FailureBanner({required this.failing, this.onDismiss});
 
   final List<BotActivity> failing;
+  final VoidCallback? onDismiss;
+
+  void _details(BuildContext context) => showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    builder: (_) => SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final entry in failing) ...[
+              Text(
+                entry.agent.displayName.isEmpty
+                    ? '@${entry.agent.handle}'
+                    : entry.agent.displayName,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              SelectableText(
+                '${entry.lastError ?? 'The backend did not respond'}${_BotRow._ago(entry.lastErrorAt)}',
+              ),
+              const SizedBox(height: 20),
+            ],
+          ],
+        ),
+      ),
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final worst = failing.first;
-    return Material(
-      color: scheme.surfaceContainerLow,
-      child: InkWell(
-        onTap: () => showModalBottomSheet<void>(
-          context: context,
-          showDragHandle: true,
-          isScrollControlled: true,
-          builder: (_) => SafeArea(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  for (final entry in failing) ...[
-                    Text(
-                      entry.agent.displayName.isEmpty
-                          ? '@${entry.agent.handle}'
-                          : entry.agent.displayName,
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 8),
-                    SelectableText(
-                      '${entry.lastError ?? 'The backend did not respond'}${_BotRow._ago(entry.lastErrorAt)}',
-                    ),
-                    const SizedBox(height: 20),
-                  ],
-                ],
-              ),
-            ),
-          ),
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 560),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: BorderSide(color: scheme.error.withValues(alpha: 0.35)),
         ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-          child: Row(
-            children: [
-              Icon(Icons.error_outline, size: 17, color: scheme.error),
-              const SizedBox(width: 9),
-              Expanded(
-                child: Text(
-                  failing.length == 1
-                      ? '@${worst.agent.handle} — previous turn failed'
-                      : '${failing.length} bots have previous turn failures',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: scheme.onSurfaceVariant,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => _details(context),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.error_outline, size: 16, color: scheme.error),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    failing.length == 1
+                        ? '@${worst.agent.handle} — previous turn failed'
+                        : '${failing.length} bots have previous turn failures',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 12, color: scheme.onSurface),
                   ),
                 ),
-              ),
-              const Icon(Icons.chevron_right, size: 18),
-            ],
+                const SizedBox(width: 6),
+                Text(
+                  'Details',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: scheme.primary,
+                  ),
+                ),
+                if (onDismiss != null)
+                  IconButton(
+                    tooltip: 'Hide until the next failure',
+                    visualDensity: VisualDensity.compact,
+                    iconSize: 16,
+                    onPressed: onDismiss,
+                    icon: const Icon(Icons.close),
+                  )
+                else
+                  const SizedBox(width: 8),
+              ],
+            ),
           ),
         ),
       ),

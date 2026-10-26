@@ -650,6 +650,15 @@ impl RoomSession {
                 // event still lands in the log.
                 let _ = events.send(ServerMessage::Stream { agent, event });
             }
+            // The turn is over, however it ended. A failed or interrupted turn
+            // sends no completion of its own, and a bot that holds no task has
+            // no status change to clear its indicator either.
+            let _ = events.send(ServerMessage::Stream {
+                agent,
+                event: orgbot_providers::StreamEvent::Done {
+                    stop_reason: orgbot_providers::StopReason::EndTurn,
+                },
+            });
         });
         tx
     }
@@ -1215,7 +1224,7 @@ fn human_audience_with_default(
         .filter_map(|word| word.strip_prefix('@'))
         .filter(|tag| !tag.is_empty())
         .collect();
-    if tags.iter().any(|tag| tag.eq_ignore_ascii_case("all")) {
+    if tags.iter().any(|tag| orgbot_proto::is_broadcast_tag(tag)) {
         return Audience::Everyone;
     }
     if tags.is_empty() {

@@ -86,6 +86,17 @@ static void my_application_activate(GApplication* application) {
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
       project, self->dart_entrypoint_arguments);
+  // Keep Dart off the GTK main thread. By default Flutter runs the UI isolate
+  // on the platform thread, so whenever GTK is busy presenting the previous
+  // frame (on GNOME's Xorg session with NVIDIA that wait is one or two
+  // refreshes), the next frame cannot even start, and the app drew at 15-19
+  // fps however little each frame cost. On its own thread, Dart keeps
+  // producing frames while GTK presents. ORGBOT_UI_ON_PLATFORM_THREAD=1
+  // restores the default.
+  if (g_strcmp0(g_getenv("ORGBOT_UI_ON_PLATFORM_THREAD"), "1") != 0) {
+    fl_dart_project_set_ui_thread_policy(
+        project, FL_UI_THREAD_POLICY_RUN_ON_SEPARATE_THREAD);
+  }
 
   FlView* view = fl_view_new(project);
   gtk_widget_add_events(GTK_WIDGET(view), GDK_BUTTON_PRESS_MASK);

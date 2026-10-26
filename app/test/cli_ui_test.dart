@@ -126,17 +126,33 @@ void main() {
       expect(find.text('Claude Code'), findsOneWidget);
       expect(find.text('Grok CLI'), findsOneWidget);
       expect(find.text('API access'), findsOneWidget);
-      await tester.drag(
-        find.byKey(const ValueKey('cli-setup')),
-        const Offset(0, -900),
-      );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 200));
-      expect(find.text('DeepSeek API'), findsOneWidget);
-      expect(find.text('Ollama Cloud API'), findsOneWidget);
+      // Scroll to the rows rather than by a fixed distance, so sections
+      // added further down the page do not carry them out of view.
+      final setup = find
+          .descendant(
+            of: find.byKey(const ValueKey('cli-setup')),
+            matching: find.byType(Scrollable),
+          )
+          .first;
+      for (final row in ['DeepSeek API', 'Ollama Cloud API']) {
+        await tester.scrollUntilVisible(
+          find.text(row),
+          100,
+          scrollable: setup,
+        );
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(find.text(row), findsOneWidget);
+      }
       expect(find.text('Accounts'), findsNothing);
       expect(find.byType(SignInScreen), findsNothing);
 
+      // Back to the DeepSeek row, so its Add button is the first one shown.
+      await tester.scrollUntilVisible(
+        find.text('DeepSeek API'),
+        -100,
+        scrollable: setup,
+      );
+      await tester.pump(const Duration(milliseconds: 200));
       await tester.ensureVisible(find.text('Add').first);
       await tester.tap(find.text('Add').first);
       await pumpUiTransition(tester);

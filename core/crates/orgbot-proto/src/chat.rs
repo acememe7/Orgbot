@@ -37,6 +37,16 @@ impl Author {
     }
 }
 
+/// Whether an `@tag` addresses the whole room rather than one bot.
+///
+/// `@all` is the documented form; `@everyone` and `@everybody` are accepted
+/// because that is what people type when they mean it.
+pub fn is_broadcast_tag(tag: &str) -> bool {
+    ["all", "everyone", "everybody"]
+        .iter()
+        .any(|name| tag.eq_ignore_ascii_case(name))
+}
+
 /// Who a message is addressed to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

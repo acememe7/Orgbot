@@ -22,6 +22,7 @@ import 'engine_room_screen.dart';
 import 'room_history_screen.dart';
 import 'role_icons.dart';
 import 'desktop_integrations_view.dart';
+import 'themes.dart';
 import '../workspace/desktop_files.dart';
 import '../orgbot/roles.dart';
 import '../orgbot/attention.dart';
@@ -421,14 +422,37 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                                       ),
                                     );
                                   }
+                                  final store = session?.store;
+                                  final dot = store == null
+                                      ? scheme.outlineVariant
+                                      : store.isActive
+                                      ? scheme.tertiary
+                                      : store.isPaused
+                                      ? const Color(0xFFC9A04A)
+                                      : scheme.onSurfaceVariant.withValues(
+                                          alpha: 0.6,
+                                        );
                                   return Padding(
-                                    padding: const EdgeInsets.only(bottom: 3),
+                                    padding: const EdgeInsets.only(bottom: 2),
                                     child: ListTile(
                                       selected: active,
                                       contentPadding: const EdgeInsets.only(
                                         left: 12,
                                         right: 2,
                                       ),
+                                      leading: AnimatedContainer(
+                                        duration: const Duration(
+                                          milliseconds: 200,
+                                        ),
+                                        width: 7,
+                                        height: 7,
+                                        decoration: BoxDecoration(
+                                          color: dot,
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
+                                      minLeadingWidth: 7,
+                                      horizontalTitleGap: 10,
                                       selectedTileColor:
                                           scheme.primaryContainer,
                                       shape: RoundedRectangleBorder(
@@ -1723,6 +1747,8 @@ class _CliSetupState extends State<_CliSetup> {
           ),
         const DesktopIntegrationsView(),
         const AllowancesView(),
+        const SizedBox(height: 24),
+        const AppearancePicker(),
       ],
     ),
   );

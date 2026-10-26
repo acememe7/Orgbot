@@ -370,6 +370,9 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
         out.push_str("\nSince your last turn:\n");
         out.push_str(&transcript);
     }
+    if let Some(name) = latest_human_name(engine, since) {
+        out.push_str(&owner_name_note(&name));
+    }
 
     // The closing instruction, last thing read and so the most influential.
     //
@@ -382,8 +385,37 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
     //
     // So the close now names the bot's actual situation, and only offers the
     // do-nothing option when doing nothing is genuinely the answer.
+    if asked_by_everyone(engine, agent, since) {
+        out.push_str(EVERYONE_ASK_INSTRUCTION);
+    }
     out.push_str(&closing_instruction(engine, agent, &mine));
     out
+}
+
+/// Said when a message to the whole room asks every bot for something.
+///
+/// Without it a bot with nothing on the board reads "do the most useful thing"
+/// and stays silent, so an `@all` roll call is answered by one bot only.
+pub const EVERYONE_ASK_INSTRUCTION: &str =
+    "\nA message to the whole room (marked \"to everyone, including you: reply\" \
+     above) asks every bot to respond. Answer it yourself in the chat, in your \
+     own words and briefly, even if others have already answered. Then carry \
+     on as below.\n";
+
+/// Whether an unseen message addressed to everyone asks this bot to respond.
+fn asked_by_everyone(engine: &Engine, agent: AgentId, since: Seq) -> bool {
+    let roles = engine
+        .agent(agent)
+        .map(|spec| spec.roles.clone())
+        .unwrap_or_default();
+    engine.events_since(since).any(|envelope| {
+        matches!(
+            &envelope.event,
+            orgbot_proto::Event::MessagePosted { message }
+                if matches!(message.audience, orgbot_proto::Audience::Everyone)
+                    && message.wakes(agent, &roles)
+        )
+    })
 }
 
 /// What to tell a bot to do, given what is actually in front of it.
@@ -436,6 +468,33 @@ fn closing_instruction(engine: &Engine, agent: AgentId, mine: &[&Task]) -> Strin
         .to_string()
 }
 
+/// The name the human most recently wrote under, among unseen messages.
+///
+/// A bot's persona names the owner as it was when the room started, and an
+/// agent CLI's resumed session remembers that too. The name on the message
+/// is current, so it wins.
+fn latest_human_name(engine: &Engine, since: Seq) -> Option<String> {
+    engine
+        .events_since(since)
+        .filter_map(|envelope| match &envelope.event {
+            orgbot_proto::Event::MessagePosted { message } => match &message.author {
+                orgbot_proto::Author::Human { name } if !name.trim().is_empty() => {
+                    Some(name.trim().to_string())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .last()
+}
+
+fn owner_name_note(name: &str) -> String {
+    format!(
+        "\nThe human writing to the room is {name}. Address them as {name}, \
+         even if earlier instructions used another name.\n"
+    )
+}
+
 /// Render chat and state changes a bot has not seen yet.
 fn recent_messages(engine: &Engine, agent: AgentId, since: Seq) -> String {
     use orgbot_proto::Event;
@@ -465,10 +524,14 @@ fn recent_messages(engine: &Engine, agent: AgentId, since: Seq) -> String {
                     .map(|spec| spec.roles.as_slice())
                     .unwrap_or(&[]);
                 let to_you = directed && message.audience.addresses(agent, roles);
+                let asks_everyone = matches!(message.audience, orgbot_proto::Audience::Everyone)
+                    && message.wakes(agent, roles);
                 out.push_str(&format!(
                     "  {who}{}: {}\n",
                     if to_you {
                         " (to you)"
+                    } else if asks_everyone {
+                        " (to everyone, including you: reply)"
                     } else if directed {
                         " (to other bots)"
                     } else {
