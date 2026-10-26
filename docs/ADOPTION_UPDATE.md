@@ -41,8 +41,17 @@ storage configurable, and use worker testing plus independent combined review.
   analysis passes, readable normal/narrow captures inspected.
 - [x] Worker/QA/reviewer prompt and preset instructions updated. All 110 runtime
   crate tests and six specialist-preset checks pass. The Rust release build passes.
-- [ ] Linux 2.0.1 build, package tests and signed APT publication.
-- [ ] Final Astra review, staged secret scan, source push and live verification.
+- [x] Linux 2.0.1 builds and package checks pass. Signed archive commit `9086ddc`
+  preserves 2.0.0 packages; Pages run `40387218167` succeeded. A fresh isolated
+  public APT refresh downloaded 2.0.1 with the expected SHA-256.
+- [x] Astra source review and staged credential-pattern scan passed; source
+  commit `13622b2` is pushed to both `main` and `master`.
+- [x] Website release `13622b2` is live. Home/install/robots/sitemap bytes and
+  CSP match source; browser forwarding and the custom HTTP 404 pass. Direct
+  origin access remains denied. The matching private Google Drive backup passed
+  download/hash comparison and a 20-file isolated restore.
+- [x] Final scoped release and evidence review approved by Astra; no remaining
+  corrective blockers in this update.
 
 No paid provider calls, real trash purges, host app upgrade or third-party
 promotional PRs are part of these verification fixtures.
@@ -63,5 +72,15 @@ Review caught and corrected a root-switch rollback race and manager/caller XDG
 mismatch before publication. Astra approved the scoped implementation after
 re-review. Installer mismatch refuses timer enablement but may leave staged
 managed configuration/files and retained backups; normal storage changes roll
-back on sync failure. Matching package and live publication verification remain
-pending.
+back on sync failure. Final packaged helpers, engine, preset, maintainer script
+and copyright were compared with the reviewed sources. Public package SHA-256:
+`ece4bc912a9847d0922cc5032d9aa7a4ed6e678540f6cf23db427d730ea512c5`.
+
+Website publication changed only the OrgBots release link and the structured-data
+CSP hash in its existing vhost. The old release and vhost were preserved. Nginx
+validation passed with pre-existing protocol-option warnings in other vhosts;
+those sites were not changed. One Python urllib request was refused by the edge;
+curl and actual browser requests subsequently returned the verified live pages.
+The owner app was not upgraded, existing trash was not purged, and no paid-model
+benchmark was run. These checks do not establish token savings or live-provider
+quality.

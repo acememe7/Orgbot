@@ -57,6 +57,8 @@ Comparison checked on 26 October 2026 against the
 [Codex documentation](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan).
 This describes workflow differences, not a security ranking or a cost benchmark.
 
+For community listings, use the [prepared sharing blurb](docs/SHARING.md).
+
 ## Install on Ubuntu
 
 The desktop package targets **Ubuntu 24.04 amd64**. Version 2.0.1 adds a

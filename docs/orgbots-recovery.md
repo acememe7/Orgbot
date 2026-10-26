@@ -140,7 +140,7 @@ measurement, or full disaster recovery test has been performed. The archive
 verifier passed synthetic fixture tests and this archive's independent restore;
 this does not establish full production recoverability.
 
-## Latest release backup
+## Previous release backup
 
 Release `ecc3628` and its active vhost were copied from the deployed host after
 manifest verification, then uploaded to the same private owner-only Drive folder
@@ -150,3 +150,22 @@ All 20 files passed manifest checks and restored into
 `/tmp/orgbots-drive-restore-ecc3628`. This backup includes the origin peer
 restriction; the older `414104c` archive is retained for historical rollback.
 No recurring upload, automatic retention deletion, or failure-alert job was enabled.
+
+## Current release backup
+
+Website release `13622b2` was activated on 26 October 2026 after the signed
+OrgBots 2.0.1 archive became available. Every immutable release file was checked
+against the local manifest; the active Nginx configuration was read back and
+matched the reviewed source. The previous release and vhost remain available
+for rollback. Home/install/robots/sitemap responses match source, the custom
+404 works, and direct-origin access remains denied.
+
+The matching snapshot was uploaded to the existing private owner-only Google
+Drive folder. Readback reports no sharing. Its independent download is 328,181
+bytes with SHA-256
+`198b044ce869fdfe1f1d53fcf5090646a82f6ad029f40a335d25c072c36fd106`.
+The downloaded hash matches the local archive, and all 20 files restored into
+`/tmp/orgbots-2.0.1-release-z2j4jja7/drive-restore-13622b2`.
+Earlier recovery points were retained. This is a verified publish-time recovery
+point; recurring backup scheduling and a full production disaster-recovery test
+remain unconfigured/unperformed.

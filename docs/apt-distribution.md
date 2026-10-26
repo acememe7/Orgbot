@@ -88,6 +88,22 @@ scoped key, and the package hashes are covered by that signed metadata.
 
 ## Published release and maintenance
 
+OrgBots **2.0.1** was published on 2026-10-26 with
+[GitHub Actions run 40387218167](https://github.com/acememe7/Orgbot/actions/runs/40387218167).
+A fresh isolated APT metadata refresh and download passed against the public
+archive, without installing on the owner's machine. The downloaded
+`orgbots_2.0.1_amd64.deb` SHA-256 matches the reviewed local package:
+
+```text
+ece4bc912a9847d0922cc5032d9aa7a4ed6e678540f6cf23db427d730ea512c5
+```
+
+This release adds configurable recovery storage and the worker/QA/reviewer
+verification guidance. The 2.0.0 package files remain in the archive pool;
+the package index selects the current version. The root Pages address forwards
+to the product website while `/apt/` remains the package archive.
+
+
 OrgBots **2.0.0** was published on 2026-10-26 with
 [GitHub Actions run 40348136526](https://github.com/acememe7/Orgbot/actions/runs/40348136526).
 The public repository passes an isolated APT metadata refresh and package
