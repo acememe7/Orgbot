@@ -87,3 +87,19 @@ Publication: `https://acememe7.github.io/Orgbot/apt/`, source milestone
 `cc100d5`, archive branch milestone `f4e5d24`. The actual public package SHA-256
 is `7597e7729aabb629735fd71aa05a287a0e255b2c79c817d497560e468baa8da1`.
 See `apt-distribution.md` for the one-time client setup and maintenance window.
+
+## Documentation correction — 2026-10-26
+
+- [x] Replace the remaining Apache appendix placeholder with `Copyright 2026
+  The AECE Studio`; all other license text is unchanged.
+- [x] Audit the root README against source and published APT metadata. Correct
+  installation/build commands, platform/provider distinctions, specialist roles,
+  the usage-report location, CLI continuity and verification limits. Both build
+  guides now list the WebKitGTK and VTE development packages required by CMake;
+  their package names were checked against Ubuntu 24.04 APT metadata.
+- [x] Validate all 13 local Markdown links, 12 shell blocks and both TOML blocks.
+  The existing engine accepts the combined example with placeholder credentials
+  and temporary paths using `orgbot check`; no model turn is executed.
+- [x] Existing Debian packaging fixture passes with the corrected license.
+  No app build, host installation or paid-provider benchmark was performed for
+  this documentation-only change; the published 2.0.0 package is unchanged.

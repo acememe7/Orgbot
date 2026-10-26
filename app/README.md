@@ -15,7 +15,8 @@ account access; that is checked by the CLI when it runs.
 
 Build the Linux app and engine before packaging. Besides Flutter and Rust,
 Ubuntu builds need `clang`, `cmake`, `ninja-build`, `pkg-config`,
-`libgtk-3-dev`, `libsecret-1-dev`, and `dpkg-dev`:
+`libgtk-3-dev`, `libsecret-1-dev`, `libwebkit2gtk-4.1-dev`, `libvte-2.91-dev`,
+and `dpkg-dev`:
 
 ```sh
 (cd ../core && cargo build --release --locked)

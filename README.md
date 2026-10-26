@@ -10,12 +10,116 @@ different roles, pick up tasks, **communicate**, **hand work off** to one
 another, **wait** on those handoffs, get their work **inspected**, and finally
 **submit** it — all in one room you can watch and talk to. Computer access depends on the platform and the workspace you select.
 
-Runs on Linux and Android. Bots can be backed by Claude (Anthropic), DeepSeek,
-or any OpenAI-compatible endpoint. Android supports in-app Codex/ChatGPT sign-in; a
-single room can mix providers. A bot can also be a full agent session on this
-machine — the Codex CLI, Claude Code, or Grok CLI — so it brings that CLI's own
-sign-in, memories and skills into the room and works a real project folder.
-Linux external MCP calls pass through the room's one-use owner approvals.
+On Linux, connect installed **Codex, Claude Code and Grok CLIs** using their
+existing sign-ins, alongside **DeepSeek and Ollama Cloud API keys**. A room can
+mix these providers. In-app Codex/ChatGPT and Grok sign-in belongs to Android.
+The headless Rust engine also supports Anthropic API and custom
+OpenAI-compatible configurations through TOML room files.
+
+## Install on Ubuntu
+
+The published desktop package is **OrgBots 2.0.0 for Ubuntu 24.04 amd64**.
+Set up the signed third-party APT repository once on each computer:
+
+```bash
+sudo apt update
+sudo apt install curl gnupg ca-certificates coreutils
+curl -fsSLo install-orgbots.sh \
+  https://raw.githubusercontent.com/acememe7/Orgbot/main/scripts/install-orgbots.sh
+cat install-orgbots.sh
+bash install-orgbots.sh
+```
+
+The installer verifies the archive key fingerprint before configuring APT.
+Review the package list at APT's confirmation prompt. Launch **OrgBots** from
+the application menu or run `orgbots`. After setup, the same commands install
+an available update while preserving existing app data:
+
+```bash
+sudo apt update
+sudo apt install orgbots
+```
+
+See the [installation guide](docs/installation.md) for the key fingerprint and
+workspace requirements, and the [APT distribution guide](docs/apt-distribution.md)
+for archive maintenance. Installing OrgBots does not install or authenticate
+the model CLIs.
+
+| Platform | Delivery status |
+|---|---|
+| Ubuntu 24.04 amd64 | Published signed APT package, version 2.0.0 |
+| Android arm64, API 24+ | Source build instructions below; Flutter/Android version 1.3.2+18 |
+| Windows and macOS | Distribution deferred |
+| Tauri shell (`desktop/`) | Separate development shell; not the supported Linux package |
+
+## Using the Linux app
+
+Connect providers in **Accounts**, create or edit bots in **Team**, then add
+them to a room with a goal and a project folder.
+
+| Provider | Connection |
+|---|---|
+| Codex | Installed `codex` CLI and its existing sign-in |
+| Claude | Installed `claude` CLI and its existing sign-in |
+| Grok | Installed `grok` CLI and its existing sign-in |
+| DeepSeek | Saved API key |
+| Ollama Cloud | Saved API key; cloud catalog, no local Ollama installation required |
+
+Finding a CLI does not verify its account access; the CLI checks that when it
+runs. API keys are kept in encrypted platform storage. Available models and
+usage limits depend on each account.
+
+Rooms have a shared conversation, task board, artifacts and editable memory.
+Reply to a message or use `@handle` to direct work to an agent; an untagged
+message goes to one available bot, preferring a coordinator. `@all` wakes the
+whole team. Agents can use mentions and task handoffs to request another
+agent's work. Questions that need you offer answers and a custom reply;
+background room services can notify you while the GUI is closed.
+
+The desktop workspace includes files, Git inspection, attachments and previews.
+Supported previews depend on the file format and installed media tools.
+CLI sessions use private copies of supported profile settings and skills.
+Configure external MCP servers through the room: each external tool call needs
+an **Allow once / Deny** answer for its exact arguments. Host MCP configurations
+are not automatically inherited, and review-only agents cannot call external
+MCP tools. See [workspace boundaries](docs/WORKSPACE_SAFETY.md).
+
+### Specialist team
+
+The repository's [specialist preset](app/tool/specialist-team.json) assigns the
+following responsibilities. It is a reference for configuring **Team**; a fresh
+library does not automatically create all ten bots. These are configured model
+choices, not proof of access through every provider account.
+
+| Agent | Configured model/service | Responsibility |
+|---|---|---|
+| Astra (`@astra`) | GPT-6 Astra / Codex | Code and security review; security/backend planning and coordination; review-only workspace |
+| Julian (`@opus`) | Opus 5.5 / Claude | Design, architecture and product coordination; relevant reviews |
+| Miles (`@grok`) | Grok 4.7 | Bounded support and handoffs |
+| Finn (`@grok-quick`) | Grok 4.7 | Fast, simple implementation |
+| Devon (`@deepseek-builder`) | DeepSeek Flash | Backend and data implementation |
+| Rhea (`@ollama-deepseek`) | DeepSeek via Ollama Cloud | Research and analysis |
+| Quinn (`@ollama-glm`) | GLM via Ollama Cloud | QA and reproduction |
+| Sol (`@sol`) | GPT-6.1 Sol / Codex | Difficult implementation and integration, extra-high reasoning |
+| Mira (`@mira`) | GPT-6 Luna / Codex | Bounded implementation and frontend subtasks |
+| Ellis (`@ellis`) | Haiku 5.5 / Claude | Writing, editing and documentation |
+
+Astra and Julian coordinate within their areas and can cross-check significant
+findings. The preset avoids automatic review loops and duplicate nested Astra
+reviews; bounded Luna delegation remains available.
+
+### Usage report
+
+Open a room, select **Work**, then find **What this has drawn**. It shows
+input/output tokens, cache reads/writes and cost totals for the room, with
+account and agent breakdowns. Missing usage or prices remain unknown.
+
+API cost estimates and subscription API equivalents are separate. A subscription
+equivalent is not an extra bill or a measurement of your remaining subscription
+quota. Splitting work can spread consumption across services; planning, handoffs
+and review can also add tokens. Real subscription savings have not been measured.
+See the [benchmark procedure](scripts/benchmarks/README.md) and
+[release verification record](docs/LINUX_2_0_PLAN.md).
 
 ## Why it holds together
 
@@ -25,8 +129,9 @@ The design puts every coordination rule in one tested place:
 - **Task and handoff lifecycles are explicit state machines.** An illegal move
   — submitting work that was never inspected, two bots claiming one task — is a
   typed error at the boundary, not corrupt state discovered three steps later.
-- **Separation of duties is enforced.** A bot can never inspect its own work,
-  inspectors cannot submit, and a coordinator cannot sign off on its own plan.
+- **Separation of duties is enforced.** A bot cannot inspect its own work.
+  Review and final submission require their respective permissions; a task
+  must pass review before final submission.
 - **Handoffs are first-class, so waiting is safe.** A blocking handoff parks the
   sender automatically; any settlement — completed, rejected, withdrawn, expired
   — wakes it. A refusal can never strand a bot.
@@ -36,54 +141,80 @@ The design puts every coordination rule in one tested place:
 - **Rework is bounded.** A worker and an inspector who never agree fail the task
   on a revision budget instead of looping until the room's turn budget is gone.
 
-The engine records coordination events and serves snapshots with replay for reconnecting clients. Flutter saves each run under **Room options → Saved run history**. Linux room services retain checkpoints, agent memory and CLI session identity across restarts; paused rooms stay paused, and interrupted operations are not blindly replayed. The separate Tauri shell is not the supported Linux delivery target.
+The engine records coordination events and serves snapshots with replay for reconnecting clients. Flutter saves each run under **Room options → Saved run history**. Linux room services retain checkpoints, agent memory and CLI session identity across restarts; paused rooms stay paused, and interrupted operations are not blindly replayed.
 
 Linux 2.0 adds protected per-agent working copies with conflict checks, explicit
 file-removal approval and HDD retention, opt-in sandboxed API commands, background
 service notifications, and portable room/project backups restored paused.
-Room usage shows input, output and cache tokens per agent and in total. API cost
-estimates and subscription API equivalents stay separate; missing usage or prices
-remain unknown. See [workspace boundaries](docs/WORKSPACE_SAFETY.md),
-[acceptance coverage](scripts/LINUX_ACCEPTANCE.md) and the
-[repeatable benchmark](scripts/benchmarks/README.md). Fixture benchmarks do not
-establish real subscription savings.
+Replacing or removing existing project files requires the configured writable
+ext4 HDD at `/mnt/hdd`; recovery copies go to `/mnt/hdd/OrgBots Trash`. Missing
+storage stops those changes. The sandbox protects workspace writes but still
+allows network access and reading host files; remote tool effects are outside
+the HDD retention boundary. Portable backups are private, unencrypted and
+limited to 64 MiB; histories can contain secrets you pasted. See
+[workspace boundaries](docs/WORKSPACE_SAFETY.md) and
+[acceptance coverage](scripts/LINUX_ACCEPTANCE.md).
 
 ## Layout
 
 ```
-core/                     Rust workspace — the whole backend
+core/crates/              Rust workspace crates
   orgbot-proto           wire types + the task/handoff state machines
   orgbot-engine          the room: task board, handoff routing, deadlock detection
-  orgbot-providers       model backends: Anthropic, DeepSeek, OpenAI-compatible, scripted
+  orgbot-providers       native CLI agents, API backends and scripted fixtures
   orgbot-tools           the tool surface bots act through (chat, board, handoffs, review)
   orgbot-runtime         the bot turn loop and the scheduler
   orgbot-server          TOML rooms, a WebSocket host, and the `orgbot` CLI
   orgbot-ffi             Android in-process engine and workspace tool bridge
 app/                      Flutter client for Linux + standalone Android
-desktop/                  Separate Tauri desktop shell
-scripts/                  Isolated SSH test fixture
+  packaging/              Debian package, protected workspaces and HDD trash helpers
+  tool/                   specialist team preset and migration helpers
+desktop/                  Separate Tauri development shell
+scripts/                  installer, acceptance/SSH fixtures and benchmark harness
+docs/                     installation, safety and verification records
+website/                  product website source
+deploy/website/           website delivery and recovery tools
 ```
 
-## Run it
+## Build from source
+
+Run these commands from the repository root. Install Rust and Flutter first.
+Linux source builds also need `clang`, `cmake`, `ninja-build`, `pkg-config`,
+`libgtk-3-dev`, `libsecret-1-dev`, `libwebkit2gtk-4.1-dev` and `libvte-2.91-dev`;
+Debian packaging additionally needs `dpkg-dev`. APT installs runtime dependencies
+for the published package.
 
 Build the CLI:
 
 ```bash
-cd core && cargo build --release
+(cd core && cargo build --release --locked)
 ```
 
-Create a room, check it, and run it headless (live transcript in your terminal):
+Create a room configuration:
 
 ```bash
-./target/release/orgbot init room.toml
-./target/release/orgbot check room.toml
-./target/release/orgbot run room.toml
+./core/target/release/orgbot init room.toml
+```
+
+Edit its models and paths, then configure credentials as described below.
+Check the configuration without running a model:
+
+```bash
+./core/target/release/orgbot check room.toml
+```
+
+This resolves credentials and checks CLI discoverability, but does not verify
+account access or workspace execution. Starting a room uses the configured
+providers and their allowance:
+
+```bash
+./core/target/release/orgbot run room.toml
 ```
 
 Or host it for the app to attach to:
 
 ```bash
-./target/release/orgbot serve room.toml --addr 127.0.0.1:8787
+./core/target/release/orgbot serve room.toml --addr 127.0.0.1:8787
 ```
 
 The host prints a generated room token, including on loopback. Enter it when joining `ws://127.0.0.1:8787/ws`. Flutter-created Linux rooms exchange their generated token automatically. Remote room connections require `wss://` and a TLS proxy; this is separate from Android SSH workspaces. Arbitrary website Origins are refused.
@@ -91,12 +222,16 @@ The host prints a generated room token, including on loopback. Enter it when joi
 Run Flutter:
 
 ```bash
-cd app && flutter run -d linux
+(cd app && flutter pub get && flutter run -d linux)
 ```
+
+Flutter locates the local engine automatically; set `ORGBOT_ENGINE` to the
+absolute engine path if it is elsewhere. See [app development](app/README.md)
+for release packaging.
 
 ### Android: standalone models, selectable computer
 
-Android loads its bundled Rust library; it neither starts nor depends on a Linux CLI. Sign in to supported providers on the phone (Codex/Grok), or configure a DeepSeek API key. Claude CLI subscriptions remain a desktop capability. Bot keys, sign-ins and SSH credentials are stored in encrypted platform storage, with migration of old plaintext preferences after a successful secure write.
+Android loads its bundled Rust library; it neither starts nor depends on a Linux CLI. Sign in to supported providers on the phone (Codex/Grok), or configure a DeepSeek or Ollama Cloud API key. Claude CLI subscriptions remain a desktop capability. Bot keys, sign-ins and SSH credentials are stored in encrypted platform storage, with migration of old plaintext preferences after a successful secure write.
 
 Grok subscriptions use the [Grok CLI catalog and chat proxy](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-shell/README.md); API keys retain the public xAI API route. Access tokens renew before expiry, including while a native room is active. A rejected catalog request gets one renewal attempt; network and permission failures retain the saved sign-in. Mobile bots require a concrete model ID, with older empty selections repaired from the account's catalog.
 
@@ -121,38 +256,38 @@ Build an **arm64 development APK** and install without clearing app data:
 # From repository root; Flutter, Rust, Android SDK and NDK must be installed.
 rustup target add aarch64-linux-android
 export PATH="$HOME/.cargo/bin:$PATH"
-cd app
-flutter pub get
-flutter build apk --debug --target-platform android-arm64
-adb install --user 0 --no-streaming -r build/app/outputs/flutter-apk/app-debug.apk
+(cd app && flutter pub get && flutter build apk --debug --target-platform android-arm64)
+adb install --user 0 --no-streaming -r app/build/app/outputs/flutter-apk/app-debug.apk
 ```
 
 Gradle builds and copies the current Rust engine before packaging, and checks the required workspace ABI symbol. Set `ANDROID_NDK_HOME` if NDK discovery needs an override. Android requires API 24+. Release APK/AAB builds require your own `app/android/key.properties` (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`); production builds cannot silently use the debug signing key. Keep that file and the keystore private.
 
-Linux still uses the local `orgbot` executable and installed model CLIs. Install the Flutter desktop prerequisites and `libsecret-1-dev` (Ubuntu/Debian) for secure storage. Build the engine and set `ORGBOT_ENGINE` when its path is not automatically found.
+## Headless room files
 
-On Ubuntu 24.04 amd64, use the [installation guide](docs/installation.md) to verify the archive key, configure the signed APT source, and install the desktop package. This is a third-party repository and requires a one-time key/source setup on each computer. See the [APT distribution guide](docs/apt-distribution.md) for package and signing maintenance details.
-
-### Credentials
-
-Room files hold **no secrets**. Each bot resolves its credential at runtime:
+For TOML rooms, keep secrets out of the room file. API providers resolve
+credentials at runtime. These settings are separate from the GUI's **Accounts**
+screen and its Linux CLI connections:
 
 | Backend | Resolved from |
 |---|---|
-| Anthropic | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or an `ant auth login` profile |
+| Anthropic API | `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 | Codex CLI bot | `codex login` sign-in on this machine |
 | Claude Code bot | Claude Code sign-in on this machine |
 | Grok CLI bot | Grok CLI sign-in on this machine |
-| OpenAI / Codex | `OPENAI_API_KEY`, or a `codex login` sign-in at `~/.codex/auth.json` |
+| OpenAI-compatible API | The API key environment variable configured for that provider |
 
-## A room file
+Custom OpenAI-compatible endpoints belong to the TOML engine configuration;
+the GUI's Ollama option connects to Ollama Cloud.
+
+### Example configuration
 
 ```toml
 [room]
 name = "release-notes"
 goal = "Write clear, accurate release notes for 1.3."
 completion = "all_tasks_terminal"
+state_path = "/absolute/private/orgbots/release-notes.state.json"
 
 [[bots]]
 handle = "lead"
@@ -177,11 +312,13 @@ autonomy = "inspector"
 provider = { kind = "anthropic", model = "claude-opus-5" }
 ```
 
-A room with a coordinator plans its own board; without one, seed the work with
-`[[tasks]]` entries.
+Replace the example model IDs with models available to your account. Set
+`state_path` inside a private, owner-controlled directory outside the project.
+Linux CLI agents require this path for protected workspaces and saved native
+sessions; GUI-created rooms configure it automatically. A room with a coordinator
+plans its own board; without one, seed the work with `[[tasks]]` entries.
 
-A bot that runs as a real CLI agent on this machine (in a project folder, under
-whatever sandbox you grant it) looks like:
+To add a CLI agent to that room, use an existing absolute project directory:
 
 ```toml
 [[bots]]
@@ -193,19 +330,37 @@ provider = { kind = "cli", cli = "codex", workdir = "/path/to/project", policy =
 # claim tasks, hand work off, and ask for review mid-episode.
 ```
 
-Each turn the engine spawns `codex exec` (or `claude -p` / `grok -p`) in that
-folder and resumes the same session afterwards, so the bot remembers its own
-earlier work like a human agent would.
+Each turn starts a CLI process and resumes that bot's saved native session when
+available. A new process does not mean a new conversation. Session reuse requires
+matching provider, model, project path, sandbox policy and MCP mode. Missing or
+rejected CLI history can require a fresh session. On Linux the CLI works in its
+protected project copy, with conflict-checked integration back to the project.
 
 ## Saved rooms and background work
 
-Opening a room returns to its conversation. Leaving the screen keeps it running. Chat, tasks, artifacts and each bot’s conversation context are checkpointed locally after changes; reopening after a process restart restores the room paused. Resume explicitly to continue model and workspace operations. Older app journals migrate on first open without deleting the original logs. The Memory tab includes editable room notes and saved outputs; your profile is shared across rooms.
+Opening a room returns to its conversation. Leaving the screen keeps it running.
+Chat, tasks, artifacts and bot context are checkpointed locally after changes.
+Linux room services can continue with the GUI closed and restore their saved
+running/paused status; Android rooms reopen paused after process termination.
+Older app journals migrate on first open without deleting the original logs.
+The Memory tab includes editable room notes and saved outputs; your profile is
+shared across rooms.
+
+Rooms can continue through multiple turns, subject to configured room/task
+budgets, provider limits and failures. Linux CLI turns have a ten-minute default
+timeout, configurable with `ORGBOT_CLI_TURN_TIMEOUT_SECS`. Persistent sessions do
+not remove per-call limits. Elapsed multi-day operation and physical
+suspend/reboot recovery remain unverified; the
+[release record](docs/LINUX_2_0_PLAN.md) distinguishes those gaps from the
+scripted crash/restart and long-workload checks.
 
 Android shows an ongoing notification while rooms are active, with a **Pause all** action. A foreground service and wake locks keep the engine and SSH connections running when you leave the app or turn off the display. Pausing the last room releases those locks. Android force-stop, reboot or process termination still stops execution; saved rooms remain available for explicit resume. Linux continues to use the system engine and model CLIs.
 
 In **Accounts**, save a DeepSeek or Ollama Cloud API key once; new bots reuse their provider's key from encrypted storage. Create an Ollama key at https://ollama.com/settings/keys, then choose **Ollama Cloud** when adding a bot. Models load from the live cloud catalog, and requests go directly to Ollama over HTTPS; no local Ollama installation is needed. Model availability and usage remain subject to your provider account. A single existing DeepSeek per-bot key migrates automatically. Distinct legacy keys are preserved. In room settings, **Working computer → Browse folders** loads the phone or SSH folder contents before you select a working path; **Files** opens that saved folder.
 
 ## Tests
+
+Run from the repository root:
 
 ```bash
 (cd core && cargo test --workspace --locked)
@@ -219,16 +374,20 @@ never gets woken to answer — fails a test rather than surfacing in production.
 
 ### Android device checks
 
-`app/integration_test/workspace_device_test.dart` exercises the actual native FFI, phone file tools, file viewer and real SSH operations, including encrypted private-key authentication. Use the isolated fixture in a temporary Python environment with `asyncssh` and `bcrypt` installed:
+`app/integration_test/workspace_device_test.dart` exercises the actual native FFI, phone file tools, file viewer and real SSH operations, including encrypted private-key authentication. Use the isolated fixture in a temporary Python environment with `asyncssh` and `bcrypt` installed. Start it in one terminal from the repository root:
 
 ```bash
-python scripts/ssh-test-server.py
-# Use its printed connection.json for host tests and device-defines.json for the phone.
+python3 scripts/ssh-test-server.py
+```
+
+In a second terminal, also from the repository root, substitute your device ID
+and the absolute `device-defines.json` path printed by the fixture:
+
+```bash
 adb reverse tcp:22222 tcp:22222
-cd app
-ORG_GRADLE_PROJECT_orgbotQa=true flutter test integration_test/workspace_device_test.dart \
-  -d <device> --no-uninstall \
-  --dart-define-from-file=<fixture-device-defines.json>
+(cd app && ORG_GRADLE_PROJECT_orgbotQa=true flutter test integration_test/workspace_device_test.dart \
+  -d 'DEVICE_ID' --no-uninstall \
+  --dart-define-from-file='/absolute/path/to/device-defines.json')
 ```
 
 Integration-test targets are refused unless `orgbotQa=true`, protecting the normal app package. The QA property uses `com.orgbot.app.qa`, keeping device tests separate from the normal package. Verify the reverse mapping remains active during the test (ADB reconnection clears it). Use `--no-uninstall`: Flutter otherwise removes its test package on completion. These deterministic tests do not validate a real paid model account or your own VPS configuration.
@@ -237,7 +396,7 @@ If Wi-Fi ADB repeatedly loses the test debugger, `integration_test/smoke_main.da
 
 ## License
 
-Original OrgBots work is licensed under Apache License 2.0. Copyright 2026 The
+Original OrgBots work is licensed under [Apache License 2.0](LICENSE). Copyright 2026 The
 AECE Studio. Bundled third-party components retain their own license terms and
 notices; for example, the Inter font's SIL Open Font License and attribution
 remain in `app/assets/fonts/OFL.txt` and in the desktop bundle.
