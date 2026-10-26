@@ -530,11 +530,10 @@ impl RoomSession {
             }
         }
         if !specs.is_empty() {
-            let servers = orgbot_runtime::mcp_client::McpClient::connect_with(
+            let servers = orgbot_runtime::mcp_client::McpClient::lazy(
                 &specs,
                 self.orchestrator.workspace(),
-            )
-            .await;
+            );
             #[cfg(target_os = "linux")]
             let servers = match self.state_path.as_ref().and_then(|p| p.parent()) {
                 Some(path) => servers.with_owner_approval(path.to_path_buf()),
@@ -544,9 +543,8 @@ impl RoomSession {
                 }
             };
             tracing::info!(
-                servers = servers.len(),
-                tools = servers.tools().len(),
-                "mcp servers available to this room"
+                servers = servers.server_names().len(),
+                "mcp servers available on demand"
             );
             self.orchestrator.attach_mcp_servers(servers);
         }
@@ -646,11 +644,14 @@ impl RoomSession {
                 std::future::pending::<()>().await;
             }
         };
-        tokio::select! {
+        let interrupted = tokio::select! {
             biased;
-            _ = interrupt.cancelled() => {},
-            _ = deadline => {},
-            _ = self.orchestrator.step_many(batch, sink) => {},
+            _ = interrupt.cancelled() => true,
+            _ = deadline => true,
+            _ = self.orchestrator.step_many(batch, sink) => false,
+        };
+        if interrupted {
+            self.orchestrator.finish_interrupted_turns().await;
         }
         self.broadcast_new_events();
         let phase = self.orchestrator.engine().room().phase;
@@ -1447,6 +1448,38 @@ mod tests {
     #[derive(Debug)]
     struct InFlightProvider(Arc<tokio::sync::Notify>);
 
+    #[derive(Debug)]
+    struct LoadSkillThenWait {
+        calls: std::sync::atomic::AtomicUsize,
+        waiting: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl Provider for LoadSkillThenWait {
+        fn name(&self) -> &str {
+            "capability cancellation fixture"
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+            _sink: Option<mpsc::Sender<orgbot_providers::StreamEvent>>,
+        ) -> orgbot_providers::Result<CompletionResponse> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Ok(orgbot_providers::scripted::tool_call(
+                    "skill-load",
+                    "use_skill",
+                    serde_json::json!({"skill":"pause-fixture"}),
+                ));
+            }
+            assert!(serde_json::to_string(&request.messages)
+                .unwrap()
+                .contains("PAUSE_SKILL_BODY"));
+            self.waiting.notify_one();
+            std::future::pending().await
+        }
+    }
+
     #[async_trait]
     impl Provider for InFlightProvider {
         fn name(&self) -> &str {
@@ -1525,6 +1558,51 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["version"], 1);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_turn_releases_temporary_skill_before_checkpoint_and_restore() {
+        let dir = std::env::temp_dir().join(format!(
+            "orgbot-capability-pause-{}",
+            orgbot_proto::RoomId::new()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let mut config = RoomConfig::parse(SCRIPTED_ROOM, "pause-capability.toml").unwrap();
+        config.room.state_path = Some(path.clone());
+        let mut resolved = config.resolve().unwrap();
+        let waiting = Arc::new(tokio::sync::Notify::new());
+        resolved.bots[0].provider = Arc::new(LoadSkillThenWait {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            waiting: waiting.clone(),
+        });
+        let (mut session, handle) = RoomSession::build(resolved).unwrap();
+        session
+            .orchestrator
+            .engine_mut()
+            .set_skills(vec![orgbot_proto::skill::Skill {
+                name: "pause-fixture".into(),
+                description: "fixture".into(),
+                body: "PAUSE_SKILL_BODY".into(),
+            }]);
+        let running = tokio::spawn(session.run());
+        tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+            .await
+            .unwrap();
+        assert!(handle.send(Control::Stop).await);
+        tokio::time::timeout(Duration::from_secs(2), running)
+            .await
+            .unwrap()
+            .unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(!saved["bots"].to_string().contains("PAUSE_SKILL_BODY"));
+        for bot in saved["bots"].as_object().unwrap().values() {
+            assert!(bot["capabilities"]["leases"].as_array().unwrap().is_empty());
+        }
+        let (restored, _) = RoomSession::build(config.resolve().unwrap()).unwrap();
+        assert!(!restored.orchestrator.checkpoint()["bots"]
+            .to_string()
+            .contains("PAUSE_SKILL_BODY"));
     }
 
     #[tokio::test]

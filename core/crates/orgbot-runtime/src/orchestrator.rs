@@ -85,6 +85,14 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    /// Expire temporary capabilities after a caller cancels a running batch,
+    /// before saving the paused room or starting another turn.
+    pub async fn finish_interrupted_turns(&mut self) {
+        for bot in self.bots.values_mut() {
+            bot.finish_turn(&self.engine).await;
+        }
+    }
+
     /// Complete room state and bot conversations, without provider credentials.
     pub fn checkpoint(&self) -> serde_json::Value {
         let engine = self.engine.borrow();

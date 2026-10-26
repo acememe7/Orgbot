@@ -148,3 +148,28 @@ cached prefix. Preserve all host/private rule files and tool availability.
 
 The reviewer command restriction and native CLI resume parser defect remain
 separate workflow blockers; this work does not relax those safety boundaries.
+
+## Skills and MCP lifecycle — 2026-10-26
+
+Use one stable discovery/load/call/unload surface for API agents and the native
+CLI room bridge. Skill bodies and selected tool schemas load on demand; catalogs
+return bounded summaries. Task leases end when work leaves the worker; one-use
+leases expire after consumption. Preserve protocol call/result pairing when
+removing released context from API requests. Native CLI transcripts remain owned
+by their CLI; do not reset sessions to simulate selective context removal.
+
+Connect only the requested MCP server and isolate connection leases per agent.
+Unloading releases that agent's connection when no selected tools still need it.
+Every actual external call retains exact-argument owner approval and reviewer
+restrictions. Configurations, source skills and host profiles remain untouched.
+
+- [x] Implement lifecycle state, discovery and both dispatch paths.
+- [x] Verify expiry, reload, restart, lazy connections and authorization locally.
+  Cancellation expires temporary leases before checkpointing; same-response task
+  release blocks later MCP use; active context can reload after compaction.
+- [x] Run affected regression checks and obtain Astra review: 128 runtime and
+  104 server tests passed. Two existing server tests require separate fixtures;
+  opt-in live-provider checks were not enabled. Two pre-existing unused-variable
+  warnings remain in runtime restart tests. No paid model calls were made.
+  The optimized server build passed; installed packages and public distribution
+  remain unchanged.

@@ -36,7 +36,10 @@ impl std::fmt::Debug for McpCall {
 
 /// The tools a given bot may see through the room MCP server.
 pub fn room_tools_for(spec: &orgbot_proto::AgentSpec) -> Vec<ToolDef> {
-    orgbot_tools::definitions_for(spec)
+    let mut tools = orgbot_tools::definitions_for(spec);
+    tools.retain(|tool| tool.name != "use_skill");
+    tools.extend(crate::capabilities::definitions(spec.autonomy.review_only));
+    tools
 }
 
 /// One MCP session: the state of a single client connection (one agent

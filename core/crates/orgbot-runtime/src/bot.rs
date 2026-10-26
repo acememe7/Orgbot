@@ -26,6 +26,8 @@ use crate::prompt;
 pub struct BotMemory {
     history: Vec<Turn>,
     last_seen: Seq,
+    #[serde(default)]
+    capabilities: crate::capabilities::Capabilities,
 }
 
 /// What one turn accomplished.
@@ -111,6 +113,7 @@ pub struct Bot {
     provider: Arc<dyn Provider>,
     /// The bot's conversation with its model, across turns.
     history: Vec<Turn>,
+    capabilities: crate::capabilities::Capabilities,
     /// The last event this bot has been shown.
     last_seen: Seq,
     /// Cached tool definitions; they depend only on the spec.
@@ -134,24 +137,30 @@ pub struct Bot {
 
 impl Bot {
     pub fn memory(&self) -> BotMemory {
+        let mut history = self.history.clone();
+        self.capabilities.prune_history(&mut history);
         BotMemory {
-            history: self.history.clone(),
+            history,
             last_seen: self.last_seen,
+            capabilities: self.capabilities.clone(),
         }
     }
 
     pub fn restore_memory(&mut self, memory: BotMemory) {
         self.history = memory.history;
         self.last_seen = memory.last_seen;
+        self.capabilities = memory.capabilities;
+        self.capabilities.prune_history(&mut self.history);
     }
     /// Seat a bot with a backend.
     pub fn new(spec: AgentSpec, provider: Arc<dyn Provider>) -> Self {
-        let tools = orgbot_tools::definitions_for(&spec);
+        let tools = crate::mcp::room_tools_for(&spec);
         let model = spec.provider.model().to_string();
         Self {
             spec,
             provider,
             history: Vec::new(),
+            capabilities: crate::capabilities::Capabilities::default(),
             last_seen: Seq::ZERO,
             tools,
             model,
@@ -180,14 +189,8 @@ impl Bot {
 
     /// Give this bot the room's MCP servers.
     ///
-    /// An agent-CLI bot inherits its machine's servers for free; an
-    /// API-backed one inherits nothing, which on a phone means every bot. The
-    /// tools arrive already named for the server they came from, so nothing
-    /// here can shadow a board tool.
+    /// Only the discovery gateway is advertised; selected schemas arrive on demand.
     pub fn attach_mcp_servers(&mut self, servers: Arc<crate::mcp_client::McpClient>) {
-        if !self.spec.autonomy.review_only {
-            self.tools.extend(servers.tools());
-        }
         self.mcp_servers = Some(servers);
     }
 
@@ -236,6 +239,26 @@ impl Bot {
     /// watching. Provider failures are reported to the engine, which faults a
     /// bot that keeps failing and hands its work back.
     pub async fn take_turn(
+        &mut self,
+        engine: &SharedEngine,
+        sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> Result<TurnReport, ProviderError> {
+        let result = self.take_turn_inner(engine, sink).await;
+        self.finish_turn(engine).await;
+        result
+    }
+
+    pub(crate) async fn finish_turn(&mut self, engine: &SharedEngine) {
+        self.capabilities
+            .refresh(engine, self.spec.id, self.mcp_servers.as_deref())
+            .await;
+        self.capabilities
+            .end_turn(self.spec.id, self.mcp_servers.as_deref())
+            .await;
+        self.capabilities.prune_history(&mut self.history);
+    }
+
+    async fn take_turn_inner(
         &mut self,
         engine: &SharedEngine,
         sink: Option<mpsc::Sender<StreamEvent>>,
@@ -332,6 +355,10 @@ impl Bot {
 
         let max_steps = self.spec.autonomy.max_turns_per_task.max(1);
         for _ in 0..max_steps {
+            self.capabilities
+                .refresh(engine, self.spec.id, self.mcp_servers.as_deref())
+                .await;
+            self.capabilities.prune_history(&mut self.history);
             self.trim_history();
 
             let mut request =
@@ -360,6 +387,7 @@ impl Bot {
                         self.mcp_servers.as_deref(),
                         self.workspace.as_ref(),
                         self.spec.autonomy.review_only,
+                        &mut self.capabilities,
                     )
                     .await;
                     report.tool_calls += mcp.ok;
@@ -436,6 +464,7 @@ impl Bot {
             };
 
             report.steps += 1;
+            self.capabilities.after_response(&mut self.history);
             report.usage.add(response.usage);
             usage_checkpoint.update(report.usage, report.steps);
             report.stop_reason = response.stop_reason.clone();
@@ -458,7 +487,18 @@ impl Bot {
                 if name == "post_message" {
                     posted_to_chat = true;
                 }
-                let outcome = if self
+                let outcome = if crate::capabilities::handles(name) {
+                    self.capabilities
+                        .dispatch(
+                            engine,
+                            self.spec.id,
+                            self.spec.autonomy.review_only,
+                            self.mcp_servers.as_deref(),
+                            name,
+                            input,
+                        )
+                        .await
+                } else if self
                     .mcp_servers
                     .as_ref()
                     .is_some_and(|servers| servers.owns(name))
@@ -468,9 +508,9 @@ impl Bot {
                             "Review-only bots cannot call external MCP tools.",
                         )
                     } else {
-                        // Safe to unwrap: `owns` is only true when it is set.
-                        let servers = self.mcp_servers.clone().expect("checked above");
-                        servers.call_for(engine, self.spec.id, name, input).await
+                        orgbot_tools::ToolOutcome::error(
+                            "Load the selected tool with load_mcp_tool, then use call_mcp_tool.",
+                        )
                     }
                 } else if name.starts_with("workspace_") {
                     if self.spec.autonomy.review_only && is_workspace_write_tool(name) {
@@ -699,9 +739,23 @@ fn compact_history(turns: &[Turn]) -> String {
                     content,
                     is_error,
                 } => {
+                    // Loaded context must not survive unloading through a summary.
+                    let transient = calls.get(tool_use_id).is_some_and(|(name, _)| {
+                        matches!(
+                            name.as_str(),
+                            "use_skill" | "load_mcp_tool" | "find_capabilities"
+                        )
+                    });
                     results.insert(
                         tool_use_id.clone(),
-                        (compact_snippet(content, 300), *is_error),
+                        (
+                            if transient && !is_error {
+                                "context omitted; discover or reload if needed".into()
+                            } else {
+                                compact_snippet(content, 300)
+                            },
+                            *is_error,
+                        ),
                     );
                 }
                 // Original files remain available through room artifacts and
@@ -865,6 +919,7 @@ async fn complete_with_mcp(
     servers: Option<&crate::mcp_client::McpClient>,
     workspace: Option<&crate::workspace::Workspace>,
     review_only: bool,
+    capabilities: &mut crate::capabilities::Capabilities,
 ) -> (Result<CompletionResponse, ProviderError>, McpTally) {
     let mut session = crate::mcp::McpSession::new(tools.to_vec());
     let mut turn = std::pin::pin!(provider.complete(request, sink));
@@ -874,7 +929,7 @@ async fn complete_with_mcp(
             response = &mut turn => {
                 while let Ok(call) = rx.try_recv() {
                     let reply = dispatch_room_mcp(&mut session, &call.request, engine, actor,
-                        servers, workspace, review_only, &mut tally).await;
+                        servers, workspace, review_only, &mut tally, capabilities).await;
                     let _ = call.reply.send(reply);
                 }
                 return (response, tally);
@@ -882,7 +937,7 @@ async fn complete_with_mcp(
             inbound = rx.recv() => {
                 let Some(call) = inbound else { return (turn.await, tally) };
                 let reply = dispatch_room_mcp(&mut session, &call.request, engine, actor,
-                    servers, workspace, review_only, &mut tally).await;
+                    servers, workspace, review_only, &mut tally, capabilities).await;
                 let _ = call.reply.send(reply);
             }
         }
@@ -899,10 +954,15 @@ async fn dispatch_room_mcp(
     workspace: Option<&crate::workspace::Workspace>,
     review_only: bool,
     tally: &mut McpTally,
+    capabilities: &mut crate::capabilities::Capabilities,
 ) -> Option<String> {
+    capabilities.refresh(engine, actor, servers).await;
     let mut pending = None;
     let reply = session.handle(request, |name, args| {
-        if servers.is_some_and(|s| s.owns(name)) || name.starts_with("workspace_") {
+        if crate::capabilities::handles(name)
+            || servers.is_some_and(|s| s.owns(name))
+            || name.starts_with("workspace_")
+        {
             pending = Some((name.to_owned(), args.clone()));
             orgbot_tools::ToolOutcome::error("pending")
         } else {
@@ -914,11 +974,17 @@ async fn dispatch_room_mcp(
     let Some((name, args)) = pending else {
         return reply;
     };
-    let outcome = if let Some(servers) = servers.filter(|s| s.owns(&name)) {
+    let outcome = if crate::capabilities::handles(&name) {
+        capabilities
+            .dispatch(engine, actor, review_only, servers, &name, &args)
+            .await
+    } else if servers.is_some_and(|s| s.owns(&name)) {
         if review_only {
             orgbot_tools::ToolOutcome::error("Review-only bots cannot call external MCP tools.")
         } else {
-            servers.call_for(engine, actor, &name, &args).await
+            orgbot_tools::ToolOutcome::error(
+                "Load the selected tool with load_mcp_tool, then use call_mcp_tool.",
+            )
         }
     } else if review_only && is_workspace_write_tool(&name) {
         orgbot_tools::ToolOutcome::error(
@@ -1028,6 +1094,7 @@ mod tests {
             None,
             None,
             false,
+            &mut crate::capabilities::Capabilities::default(),
         )
         .await;
         assert!(result.is_ok());
@@ -1553,7 +1620,7 @@ mod tests {
         let (server_spec, calls, server) = local_mcp_server().await;
         let mut spec = spec();
         spec.autonomy.review_only = true;
-        let client = Arc::new(crate::mcp_client::McpClient::connect(&[server_spec]).await);
+        let client = Arc::new(crate::mcp_client::McpClient::lazy(&[server_spec], None));
         let mut bot = Bot::new(spec.clone(), mcp_call_provider());
         bot.attach_mcp_servers(client);
         assert!(
@@ -1575,13 +1642,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ordinary_bots_keep_external_mcp_tools() {
+    async fn ordinary_bots_load_external_mcp_tools_on_demand() {
         let (server_spec, calls, server) = local_mcp_server().await;
         let spec = spec();
-        let client = Arc::new(crate::mcp_client::McpClient::connect(&[server_spec]).await);
-        let mut bot = Bot::new(spec.clone(), mcp_call_provider());
+        let client = Arc::new(crate::mcp_client::McpClient::lazy(&[server_spec], None));
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            orgbot_providers::scripted::tool_call(
+                "load",
+                "load_mcp_tool",
+                json!({"server":"external", "tool":"external__mutate", "lifetime":"once"}),
+            ),
+            orgbot_providers::scripted::tool_call(
+                "call",
+                "call_mcp_tool",
+                json!({"tool":"external__mutate", "arguments":{}}),
+            ),
+            orgbot_providers::scripted::says("done"),
+        ]));
+        let mut bot = Bot::new(spec.clone(), provider.clone());
         bot.attach_mcp_servers(client);
-        assert!(bot.tools.iter().any(|tool| tool.name == "external__mutate"));
+        assert!(!bot.tools.iter().any(|tool| tool.name == "external__mutate"));
+        assert!(bot.tools.iter().any(|tool| tool.name == "load_mcp_tool"));
 
         let report = bot
             .take_turn(&mcp_test_engine(&spec).await, None)
@@ -1589,6 +1670,277 @@ mod tests {
             .unwrap();
         assert_eq!(report.tool_errors, 0);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let requests = provider.requests();
+        let serialized: Vec<_> = requests
+            .iter()
+            .map(|request| serde_json::to_string(request).unwrap())
+            .collect();
+        assert!(!serialized[0].contains("A test-only external mutation"));
+        assert!(serialized[1].contains("A test-only external mutation"));
+        assert!(!serialized[2].contains("A test-only external mutation"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn api_skill_bodies_are_consumed_released_and_reloadable() {
+        use orgbot_providers::scripted::{says, tool_call};
+        let spec = spec();
+        let engine = mcp_test_engine(&spec).await;
+        engine.with(|room| {
+            room.set_skills(vec![orgbot_proto::skill::Skill {
+                name: "fixture-skill".into(),
+                description: "fixture summary absent from the startup prompt".into(),
+                body: "PRIVATE_SKILL_BODY_MARKER".repeat(500),
+            }])
+        });
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            tool_call(
+                "load-once",
+                "use_skill",
+                json!({"skill":"fixture-skill", "lifetime":"once"}),
+            ),
+            tool_call("next", "list_tasks", json!({})),
+            tool_call("reload", "use_skill", json!({"skill":"fixture-skill"})),
+            tool_call(
+                "release",
+                "unload_capability",
+                json!({"kind":"skill", "name":"fixture-skill"}),
+            ),
+            says("done"),
+        ]));
+        let mut bot = Bot::new(spec, provider.clone());
+        let report = bot.take_turn(&engine, None).await.unwrap();
+        assert_eq!(report.tool_errors, 0);
+        let requests = provider.requests();
+        let bodies: Vec<_> = requests
+            .iter()
+            .map(|r| serde_json::to_string(&r.messages).unwrap())
+            .collect();
+        assert!(!requests[0].system.contains("fixture summary"));
+        assert!(!bodies[0].contains("PRIVATE_SKILL_BODY_MARKER"));
+        assert!(bodies[1].contains("PRIVATE_SKILL_BODY_MARKER"));
+        assert!(!bodies[2].contains("PRIVATE_SKILL_BODY_MARKER"));
+        assert!(bodies[3].contains("PRIVATE_SKILL_BODY_MARKER"));
+        assert!(!bodies[4].contains("PRIVATE_SKILL_BODY_MARKER"));
+        assert!(!serde_json::to_string(&bot.memory())
+            .unwrap()
+            .contains("PRIVATE_SKILL_BODY_MARKER"));
+        for request in requests {
+            let mut uses = std::collections::BTreeSet::new();
+            for block in request.messages.iter().flat_map(|turn| &turn.content) {
+                match block {
+                    ContentBlock::ToolUse { id, .. } => {
+                        uses.insert(id);
+                    }
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        assert!(uses.contains(tool_use_id))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let saved = serde_json::to_value(bot.memory()).unwrap();
+        let mut legacy = saved;
+        legacy.as_object_mut().unwrap().remove("capabilities");
+        let memory: BotMemory = serde_json::from_value(legacy).unwrap();
+        bot.restore_memory(memory);
+        assert!(!serde_json::to_string(&bot.memory())
+            .unwrap()
+            .contains("PRIVATE_SKILL_BODY_MARKER"));
+    }
+
+    #[tokio::test]
+    async fn interrupted_cleanup_expires_mcp_lease_and_connection_before_restore() {
+        let (server_spec, calls, server) = local_mcp_server().await;
+        let spec = spec();
+        let engine = mcp_test_engine(&spec).await;
+        let client = Arc::new(crate::mcp_client::McpClient::lazy(&[server_spec], None));
+        let mut bot = Bot::new(
+            spec.clone(),
+            Arc::new(ScriptedProvider::always_says("done")),
+        );
+        bot.attach_mcp_servers(client.clone());
+        let loaded = bot
+            .capabilities
+            .dispatch(
+                &engine,
+                spec.id,
+                false,
+                Some(&client),
+                "load_mcp_tool",
+                &json!({"server":"external", "tool":"external__mutate"}),
+            )
+            .await;
+        assert!(!loaded.is_error);
+        bot.finish_turn(&engine).await;
+        let saved = serde_json::to_value(bot.memory()).unwrap();
+        bot.restore_memory(serde_json::from_value(saved).unwrap());
+        let rejected = bot
+            .capabilities
+            .dispatch(
+                &engine,
+                spec.id,
+                false,
+                Some(&client),
+                "call_mcp_tool",
+                &json!({"tool":"external__mutate", "arguments":{}}),
+            )
+            .await;
+        assert!(rejected.is_error);
+        assert!(
+            client
+                .call_loaded_for(&engine, spec.id, "external__mutate", &json!({}))
+                .await
+                .is_error
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn active_skill_can_be_refreshed_after_history_compaction() {
+        use orgbot_providers::scripted::{says, tool_call};
+        let spec = spec();
+        let engine = mcp_test_engine(&spec).await;
+        engine.with(|room| {
+            room.set_skills(vec![orgbot_proto::skill::Skill {
+                name: "compact-fixture".into(),
+                description: "fixture".into(),
+                body: "COMPACT_SKILL_BODY".into(),
+            }]);
+            let events = room
+                .apply(Command::CreateTask {
+                    title: "active work".into(),
+                    brief: String::new(),
+                    by: None,
+                    required_role: None,
+                    priority: orgbot_proto::task::Priority::Normal,
+                    acceptance_criteria: vec![],
+                    depends_on: vec![],
+                    origin: orgbot_proto::graph::TaskOrigin::plain(),
+                })
+                .unwrap();
+            let task = events
+                .iter()
+                .find_map(|e| match &e.event {
+                    orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+                    _ => None,
+                })
+                .unwrap();
+            room.apply(Command::OpenTask { task }).unwrap();
+            room.apply(Command::ClaimTask { task, by: spec.id })
+                .unwrap();
+        });
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            tool_call("refresh", "use_skill", json!({"skill":"compact-fixture"})),
+            says("done"),
+        ]));
+        let mut bot = Bot::new(spec.clone(), provider.clone());
+        let result = bot
+            .capabilities
+            .dispatch(
+                &engine,
+                spec.id,
+                false,
+                None,
+                "use_skill",
+                &json!({"skill":"compact-fixture"}),
+            )
+            .await;
+        assert!(!result.is_error);
+        bot.history
+            .push(tool_call("original", "use_skill", json!({"skill":"compact-fixture"})).as_turn());
+        bot.history
+            .push(Turn::tool_results(vec![ContentBlock::ToolResult {
+                tool_use_id: "original".into(),
+                content: result.content,
+                is_error: false,
+            }]));
+        for _ in 0..40 {
+            bot.history.push(Turn::user("Continue the current task."));
+            bot.history.push(Turn::assistant("Working."));
+        }
+        bot.trim_history();
+        assert!(!serde_json::to_string(&bot.history)
+            .unwrap()
+            .contains("COMPACT_SKILL_BODY"));
+        assert_eq!(bot.take_turn(&engine, None).await.unwrap().tool_errors, 0);
+        assert!(serde_json::to_string(&provider.requests()[1].messages)
+            .unwrap()
+            .contains("COMPACT_SKILL_BODY"));
+    }
+
+    #[tokio::test]
+    async fn api_batch_cannot_use_a_task_lease_after_releasing_its_task() {
+        use orgbot_providers::scripted::{says, tool_call};
+        let (server_spec, calls, server) = local_mcp_server().await;
+        let spec = spec();
+        let engine = mcp_test_engine(&spec).await;
+        let task = engine.with(|room| {
+            let events = room
+                .apply(Command::CreateTask {
+                    title: "bounded work".into(),
+                    brief: String::new(),
+                    by: None,
+                    required_role: None,
+                    priority: orgbot_proto::task::Priority::Normal,
+                    acceptance_criteria: vec![],
+                    depends_on: vec![],
+                    origin: orgbot_proto::graph::TaskOrigin::plain(),
+                })
+                .unwrap();
+            let task = events
+                .iter()
+                .find_map(|e| match &e.event {
+                    orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+                    _ => None,
+                })
+                .unwrap();
+            room.apply(Command::OpenTask { task }).unwrap();
+            room.apply(Command::ClaimTask { task, by: spec.id })
+                .unwrap();
+            task
+        });
+        let mut batch = tool_call(
+            "release",
+            "release_task",
+            json!({"task":task,"reason":"handoff"}),
+        );
+        batch.content.extend(
+            tool_call(
+                "late-call",
+                "call_mcp_tool",
+                json!({"tool":"external__mutate","arguments":{}}),
+            )
+            .content,
+        );
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            tool_call(
+                "load",
+                "load_mcp_tool",
+                json!({"server":"external","tool":"external__mutate"}),
+            ),
+            batch,
+            says("done"),
+        ]));
+        let client = Arc::new(crate::mcp_client::McpClient::lazy(&[server_spec], None));
+        let mut bot = Bot::new(spec, provider.clone());
+        bot.attach_mcp_servers(client);
+        let report = bot.take_turn(&engine, None).await.unwrap();
+        assert_eq!(report.tool_errors, 1);
+        assert_eq!(
+            engine.borrow().task(task).unwrap().state,
+            orgbot_proto::TaskState::Ready
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(provider.requests()[2]
+            .messages
+            .iter()
+            .flat_map(|turn| &turn.content)
+            .any(|block| {
+                matches!(block, ContentBlock::ToolResult {tool_use_id,content,is_error:true}
+                if tool_use_id == "late-call" && content.contains("not loaded"))
+            }));
         server.abort();
     }
 
@@ -1599,13 +1951,13 @@ mod tests {
         let engine = mcp_test_engine(&spec).await;
         let state = std::env::temp_dir().join(format!("orgbots-bridge-{}", spec.id));
         std::fs::create_dir(&state).unwrap();
-        let client = crate::mcp_client::McpClient::connect(&[server_spec])
-            .await
-            .with_owner_approval(state);
-        let mut session = crate::mcp::McpSession::new(client.tools());
+        let client =
+            crate::mcp_client::McpClient::lazy(&[server_spec], None).with_owner_approval(state);
+        let mut session = crate::mcp::McpSession::new(crate::mcp::room_tools_for(&spec));
         let mut tally = McpTally::default();
+        let mut capabilities = crate::capabilities::Capabilities::default();
         let request = json!({"jsonrpc":"2.0","id":7,"method":"tools/call",
-            "params":{"name":"external__mutate","arguments":{}}})
+            "params":{"name":"call_mcp_tool","arguments":{"tool":"external__mutate","arguments":{}}}})
         .to_string();
         let reply = dispatch_room_mcp(
             &mut session,
@@ -1616,6 +1968,7 @@ mod tests {
             None,
             false,
             &mut tally,
+            &mut capabilities,
         )
         .await
         .unwrap();
@@ -1634,11 +1987,23 @@ mod tests {
             None,
             true,
             &mut tally,
+            &mut capabilities,
         )
         .await
         .unwrap();
-        assert!(reply.contains("Review-only"));
+        assert!(reply.to_lowercase().contains("review-only"));
         assert_eq!(engine.borrow().decisions().pending().count(), 0);
+        let loaded = capabilities
+            .dispatch(
+                &engine,
+                spec.id,
+                false,
+                Some(&client),
+                "load_mcp_tool",
+                &json!({"server":"external", "tool":"external__mutate"}),
+            )
+            .await;
+        assert!(!loaded.is_error, "{}", loaded.content);
         let reply = dispatch_room_mcp(
             &mut session,
             &request,
@@ -1648,6 +2013,7 @@ mod tests {
             None,
             false,
             &mut tally,
+            &mut capabilities,
         )
         .await
         .unwrap();
@@ -1674,6 +2040,7 @@ mod tests {
             None,
             false,
             &mut tally,
+            &mut capabilities,
         )
         .await
         .unwrap();
@@ -1690,6 +2057,7 @@ mod tests {
             None,
             false,
             &mut tally,
+            &mut capabilities,
         )
         .await
         .unwrap();
@@ -1769,6 +2137,28 @@ mod tests {
         assert!(summary.contains("art_abc123"));
         assert!(summary.contains("tool call-7 `read_artifact`"));
         assert!(summary.contains("Loaded the signed decision record"));
+    }
+
+    #[test]
+    fn compaction_keeps_capability_receipts_without_carrying_loaded_bodies() {
+        let turns = vec![
+            Turn {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "skill-load".into(),
+                    name: "use_skill".into(),
+                    input: json!({"skill":"fixture"}),
+                }],
+            },
+            Turn::tool_results(vec![ContentBlock::ToolResult {
+                tool_use_id: "skill-load".into(),
+                content: "SKILL fixture\nPRIVATE_PLAYBOOK_BODY".into(),
+                is_error: false,
+            }]),
+        ];
+        let summary = compact_history(&turns);
+        assert!(summary.contains("skill-load"));
+        assert!(!summary.contains("PRIVATE_PLAYBOOK_BODY"));
     }
 
     #[test]

@@ -26,7 +26,7 @@
 //! board tools must never be shadowed by something a server decided to call
 //! `claim_task`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -154,6 +154,23 @@ struct StdioPipe {
 pub struct McpClient {
     servers: Vec<Connected>,
     approval_state: Option<PathBuf>,
+    catalog: Vec<String>,
+    lazy: Option<LazyRegistry>,
+}
+
+struct LazyRegistry {
+    specs: BTreeMap<String, McpServerSpec>,
+    workspace: Option<crate::workspace::Workspace>,
+    loaded: Mutex<HashMap<AgentId, BTreeMap<String, Arc<Connected>>>>,
+    locks: Mutex<HashMap<(AgentId, String), Arc<Mutex<()>>>>,
+}
+
+impl LazyRegistry {
+    async fn connection_lock(&self, actor: AgentId, server: &str) -> Arc<Mutex<()>> {
+        let key = (actor, server.to_string());
+        let mut locks = self.locks.lock().await;
+        Arc::clone(locks.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+    }
 }
 
 impl std::fmt::Debug for McpClient {
@@ -161,24 +178,40 @@ impl std::fmt::Debug for McpClient {
         f.debug_struct("McpClient")
             .field(
                 "servers",
-                &self.servers.iter().map(|s| &s.name).collect::<Vec<_>>(),
+                &self
+                    .servers
+                    .iter()
+                    .filter_map(|s| safe_server_name(&s.name).then_some(s.name.as_str()))
+                    .collect::<Vec<_>>(),
             )
+            .field("server_count", &self.catalog.len())
+            .field("lazy", &self.lazy.is_some())
             .finish()
     }
 }
 
 impl McpClient {
-    /// Connect to each server, keeping the ones that answer.
+    /// Eagerly connect to each server, keeping the ones that answer.
+    ///
+    /// This legacy constructor is not lifecycle-capable: use [`Self::lazy`]
+    /// when tools must be loaded and released per actor.
     pub async fn connect(specs: &[McpServerSpec]) -> Self {
         Self::connect_with(specs, None).await
     }
 
     /// As [`Self::connect`], with a computer the room can run servers on.
+    /// This eager constructor is not lifecycle-capable; use [`Self::lazy`]
+    /// for per-actor loading and release.
     pub async fn connect_with(
         specs: &[McpServerSpec],
         workspace: Option<&crate::workspace::Workspace>,
     ) -> Self {
         let workspace = workspace.cloned();
+        let catalog = specs
+            .iter()
+            .filter(|spec| safe_server_name(&spec.name))
+            .map(|spec| spec.name.clone())
+            .collect::<Vec<_>>();
         let attempts = futures::stream::iter(specs.iter().cloned())
             .map(move |spec| {
                 let workspace = workspace.clone();
@@ -215,6 +248,33 @@ impl McpClient {
         Self {
             servers,
             approval_state: None,
+            catalog,
+            lazy: None,
+        }
+    }
+
+    /// Keep server configuration without starting any process or opening any
+    /// network connection. Each actor connects only after explicitly loading
+    /// a server, and owns an independent connection until it releases it.
+    pub fn lazy(specs: &[McpServerSpec], workspace: Option<&crate::workspace::Workspace>) -> Self {
+        let mut configured = BTreeMap::new();
+        for spec in specs.iter().filter(|spec| safe_server_name(&spec.name)) {
+            configured
+                .entry(spec.name.clone())
+                .or_insert_with(|| spec.clone());
+        }
+        let specs = configured;
+        let catalog = specs.keys().cloned().collect();
+        Self {
+            servers: Vec::new(),
+            approval_state: None,
+            catalog,
+            lazy: Some(LazyRegistry {
+                specs,
+                workspace: workspace.cloned(),
+                loaded: Mutex::new(HashMap::new()),
+                locks: Mutex::new(HashMap::new()),
+            }),
         }
     }
 
@@ -232,11 +292,81 @@ impl McpClient {
             .collect()
     }
 
+    /// Names of configured MCP servers, without returning their commands,
+    /// endpoints, environment, headers, or other configuration.
+    pub fn server_names(&self) -> Vec<String> {
+        self.catalog.clone()
+    }
+
+    /// Connect one configured server for one actor and return its namespaced
+    /// tools. Repeated loads by the same actor reuse the same connection.
+    pub async fn load_for(&self, actor: AgentId, server: &str) -> Result<Vec<ToolDef>, String> {
+        let Some(lazy) = &self.lazy else {
+            return Err("MCP server loading is unavailable.".into());
+        };
+        let Some(spec) = lazy.specs.get(server) else {
+            return Err("MCP server is unavailable.".into());
+        };
+        let connection_lock = lazy.connection_lock(actor, server).await;
+        let _connection_guard = connection_lock.lock().await;
+        let existing = lazy
+            .loaded
+            .lock()
+            .await
+            .get(&actor)
+            .and_then(|servers| servers.get(server).cloned());
+        if let Some(connected) = existing {
+            return Ok(connected.tools.clone());
+        }
+        {
+            let connected = tokio::time::timeout(
+                MCP_CONNECT_TIMEOUT,
+                connect_one(spec, lazy.workspace.as_ref()),
+            )
+            .await
+            .map_err(|_| "MCP server could not be loaded.".to_string())?
+            .map_err(|_| "MCP server could not be loaded.".to_string())?;
+            lazy.loaded
+                .lock()
+                .await
+                .entry(actor)
+                .or_default()
+                .insert(server.to_string(), Arc::new(connected));
+        }
+        Ok(lazy.loaded.lock().await[&actor][server].tools.clone())
+    }
+
+    /// Release only this actor's connection to a configured server. A second
+    /// actor using the same server remains connected.
+    pub async fn release_for(&self, actor: AgentId, server: &str) -> Result<(), String> {
+        let Some(lazy) = &self.lazy else {
+            return Err("MCP server release is unavailable.".into());
+        };
+        if !lazy.specs.contains_key(server) {
+            return Err("MCP server is unavailable.".into());
+        }
+        let connection_lock = lazy.connection_lock(actor, server).await;
+        let _connection_guard = connection_lock.lock().await;
+        let mut loaded = lazy.loaded.lock().await;
+        if let Some(actor_servers) = loaded.get_mut(&actor) {
+            actor_servers.remove(server);
+            if actor_servers.is_empty() {
+                loaded.remove(&actor);
+            }
+        }
+        Ok(())
+    }
+
     /// Whether this name belongs to a server rather than to the room.
     pub fn owns(&self, tool: &str) -> bool {
         self.servers
             .iter()
             .any(|server| tool.starts_with(&format!("{}{NAMESPACE}", server.name)))
+            || self.lazy.as_ref().is_some_and(|lazy| {
+                lazy.specs
+                    .keys()
+                    .any(|name| tool.starts_with(&format!("{name}{NAMESPACE}")))
+            })
     }
 
     /// Call a namespaced tool and return what the server said.
@@ -248,25 +378,7 @@ impl McpClient {
         else {
             return ToolOutcome::error(format!("No MCP server offers `{tool}`."));
         };
-        let bare = &tool[server.name.len() + NAMESPACE.len()..];
-        let request = json!({
-            "method": "tools/call",
-            "params": { "name": bare, "arguments": arguments },
-        });
-        match server.channel.request(request).await {
-            Ok(result) => ToolOutcome {
-                content: render(&result),
-                // A server reports a tool-level failure in the result, not as
-                // a protocol error, and the bot needs to know the difference.
-                is_error: result
-                    .get("isError")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            },
-            Err(error) => ToolOutcome::error(format!(
-                "`{tool}` did not answer: {error}. The server may have stopped."
-            )),
-        }
+        call_connected(server, tool, arguments, false).await
     }
 
     /// Call an external tool only after the room owner approved this exact
@@ -278,15 +390,58 @@ impl McpClient {
         tool: &str,
         arguments: &Value,
     ) -> ToolOutcome {
-        let Some(state_dir) = self.approval_state.as_deref() else {
-            return self.call(tool, arguments).await;
-        };
         let Some(server) = self
             .servers
             .iter()
             .find(|server| tool.starts_with(&format!("{}{NAMESPACE}", server.name)))
         else {
             return ToolOutcome::error(format!("No MCP server offers `{tool}`."));
+        };
+        self.call_for_server(engine, actor, server, tool, arguments, false)
+            .await
+    }
+
+    /// Call only an exact tool loaded by this actor. Lazy connections and
+    /// approval decisions are scoped to the selected actor and server.
+    pub async fn call_loaded_for(
+        &self,
+        engine: &crate::SharedEngine,
+        actor: AgentId,
+        tool: &str,
+        arguments: &Value,
+    ) -> ToolOutcome {
+        let Some(lazy) = &self.lazy else {
+            return ToolOutcome::error("No MCP server offers that loaded tool.");
+        };
+        let server = lazy.loaded.lock().await.get(&actor).and_then(|servers| {
+            servers.values().find_map(|connected| {
+                connected
+                    .tools
+                    .iter()
+                    .any(|definition| definition.name == tool)
+                    .then(|| Arc::clone(connected))
+            })
+        });
+        let Some(server) = server else {
+            return ToolOutcome::error("No MCP server offers that loaded tool.");
+        };
+        // Keep this Arc for the in-flight operation. Release removes the
+        // registry's reference immediately; this call may finish on its own.
+        self.call_for_server(engine, actor, server.as_ref(), tool, arguments, true)
+            .await
+    }
+
+    async fn call_for_server(
+        &self,
+        engine: &crate::SharedEngine,
+        actor: AgentId,
+        server: &Connected,
+        tool: &str,
+        arguments: &Value,
+        redact_errors: bool,
+    ) -> ToolOutcome {
+        let Some(state_dir) = self.approval_state.as_deref() else {
+            return call_connected(server, tool, arguments, redact_errors).await;
         };
         let args = crate::mcp_approval::canonical_json(arguments);
         let state_identity = match crate::mcp_approval::canonical_state_identity(
@@ -401,7 +556,7 @@ impl McpClient {
             return ToolOutcome::error("Owner response did not grant this external MCP call.");
         }
         match crate::mcp_approval::consume_approval(state_dir.to_path_buf(), decision.id).await {
-            Ok(()) => self.call(tool, arguments).await,
+            Ok(()) => call_connected(server, tool, arguments, redact_errors).await,
             Err(error) => ToolOutcome::error(error),
         }
     }
@@ -433,6 +588,49 @@ fn render(result: &Value) -> String {
         result.to_string()
     } else {
         text.join("\n")
+    }
+}
+
+fn safe_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.contains(NAMESPACE)
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+async fn call_connected(
+    server: &Connected,
+    tool: &str,
+    arguments: &Value,
+    redact_errors: bool,
+) -> ToolOutcome {
+    let prefix = format!("{}{NAMESPACE}", server.name);
+    let Some(bare) = tool.strip_prefix(&prefix) else {
+        return ToolOutcome::error("No MCP server offers that tool.");
+    };
+    let request = json!({
+        "method": "tools/call",
+        "params": { "name": bare, "arguments": arguments },
+    });
+    match server.channel.request(request).await {
+        Ok(result) => ToolOutcome {
+            content: render(&result),
+            // A server reports a tool-level failure in the result, not as a
+            // protocol error, and the bot needs to know the difference.
+            is_error: result
+                .get("isError")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+        Err(error) if redact_errors => {
+            let _ = error;
+            ToolOutcome::error("The loaded MCP tool did not answer; its details were withheld.")
+        }
+        Err(error) => ToolOutcome::error(format!(
+            "`{tool}` did not answer: {error}. The server may have stopped."
+        )),
     }
 }
 
@@ -970,8 +1168,267 @@ mod tests {
                 },
             }],
             approval_state: None,
+            catalog: vec!["remote".into()],
+            lazy: None,
         }
         .with_owner_approval(path)
+    }
+
+    #[cfg(unix)]
+    fn lazy_fixture_with_delay(
+        root: &std::path::Path,
+        name: &str,
+        startup_delay: f64,
+    ) -> (McpClient, PathBuf) {
+        let marker = root.join(format!("mcp-events-{name}"));
+        let script = root.join(format!("fake-mcp-{name}.py"));
+        std::fs::write(
+            &script,
+            format!(
+                "import json,sys,time\nopen({:?},'a').write('start\\n')\ntime.sleep({})\nfor line in sys.stdin:\n m=json.loads(line)\n method=m.get('method')\n if method=='initialize': r={{'protocolVersion':'2025-06-18','serverInfo':{{'name':'fixture','version':'1'}}}}\n elif method=='tools/list': r={{'tools':[{{'name':'lookup','description':'Synthetic lookup','inputSchema':{{'type':'object','properties':{{'query':{{'type':'string'}}}},'required':['query']}}}}]}}\n elif method=='tools/call':\n  open({:?},'a').write('call\\n')\n  r={{'content':[{{'type':'text','text':'fixture result'}}]}}\n else: r={{}}\n if 'id' in m: print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':r}}),flush=True)\n",
+                marker.to_string_lossy(),
+                startup_delay,
+                marker.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let client = McpClient::lazy(
+            &[McpServerSpec {
+                name: name.into(),
+                transport: McpTransport::Stdio {
+                    command: "python3".into(),
+                    args: vec![script.to_string_lossy().into_owned()],
+                    env: BTreeMap::new(),
+                },
+            }],
+            None,
+        );
+        (client, marker)
+    }
+
+    #[cfg(unix)]
+    fn lazy_fixture(root: &std::path::Path, name: &str) -> (McpClient, PathBuf) {
+        lazy_fixture_with_delay(root, name, 0.0)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lazy_mcp_load_release_and_calls_are_isolated_per_actor() {
+        use orgbot_engine::Command;
+        use orgbot_proto::decision::Answer;
+
+        let root = std::env::temp_dir().join(format!(
+            "orgbot-lazy-mcp-test-{}-{}",
+            std::process::id(),
+            DecisionId::new()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let first = AgentId::new();
+        let second = AgentId::new();
+        let (client, marker) = lazy_fixture(&root, "fixture");
+        let server_names = client.server_names();
+        assert_eq!(server_names, vec!["fixture"]);
+        assert!(client.tools().is_empty());
+        assert!(
+            !marker.exists(),
+            "lazy construction must not start a process"
+        );
+        assert!(client.owns("fixture__lookup"));
+
+        let first_tools = client.load_for(first, "fixture").await.unwrap();
+        assert_eq!(first_tools[0].name, "fixture__lookup");
+        assert!(marker.exists());
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap().lines().count(),
+            1,
+            "repeated load by one actor reuses its process"
+        );
+        assert_eq!(
+            client.load_for(first, "fixture").await.unwrap(),
+            first_tools
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 1);
+
+        let second_tools = client.load_for(second, "fixture").await.unwrap();
+        assert_eq!(second_tools, first_tools);
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap().lines().count(),
+            2,
+            "each actor owns an independent server connection"
+        );
+
+        let engine = approval_engine(vec![first, second]);
+        let client = client.with_owner_approval(root.clone());
+
+        let unknown = client
+            .call_loaded_for(&engine, first, "fixture__not-listed", &json!({}))
+            .await;
+        assert!(unknown.is_error);
+        assert!(unknown.content.contains("No MCP server offers"));
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap().lines().count(),
+            2,
+            "unknown tools are rejected before the external server call"
+        );
+
+        let args = json!({"query":"approved"});
+        let pending = client
+            .call_loaded_for(&engine, second, "fixture__lookup", &args)
+            .await;
+        assert!(pending.content.contains("Waiting for owner approval"));
+        assert_eq!(engine.borrow().decisions().pending().count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap().lines().count(),
+            2,
+            "no tools/call is forwarded before owner approval"
+        );
+        let decision = engine.borrow().decisions().pending().next().unwrap().id;
+        engine.with(|room| {
+            room.apply(Command::AnswerDecision {
+                decision,
+                answer: Answer {
+                    chosen: "Allow once".into(),
+                    note: String::new(),
+                    at: orgbot_proto::Timestamp::now(),
+                },
+            })
+            .unwrap()
+        });
+        let called = client
+            .call_loaded_for(&engine, second, "fixture__lookup", &args)
+            .await;
+        assert!(!called.is_error, "{}", called.content);
+        assert!(called.content.contains("fixture result"));
+
+        client.release_for(first, "fixture").await.unwrap();
+        let released = client
+            .call_loaded_for(&engine, first, "fixture__lookup", &args)
+            .await;
+        assert!(released.is_error, "released tools must no longer route");
+        let reloaded = client.load_for(first, "fixture").await.unwrap();
+        assert_eq!(reloaded, first_tools);
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap().lines().count(),
+            4,
+            "loading after release starts a fresh process"
+        );
+        let second_still_loaded = client.load_for(second, "fixture").await.unwrap();
+        assert_eq!(second_still_loaded, second_tools);
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap().lines().count(),
+            4,
+            "releasing another actor must not stop or recreate this connection"
+        );
+        let other_actor_still_loaded = client
+            .call_loaded_for(&engine, second, "fixture__lookup", &args)
+            .await;
+        assert!(other_actor_still_loaded
+            .content
+            .contains("Waiting for owner approval"));
+        client.release_for(second, "fixture").await.unwrap();
+        client.release_for(first, "fixture").await.unwrap();
+        assert!(client.release_for(first, "not-configured").await.is_err());
+
+        assert!(!format!("{client:?}").contains("fake-mcp.py"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_lazy_connection_does_not_block_another_server_or_actor() {
+        let root = std::env::temp_dir().join(format!(
+            "orgbot-lazy-mcp-parallel-{}-{}",
+            std::process::id(),
+            DecisionId::new()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let (slow_client, slow_marker) = lazy_fixture_with_delay(&root, "slow", 0.5);
+        let (fast_client, fast_marker) = lazy_fixture(&root, "fast");
+        let specs = slow_client
+            .lazy
+            .as_ref()
+            .unwrap()
+            .specs
+            .values()
+            .chain(fast_client.lazy.as_ref().unwrap().specs.values())
+            .cloned()
+            .collect::<Vec<_>>();
+        let client = Arc::new(McpClient::lazy(&specs, None));
+        let slow_actor = AgentId::new();
+        let fast_actor = AgentId::new();
+        let slow = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.load_for(slow_actor, "slow").await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !slow_marker.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("slow connection should have started");
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            client.load_for(fast_actor, "fast")
+        )
+        .await
+        .expect("unrelated load should make progress while another connects")
+        .is_ok());
+        assert!(fast_marker.exists());
+        assert!(slow.await.unwrap().is_ok());
+        client.release_for(slow_actor, "slow").await.unwrap();
+        client.release_for(fast_actor, "fast").await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn lazy_catalog_rejects_unsafe_names_without_exposing_configuration() {
+        let secretish_command = "/private/path/with-token-do-not-print";
+        let client = McpClient::lazy(
+            &[
+                McpServerSpec {
+                    name: "safe-server".into(),
+                    transport: McpTransport::Stdio {
+                        command: secretish_command.into(),
+                        args: vec![],
+                        env: BTreeMap::from([("TOKEN".into(), "private-value".into())]),
+                    },
+                },
+                McpServerSpec {
+                    name: "unsafe/name".into(),
+                    transport: McpTransport::Stdio {
+                        command: "missing".into(),
+                        args: vec![],
+                        env: BTreeMap::new(),
+                    },
+                },
+                McpServerSpec {
+                    name: "unavailable".into(),
+                    transport: McpTransport::Stdio {
+                        command: "missing-binary-for-lazy-catalog".into(),
+                        args: vec![],
+                        env: BTreeMap::new(),
+                    },
+                },
+            ],
+            None,
+        );
+        assert_eq!(client.server_names(), vec!["safe-server", "unavailable"]);
+        let debug = format!("{client:?}");
+        assert!(!debug.contains(secretish_command));
+        assert!(!debug.contains("private-value"));
+        let error = client
+            .load_for(AgentId::new(), "unsafe/name")
+            .await
+            .unwrap_err();
+        assert!(!error.contains(secretish_command));
+        assert!(!error.contains("private-value"));
+        let unavailable = client
+            .load_for(AgentId::new(), "unavailable")
+            .await
+            .unwrap_err();
+        assert_eq!(unavailable, "MCP server could not be loaded.");
+        assert!(!format!("{client:?}").contains("missing-binary-for-lazy-catalog"));
     }
 
     #[tokio::test]
@@ -1602,6 +2059,8 @@ some = true
                 },
             }],
             approval_state: None,
+            catalog: vec!["history".into()],
+            lazy: None,
         };
         assert!(client.owns("history__claim_task"));
         assert!(

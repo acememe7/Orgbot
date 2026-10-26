@@ -155,14 +155,6 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
         );
     }
 
-    // One line per skill. A bot cannot ask for what it does not know exists,
-    // and the whole point of the split is that this part is cheap: the body of
-    // a skill is fetched by the bot that decided it applied, on the turn it
-    // applies, and costs nothing on any other turn.
-    // Reuse is worth a sentence in the standing brief rather than a tool
-    // description nobody reads: the moment it pays is the moment before work
-    // starts, and by the time a bot is deep in a task it has already paid for
-    // building the thing again.
     if !engine.archive().is_empty() {
         out.push_str(
             "\nEarlier rooms have already built things. Before you start a task, \
@@ -173,18 +165,21 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
         );
     }
 
-    let skills = engine.skills();
-    if !skills.is_empty() {
-        out.push_str(
-            "\nPlaybooks available to you. Call use_skill with the name when one \
-             matches the work in front of you; it returns the full approach. \
-             Following a proven one beats working it out again.\n",
-        );
-        for skill in skills {
-            out.push_str(&format!("  {} — {}\n", skill.name, skill.summary()));
-        }
-        out.push('\n');
-    }
+    out.push_str(
+        "\nSkills and external MCP tools load on demand. Search find_capabilities \
+         for relevant skills or server names; select a server to search its tool \
+         summaries. Load only the needed playbook with use_skill, or selected \
+         schema with load_mcp_tool, then invoke it through call_mcp_tool. \
+         Use lifetime=once for a one-off; otherwise task leases end when your \
+         assigned work leaves implementation (or this turn ends if no task is held). \
+         Call unload_capability as soon as a capability is no longer needed. \
+         You can discover and reload it later. A one-use MCP attempt releases its \
+         lease even while awaiting approval; reload and retry the same arguments \
+         after the owner allows it. Loading never grants execution permission. \
+         Native CLI transcripts may retain previously read text; unloading does \
+         not erase that history or reset your session. Save useful findings in \
+         artifacts before releasing context.\n",
+    );
 
     out.push_str(
         "Style: you are talking to colleagues. Be brief and concrete. Say what you \

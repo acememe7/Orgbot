@@ -123,6 +123,10 @@ background room services can notify you while the GUI is closed.
 The desktop workspace includes files, Git inspection, attachments and previews.
 Supported previews depend on the file format and installed media tools.
 CLI sessions use private copies of supported profile settings and skills.
+The source runtime discovers room skills and MCP capabilities on demand, with
+task or one-use lifetimes and explicit unloading. See the
+[capability lifecycle](docs/CAPABILITY_LIFECYCLE.md) for the API and native CLI
+context boundaries.
 Configure external MCP servers through the room: each external tool call needs
 an **Allow once / Deny** answer for its exact arguments. Host MCP configurations
 are not automatically inherited, and review-only agents cannot call external
