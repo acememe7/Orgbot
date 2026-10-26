@@ -620,6 +620,20 @@ impl RoomConfig {
                             Some(path) => provider.with_session_store(path),
                             None => provider,
                         };
+                        #[cfg(target_os = "linux")]
+                        let provider = {
+                            let state = self.room.state_path.as_ref()
+                                .and_then(|path| path.parent().map(|p| p.join("workspaces")))
+                                .ok_or_else(|| ConfigError::Invalid("Linux CLI rooms need a private state_path for workspace protection".into()))?;
+                            let agent = session_file_key(&section.handle);
+                            let project = if workdir.trim().is_empty() {
+                                orgbot_providers::workspace_guard::WorkspaceGuard::empty_project(&state, &agent)
+                                    .map_err(|error| ConfigError::Invalid(format!("bot `{}`: {error}", section.handle)))?
+                            } else {
+                                std::path::PathBuf::from(workdir)
+                            };
+                            provider.with_workspace_guard_project(state, agent, project)
+                        };
                         Ok(Arc::new(provider) as Arc<dyn Provider>)
                     }
                     _ => build(&reference),

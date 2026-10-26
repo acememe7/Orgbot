@@ -18,11 +18,28 @@ const MAX_LIST_ENTRIES: usize = 500;
 const MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 
+async fn bounded_output(mut stream: impl tokio::io::AsyncRead + Unpin) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+    let mut saved = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = stream.read(&mut buffer).await.map_err(|e| e.to_string())?;
+        if count == 0 {
+            break;
+        }
+        let keep = count.min(32768_usize.saturating_sub(saved.len()));
+        saved.extend_from_slice(&buffer[..keep]);
+    }
+    Ok(String::from_utf8_lossy(&saved).into_owned())
+}
+
 /// A validated local workspace and its request channel.
 #[derive(Debug)]
 pub struct LocalWorkspaceHost {
     root: PathBuf,
     writable: bool,
+    guard_state: Option<PathBuf>,
+    commands: bool,
     #[cfg(target_os = "linux")]
     root_fd: std::os::fd::OwnedFd,
     #[cfg(target_os = "linux")]
@@ -38,16 +55,17 @@ impl LocalWorkspaceHost {
         spec: WorkspaceSpec,
         session: &mut crate::session::RoomSession,
     ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-        anyhow::ensure!(
-            !spec.commands,
-            "Local workspace commands are unavailable; set workspace.commands = false"
-        );
         let state_parent = session
             .state_path()
             .and_then(|path| path.parent())
             .map(Path::to_path_buf);
         let committed_attachment_ids = session.committed_attachment_ids();
-        let host = tokio::task::spawn_blocking({
+        let guard_state = state_parent.as_ref().map(|p| p.join("workspaces"));
+        anyhow::ensure!(
+            !spec.writable || guard_state.is_some(),
+            "Writable local workspaces require a private room state_path"
+        );
+        let mut host = tokio::task::spawn_blocking({
             let root = spec.root.clone();
             let writable = spec.writable;
             move || {
@@ -65,6 +83,8 @@ impl LocalWorkspaceHost {
         })
         .await
         .map_err(|e| anyhow::anyhow!("local workspace setup failed: {e}"))??;
+        host.guard_state = guard_state;
+        host.commands = spec.commands && spec.writable;
         let root = host.root.clone();
         let capabilities = WorkspaceCapabilities {
             attachment_import: spec.writable && host.attachment_parent_fd.is_some(),
@@ -72,7 +92,6 @@ impl LocalWorkspaceHost {
         };
         let mut runtime_spec = spec;
         runtime_spec.root = root.display().to_string();
-        runtime_spec.commands = false;
         let (tx, rx) = mpsc::channel::<WorkspaceCall>(8);
         session.attach_workspace(Workspace::with_capabilities(runtime_spec, tx, capabilities));
         Ok(tokio::spawn(Arc::new(host).serve(rx)))
@@ -125,6 +144,8 @@ impl LocalWorkspaceHost {
         Ok(Self {
             root: path.to_path_buf(),
             writable,
+            guard_state: None,
+            commands: false,
             root_fd,
             attachment_parent_fd,
             committed_attachment_ids,
@@ -139,16 +160,202 @@ impl LocalWorkspaceHost {
                 continue;
             }
             let host = Arc::clone(&self);
+            if call.name == "workspace_run" {
+                let outcome = self.run(call.agent, &call.arguments).await;
+                let _ = call.reply.send(outcome);
+                continue;
+            }
+            let agent = call.agent;
             let name = call.name;
             let arguments = call.arguments;
-            let outcome = tokio::task::spawn_blocking(move || host.handle(&name, &arguments))
-                .await
-                .unwrap_or_else(|e| ToolOutcome {
-                    content: format!("Local workspace worker failed: {e}"),
-                    is_error: true,
-                });
+            let outcome =
+                tokio::task::spawn_blocking(move || host.handle_agent(agent, &name, &arguments))
+                    .await
+                    .unwrap_or_else(|e| ToolOutcome {
+                        content: format!("Local workspace worker failed: {e}"),
+                        is_error: true,
+                    });
             let _ = call.reply.send(outcome);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn guard(
+        &self,
+        agent: orgbot_proto::AgentId,
+    ) -> Result<orgbot_providers::workspace_guard::WorkspaceGuard, String> {
+        Ok(orgbot_providers::workspace_guard::WorkspaceGuard {
+            project: self.root.clone(),
+            state: self
+                .guard_state
+                .clone()
+                .ok_or("Workspace protection is unavailable")?,
+            agent: agent.to_string(),
+            read_only: !self.writable,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn handle_agent(&self, agent: orgbot_proto::AgentId, name: &str, args: &Value) -> ToolOutcome {
+        let execute = || -> Result<ToolOutcome, String> {
+            if self.guard_state.is_none() && !self.writable {
+                return Ok(self.handle(name, args));
+            }
+            let guard = self.guard(agent)?;
+            let prepared = guard.prepare()?;
+            let attachment_fd = self
+                .attachment_parent_fd
+                .as_ref()
+                .map(|fd| fd.try_clone())
+                .transpose()
+                .map_err(io_error)?;
+            let host = Self::open_root(
+                prepared.workspace.to_string_lossy().into_owned(),
+                self.writable,
+                attachment_fd,
+                self.committed_attachment_ids.clone(),
+            )
+            .map_err(|e| e.to_string())?;
+            if name == "workspace_write" {
+                use rustix::fs::{Mode, OFlags};
+                use sha2::{Digest, Sha256};
+                let path = validate_relative(arg_string(args, "path")?)?;
+                match rustix::fs::openat2(
+                    &host.root_fd,
+                    path_arg(&path)?,
+                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                    Mode::empty(),
+                    no_symlink_resolution(),
+                ) {
+                    Ok(fd) => {
+                        let current = read_open_file(fd)?;
+                        let hash = format!("{:x}", Sha256::digest(current.as_bytes()));
+                        if args.get("expected_sha256").and_then(Value::as_str)
+                            != Some(hash.as_str())
+                        {
+                            return Err("File changed or expected_sha256 missing. Read this file again, then use its sha256 when writing.".into());
+                        }
+                    }
+                    Err(rustix::io::Errno::NOENT) => {
+                        if args.get("expected_sha256").is_some() {
+                            return Err(
+                                "File was removed after it was read; inspect before recreating it."
+                                    .into(),
+                            );
+                        }
+                    }
+                    Err(error) => return Err(io_error(error)),
+                }
+            }
+            if name == "workspace_read" {
+                use sha2::{Digest, Sha256};
+                let content = host.read(arg_string(args, "path"))?;
+                let sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
+                return Ok(ToolOutcome {
+                    content: serde_json::json!({"content":content,"sha256":sha256}).to_string(),
+                    is_error: false,
+                });
+            }
+            let mut outcome = host.handle(name, args);
+            if !outcome.is_error && name == "workspace_mkdir" {
+                outcome.content.push_str(" Staged in your working copy; original parent directories are created when a file is integrated.");
+            }
+            if !outcome.is_error
+                && matches!(name, "workspace_write" | "workspace_import_attachment")
+            {
+                let status = guard.apply()?;
+                if status
+                    .get("deleted")
+                    .and_then(Value::as_array)
+                    .is_some_and(|v| !v.is_empty())
+                {
+                    outcome
+                        .content
+                        .push_str("\nOriginal file removals await owner approval.");
+                }
+            }
+            Ok(outcome)
+        };
+        execute().unwrap_or_else(|content| ToolOutcome {
+            content,
+            is_error: true,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn run(&self, agent: orgbot_proto::AgentId, args: &Value) -> ToolOutcome {
+        let execute = async {
+            if !self.commands {
+                return Err("Command execution is disabled for this workspace".to_owned());
+            }
+            let script = arg_string(args, "command")?;
+            if script.len() > 64 * 1024 {
+                return Err("Command exceeds 64 KiB".into());
+            }
+            let seconds = args
+                .get("timeout_seconds")
+                .map(|v| {
+                    v.as_u64()
+                        .filter(|n| (1..=1800).contains(n))
+                        .ok_or("timeout_seconds must be 1–1800")
+                })
+                .transpose()?
+                .unwrap_or(300);
+            let guard = self.guard(agent)?;
+            let setup_guard = guard.clone();
+            tokio::task::spawn_blocking(move || setup_guard.prepare())
+                .await
+                .map_err(|e| e.to_string())??;
+            let mut command = tokio::process::Command::from(guard.command("run")?);
+            command
+                .args(["--", "/bin/sh", "-c", script])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            for (name, _) in std::env::vars_os() {
+                let key = name.to_string_lossy();
+                if key.ends_with("_API_KEY")
+                    || key.contains("TOKEN")
+                    || key.starts_with("ORGBOT_MCP_")
+                {
+                    command.env_remove(name);
+                }
+            }
+            let mut child = command.spawn().map_err(|e| e.to_string())?;
+            let stdout = child.stdout.take().expect("piped stdout");
+            let stderr = child.stderr.take().expect("piped stderr");
+            let out = tokio::spawn(bounded_output(stdout));
+            let err = tokio::spawn(bounded_output(stderr));
+            let status = tokio::time::timeout(Duration::from_secs(seconds), child.wait()).await;
+            let timed_out = status.is_err();
+            if timed_out {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            }
+            let output = out.await.map_err(|e| e.to_string())??;
+            let error = err.await.map_err(|e| e.to_string())??;
+            let success = matches!(status, Ok(Ok(code)) if code.success());
+            let integration = if success {
+                Some(
+                    tokio::task::spawn_blocking(move || guard.apply())
+                        .await
+                        .map_err(|e| e.to_string())??,
+                )
+            } else {
+                None
+            };
+            Ok(ToolOutcome {
+                content: serde_json::json!({"stdout":output,"stderr":error,"timed_out":timed_out,
+                "success":success,"integration":integration})
+                .to_string(),
+                is_error: !success,
+            })
+        };
+        execute.await.unwrap_or_else(|content| ToolOutcome {
+            content,
+            is_error: true,
+        })
     }
 
     #[cfg(target_os = "linux")]
@@ -830,6 +1037,14 @@ mod tests {
         path
     }
 
+    // File-boundary unit tests below deliberately call the pinned-fd handler.
+    // Protected provider integration is covered separately with real bubblewrap.
+    async fn serve_files(host: LocalWorkspaceHost, mut rx: mpsc::Receiver<WorkspaceCall>) {
+        while let Some(call) = rx.recv().await {
+            let _ = call.reply.send(host.handle(&call.name, &call.arguments));
+        }
+    }
+
     async fn host(root: &Path, writable: bool) -> (Workspace, tokio::task::JoinHandle<()>) {
         let host = LocalWorkspaceHost::open_root(
             root.to_string_lossy().into_owned(),
@@ -849,7 +1064,7 @@ mod tests {
             },
             tx,
         );
-        let task = tokio::spawn(Arc::new(host).serve(rx));
+        let task = tokio::spawn(serve_files(host, rx));
         (workspace, task)
     }
 
@@ -876,8 +1091,107 @@ mod tests {
             tx,
             capabilities,
         );
-        let task = tokio::spawn(Arc::new(host).serve(rx));
+        let task = tokio::spawn(serve_files(host, rx));
         (workspace, task)
+    }
+
+    fn protected_host(root: &Path, state: &Path, commands: bool) -> LocalWorkspaceHost {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(state, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut host = LocalWorkspaceHost::open_root(
+            root.to_string_lossy().into_owned(),
+            true,
+            None,
+            Arc::new(RwLock::new(std::collections::HashSet::new())),
+        )
+        .unwrap();
+        host.guard_state = Some(state.to_path_buf());
+        host.commands = commands;
+        host
+    }
+
+    #[tokio::test]
+    async fn protected_api_commands_preserve_originals_and_bound_runtime_and_output() {
+        let root = temp_dir();
+        let state = temp_dir();
+        fs::write(root.join("keep.txt"), "original").unwrap();
+        let host = protected_host(&root, &state, true);
+        let agent = AgentId::new();
+        let command = format!(
+            "printf added > added.txt; rm keep.txt; if rm '{}'; then exit 9; fi; printf done",
+            root.join("keep.txt").display()
+        );
+        let result = host.run(agent, &json!({"command":command})).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(
+            fs::read_to_string(root.join("keep.txt")).unwrap(),
+            "original"
+        );
+        assert_eq!(fs::read_to_string(root.join("added.txt")).unwrap(), "added");
+        let result: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(result["integration"]["pending_delete"], json!(["keep.txt"]));
+        let timeout = host
+            .run(agent, &json!({"command":"sleep 20", "timeout_seconds":1}))
+            .await;
+        assert!(timeout.is_error);
+        assert_eq!(
+            serde_json::from_str::<Value>(&timeout.content).unwrap()["timed_out"],
+            true
+        );
+        let output = host
+            .run(
+                agent,
+                &json!({"command":"head -c 100000 /dev/zero | tr '\\0' x"}),
+            )
+            .await;
+        assert!(!output.is_error, "{}", output.content);
+        let output: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(output["stdout"].as_str().unwrap().len(), 32768);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[tokio::test]
+    async fn protected_api_write_rejects_stale_reads_and_unreadable_existing_files() {
+        let root = temp_dir();
+        let state = temp_dir();
+        fs::write(root.join("shared.txt"), "first").unwrap();
+        fs::write(root.join("large.txt"), "a".repeat(MAX_FILE_BYTES + 1)).unwrap();
+        let host = protected_host(&root, &state, false);
+        let agent = AgentId::new();
+        let read = host.handle_agent(agent, "workspace_read", &json!({"path":"shared.txt"}));
+        assert!(!read.is_error, "{}", read.content);
+        let value: Value = serde_json::from_str(&read.content).unwrap();
+        fs::write(root.join("shared.txt"), "another agent").unwrap();
+        let stale = host.handle_agent(agent, "workspace_write", &json!({"path":"shared.txt", "content":"stale edit", "expected_sha256":value["sha256"]}));
+        assert!(stale.is_error, "{}", stale.content);
+        assert_eq!(
+            fs::read_to_string(root.join("shared.txt")).unwrap(),
+            "another agent"
+        );
+        let large = host.handle_agent(
+            agent,
+            "workspace_write",
+            &json!({"path":"large.txt", "content":"truncated"}),
+        );
+        assert!(large.is_error, "{}", large.content);
+        assert_eq!(
+            fs::metadata(root.join("large.txt")).unwrap().len(),
+            (MAX_FILE_BYTES + 1) as u64
+        );
+        let added = host.handle_agent(
+            agent,
+            "workspace_write",
+            &json!({"path":"fresh.txt", "content":"new file"}),
+        );
+        assert!(!added.is_error, "{}", added.content);
+        assert_eq!(
+            fs::read_to_string(root.join("fresh.txt")).unwrap(),
+            "new file"
+        );
+        assert!(host.run(agent, &json!({"command":"true"})).await.is_error);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[tokio::test]
@@ -1206,7 +1520,7 @@ mod tests {
                 git_read: true,
             },
         );
-        let host_task = tokio::spawn(Arc::new(host).serve(rx));
+        let host_task = tokio::spawn(serve_files(host, rx));
         let agent = AgentId::new();
         let guessed = workspace
             .call(

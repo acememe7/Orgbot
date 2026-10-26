@@ -111,7 +111,7 @@ impl Workspace {
             if self.capabilities.attachment_import {
                 tools.push(tool("workspace_import_attachment", "Copy a user-attached original file into the selected working directory. Pass its attachment id from the conversation. Returns a new unique relative path; never overwrites another file. Use this when extracted text/images are insufficient, or for other file formats.", json!({"id":{"type":"string"}}), json!(["id"])));
             }
-            tools.push(tool("workspace_write", "Atomically create or replace a UTF-8 file (up to 1 MiB). Parent directory must exist.", json!({"path":{"type":"string"},"content":{"type":"string"}}), json!(["path","content"])));
+            tools.push(tool("workspace_write", "Atomically create or replace a UTF-8 file (up to 1 MiB). Parent directory must exist. On Linux, overwrites require expected_sha256 from workspace_read; reread after a conflict.", json!({"path":{"type":"string"},"content":{"type":"string"},"expected_sha256":{"type":"string"}}), json!(["path","content"])));
             tools.push(tool(
                 "workspace_mkdir",
                 "Create one directory in the workspace. Parent directory must exist.",
@@ -119,7 +119,7 @@ impl Workspace {
                 json!(["path"]),
             ));
             if self.spec.commands {
-                tools.push(tool("workspace_run", "Run a POSIX shell command on the selected SSH computer, starting in its workspace. Output is bounded to 64 KiB. Commands default to 300 seconds; set timeout_seconds from 1 to 1800 for longer builds or tests. A command timeout stops its channel, not SSH; inspect partial effects before retrying. Shell access has the SSH account's permissions, not a directory sandbox. Do not start persistent/background processes.", json!({"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":1800}}), json!(["command"])));
+                tools.push(tool("workspace_run", "Run a POSIX shell command in the selected workspace. Linux local commands use an isolated working copy: original project files are read-only, non-conflicting edits integrate after success, and removals await owner approval. SSH commands retain the SSH account's permissions. Output is bounded to 64 KiB. Timeout defaults to 300 seconds (1–1800 allowed). Inspect partial effects after interruption; do not start background processes.", json!({"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":1800}}), json!(["command"])));
             }
         }
         if self.capabilities.git_read {

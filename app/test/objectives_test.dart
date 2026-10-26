@@ -66,6 +66,7 @@ Map<String, Object?> digestJson({
   int rawRecords = 18,
   bool expansion = false,
   bool tasklessDecision = false,
+  bool withSpend = false,
 }) => {
   'objectives': [
     for (var i = 0; i < objectives; i++)
@@ -105,6 +106,45 @@ Map<String, Object?> digestJson({
     'closed_as_duplicate': 1,
     'coordination_expansion': expansion,
   },
+  if (withSpend) ...{
+    'spend': [
+      {
+        'backend': 'Anthropic',
+        'turns': 1,
+        'tokens': 27,
+        'per_turn': 27,
+        'input_tokens': 15,
+        'output_tokens': 7,
+        'cache_read_tokens': 3,
+        'cache_write_tokens': 2,
+        'usage_known': false,
+        'usage_complete': false,
+      },
+    ],
+    'agent_spend': [
+      {
+        'handle': 'Iris',
+        'turns': 2,
+        'input_tokens': 15,
+        'output_tokens': 7,
+        'cache_read_tokens': 3,
+        'cache_write_tokens': 2,
+        'usage_known': true,
+        'usage_complete': false,
+        'actual_api_cost_microusd': null,
+        'api_equivalent_cost_microusd': null,
+      },
+    ],
+    'total_spend': {
+      'turns': 2,
+      'input_tokens': 15,
+      'output_tokens': 7,
+      'cache_read_tokens': 3,
+      'cache_write_tokens': 2,
+      'usage_known': false,
+      'usage_complete': false,
+    },
+  },
 };
 
 void main() {
@@ -139,6 +179,31 @@ void main() {
       expect(nothing.fraction, isNull);
       expect(nothing.label, 'not broken down yet');
     });
+
+    test(
+      'partial spend keeps its known token breakdown and metering state',
+      () {
+        final digest = RoomDigest.fromJson(digestJson(withSpend: true));
+        final agent = digest.agentSpend.single;
+        expect(agent.turns, 2);
+        expect(agent.inputTokens, 15);
+        expect(agent.outputTokens, 7);
+        expect(agent.cacheReadTokens, 3);
+        expect(agent.cacheWriteTokens, 2);
+        expect(agent.usageKnown, isTrue);
+        expect(agent.usageComplete, isFalse);
+        expect(digest.totalSpend.usageComplete, isFalse);
+
+        // A digest from before completeness was added remains readable and
+        // retains its former all-reported interpretation.
+        final legacy = AgentSpend.fromJson({
+          'handle': 'Old',
+          'turns': 1,
+          'usage_known': true,
+        });
+        expect(legacy.usageComplete, isTrue);
+      },
+    );
   });
 
   group('the store', () {
@@ -627,6 +692,40 @@ void _viewTests() {
         findsOneWidget,
       );
     });
+
+    testWidgets(
+      'per-agent spend shows token split, partial state, and both costs',
+      (tester) async {
+        final digest = digestJson(withSpend: true);
+        (digest['total_spend'] as Map)['turns'] = 0xffffffff;
+        final agentSpend = (digest['agent_spend'] as List).single as Map;
+        agentSpend['usage_complete'] = true;
+        agentSpend['actual_api_cost_microusd'] = 1200000;
+        agentSpend['api_equivalent_cost_microusd'] = 2400000;
+        final store = storeWith([
+          {'type': 'digest', 'digest': digest},
+        ]);
+        await tester.pumpWidget(wrap(store));
+        await tester.scrollUntilVisible(
+          find.text('What this has drawn'),
+          250,
+          scrollable: find.byType(Scrollable).first,
+        );
+        expect(find.text('Room · ≥4,294,967,295 turns'), findsOneWidget);
+
+        expect(
+          find.textContaining('15 in · 7 out · 3 cache read · 2 cache write'),
+          findsNWidgets(3),
+        );
+        expect(find.text('2 turns'), findsOneWidget);
+        expect(find.text('partial usage'), findsNWidgets(2));
+        expect(find.text('metered'), findsOneWidget);
+        expect(
+          find.textContaining('API \$1.2000 · equivalent \$2.4000'),
+          findsOneWidget,
+        );
+      },
+    );
 
     /// Work nobody free can do is a roster problem, and saying "the scheduler
     /// is idle" would send someone looking in the wrong place.

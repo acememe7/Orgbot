@@ -28,9 +28,15 @@ bash packaging/make-deb.sh
 If Flutter is installed outside `PATH`, use its full executable path. The
 Linux package version is in `packaging/version`, independent of Android's
 `pubspec.yaml` version; an explicit version can also be passed to the packager.
-The package includes the engine and calculates dependencies from all bundled
+The `orgbots` package retains `/usr/lib/orgbot`, `/usr/bin/orgbot`, the
+`orgbot.desktop` launcher, and existing per-user data while also providing an
+`orgbots` command. Packaging also emits an `orgbot` transitional package that
+depends on the renamed package, so apt upgrades existing installations. The
+package includes the engine and calculates dependencies from all bundled
 native libraries. Build on the oldest distribution you intend to support;
 the current artifact targets Ubuntu 24.04 amd64. Packaging does not install it.
+
+APT repository generation is described in [the distribution guide](../docs/apt-distribution.md).
 
 See the [project README](../README.md) for build requirements, SSH setup, signing, secure storage and tests. Android workspace selection is per room; Linux project paths continue to configure the system CLIs.
 

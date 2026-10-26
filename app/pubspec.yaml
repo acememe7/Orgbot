@@ -50,6 +50,7 @@ dependencies:
   flutter_markdown_plus: ^1.0.12
   # Parsing @mentions inside message markdown.
   markdown: ^7.3.1
+  crypto: ^3.0.6
 
 dev_dependencies:
   integration_test:

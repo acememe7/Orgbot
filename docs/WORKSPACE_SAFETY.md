@@ -1,0 +1,141 @@
+# Linux agent workspace boundary
+
+`app/packaging/orgbot-workspace.py` gives each agent a private working copy of
+one project. The project source is never mounted writable inside a model CLI.
+The helper stores its baseline manifest outside the agent worktree and mounts
+that host root read-only through bubblewrap. A missing bubblewrap executable or
+failed sandbox setup stops the run.
+
+The helper speaks newline-free JSON on standard output. Errors use
+`{"ok":false,"error":"..."}` and a non-zero exit code. Standard error from
+the child process remains the child’s standard error.
+
+```text
+orgbot-workspace.py prepare --project ABS --state ABS --agent ID [--read-only]
+orgbot-workspace.py status --state ABS --agent ID
+orgbot-workspace.py run --state ABS --agent ID [--read-only] [--private-home ABS] [--profile codex=ABS] [--profile claude=ABS] [--profile grok=ABS] [--mcp-socket ABS] -- PROGRAM ARG...
+orgbot-workspace.py apply --state ABS --agent ID [--review-token SHA256]
+```
+
+`prepare` returns the host paths `workspace`, `profile_root`, and
+`private_home`, plus `private_home_mount`, `mcp_socket_mount`, `project_id`,
+and `read_only`. The mount paths are exact in-sandbox destinations and should
+be used when writing CLI or room-MCP configuration. It copies the project into
+`workspace` and creates `private_home` under the agent’s private profile root.
+The trusted launcher may copy the owner’s CLI configuration and authentication
+files into `private_home`; `HOME` inside the sandbox points to a private mount
+under `/run/user/<uid>/orgbot-home`. The host home remains visible through the
+read-only root so installed CLI binaries resolve. CLI environment variables
+point at the private profile copies, but read-only visibility still lets a
+process read files in the real host home. The copies are not an OS-level
+credential-isolation boundary.
+Optional `--profile` binds accept only that agent’s private
+`private_home/.codex`, `private_home/.claude`, or `private_home/.grok` directory.
+
+Each run sees the project copy at `/tmp/orgbot-workspace` and as its current
+directory; `ORGBOT_WORKSPACE` names the same in-sandbox path. The helper clears
+the inherited environment, then sets a filtered absolute `PATH`, private
+`HOME`, `TMPDIR`,
+locale, optional safe `TERM`, `ORGBOT_WORKSPACE`, and optional room MCP socket
+path. The private CLI home stays writable for auth/session refresh, even for
+reviewer runs; reviewer project files are read-only. In particular, SSH agent
+and D-Bus variables are not inherited. The sandbox has a read-only host root,
+new PID/IPC/UTS namespaces, a private `/run` tmpfs (and `/var/run` when it is a
+real directory), a private 1 GiB `/tmp`, and a
+1 GiB per-file write limit. Its writable locations are the worktree, private
+CLI home under `/run/user/<uid>`, and bounded `/tmp`. The helper rejects project
+copies above 150,000 files, 20 GiB total, or 512 MiB per file. A
+passed Unix room-MCP socket is mounted into that private runtime tree. Other
+Unix sockets under host-visible paths outside `/run` (including a socket stored
+in a readable home directory or project) are not automatically hidden; this is
+not a general Unix-socket filtering boundary.
+
+The helper also points native CLIs at their private profile directories with
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `GROK_HOME`. Those directories remain
+writable for provider session state. Host CLI binaries and their installation
+files are readable through the read-only host root. Since the host home is also
+readable, a CLI or process can still access files there; the launcher’s copied
+profiles provide writable session isolation, not complete credential secrecy.
+
+`status` returns `changed` records (`path`, `kind`), `added`, `deleted`, and
+`conflicts` path lists, plus a `review_token`. The token is a SHA-256 digest of
+the canonical project, agent, baseline, owner-project, and agent-workspace
+snapshot. A
+conflict means both the owner’s project and the agent’s copy changed the same
+path to different contents. `prepare` refreshes owner changes into clean agent
+files and preserves agent-only changes, even if another path conflicts.
+Conflicting files remain untouched in both trees and are reported until a human
+or trusted integration resolves them.
+
+`apply` performs a three-way comparison of the trusted baseline, current
+project, and agent worktree before writing anything. If any conflict exists,
+the whole batch is rejected before mutation. New and changed files are written
+through same-directory temporary files and atomic links/replacements. Existing
+project bytes are moved through the installed trusted `orgbot-trash` helper
+before replacement. The helper receives the reviewed file SHA-256 and verifies
+it before moving the source; a changed or replaced file is retained. A target
+that was absent during conflict checking is never moved to trash: if it appears
+before integration, the operation fails and preserves it. If the trusted trash
+helper is missing, cannot verify its HDD mount, or rejects the path, the
+workspace helper stops without replacing existing bytes. An
+out-of-tree journal records each planned operation and its progress so an
+interrupted application leaves preserved originals recoverable.
+`apply` must be invoked by the trusted host integration after the sandboxed
+process exits; project and state paths are read-only from inside `run`.
+
+On Debian installs, `orgbot-trash` is packaged at `/usr/bin/orgbot-trash` with
+its implementation at `/usr/lib/orgbot/orgbot-trash.py`. Before applying
+workspace changes, mount the owner HDD at `/mnt/hdd` as writable ext4. The
+helper stores recovery copies under `/mnt/hdd/OrgBots Trash`; it fails closed
+when that mount is unavailable, read-only, a different filesystem, or cannot
+be verified. Installing OrgBots does not create or mount the HDD destination.
+
+Agent deletions are listed as pending and remain unapplied unless the trusted
+owner flow passes the exact `review_token` returned by `status` after the owner
+reviews and approves that deletion list. The helper recomputes the token under
+the project integration lock before any mutation. A stale token fails the whole
+batch and returns the current paths and token for renewed review; there is no
+blanket `--allow-delete` option. Without a token, clean non-deletion changes
+may apply while deletions remain pending. The helper itself does not infer
+approval from model output.
+
+Workspace copies preserve relative symlinks only when their resolved targets
+stay inside the project and are included in the copy. Absolute, dangling,
+external, and generated-tree symlinks fail closed. Special files,
+multiply-linked files, unsafe path components, oversized files, and trees
+beyond the configured entry and byte limits are rejected. The helper omits
+rebuildable directories such as `node_modules`, `.dart_tool`, `target`, `build`,
+`dist`, virtual environments, and common tool caches. These folders are not
+copied or merged; rebuild them inside the agent workspace as needed. `.git` is
+copied once so local Git commands can inspect the project, but is excluded from
+status and apply. Empty directories remain staged in the private workspace;
+file writes create canonical parent directories when integrated. State
+directories and manifests must be private, owner-controlled paths. Baseline
+manifests are validated on every operation; malformed or missing metadata
+fails closed. Project preparation and integration are serialized with an
+owner-private per-project `flock`; the lock is released before the CLI runs so
+room-MCP workspace calls cannot deadlock.
+
+The sandbox preserves network access so native provider CLIs can reach their
+configured services. Remote MCP servers and other services reachable over the
+network are outside this local filesystem boundary; their authorization and
+side effects require separate controls. This helper does not claim to confine
+remote tools or every kernel attack surface.
+
+On Linux, OrgBots routes configured external MCP tools through the room bridge.
+Each call pauses for an **Allow once / Deny** owner question showing the server,
+tool and arguments. Approval binds the exact agent, arguments, configuration and
+room; its use is durably recorded before dispatch. Private CLI profiles inherit
+only the room bridge, leaving original host configurations untouched. Review-only
+agents cannot invoke external MCP tools. Approving a remote tool permits its
+external effects; those effects do not pass through the local HDD trash helper.
+
+Run the fixture suite with:
+
+```sh
+python3 app/packaging/test-orgbot-workspace.py
+```
+
+The sandbox tests execute the installed bubblewrap binary. They use disposable
+temporary projects and a test-only replacement for the trash preservation
+function; no production trash-mount bypass is exposed by the helper CLI.

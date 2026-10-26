@@ -26,6 +26,9 @@ pub struct Policy {
     pub max_cost_microusd: u64,
     pub input_microusd_per_million: u64,
     pub output_microusd_per_million: u64,
+    pub cache_read_microusd_per_million: Option<u64>,
+    pub cache_write_microusd_per_million: Option<u64>,
+    pub model_rates: BTreeMap<String, TokenRates>,
     pub max_output_tokens: u32,
     pub enabled: bool,
 }
@@ -39,10 +42,22 @@ impl Default for Policy {
             max_cost_microusd: 0,
             input_microusd_per_million: 0,
             output_microusd_per_million: 0,
+            cache_read_microusd_per_million: None,
+            cache_write_microusd_per_million: None,
+            model_rates: BTreeMap::new(),
             max_output_tokens: 16000,
             enabled: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TokenRates {
+    pub input_microusd_per_million: u64,
+    pub output_microusd_per_million: u64,
+    pub cache_read_microusd_per_million: u64,
+    pub cache_write_microusd_per_million: u64,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -82,6 +97,7 @@ struct Reservation {
     tokens: u64,
     cost: u64,
     policy: Policy,
+    metered: bool,
 }
 
 /// Recorded when a capped request used more than it reserved.
@@ -185,10 +201,18 @@ impl Allowances {
                 return Err("Allowance window or output ceiling is invalid".into());
             }
             if policy.max_cost_microusd > 0
-                && (policy.input_microusd_per_million == 0
+                && ((policy.input_microusd_per_million == 0
                     || policy.output_microusd_per_million == 0)
+                    && policy.model_rates.is_empty())
             {
                 return Err("A money limit requires both input and output prices".into());
+            }
+            if policy
+                .model_rates
+                .keys()
+                .any(|model| model.trim().is_empty())
+            {
+                return Err("Model rate names cannot be empty".into());
             }
         }
         Ok(config)
@@ -285,7 +309,18 @@ impl Allowances {
         request.max_tokens = request.max_tokens.min(policy.max_output_tokens);
         let strict = policy.max_tokens > 0 || policy.max_cost_microusd > 0;
         if strict && !metered {
-            return Err(waiting(backend, "This backend does not expose a bounded API request. Use a request/episode limit instead of a token or money cap.", 60));
+            return Err(waiting(
+                backend,
+                "This backend does not expose a bounded API request. Use a request/episode limit instead of a token or money cap.",
+                60,
+            ));
+        }
+        if policy.max_cost_microusd > 0 && token_rates(&policy, &request.model).is_none() {
+            return Err(waiting(
+                backend,
+                "No token rates configured for this model",
+                60,
+            ));
         }
         if strict
             && request
@@ -310,7 +345,21 @@ impl Allowances {
         } else {
             0
         };
-        let cost = price(input, request.max_tokens as u64, &policy);
+        let rates = token_rates(&policy, &request.model).unwrap_or_default();
+        let input_reservation_rate = rates
+            .input_microusd_per_million
+            .max(rates.cache_read_microusd_per_million)
+            .max(rates.cache_write_microusd_per_million);
+        let cost = if metered {
+            price(
+                input,
+                request.max_tokens as u64,
+                input_reservation_rate,
+                rates.output_microusd_per_million,
+            )
+        } else {
+            0
+        };
         let result = self
             .transaction(|ledger| {
                 let record = ledger.providers.entry(backend.into()).or_default();
@@ -347,6 +396,7 @@ impl Allowances {
                     tokens,
                     cost,
                     policy,
+                    metered,
                 }))
             })
             .map_err(|e| waiting(backend, e, 60))?;
@@ -373,11 +423,10 @@ impl Allowances {
                         record.message = "Usage not reported; reservation retained".into();
                     } else if record.window_start == reservation.start {
                         let tokens = usage_total(response.usage);
-                        let cost = price(
-                            usage_input(response.usage),
-                            response.usage.output_tokens as u64,
-                            &reservation.policy,
-                        );
+                        let cost = response
+                            .usage
+                            .actual_api_cost_microusd
+                            .unwrap_or(reservation.cost);
                         record.tokens = record
                             .tokens
                             .saturating_sub(reservation.tokens)
@@ -472,10 +521,34 @@ fn usage_input(usage: Usage) -> u64 {
 fn usage_total(usage: Usage) -> u64 {
     usage_input(usage) + usage.output_tokens as u64
 }
-fn price(input: u64, output: u64, policy: &Policy) -> u64 {
-    let units = input as u128 * policy.input_microusd_per_million as u128
-        + output as u128 * policy.output_microusd_per_million as u128;
+fn price(input: u64, output: u64, input_rate: u64, output_rate: u64) -> u64 {
+    let units = input as u128 * input_rate as u128 + output as u128 * output_rate as u128;
     units.div_ceil(1_000_000).min(u64::MAX as u128) as u64
+}
+
+fn price_usage(usage: Usage, rates: TokenRates) -> u64 {
+    let units = usage.input_tokens as u128 * rates.input_microusd_per_million as u128
+        + usage.output_tokens as u128 * rates.output_microusd_per_million as u128
+        + usage.cache_read_tokens as u128 * rates.cache_read_microusd_per_million as u128
+        + usage.cache_write_tokens as u128 * rates.cache_write_microusd_per_million as u128;
+    units.div_ceil(1_000_000).min(u64::MAX as u128) as u64
+}
+
+fn token_rates(policy: &Policy, model: &str) -> Option<TokenRates> {
+    policy.model_rates.get(model).copied().or_else(|| {
+        (policy.input_microusd_per_million > 0 || policy.output_microusd_per_million > 0).then_some(
+            TokenRates {
+                input_microusd_per_million: policy.input_microusd_per_million,
+                output_microusd_per_million: policy.output_microusd_per_million,
+                cache_read_microusd_per_million: policy
+                    .cache_read_microusd_per_million
+                    .unwrap_or(policy.input_microusd_per_million),
+                cache_write_microusd_per_million: policy
+                    .cache_write_microusd_per_million
+                    .unwrap_or(policy.input_microusd_per_million),
+            },
+        )
+    })
 }
 
 #[derive(Debug)]
@@ -506,7 +579,19 @@ impl Provider for GuardedProvider {
         .await
         .map_err(|_| waiting(&self.backend, "Allowance accounting task failed", 60))??;
         // A cancelled process/future leaves its reservation charged, preventing restart overspend.
-        let result = self.inner.complete(request, sink).await;
+        let mut result = self.inner.complete(request, sink).await;
+        if let Ok(response) = &mut result {
+            if response.usage.reported {
+                if let Some(rates) = token_rates(&reservation.policy, &response.model) {
+                    let cost = price_usage(response.usage, rates);
+                    if reservation.metered {
+                        response.usage.actual_api_cost_microusd = Some(cost);
+                    } else {
+                        response.usage.api_equivalent_cost_microusd = Some(cost);
+                    }
+                }
+            }
+        }
         let manager = self.allowances.clone();
         let backend = self.backend.clone();
         let (result, settlement) = tokio::task::spawn_blocking(move || {
@@ -532,7 +617,7 @@ pub fn wrap(
     let metered = matches!(
         reference,
         ProviderRef::DeepSeek { .. } | ProviderRef::Anthropic { .. }
-    ) || matches!(reference, ProviderRef::OpenAiCompatible { profile, .. } if profile != "codex" && profile != "chatgpt");
+    ) || matches!(reference, ProviderRef::OpenAiCompatible { profile, .. } if profile != "codex" && profile != "chatgpt" && profile != "ollama");
     Arc::new(GuardedProvider {
         inner: provider,
         allowances,
@@ -550,6 +635,42 @@ pub fn routing(manager: Option<&Allowances>) -> BTreeMap<String, Option<u64>> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_rates_price_uncached_input_output_and_both_cache_paths() {
+        let usage = Usage {
+            reported: true,
+            complete: true,
+            calls: 1,
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_tokens: 300,
+            cache_write_tokens: 40,
+            ..Usage::default()
+        };
+        let cost = price_usage(
+            usage,
+            TokenRates {
+                input_microusd_per_million: 1_000_000,
+                output_microusd_per_million: 2_000_000,
+                cache_read_microusd_per_million: 100_000,
+                cache_write_microusd_per_million: 500_000,
+            },
+        );
+        assert_eq!(cost, 190);
+        let policy = Policy {
+            model_rates: BTreeMap::from([(
+                "m".into(),
+                TokenRates {
+                    input_microusd_per_million: 1,
+                    ..TokenRates::default()
+                },
+            )]),
+            ..Policy::default()
+        };
+        assert!(token_rates(&policy, "unknown").is_none());
+        assert!(token_rates(&policy, "m").is_some());
+    }
     use orgbot_providers::{StopReason, Turn};
     struct Fixture {
         root: PathBuf,
@@ -588,6 +709,9 @@ mod tests {
             content: vec![ContentBlock::text("checked")],
             stop_reason: StopReason::EndTurn,
             usage: Usage {
+                reported: true,
+                complete: true,
+                calls: 1,
                 input_tokens: input,
                 output_tokens: output,
                 ..Default::default()
@@ -637,9 +761,11 @@ mod tests {
             .manager
             .reserve("deepseek", &mut request(), true, 700000)
             .unwrap();
+        let mut unknown = response(0, 0).unwrap();
+        unknown.usage = Usage::missing();
         fixture
             .manager
-            .settle("deepseek", hold, &response(0, 0), 700001)
+            .settle("deepseek", hold, &Ok(unknown), 700001)
             .unwrap();
         assert!(fixture
             .manager
@@ -688,8 +814,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        fs::write(&fixture.manager.ledger, serde_json::to_vec(&ledger).unwrap()).unwrap();
-        assert_eq!(fixture.manager.routing(700000).unwrap()["cli:grok"], Some(0));
+        fs::write(
+            &fixture.manager.ledger,
+            serde_json::to_vec(&ledger).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.manager.routing(700000).unwrap()["cli:grok"],
+            Some(0)
+        );
         assert!(fixture
             .manager
             .reserve("cli:grok", &mut request(), false, 700000)
@@ -713,9 +846,11 @@ mod tests {
             .reserve("deepseek", &mut req, true, 700000)
             .unwrap();
         assert_eq!(req.max_tokens, 100);
+        let mut reported = response(30, 10);
+        reported.as_mut().unwrap().usage.actual_api_cost_microusd = Some(50);
         fixture
             .manager
-            .settle("deepseek", hold, &response(30, 10), 700001)
+            .settle("deepseek", hold, &reported, 700001)
             .unwrap();
         let ledger: Ledger = read_json(&fixture.manager.ledger).unwrap();
         assert_eq!(ledger.providers["deepseek"].tokens, 40);

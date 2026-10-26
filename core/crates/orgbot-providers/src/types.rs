@@ -428,20 +428,28 @@ mod tests {
     fn usage_accumulates_across_turns() {
         let mut total = Usage::default();
         total.add(Usage {
+            reported: true,
+            complete: true,
+            calls: 1,
             input_tokens: 10,
             output_tokens: 5,
             cache_read_tokens: 100,
             cache_write_tokens: 0,
+            ..Usage::default()
         });
         total.add(Usage {
+            reported: true,
+            complete: true,
+            calls: 1,
             input_tokens: 3,
             output_tokens: 7,
             cache_read_tokens: 50,
             cache_write_tokens: 2,
+            ..Usage::default()
         });
         assert_eq!(total.input_tokens, 13);
         assert_eq!(total.output_tokens, 12);
-        assert_eq!(total.total_input(), 13 + 150);
+        assert_eq!(total.total_input(), 13 + 150 + 2);
     }
 
     #[test]

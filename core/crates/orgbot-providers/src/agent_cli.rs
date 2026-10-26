@@ -37,8 +37,51 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+async fn read_stderr_tail(
+    reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    limit: usize,
+) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut tail = Vec::with_capacity(limit.min(8192));
+    let mut chunk = [0u8; 8192];
+    loop {
+        let count = match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        if count >= limit {
+            tail.clear();
+            tail.extend_from_slice(&chunk[count - limit..count]);
+        } else {
+            let overflow = tail.len().saturating_add(count).saturating_sub(limit);
+            if overflow > 0 {
+                tail.drain(..overflow);
+            }
+            tail.extend_from_slice(&chunk[..count]);
+        }
+    }
+    tail
+}
+
+#[cfg(target_os = "linux")]
+fn replace_room_socket(config: &mut Value, inner_socket: &Path) -> std::result::Result<(), String> {
+    let args = config
+        .pointer_mut("/mcpServers/orgbot_room/args")
+        .and_then(Value::as_array_mut)
+        .ok_or("room MCP config is missing its server arguments")?;
+    let index = args
+        .iter()
+        .position(|value| value.as_str() == Some("--socket"))
+        .ok_or("room MCP config is missing its socket argument")?;
+    let socket = args
+        .get_mut(index + 1)
+        .ok_or("room MCP config has no socket path")?;
+    *socket = Value::String(inner_socket.to_string_lossy().into_owned());
+    Ok(())
+}
+
 use crate::error::{ProviderError, Result};
-use crate::provider::{Provider, emit};
+use crate::provider::{emit, Provider};
 use crate::types::{
     CompletionRequest, CompletionResponse, ContentBlock, Role, StopReason, StreamEvent, Turn, Usage,
 };
@@ -79,6 +122,8 @@ pub struct AgentCliProvider {
     /// Optional owner-only record that lets one bot resume its native session
     /// after the room process is rebuilt.
     session_store: Mutex<Option<SessionStore>>,
+    #[cfg(target_os = "linux")]
+    guard: Option<crate::workspace_guard::WorkspaceGuard>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -146,6 +191,8 @@ impl AgentCliProvider {
             last_socket: Mutex::new(None),
             timeout,
             session_store: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            guard: None,
         })
     }
 
@@ -167,6 +214,42 @@ impl AgentCliProvider {
             *self.session_system_brief.lock().unwrap() = persisted.system_brief;
         }
         *self.session_store.lock().unwrap() = Some(store);
+        self
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn with_workspace_guard(self, state: PathBuf, agent: String) -> Self {
+        let project = self.workdir.clone();
+        self.with_workspace_guard_project(state, agent, project)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn with_workspace_guard_project(
+        mut self,
+        state: PathBuf,
+        agent: String,
+        project: PathBuf,
+    ) -> Self {
+        let canonical_project = canonical_workdir(&project);
+        self.guard = Some(crate::workspace_guard::WorkspaceGuard {
+            project,
+            state,
+            agent,
+            read_only: self.policy == AgentPolicy::ReadOnly,
+            #[cfg(test)]
+            profile_source: None,
+        });
+        let stored_session = { self.session_store.lock().unwrap().clone() };
+        if let Some(mut store) = stored_session {
+            store.workdir = canonical_project;
+            *self.session.lock().unwrap() = None;
+            *self.session_system_brief.lock().unwrap() = None;
+            if let Some(persisted) = read_session_record(&store) {
+                *self.session.lock().unwrap() = Some(persisted.session_id);
+                *self.session_system_brief.lock().unwrap() = persisted.system_brief;
+            }
+            *self.session_store.lock().unwrap() = Some(store);
+        }
         self
     }
 
@@ -429,7 +512,10 @@ impl Provider for AgentCliProvider {
                 .err()
                 .is_some_and(|error| is_missing_session(&error.to_string()))
         {
-            tracing::warn!(cli = self.cli.binary(), "saved session is gone; starting a fresh one");
+            tracing::warn!(
+                cli = self.cli.binary(),
+                "saved session is gone; starting a fresh one"
+            );
             self.forget_session();
             let fresh_prompt = compose_prompt(&request.system, situation.as_deref(), false, None);
             episode = Episode::default();
@@ -499,7 +585,94 @@ impl AgentCliProvider {
         mcp_config: Option<&Path>,
         codex_home: Option<&Path>,
     ) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if self.guard.is_none() && !cfg!(test) {
+            return Err(ProviderError::Unsupported(
+                "Linux native CLI requires a protected room workspace".into(),
+            ));
+        }
         let mut cmd = Command::new(&self.bin);
+        #[cfg(target_os = "linux")]
+        let prepared = self
+            .guard
+            .as_ref()
+            .map(|guard| guard.prepare())
+            .transpose()
+            .map_err(ProviderError::Unsupported)?;
+        #[cfg(target_os = "linux")]
+        let private_home = prepared
+            .as_ref()
+            .map(|prepared| {
+                #[cfg(test)]
+                if let Some(source) = self
+                    .guard
+                    .as_ref()
+                    .and_then(|guard| guard.profile_source.as_deref())
+                {
+                    return crate::workspace_guard::private_home_from_test(
+                        &prepared.profile_root,
+                        source,
+                        resumed,
+                    );
+                }
+                crate::workspace_guard::private_home(
+                    &prepared.profile_root,
+                    &prepared.private_home,
+                    resumed,
+                )
+            })
+            .transpose()
+            .map_err(ProviderError::Unsupported)?;
+        #[cfg(target_os = "linux")]
+        let private_mcp_config = if let (Some(home), Some(prepared)) = (&private_home, &prepared) {
+            if self.cli != CliKind::Claude {
+                None
+            } else {
+                let target = home.join("orgbot-room-mcp.json");
+                let mut value: Value = if let Some(config) = mcp_config {
+                    serde_json::from_slice(
+                        &std::fs::read(config)
+                            .map_err(|e| ProviderError::Unsupported(e.to_string()))?,
+                    )
+                    .map_err(|e| {
+                        ProviderError::Unsupported(format!("invalid room MCP config: {e}"))
+                    })?
+                } else {
+                    serde_json::json!({"mcpServers": {}})
+                };
+                if mcp_config.is_some() {
+                    replace_room_socket(&mut value, &prepared.mcp_socket_mount)
+                        .map_err(ProviderError::Unsupported)?;
+                }
+                crate::workspace_guard::write_private_file(
+                    &target,
+                    &serde_json::to_vec(&value)
+                        .map_err(|e| ProviderError::Unsupported(e.to_string()))?,
+                )
+                .map_err(ProviderError::Unsupported)?;
+                Some(prepared.private_home_mount.join("orgbot-room-mcp.json"))
+            }
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let mcp_config = private_mcp_config.as_deref().or(mcp_config);
+        #[cfg(target_os = "linux")]
+        if let Some(home) = private_home.as_deref() {
+            crate::workspace_guard::strip_private_agent_mcp_config(home, self.cli)
+                .map_err(ProviderError::Unsupported)?;
+        }
+        #[cfg(target_os = "linux")]
+        if let (Some(home), Some(prepared), Some(_overlay)) = (&private_home, &prepared, codex_home)
+        {
+            crate::workspace_guard::update_private_agent_config(
+                home,
+                self.cli,
+                &prepared.private_home_mount,
+                &prepared.mcp_socket_mount,
+            )
+            .map_err(ProviderError::Unsupported)?;
+        }
         build_args(
             &mut cmd,
             self.cli,
@@ -533,6 +706,47 @@ impl AgentCliProvider {
                 home,
             );
         }
+        #[cfg(target_os = "linux")]
+        if let (Some(guard), Some(prepared)) = (&self.guard, &prepared) {
+            let original = cmd.as_std();
+            let mut protected =
+                Command::from(guard.command("run").map_err(ProviderError::Unsupported)?);
+            if guard.read_only || prepared.read_only {
+                protected.arg("--read-only");
+            }
+            protected
+                .arg("--private-home")
+                .arg(private_home.as_ref().expect("prepared private home"));
+            if let Some(socket) = self.mcp_socket_debug() {
+                protected.arg("--mcp-socket").arg(socket);
+            }
+            protected
+                .arg("--")
+                .arg(original.get_program())
+                .args(original.get_args());
+            for (name, value) in original.get_envs() {
+                if let Some(value) = value {
+                    protected.env(name, value);
+                } else {
+                    protected.env_remove(name);
+                }
+            }
+            protected.current_dir(&prepared.workspace);
+            match self.cli {
+                CliKind::Codex => {
+                    protected.env("CODEX_HOME", prepared.private_home_mount.join(".codex"))
+                }
+                CliKind::Grok => {
+                    protected.env("GROK_HOME", prepared.private_home_mount.join(".grok"))
+                }
+                CliKind::Claude => protected.env(
+                    "CLAUDE_CONFIG_DIR",
+                    prepared.private_home_mount.join(".claude"),
+                ),
+            };
+            protected.env("HOME", &prepared.private_home_mount);
+            cmd = protected;
+        }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -546,11 +760,8 @@ impl AgentCliProvider {
 
         // Drain stderr concurrently so the pipe can never fill and wedge the
         // agent; its tail is surfaced only on failure.
-        let stderr_task = tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            let _ = tokio::io::copy(&mut stderr, &mut buffer).await;
-            buffer
-        });
+        let stderr_task =
+            tokio::spawn(async move { read_stderr_tail(&mut stderr, 64 * 1024).await });
 
         let provider = self;
         let run = async {
@@ -595,6 +806,32 @@ impl AgentCliProvider {
         })
         .await;
 
+        #[cfg(target_os = "linux")]
+        let cleanup_private_profile = || -> Result<()> {
+            if self.guard.is_some() {
+                if let Some(home) = private_home.as_deref() {
+                    match self.cli {
+                        CliKind::Claude if mcp_config.is_some() => {
+                            crate::workspace_guard::remove_private_file(
+                                &home.join("orgbot-room-mcp.json"),
+                            )
+                            .map_err(ProviderError::Unsupported)?;
+                        }
+                        CliKind::Codex | CliKind::Grok if codex_home.is_some() => {
+                            crate::workspace_guard::clear_private_agent_config(home, self.cli)
+                                .map_err(ProviderError::Unsupported)?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(())
+        };
+        #[cfg(target_os = "linux")]
+        if outcome.is_ok() {
+            cleanup_private_profile()?;
+        }
+
         match outcome {
             Ok((parsed, stderr_bytes, status)) => {
                 parsed?;
@@ -619,12 +856,31 @@ impl AgentCliProvider {
                         detail: format!("exited with {exit}: {tail}"),
                     });
                 }
+                #[cfg(target_os = "linux")]
+                if let Some(guard) = &self.guard {
+                    if !guard.read_only
+                        && !prepared
+                            .as_ref()
+                            .is_some_and(|workspace| workspace.read_only)
+                    {
+                        let integration = guard.apply().map_err(ProviderError::Unsupported)?;
+                        if integration
+                            .get("deleted")
+                            .and_then(Value::as_array)
+                            .is_some_and(|paths| !paths.is_empty())
+                        {
+                            episode.text.push_str("\nFile removals await owner approval in Workspace changes; originals are preserved.");
+                        }
+                    }
+                }
                 Ok(())
             }
             Err(_elapsed) => {
                 // Kill and reap so the child cannot linger.
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                #[cfg(target_os = "linux")]
+                cleanup_private_profile()?;
                 Err(ProviderError::Process {
                     provider: self.cli.label().to_string(),
                     detail: format!("timed out after {}s", self.timeout.as_secs()),
@@ -970,11 +1226,29 @@ fn classify_cli_error(cli: CliKind, message: &str) -> ProviderError {
 /// event that omits usage degrades to zeros instead of failing the turn.
 fn usage_from_json(value: &Value) -> Usage {
     let num = |key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0) as u32;
+    let openai_cached = num("cached_input_tokens");
+    let cache_read = openai_cached.max(num("cache_read_input_tokens"));
+    let input = num("input_tokens");
     Usage {
-        input_tokens: num("input_tokens"),
+        reported: [
+            "input_tokens",
+            "output_tokens",
+            "cached_input_tokens",
+            "cache_read_input_tokens",
+            "cache_write_input_tokens",
+            "cache_creation_input_tokens",
+        ]
+        .iter()
+        .any(|key| value.get(*key).and_then(Value::as_u64).is_some()),
+        complete: value.get("input_tokens").and_then(Value::as_u64).is_some()
+            && value.get("output_tokens").and_then(Value::as_u64).is_some(),
+        calls: 1,
+        // CLI usage follows the OpenAI shape when it reports cached input.
+        input_tokens: input.saturating_sub(openai_cached),
         output_tokens: num("output_tokens"),
-        cache_read_tokens: num("cached_input_tokens").max(num("cache_read_input_tokens")),
+        cache_read_tokens: cache_read,
         cache_write_tokens: num("cache_write_input_tokens").max(num("cache_creation_input_tokens")),
+        ..Usage::default()
     }
 }
 
@@ -1181,8 +1455,8 @@ fn write_claude_mcp_config(socket: &str) -> Result<std::path::PathBuf> {
 fn is_missing_session(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     [
-        "no rollout found",                // codex
-        "no conversation found",           // claude
+        "no rollout found",      // codex
+        "no conversation found", // claude
         "session not found",
         "thread not found",
         "could not find session",
@@ -1235,7 +1509,7 @@ fn build_args(
         // Only Claude Code accepts a per-run MCP config today; the other
         // CLIs ignore it (their attach story is config-managed).
         if cli == CliKind::Claude {
-            cmd.arg("--mcp-config").arg(path);
+            cmd.arg("--strict-mcp-config").arg("--mcp-config").arg(path);
         }
     }
     match (cli, resumed) {
@@ -1386,6 +1660,41 @@ mod tests {
     const CODEX_RATE_LIMIT_FAILURE: &str = r#"{"type":"turn.failed","error":{"message":"Rate limit exceeded. Try again later."}}
 "#;
 
+    #[tokio::test]
+    async fn stderr_capture_retains_a_bounded_tail() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, mut reader) = tokio::io::duplex(8192);
+        let write = tokio::spawn(async move {
+            let block = vec![b'x'; 8192];
+            for _ in 0..40 {
+                writer.write_all(&block).await.unwrap();
+            }
+            writer.write_all(b"tail-marker").await.unwrap();
+        });
+        let tail = read_stderr_tail(&mut reader, 4096).await;
+        write.await.unwrap();
+        assert_eq!(tail.len(), 4096);
+        assert!(tail.ends_with(b"tail-marker"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn claude_room_config_replaces_the_host_socket_with_the_private_mount() {
+        let mut config = serde_json::json!({"mcpServers":{"orgbot_room":{"args":["room-mcp","--socket","/run/user/1000/host.sock"]}}});
+        replace_room_socket(
+            &mut config,
+            Path::new("/run/user/1000/orgbot-room-mcp.sock"),
+        )
+        .unwrap();
+        assert_eq!(
+            config["mcpServers"]["orgbot_room"]["args"][2],
+            "/run/user/1000/orgbot-room-mcp.sock"
+        );
+        assert!(
+            replace_room_socket(&mut serde_json::json!({}), Path::new("/safe/socket")).is_err()
+        );
+    }
+
     fn fold(cli: CliKind, run: &str) -> Episode {
         let mut episode = Episode::default();
         for line in run.lines() {
@@ -1458,6 +1767,8 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            guard: None,
         };
         if let Some(path) = session_store {
             provider.with_session_store(path)
@@ -1474,7 +1785,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             episode.session_id.as_deref(),
             Some("01a067db-ea53-7973-b9ae-4b63f2af5026")
         );
-        assert_eq!(episode.usage.input_tokens, 24416);
+        assert_eq!(episode.usage.input_tokens, 24416 - 11264);
         assert_eq!(episode.usage.cache_read_tokens, 11264);
         assert_eq!(episode.usage.output_tokens, 6);
     }
@@ -1488,6 +1799,9 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             Some("95465654-0fdf-4e1a-ab39-4f30c5575580")
         );
         assert_eq!(episode.usage.output_tokens, 7);
+        assert_eq!(episode.usage.input_tokens, 15);
+        assert_eq!(episode.usage.cache_read_tokens, 3);
+        assert_eq!(episode.usage.total_input(), 18);
     }
 
     #[test]
@@ -1571,23 +1885,19 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
                 succeeded: true,
             }
         );
-        assert!(
-            !serde_json::to_string(&[start, end])
-                .unwrap()
-                .contains("private.invalid")
-        );
+        assert!(!serde_json::to_string(&[start, end])
+            .unwrap()
+            .contains("private.invalid"));
     }
 
     #[test]
     fn structured_cli_failures_are_parsed_without_losing_usage() {
         let claude = fold(CliKind::Claude, CLAUDE_QUOTA_FAILURE);
-        assert!(
-            claude
-                .structured_error
-                .as_deref()
-                .unwrap()
-                .contains("weekly limit")
-        );
+        assert!(claude
+            .structured_error
+            .as_deref()
+            .unwrap()
+            .contains("weekly limit"));
         assert_eq!(claude.usage.input_tokens, 19);
         assert_eq!(claude.usage.output_tokens, 4);
 
@@ -1655,6 +1965,8 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            guard: None,
         };
         let mut episode = Episode::default();
         let error = provider
@@ -1715,10 +2027,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect();
             assert!(args.windows(2).any(|pair| pair == ["-s", expected]));
-            assert!(
-                args.windows(2)
-                    .any(|pair| pair == ["-c", "approval_policy=\"never\""])
-            );
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["-c", "approval_policy=\"never\""]));
             assert!(!args.iter().any(|arg| arg == "--approve-for-me"));
         }
     }
@@ -1746,10 +2057,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect();
-            assert!(
-                args.windows(2)
-                    .any(|pair| pair == ["-c", "approval_policy=\"never\""])
-            );
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["-c", "approval_policy=\"never\""]));
             assert!(!args.iter().any(|arg| arg == "-s"));
             assert!(!args.iter().any(|arg| arg == "--approve-for-me"));
             assert!(!args.iter().any(|arg| arg == "--full-auto"));
@@ -1912,12 +2222,10 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
                 & 0o777,
             0o600
         );
-        assert!(
-            std::fs::symlink_metadata(overlay.join("auth.json"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        assert!(std::fs::symlink_metadata(overlay.join("auth.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
         std::fs::remove_dir_all(overlay).unwrap();
         std::fs::remove_dir_all(source).unwrap();
     }
@@ -1964,6 +2272,8 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             mcp: store.mcp,
             timeout: Duration::from_millis(50),
             session_store: Mutex::new(Some(store.clone())),
+            #[cfg(target_os = "linux")]
+            guard: None,
         };
         let mut episode = Episode::default();
         let result = provider
@@ -1997,6 +2307,152 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             Some("session-before-timeout")
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn protected_fake_cli_resumes_in_private_profile_and_cannot_redirect_writes_home() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = std::env::temp_dir().join(format!(
+            "orgbot-protected-cli-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("original-home");
+        let project = root.join("project");
+        let state = root.join("state/workspaces");
+        std::fs::create_dir_all(source.join(".codex/sessions")).unwrap();
+        std::fs::create_dir_all(source.join(".codex/skills/local")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(source.join(".codex/auth.json"), "fixture-auth").unwrap();
+        std::fs::write(
+            source.join(".codex/config.toml"),
+            "model = \"fixture\"\n[mcp_servers.remote]\ncommand = \"remote-fixture\"\n",
+        )
+        .unwrap();
+        std::fs::write(source.join(".codex/skills/local/SKILL.md"), "fixture skill").unwrap();
+        std::fs::write(project.join("kept.txt"), "original-project").unwrap();
+
+        let binary = project.join("fake-codex");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$HOME|$CODEX_HOME\" > \"$CODEX_HOME/env-record.txt\"\nif [ ! -f \"$CODEX_HOME/auth.json\" ] || [ ! -f \"$CODEX_HOME/skills/local/SKILL.md\" ]; then exit 41; fi\nif grep -q 'remote\\|mcp_servers' \"$CODEX_HOME/config.toml\"; then exit 43; fi\ncase \"$*\" in *stable-session*) [ -f \"$CODEX_HOME/sessions/stable-session.jsonl\" ] || exit 42 ;; *) mkdir -p \"$CODEX_HOME/sessions\"; printf 'resume state\\n' > \"$CODEX_HOME/sessions/stable-session.jsonl\" ;; esac\nprintf 'modified-private-auth' > \"$CODEX_HOME/auth.json\"\nprintf 'generated-by-cli' > /tmp/orgbot-workspace/generated.txt\nprintf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"stable-session\"}}'\nprintf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"protected-ok\"}}}}'\n"
+        );
+        std::fs::write(&binary, script).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let session_path = root.join("state/cli-session.json");
+        let mut provider = AgentCliProvider::new(
+            CliKind::Codex,
+            "fixture-model",
+            project.to_string_lossy(),
+            AgentPolicy::WorkspaceWrite,
+            false,
+        )
+        .unwrap();
+        provider.bin = binary.to_string_lossy().into_owned();
+        provider.timeout = Duration::from_secs(10);
+        provider = provider.with_session_store(session_path);
+        provider = provider.with_workspace_guard_project(
+            state.clone(),
+            "fake-agent".into(),
+            project.clone(),
+        );
+        provider.guard.as_mut().unwrap().profile_source = Some(source.clone());
+
+        let mut first = Episode::default();
+        provider
+            .run_episode("first", None, &None, &mut first, None, None)
+            .await
+            .unwrap();
+        assert_eq!(first.session_id.as_deref(), Some("stable-session"));
+        assert_eq!(first.text.trim(), "protected-ok");
+        assert!(project.join("generated.txt").is_file());
+        assert_eq!(
+            std::fs::read_to_string(source.join(".codex/auth.json")).unwrap(),
+            "fixture-auth"
+        );
+        let prepared = provider.guard.as_ref().unwrap().prepare().unwrap();
+        let recorded =
+            std::fs::read_to_string(prepared.private_home.join(".codex/env-record.txt")).unwrap();
+        assert!(recorded.contains("/run/user/"));
+        assert!(recorded.contains("/orgbot-home/.codex"));
+
+        let mut resumed = Episode::default();
+        provider
+            .run_episode(
+                "second",
+                first.session_id.as_deref(),
+                &None,
+                &mut resumed,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed.session_id.as_deref(), Some("stable-session"));
+        assert_eq!(
+            std::fs::read_to_string(source.join(".codex/auth.json")).unwrap(),
+            "fixture-auth"
+        );
+
+        // No room socket means no room bridge, but copied remote MCP servers
+        // still must not be inherited by a CLI that is MCP-capable.
+        let mut missing_socket = AgentCliProvider::new(
+            CliKind::Codex,
+            "fixture-model",
+            project.to_string_lossy(),
+            AgentPolicy::WorkspaceWrite,
+            true,
+        )
+        .unwrap();
+        missing_socket.bin = binary.to_string_lossy().into_owned();
+        missing_socket.timeout = Duration::from_secs(10);
+        missing_socket = missing_socket.with_workspace_guard_project(
+            state.clone(),
+            "missing-socket-agent".into(),
+            project.clone(),
+        );
+        missing_socket.guard.as_mut().unwrap().profile_source = Some(source.clone());
+        let mut no_socket_episode = Episode::default();
+        missing_socket
+            .run_episode("no socket", None, &None, &mut no_socket_episode, None, None)
+            .await
+            .unwrap();
+        assert_eq!(no_socket_episode.text.trim(), "protected-ok");
+
+        let home = root.join("state/workspaces/agents");
+        let private_auth = std::fs::read_dir(&home)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("fake-agent/profiles/home/.codex/auth.json");
+        std::fs::remove_file(&private_auth).unwrap();
+        symlink(source.join(".codex/auth.json"), &private_auth).unwrap();
+        let mut rejected = Episode::default();
+        assert!(provider
+            .run_episode(
+                "third",
+                Some("stable-session"),
+                &None,
+                &mut rejected,
+                None,
+                None
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(source.join(".codex/auth.json")).unwrap(),
+            "fixture-auth"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
@@ -2042,7 +2498,9 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             .expect("the turn should run in a fresh session");
         assert_eq!(response.content.len(), 1);
         assert_eq!(provider.session_id().as_deref(), Some("fresh-session"));
-        assert!(std::fs::read_to_string(&store).unwrap().contains("fresh-session"));
+        assert!(std::fs::read_to_string(&store)
+            .unwrap()
+            .contains("fresh-session"));
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2085,11 +2543,9 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
         assert!(sections[0].contains("first situation"));
         assert!(sections[1].contains("stable role brief"));
         assert!(sections[1].contains("retry situation"));
-        assert!(
-            std::fs::read_to_string(&args)
-                .unwrap()
-                .contains("--resume\nstable-session")
-        );
+        assert!(std::fs::read_to_string(&args)
+            .unwrap()
+            .contains("--resume\nstable-session"));
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2129,19 +2585,17 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 
         let updated = fake_claude_provider(&binary, Some(state_path.clone()));
         assert_eq!(updated.session_id().as_deref(), Some("stable-session"));
-        assert!(
-            updated
-                .complete(
-                    CompletionRequest::new(
-                        "claude-opus-5-5",
-                        "ROLE V2 UNIQUE",
-                        vec![Turn::user("task after role update")],
-                    ),
-                    None,
-                )
-                .await
-                .is_err()
-        );
+        assert!(updated
+            .complete(
+                CompletionRequest::new(
+                    "claude-opus-5-5",
+                    "ROLE V2 UNIQUE",
+                    vec![Turn::user("task after role update")],
+                ),
+                None,
+            )
+            .await
+            .is_err());
         assert_eq!(
             read_session_record(&SessionStore {
                 path: state_path.clone(),
@@ -2365,14 +2819,12 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
                     .map(|arg| arg.to_string_lossy().into_owned())
                     .collect();
                 assert_eq!(args.iter().filter(|arg| *arg == "--allow").count(), 2);
-                assert!(
-                    args.windows(2)
-                        .any(|pair| pair == ["--allow", ROOM_TOOL_PATTERN])
-                );
-                assert!(
-                    args.windows(2)
-                        .any(|pair| pair == ["--allow", ROOM_TOOL_WILDCARD])
-                );
+                assert!(args
+                    .windows(2)
+                    .any(|pair| pair == ["--allow", ROOM_TOOL_PATTERN]));
+                assert!(args
+                    .windows(2)
+                    .any(|pair| pair == ["--allow", ROOM_TOOL_WILDCARD]));
             }
         }
     }
@@ -2402,7 +2854,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             None,
             "",
             AgentPolicy::ReadOnly,
-            None,
+            Some(Path::new("/private/orgbot-room-mcp.json")),
             true,
         );
         let args: Vec<_> = cmd
@@ -2410,14 +2862,12 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--permission-mode", "dontAsk"])
-        );
-        assert!(
-            args.windows(3).any(|triple| {
-                triple == ["--allowedTools", ROOM_TOOL_PATTERN, ROOM_TOOL_WILDCARD]
-            })
-        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--permission-mode", "dontAsk"]));
+        assert!(args
+            .windows(3)
+            .any(|triple| { triple == ["--allowedTools", ROOM_TOOL_PATTERN, ROOM_TOOL_WILDCARD] }));
+        assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
     }
 }

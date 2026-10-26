@@ -421,7 +421,7 @@ fn parse_finish_reason(raw: &str) -> StopReason {
 
 fn parse_usage(usage: Option<&Value>) -> Usage {
     let Some(usage) = usage else {
-        return Usage::default();
+        return Usage::missing();
     };
     let field = |name: &str| usage.get(name).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let cached = usage
@@ -430,12 +430,28 @@ fn parse_usage(usage: Option<&Value>) -> Usage {
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
     Usage {
+        reported: ["prompt_tokens", "completion_tokens", "cached_tokens"]
+            .iter()
+            .any(|key| {
+                usage
+                    .pointer(&format!("/prompt_tokens_details/{key}"))
+                    .and_then(Value::as_u64)
+                    .is_some()
+                    || usage.get(*key).and_then(Value::as_u64).is_some()
+            }),
+        complete: usage.get("prompt_tokens").and_then(Value::as_u64).is_some()
+            && usage
+                .get("completion_tokens")
+                .and_then(Value::as_u64)
+                .is_some(),
+        calls: 1,
         // Cached tokens are reported inside the prompt total here, unlike the
         // Anthropic shape where they are a separate bucket.
         input_tokens: field("prompt_tokens").saturating_sub(cached),
         output_tokens: field("completion_tokens"),
         cache_read_tokens: cached,
         cache_write_tokens: 0,
+        ..Usage::default()
     }
 }
 
@@ -623,7 +639,11 @@ impl Accumulator {
             model: self.model,
             content,
             stop_reason,
-            usage: self.usage,
+            usage: if self.usage.calls == 0 {
+                Usage::missing()
+            } else {
+                self.usage
+            },
         }
     }
 }
@@ -643,17 +663,32 @@ mod tests {
     async fn streams_finish_at_done_and_reject_truncated_tool_turns() {
         let tool = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"shell\",\"arguments\":\"{}\"}}]}}]}\n\n";
         for (terminal, keep_open, succeeds) in [
-            ("data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\ndata: {\"usage\":{\"completion_tokens\":9}}\n\ndata: [DONE]\n\n", true, true),
-            ("data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}", false, true),
+            (
+                "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\ndata: {\"usage\":{\"completion_tokens\":9}}\n\ndata: [DONE]\n\n",
+                true,
+                true,
+            ),
+            (
+                "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}",
+                false,
+                true,
+            ),
             ("", false, false),
         ] {
-            let (http, _release) = crate::sse::test_response(&format!("{tool}{terminal}"), keep_open).await;
-            let result = tokio::time::timeout(std::time::Duration::from_secs(1), stream_response("grok", http, None))
-                .await.expect("a completed turn must not wait for the server to close HTTP");
+            let (http, _release) =
+                crate::sse::test_response(&format!("{tool}{terminal}"), keep_open).await;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                stream_response("grok", http, None),
+            )
+            .await
+            .expect("a completed turn must not wait for the server to close HTTP");
             assert_eq!(result.is_ok(), succeeds, "{result:?}");
             if let Ok(turn) = result {
                 assert_eq!(turn.stop_reason, StopReason::ToolUse);
-                if keep_open { assert_eq!(turn.usage.output_tokens, 9); }
+                if keep_open {
+                    assert_eq!(turn.usage.output_tokens, 9);
+                }
             }
         }
     }
@@ -696,7 +731,11 @@ mod tests {
             let response = reqwest::get(format!("http://{address}")).await.unwrap();
             let error = check_status("grok", response).await.unwrap_err();
             let report = crate::error::ErrorReport::from(&error);
-            let expected = if body.contains("capacity") { "Temporary model capacity limit" } else { "subscription:free-usage-exhausted" };
+            let expected = if body.contains("capacity") {
+                "Temporary model capacity limit"
+            } else {
+                "subscription:free-usage-exhausted"
+            };
             assert!(report.message.contains(expected), "{}", report.message);
             assert!(report.message.contains("retry after 12s"));
             assert_eq!(report.kind, "rate_limited");

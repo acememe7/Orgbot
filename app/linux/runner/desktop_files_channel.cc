@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 
@@ -21,12 +22,21 @@ struct ChannelContext {
 struct PickerContext {
   FlMethodCall* call;
   gboolean choose_directory;
+  gboolean document;
 };
 
 struct PreviewContext {
   FlMethodCall* call;
   gchar* root;
   gchar* relative;
+};
+
+struct BackupContext {
+  FlMethodCall* call;
+  gchar* path;
+  guint8* bytes;
+  gsize length;
+  gboolean write;
 };
 
 void respond_error(FlMethodCall* call, const gchar* code,
@@ -38,6 +48,110 @@ void preview_context_free(gpointer data) {
   g_free(context->root);
   g_free(context->relative);
   delete context;
+}
+
+void backup_context_free(gpointer data) {
+  auto* context = static_cast<BackupContext*>(data);
+  g_object_unref(context->call);
+  g_free(context->path);
+  g_free(context->bytes);
+  delete context;
+}
+
+void backup_worker(GTask* task, gpointer, gpointer task_data, GCancellable*) {
+  auto* context = static_cast<BackupContext*>(task_data);
+  if (context->write) {
+    const int fd = open(context->path,
+                        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                        0600);
+    if (fd < 0) {
+      g_task_return_new_error(task, G_IO_ERROR, g_io_error_from_errno(errno),
+                              errno == EEXIST
+                                  ? "That file already exists. Choose a new name."
+                                  : "Could not create a private backup file.");
+      return;
+    }
+    gsize offset = 0;
+    while (offset < context->length) {
+      const ssize_t count = write(fd, context->bytes + offset,
+                                  context->length - offset);
+      if (count < 0 && errno == EINTR) continue;
+      if (count <= 0) break;
+      offset += static_cast<gsize>(count);
+    }
+    const bool saved = offset == context->length && fsync(fd) == 0;
+    close(fd);
+    if (!saved) {
+      unlink(context->path);
+      g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                              "Could not finish writing the backup.");
+      return;
+    }
+    g_task_return_boolean(task, TRUE);
+    return;
+  }
+
+  const int fd = open(context->path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+  struct stat metadata;
+  if (fd < 0 || fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+      metadata.st_size < 0 || metadata.st_size > 64 * 1024 * 1024) {
+    if (fd >= 0) close(fd);
+    g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                            "Backup must be a regular file under 64 MiB.");
+    return;
+  }
+  auto* bytes = static_cast<guint8*>(g_malloc(static_cast<gsize>(metadata.st_size)));
+  gsize offset = 0;
+  while (offset < static_cast<gsize>(metadata.st_size)) {
+    const ssize_t count = read(fd, bytes + offset,
+                               static_cast<gsize>(metadata.st_size) - offset);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) break;
+    offset += static_cast<gsize>(count);
+  }
+  struct stat after;
+  const bool stable = fstat(fd, &after) == 0 &&
+      after.st_dev == metadata.st_dev && after.st_ino == metadata.st_ino &&
+      after.st_size == metadata.st_size &&
+      after.st_mtim.tv_sec == metadata.st_mtim.tv_sec &&
+      after.st_mtim.tv_nsec == metadata.st_mtim.tv_nsec &&
+      offset == static_cast<gsize>(metadata.st_size);
+  close(fd);
+  if (!stable) {
+    g_free(bytes);
+    g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_BUSY,
+                            "Backup changed while it was being read.");
+    return;
+  }
+  g_task_return_pointer(task, g_bytes_new_take(bytes, offset),
+                        reinterpret_cast<GDestroyNotify>(g_bytes_unref));
+}
+
+void backup_done(GObject*, GAsyncResult* result, gpointer) {
+  auto* task = G_TASK(result);
+  auto* context = static_cast<BackupContext*>(g_task_get_task_data(task));
+  g_autoptr(GError) error = nullptr;
+  if (context->write) {
+    if (!g_task_propagate_boolean(task, &error)) {
+      respond_error(context->call, "backup",
+                    error == nullptr ? "Could not save backup." : error->message);
+    } else {
+      fl_method_call_respond_success(context->call, fl_value_new_bool(TRUE), nullptr);
+    }
+    return;
+  }
+  GBytes* bytes = static_cast<GBytes*>(g_task_propagate_pointer(task, &error));
+  if (bytes == nullptr) {
+    respond_error(context->call, "backup",
+                  error == nullptr ? "Could not read backup." : error->message);
+    return;
+  }
+  gsize length = 0;
+  gconstpointer data = g_bytes_get_data(bytes, &length);
+  g_autoptr(FlValue) value = fl_value_new_uint8_list(
+      static_cast<const uint8_t*>(data), length);
+  fl_method_call_respond_success(context->call, value, nullptr);
+  g_bytes_unref(bytes);
 }
 
 void preview_worker(GTask* task, gpointer, gpointer task_data,
@@ -110,10 +224,17 @@ void preview_worker(GTask* task, gpointer, gpointer task_data,
     }
     length += static_cast<gsize>(count);
   }
+  struct stat after;
+  if (fstat(directory_fd, &after) != 0 ||
+      metadata.st_size != after.st_size ||
+      metadata.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+      metadata.st_mtim.tv_nsec != after.st_mtim.tv_nsec) {
+    failed = TRUE;
+  }
   close(directory_fd);
   if (failed) {
     g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_FAILED,
-                            "Could not read the selected project file.");
+                            "Project file changed while being read.");
     return;
   }
   g_task_return_pointer(task, g_bytes_new(bytes, length),
@@ -185,8 +306,9 @@ void picker_context_free(gpointer data, GClosure*) {
 void picker_response(GtkNativeDialog* dialog, gint response, gpointer data) {
   auto* context = static_cast<PickerContext*>(data);
   if (response != GTK_RESPONSE_ACCEPT) {
-    g_autoptr(FlValue) result =
-        context->choose_directory ? fl_value_new_null() : fl_value_new_list();
+    g_autoptr(FlValue) result = context->document || context->choose_directory
+                                    ? fl_value_new_null()
+                                    : fl_value_new_list();
     fl_method_call_respond_success(context->call, result, nullptr);
     gtk_native_dialog_destroy(dialog);
     g_object_unref(dialog);
@@ -194,6 +316,19 @@ void picker_response(GtkNativeDialog* dialog, gint response, gpointer data) {
   }
 
   auto* chooser = GTK_FILE_CHOOSER(dialog);
+  if (context->document) {
+    g_autoptr(GFile) file = gtk_file_chooser_get_file(chooser);
+    g_autofree gchar* path = file == nullptr ? nullptr : g_file_get_path(file);
+    if (path == nullptr) {
+      respond_error(context->call, "document", "Choose a local backup file.");
+    } else {
+      g_autoptr(FlValue) result = fl_value_new_string(path);
+      fl_method_call_respond_success(context->call, result, nullptr);
+    }
+    gtk_native_dialog_destroy(dialog);
+    g_object_unref(dialog);
+    return;
+  }
   if (context->choose_directory) {
     g_autoptr(GFile) folder = gtk_file_chooser_get_file(chooser);
     g_autofree gchar* path = folder == nullptr ? nullptr : g_file_get_path(folder);
@@ -283,10 +418,59 @@ void show_picker(ChannelContext* context, FlMethodCall* call,
   gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(chooser),
                                        !choose_directory);
   auto* picker = new PickerContext{FL_METHOD_CALL(g_object_ref(call)),
-                                   choose_directory};
+                                   choose_directory, FALSE};
   g_signal_connect_data(chooser, "response", G_CALLBACK(picker_response),
                         picker, picker_context_free, G_CONNECT_DEFAULT);
   gtk_native_dialog_show(GTK_NATIVE_DIALOG(chooser));
+}
+
+void show_document_picker(ChannelContext* context, FlMethodCall* call,
+                          gboolean save) {
+  GtkFileChooserNative* chooser = gtk_file_chooser_native_new(
+      save ? "Save room backup" : "Open room backup", context->parent,
+      save ? GTK_FILE_CHOOSER_ACTION_SAVE : GTK_FILE_CHOOSER_ACTION_OPEN,
+      save ? "Save" : "Open", "Cancel");
+  if (save) {
+    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(chooser),
+                                      "orgbots-room.orgbotbackup");
+  }
+  auto* picker = new PickerContext{FL_METHOD_CALL(g_object_ref(call)), FALSE,
+                                   TRUE};
+  g_signal_connect_data(chooser, "response", G_CALLBACK(picker_response),
+                        picker, picker_context_free, G_CONNECT_DEFAULT);
+  gtk_native_dialog_show(GTK_NATIVE_DIALOG(chooser));
+}
+
+void read_backup(FlMethodCall* call, const gchar* path) {
+  if (path == nullptr || path[0] != '/') {
+    respond_error(call, "backup", "Choose a local backup file.");
+    return;
+  }
+  auto* context = new BackupContext{FL_METHOD_CALL(g_object_ref(call)),
+                                    g_strdup(path), nullptr, 0, FALSE};
+  GTask* task = g_task_new(nullptr, nullptr, backup_done, nullptr);
+  g_task_set_task_data(task, context, backup_context_free);
+  g_task_run_in_thread(task, backup_worker);
+  g_object_unref(task);
+}
+
+void write_backup(FlMethodCall* call, const gchar* path, FlValue* value) {
+  if (path == nullptr || path[0] != '/' || value == nullptr ||
+      fl_value_get_type(value) != FL_VALUE_TYPE_UINT8_LIST ||
+      fl_value_get_length(value) > 64 * 1024 * 1024) {
+    respond_error(call, "backup", "Backup data or destination is invalid.");
+    return;
+  }
+  const auto* bytes = fl_value_get_uint8_list(value);
+  const gsize length = fl_value_get_length(value);
+  auto* context = new BackupContext{FL_METHOD_CALL(g_object_ref(call)),
+                                    g_strdup(path),
+                                    static_cast<guint8*>(g_memdup2(bytes, length)),
+                                    length, TRUE};
+  GTask* task = g_task_new(nullptr, nullptr, backup_done, nullptr);
+  g_task_set_task_data(task, context, backup_context_free);
+  g_task_run_in_thread(task, backup_worker);
+  g_object_unref(task);
 }
 
 void attachments_method_call(FlMethodChannel*, FlMethodCall* call,
@@ -357,6 +541,24 @@ void workspace_method_call(FlMethodChannel*, FlMethodCall* call,
   }
   if (g_strcmp0(fl_method_call_get_name(call), "choose_directory") == 0) {
     show_picker(context, call, TRUE);
+    return;
+  }
+  if (g_strcmp0(fl_method_call_get_name(call), "choose_backup_export") == 0) {
+    show_document_picker(context, call, TRUE);
+    return;
+  }
+  if (g_strcmp0(fl_method_call_get_name(call), "choose_backup_import") == 0) {
+    show_document_picker(context, call, FALSE);
+    return;
+  }
+  if (g_strcmp0(fl_method_call_get_name(call), "read_backup") == 0) {
+    read_backup(call, argument_string(fl_method_call_get_args(call), "path"));
+    return;
+  }
+  if (g_strcmp0(fl_method_call_get_name(call), "write_backup") == 0) {
+    FlValue* arguments = fl_method_call_get_args(call);
+    write_backup(call, argument_string(arguments, "path"),
+                 fl_value_lookup_string(arguments, "bytes"));
     return;
   }
   if (g_strcmp0(fl_method_call_get_name(call), "read_preview") == 0) {

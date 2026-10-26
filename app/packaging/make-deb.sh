@@ -9,7 +9,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-NAME=orgbot
+PACKAGE=orgbots
+APP=orgbot
 VERSION=${1:-$(<packaging/version)}
 BUNDLE=build/linux/x64/release/bundle
 
@@ -33,24 +34,40 @@ if [ ! -x "$ENGINE" ]; then
   exit 1
 fi
 
+WORKSPACE_HELPER=packaging/orgbot-workspace.py
+if [ ! -f "$WORKSPACE_HELPER" ]; then
+  echo "missing trusted workspace helper at $WORKSPACE_HELPER" >&2
+  exit 1
+fi
+TRASH_HELPER=packaging/orgbot-trash.py
+if [ ! -f "$TRASH_HELPER" ]; then
+  echo "missing trusted HDD trash helper at $TRASH_HELPER" >&2
+  exit 1
+fi
+
 STAGE=$(mktemp -d)
-trap 'rm -rf "$STAGE"' EXIT
-mkdir -p "$STAGE/usr/lib/$NAME" "$STAGE/usr/bin" \
+TRANSITIONAL_STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE" "$TRANSITIONAL_STAGE"' EXIT
+mkdir -p "$STAGE/usr/lib/$APP" "$STAGE/usr/bin" \
          "$STAGE/usr/share/applications" \
          "$STAGE/usr/share/icons/hicolor/256x256/apps" \
          "$STAGE/DEBIAN"
 
-cp -r "$BUNDLE/." "$STAGE/usr/lib/$NAME/"
-chmod 755 "$STAGE/usr/lib/$NAME/orgbot_app"
+cp -r "$BUNDLE/." "$STAGE/usr/lib/$APP/"
+chmod 755 "$STAGE/usr/lib/$APP/orgbot_app"
 
 # The engine the app runs rooms on. Installed as orgbot-engine so it cannot be
 # confused with the app's own /usr/bin/orgbot launcher, which is what
 # findEngine() looks for first.
-install -m755 "$ENGINE" "$STAGE/usr/lib/$NAME/orgbot-engine"
-ln -s "/usr/lib/$NAME/orgbot-engine" "$STAGE/usr/bin/orgbot-engine"
+install -m755 "$ENGINE" "$STAGE/usr/lib/$APP/orgbot-engine"
+install -m755 "$WORKSPACE_HELPER" "$STAGE/usr/lib/$APP/orgbot-workspace.py"
+install -m755 "$TRASH_HELPER" "$STAGE/usr/lib/$APP/orgbot-trash.py"
+ln -s "/usr/lib/$APP/orgbot-engine" "$STAGE/usr/bin/orgbot-engine"
+ln -s "/usr/lib/$APP/orgbot-trash.py" "$STAGE/usr/bin/orgbot-trash"
 install -m644 packaging/orgbot.desktop "$STAGE/usr/share/applications/orgbot.desktop"
-install -m644 packaging/orgbots-icon-256.png "$STAGE/usr/share/icons/hicolor/256x256/apps/$NAME.png"
-ln -s "/usr/lib/$NAME/orgbot_app" "$STAGE/usr/bin/$NAME"
+install -m644 packaging/orgbots-icon-256.png "$STAGE/usr/share/icons/hicolor/256x256/apps/$APP.png"
+ln -s "/usr/lib/$APP/orgbot_app" "$STAGE/usr/bin/$APP"
+ln -s "/usr/lib/$APP/orgbot_app" "$STAGE/usr/bin/$PACKAGE"
 
 INSTALLED_KB=$(du -sk "$STAGE/usr" | cut -f1)
 
@@ -64,16 +81,16 @@ command -v dpkg-shlibdeps >/dev/null 2>&1 || {
   exit 1
 }
 ( cd "$STAGE" && mkdir -p debian \
-    && printf 'Source: %s\n\nPackage: %s\nArchitecture: amd64\n' "$NAME" "$NAME" > debian/control )
+    && printf 'Source: %s\n\nPackage: %s\nArchitecture: amd64\n' "$PACKAGE" "$PACKAGE" > debian/control )
 # Scan the app, engine, and every bundled shared object: dynamically loaded
 # Flutter plugins do not appear in the app executable's DT_NEEDED entries.
-SHLIBDEPS_BINS=("usr/lib/$NAME/orgbot_app" "usr/lib/$NAME/orgbot-engine")
+SHLIBDEPS_BINS=("usr/lib/$APP/orgbot_app" "usr/lib/$APP/orgbot-engine")
 while IFS= read -r -d '' library; do
   SHLIBDEPS_BINS+=("${library#"$STAGE/"}")
-done < <(find "$STAGE/usr/lib/$NAME" -type f \
+done < <(find "$STAGE/usr/lib/$APP" -type f \
   \( -name '*.so' -o -name '*.so.*' \) -print0)
 DEPENDS=$(cd "$STAGE" && dpkg-shlibdeps \
-  -l"$STAGE/usr/lib/$NAME/lib" -O "${SHLIBDEPS_BINS[@]}" \
+  -l"$STAGE/usr/lib/$APP/lib" -O "${SHLIBDEPS_BINS[@]}" \
   | sed -n 's/^shlibs:Depends=//p')
 rm -rf "$STAGE/debian"
 if [ -z "$DEPENDS" ]; then
@@ -82,13 +99,15 @@ if [ -z "$DEPENDS" ]; then
 fi
 
 cat > "$STAGE/DEBIAN/control" <<CONTROL
-Package: $NAME
+Package: $PACKAGE
 Version: $VERSION
 Section: devel
 Priority: optional
 Architecture: amd64
+Breaks: orgbot (<< $VERSION)
+Replaces: orgbot (<< $VERSION)
 Installed-Size: $INSTALLED_KB
-Depends: $DEPENDS, libsecret-tools, ffmpeg, gstreamer1.0-libav, gstreamer1.0-plugins-good
+Depends: $DEPENDS, python3, bubblewrap, libnotify-bin, libsecret-tools, ffmpeg, gstreamer1.0-libav, gstreamer1.0-plugins-good
 Maintainer: OrgBot <theaeceme@gmail.com>
 Description: CLI and API agents working together in shared rooms
  Bots hold different roles, pick up tasks, hand work off to one another, wait
@@ -98,5 +117,19 @@ Description: CLI and API agents working together in shared rooms
  work together in the room's shared project folder with role permissions.
 CONTROL
 
-dpkg-deb --build --root-owner-group "$STAGE" "${NAME}_${VERSION}_amd64.deb" >/dev/null
-echo "built ${NAME}_${VERSION}_amd64.deb"
+dpkg-deb --build --root-owner-group "$STAGE" "${PACKAGE}_${VERSION}_amd64.deb" >/dev/null
+
+mkdir -p "$TRANSITIONAL_STAGE/DEBIAN"
+cat > "$TRANSITIONAL_STAGE/DEBIAN/control" <<TRANSITIONAL
+Package: orgbot
+Version: $VERSION
+Section: oldlibs
+Priority: optional
+Architecture: all
+Depends: orgbots (= $VERSION)
+Maintainer: OrgBot <theaeceme@gmail.com>
+Description: transitional package for OrgBots
+ This package upgrades installations of the former orgbot package to orgbots.
+TRANSITIONAL
+dpkg-deb --build --root-owner-group "$TRANSITIONAL_STAGE" "orgbot_${VERSION}_all.deb" >/dev/null
+echo "built ${PACKAGE}_${VERSION}_amd64.deb and orgbot_${VERSION}_all.deb"

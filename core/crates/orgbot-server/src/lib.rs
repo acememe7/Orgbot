@@ -16,6 +16,8 @@
 
 pub mod bodies;
 pub mod config;
+#[cfg(target_os = "linux")]
+pub mod desktop_notifications;
 pub mod local_workspace;
 pub mod pair;
 pub mod protocol;
@@ -160,6 +162,10 @@ async fn serve_room_inner(
     };
     let workspace_spec = resolved.workspace.clone();
     let (mut session, handle) = RoomSession::build_with_resume(resolved, resume_was_running)?;
+    #[cfg(target_os = "linux")]
+    if resume_was_running {
+        session.enable_desktop_notifications();
+    }
     let workspace_host = match workspace_spec {
         Some(spec) => Some(local_workspace::LocalWorkspaceHost::attach(spec, &mut session).await?),
         None => None,

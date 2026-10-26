@@ -8,14 +8,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::graph::TaskKind;
-use crate::decision::{Answer, Decision};
 use crate::agent::{AgentSpec, AgentStatus};
 use crate::artifact::Artifact;
 use crate::chat::ChatMessage;
+use crate::decision::{Answer, Decision};
+use crate::graph::TaskKind;
 use crate::handoff::{Handoff, HandoffState, HandoffTransition};
 use crate::ids::{AgentId, ArtifactId, DecisionId, EventId, HandoffId, RoomId, TaskId};
 use crate::review::Review;
+use crate::spend::TokenUsage;
 use crate::task::{Task, TaskState, TaskTransition};
 use crate::time::Timestamp;
 
@@ -23,7 +24,9 @@ use crate::time::Timestamp;
 ///
 /// Clients resume with "everything after N", so gaps and reordering are not
 /// permitted: the engine assigns these under the same lock that appends.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct Seq(pub u64);
 
@@ -42,7 +45,11 @@ impl Seq {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     /// A room was opened.
-    RoomOpened { room: RoomId, name: String, goal: String },
+    RoomOpened {
+        room: RoomId,
+        name: String,
+        goal: String,
+    },
     /// The room finished, successfully or otherwise.
     RoomClosed { room: RoomId, reason: String },
 
@@ -161,6 +168,12 @@ pub enum Event {
         /// Which retry this was.
         attempt: u32,
     },
+    /// Provider usage returned for a completed model turn.
+    UsageRecorded {
+        agent: AgentId,
+        #[serde(default)]
+        usage: TokenUsage,
+    },
 }
 
 /// What the engine did after detecting a deadlock.
@@ -197,6 +210,7 @@ impl Event {
             Self::ReviewRecorded { .. } => "review_recorded",
             Self::DeadlockDetected { .. } => "deadlock_detected",
             Self::AgentErrored { .. } => "agent_errored",
+            Self::UsageRecorded { .. } => "usage_recorded",
             Self::RoomHealthChanged { .. } => "room_health_changed",
         }
     }
@@ -228,6 +242,7 @@ impl Event {
             Self::ArtifactAdded { artifact } => Some(artifact.author),
             Self::ReviewRecorded { review } => Some(review.inspector),
             Self::AgentErrored { agent, .. } => Some(*agent),
+            Self::UsageRecorded { agent, .. } => Some(*agent),
             _ => None,
         }
     }
@@ -318,7 +333,9 @@ mod tests {
         let room = RoomId::new();
         let task = Task::draft(room, "ship", "do it");
         let id = task.id;
-        let created = Event::TaskCreated { task: Box::new(task) };
+        let created = Event::TaskCreated {
+            task: Box::new(task),
+        };
         assert_eq!(created.task(), Some(id));
         assert_eq!(
             Event::RoomClosed {

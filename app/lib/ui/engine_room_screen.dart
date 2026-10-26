@@ -31,6 +31,7 @@ import 'room_widgets.dart';
 import 'polish.dart';
 import 'desktop_project_pane.dart';
 import 'widgets/memory_pane.dart';
+import 'workspace_changes_dialog.dart';
 
 /// Runs a saved room on the engine and shows it.
 class EngineRoomScreen extends StatefulWidget {
@@ -416,6 +417,41 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
     },
   );
 
+  Future<void> _reviewWorkspaceChanges(RoomStore store) async {
+    final agents = <WorkspaceAgentLabel>[];
+    final seen = <String>{};
+    for (final agent in store.agents) {
+      final label = agent.handle.isNotEmpty
+          ? '@${agent.handle}'
+          : agent.displayName.isNotEmpty
+          ? agent.displayName
+          : agent.id;
+      if (seen.add(agent.id)) {
+        agents.add(WorkspaceAgentLabel(id: agent.id, label: '$label · engine'));
+      }
+      if (agent.handle.isNotEmpty) {
+        final nativeId = utf8
+            .encode(agent.handle)
+            .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+            .join();
+        if (seen.add(nativeId)) {
+          agents.add(
+            WorkspaceAgentLabel(id: nativeId, label: '$label · native'),
+          );
+        }
+      }
+    }
+    final archive = await RoomArchive.directory(widget.room.id);
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => WorkspaceChangesDialog(
+        stateDirectory: Directory('${archive.path}/workspaces'),
+        agents: agents,
+      ),
+    );
+  }
+
   PreferredSizeWidget _appBar(RoomStore? store) {
     final scheme = Theme.of(context).colorScheme;
     final state = _controller.phase == RoomLaunch.failed
@@ -791,6 +827,15 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
                       ),
                     ),
                   ),
+                  if (_inspector == 0 && _desktop)
+                    IconButton(
+                      key: const ValueKey('review-workspace-changes'),
+                      tooltip: 'Review agent workspace changes',
+                      onPressed: store == null
+                          ? null
+                          : () => _reviewWorkspaceChanges(store),
+                      icon: const Icon(Icons.merge_type, size: 18),
+                    ),
                   IconButton(
                     key: const ValueKey('collapse-workspace'),
                     tooltip: 'Collapse tools',

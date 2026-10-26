@@ -1,0 +1,18 @@
+[room]
+name = {{TASK_TITLE}}
+goal = {{TASK}}
+completion = "root_task_submitted"
+state_path = {{STATE_PATH}}
+
+[[bots]]
+handle = "builder"
+display_name = "Benchmark builder"
+roles = ["implementation"]
+persona = "Complete the requested code change inside the supplied project folder. Run tests where available and report the result."
+provider = {{PROVIDER_CONFIG}}
+
+[[tasks]]
+title = {{TASK_TITLE}}
+brief = {{TASK}}
+acceptance_criteria = ["Complete the task using the project's independent test suite."]
+open = true

@@ -35,6 +35,7 @@ pub mod allowance;
 pub mod attachments;
 pub mod bot;
 pub mod mcp;
+mod mcp_approval;
 pub mod mcp_client;
 pub mod orchestrator;
 pub mod prompt;

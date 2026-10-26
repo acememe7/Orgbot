@@ -1,0 +1,363 @@
+{
+  "bots": {},
+  "cursor": 0,
+  "engine": {
+    "artifacts": {},
+    "decisions": {
+      "decisions": []
+    },
+    "error_streak": {},
+    "governance": {
+      "policies": []
+    },
+    "handles": {
+      "a": "bot_9c8d020ca269441c8c6c3c8cf35b10c8",
+      "b": "bot_b0815c4f1f4744af8748c5d623ff5c6d",
+      "lead": "bot_150e5d07316e4f558449c55f48f70271",
+      "qa": "bot_62c86846ceda447695794b52d171d0d3"
+    },
+    "handoffs": {},
+    "last_health": "",
+    "log": [
+      {
+        "at": 1793025941526,
+        "event": {
+          "event": "room_opened",
+          "goal": "one answer, everywhere",
+          "name": "eligibility",
+          "room": "room_dba009194a634c678b7afbb21b77afeb"
+        },
+        "id": "ev_672228c68c044bcc8c285f29f6689fc8",
+        "room": "room_dba009194a634c678b7afbb21b77afeb",
+        "seq": 1
+      },
+      {
+        "at": 1793025941527,
+        "event": {
+          "event": "agent_joined",
+          "spec": {
+            "autonomy": {
+              "max_open_handoffs": 16,
+              "max_turns_per_task": 24,
+              "may_create_tasks": true,
+              "may_inspect": false,
+              "may_submit": true,
+              "review_only": false
+            },
+            "created_at": 1793025941526,
+            "display_name": "Lead",
+            "handle": "lead",
+            "id": "bot_150e5d07316e4f558449c55f48f70271",
+            "persona": "",
+            "provider": {
+              "provider": "scripted",
+              "script": "test"
+            },
+            "roles": [
+              "coordinator"
+            ],
+            "tools": []
+          }
+        },
+        "id": "ev_6592186b77764a96a294cb69667579a3",
+        "room": "room_dba009194a634c678b7afbb21b77afeb",
+        "seq": 2
+      },
+      {
+        "at": 1793025941527,
+        "event": {
+          "event": "agent_joined",
+          "spec": {
+            "autonomy": {
+              "max_open_handoffs": 4,
+              "max_turns_per_task": 24,
+              "may_create_tasks": false,
+              "may_inspect": false,
+              "may_submit": false,
+              "review_only": false
+            },
+            "created_at": 1793025941526,
+            "display_name": "Worker A",
+            "handle": "a",
+            "id": "bot_9c8d020ca269441c8c6c3c8cf35b10c8",
+            "persona": "",
+            "provider": {
+              "model": "deepseek-chat",
+              "provider": "deep_seek"
+            },
+            "roles": [
+              "writer"
+            ],
+            "tools": []
+          }
+        },
+        "id": "ev_fcadde1018c241648f0dc2aac36a9af8",
+        "room": "room_dba009194a634c678b7afbb21b77afeb",
+        "seq": 3
+      },
+      {
+        "at": 1793025941527,
+        "event": {
+          "event": "agent_joined",
+          "spec": {
+            "autonomy": {
+              "max_open_handoffs": 4,
+              "max_turns_per_task": 24,
+              "may_create_tasks": false,
+              "may_inspect": false,
+              "may_submit": false,
+              "review_only": false
+            },
+            "created_at": 1793025941526,
+            "display_name": "Worker B",
+            "handle": "b",
+            "id": "bot_b0815c4f1f4744af8748c5d623ff5c6d",
+            "persona": "",
+            "provider": {
+              "provider": "scripted",
+              "script": "test"
+            },
+            "roles": [
+              "writer"
+            ],
+            "tools": []
+          }
+        },
+        "id": "ev_8b095b972b17496c89ee9403d0ac22be",
+        "room": "room_dba009194a634c678b7afbb21b77afeb",
+        "seq": 4
+      },
+      {
+        "at": 1793025941527,
+        "event": {
+          "event": "agent_joined",
+          "spec": {
+            "autonomy": {
+              "max_open_handoffs": 4,
+              "max_turns_per_task": 24,
+              "may_create_tasks": false,
+              "may_inspect": true,
+              "may_submit": false,
+              "review_only": false
+            },
+            "created_at": 1793025941526,
+            "display_name": "Inspector",
+            "handle": "qa",
+            "id": "bot_62c86846ceda447695794b52d171d0d3",
+            "persona": "",
+            "provider": {
+              "provider": "scripted",
+              "script": "test"
+            },
+            "roles": [
+              "reviewer"
+            ],
+            "tools": []
+          }
+        },
+        "id": "ev_1f5dea1323fc42e8b1d740ff55f555e2",
+        "room": "room_dba009194a634c678b7afbb21b77afeb",
+        "seq": 5
+      },
+      {
+        "at": 1793025941527,
+        "event": {
+          "event": "message_posted",
+          "message": {
+            "attachments": [],
+            "audience": {
+              "kind": "everyone"
+            },
+            "author": {
+              "kind": "system"
+            },
+            "body": "room running: started",
+            "handoff": null,
+            "id": "msg_f884d47115774db38e15adca17d96fa5",
+            "intent": "system_notice",
+            "reply_to": null,
+            "room": "room_dba009194a634c678b7afbb21b77afeb",
+            "sent_at": 1793025941527,
+            "task": null
+          }
+        },
+        "id": "ev_285dd2b3a4f54352bd5834bf97e2fdba",
+        "room": "room_dba009194a634c678b7afbb21b77afeb",
+        "seq": 6
+      },
+      {
+        "at": 1793025941527,
+        "event": {
+          "agent": "bot_9c8d020ca269441c8c6c3c8cf35b10c8",
+          "event": "usage_recorded",
+          "usage": {
+            "actual_api_cost_microusd": 31,
+            "api_equivalent_cost_microusd": 31,
+            "cache_read_tokens": 7,
+            "cache_write_tokens": 2,
+            "calls": 1,
+            "complete": true,
+            "input_tokens": 11,
+            "output_tokens": 5,
+            "reported": true
+          }
+        },
+        "id": "ev_6b92b9b8c9d744108313ce683688d938",
+        "room": "room_dba009194a634c678b7afbb21b77afeb",
+        "seq": 7
+      }
+    ],
+    "reviews": [],
+    "roles": {
+      "roles": []
+    },
+    "room": {
+      "created_at": 1793025941526,
+      "id": "room_dba009194a634c678b7afbb21b77afeb",
+      "phase": "running",
+      "spec": {
+        "completion": {
+          "kind": "all_tasks_terminal"
+        },
+        "goal": "one answer, everywhere",
+        "limits": {
+          "handoff_timeout_ms": 300000,
+          "max_consecutive_errors": 3,
+          "max_duration_ms": 3600000,
+          "max_parallel_per_backend": 0,
+          "max_parallel_turns": 3,
+          "max_total_turns": 500
+        },
+        "name": "eligibility",
+        "roster": []
+      },
+      "turns_used": 1,
+      "updated_at": 1793025941527
+    },
+    "seq": 7,
+    "skills": [],
+    "specs": {
+      "bot_150e5d07316e4f558449c55f48f70271": {
+        "autonomy": {
+          "max_open_handoffs": 16,
+          "max_turns_per_task": 24,
+          "may_create_tasks": true,
+          "may_inspect": false,
+          "may_submit": true,
+          "review_only": false
+        },
+        "created_at": 1793025941526,
+        "display_name": "Lead",
+        "handle": "lead",
+        "id": "bot_150e5d07316e4f558449c55f48f70271",
+        "persona": "",
+        "provider": {
+          "provider": "scripted",
+          "script": "test"
+        },
+        "roles": [
+          "coordinator"
+        ],
+        "tools": []
+      },
+      "bot_62c86846ceda447695794b52d171d0d3": {
+        "autonomy": {
+          "max_open_handoffs": 4,
+          "max_turns_per_task": 24,
+          "may_create_tasks": false,
+          "may_inspect": true,
+          "may_submit": false,
+          "review_only": false
+        },
+        "created_at": 1793025941526,
+        "display_name": "Inspector",
+        "handle": "qa",
+        "id": "bot_62c86846ceda447695794b52d171d0d3",
+        "persona": "",
+        "provider": {
+          "provider": "scripted",
+          "script": "test"
+        },
+        "roles": [
+          "reviewer"
+        ],
+        "tools": []
+      },
+      "bot_9c8d020ca269441c8c6c3c8cf35b10c8": {
+        "autonomy": {
+          "max_open_handoffs": 4,
+          "max_turns_per_task": 24,
+          "may_create_tasks": false,
+          "may_inspect": false,
+          "may_submit": false,
+          "review_only": false
+        },
+        "created_at": 1793025941526,
+        "display_name": "Worker A",
+        "handle": "a",
+        "id": "bot_9c8d020ca269441c8c6c3c8cf35b10c8",
+        "persona": "",
+        "provider": {
+          "model": "deepseek-chat",
+          "provider": "deep_seek"
+        },
+        "roles": [
+          "writer"
+        ],
+        "tools": []
+      },
+      "bot_b0815c4f1f4744af8748c5d623ff5c6d": {
+        "autonomy": {
+          "max_open_handoffs": 4,
+          "max_turns_per_task": 24,
+          "may_create_tasks": false,
+          "may_inspect": false,
+          "may_submit": false,
+          "review_only": false
+        },
+        "created_at": 1793025941526,
+        "display_name": "Worker B",
+        "handle": "b",
+        "id": "bot_b0815c4f1f4744af8748c5d623ff5c6d",
+        "persona": "",
+        "provider": {
+          "provider": "scripted",
+          "script": "test"
+        },
+        "roles": [
+          "writer"
+        ],
+        "tools": []
+      }
+    },
+    "spend": {
+      "bot_9c8d020ca269441c8c6c3c8cf35b10c8": {
+        "actual_cost_turns": 1,
+        "equivalent_cost_turns": 1,
+        "reported_turns": 1,
+        "turns": 1,
+        "unreported_turns": 0,
+        "usage": {
+          "actual_api_cost_microusd": 31,
+          "api_equivalent_cost_microusd": 31,
+          "cache_read_tokens": 7,
+          "cache_write_tokens": 2,
+          "calls": 1,
+          "complete": true,
+          "input_tokens": 11,
+          "output_tokens": 5,
+          "reported": true
+        }
+      }
+    },
+    "statuses": {
+      "bot_150e5d07316e4f558449c55f48f70271": "idle",
+      "bot_62c86846ceda447695794b52d171d0d3": "idle",
+      "bot_9c8d020ca269441c8c6c3c8cf35b10c8": "idle",
+      "bot_b0815c4f1f4744af8748c5d623ff5c6d": "idle"
+    },
+    "tasks": {},
+    "transcript": []
+  },
+  "version": 1
+}

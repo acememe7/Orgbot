@@ -37,6 +37,14 @@ use crate::deadlock::{self, WaitGraph};
 use crate::eligibility::{Eligibility, LeaseState, Reason};
 use crate::error::{EngineError, Result};
 
+fn spend_usage_known(spend: Spend) -> bool {
+    spend.reported_turns > 0
+        || (spend.reported_turns == 0
+            && spend.unreported_turns == 0
+            && spend.turns > 0
+            && spend.usage.total() > 0)
+}
+
 /// How many open remediations one task may carry before the room is told to
 /// consolidate rather than add another.
 ///
@@ -235,6 +243,9 @@ impl Engine {
                 Event::ReviewRecorded { review } => engine.reviews.push(*review.clone()),
                 Event::AgentErrored { agent, attempt, .. } => {
                     engine.error_streak.insert(*agent, *attempt);
+                }
+                Event::UsageRecorded { agent, usage } => {
+                    engine.spend.entry(*agent).or_default().record(*usage);
                 }
                 Event::DeadlockDetected { .. } => {}
             }
@@ -438,8 +449,113 @@ impl Engine {
                 turns: spend.turns,
                 tokens: spend.usage.total(),
                 per_turn: spend.per_turn(),
+                input_tokens: spend.usage.input_tokens,
+                output_tokens: spend.usage.output_tokens,
+                cache_read_tokens: spend.usage.cache_read_tokens,
+                cache_write_tokens: spend.usage.cache_write_tokens,
+                usage_known: spend_usage_known(spend),
+                usage_complete: spend.turns > 0 && spend.usage.complete,
+                actual_api_cost_microusd: (spend.actual_cost_turns == spend.turns
+                    && spend.turns > 0)
+                    .then_some(spend.usage.actual_api_cost_microusd)
+                    .flatten(),
+                api_equivalent_cost_microusd: (spend.equivalent_cost_turns == spend.turns
+                    && spend.turns > 0)
+                    .then_some(spend.usage.api_equivalent_cost_microusd)
+                    .flatten(),
             })
             .collect();
+        view.agent_spend = self
+            .specs
+            .values()
+            .filter(|spec| !matches!(&spec.provider, orgbot_proto::ProviderRef::Scripted { .. }))
+            .map(|spec| {
+                let spend = self.spend_of(spec.id);
+                crate::digest::AgentSpend {
+                    handle: spec.handle.clone(),
+                    turns: spend.turns,
+                    input_tokens: spend.usage.input_tokens,
+                    output_tokens: spend.usage.output_tokens,
+                    cache_read_tokens: spend.usage.cache_read_tokens,
+                    cache_write_tokens: spend.usage.cache_write_tokens,
+                    usage_known: spend_usage_known(spend),
+                    usage_complete: spend.turns > 0 && spend.usage.complete,
+                    actual_api_cost_microusd: (spend.actual_cost_turns == spend.turns
+                        && spend.turns > 0)
+                        .then_some(spend.usage.actual_api_cost_microusd)
+                        .flatten(),
+                    api_equivalent_cost_microusd: (spend.equivalent_cost_turns == spend.turns
+                        && spend.turns > 0)
+                        .then_some(spend.usage.api_equivalent_cost_microusd)
+                        .flatten(),
+                }
+            })
+            .filter(|spend| spend.turns > 0)
+            .collect();
+        let mut model_turns = 0u32;
+        let mut model_usage_known = false;
+        let mut model_usage_complete = true;
+        let mut model_input = 0u32;
+        let mut model_output = 0u32;
+        let mut model_cache_read = 0u32;
+        let mut model_cache_write = 0u32;
+        let mut api_turns = 0u32;
+        let mut api_cost = 0u64;
+        let mut api_cost_known = true;
+        let mut equivalent_cost = 0u64;
+        let mut equivalent_cost_known = true;
+        for spec in self.specs.values() {
+            if matches!(&spec.provider, orgbot_proto::ProviderRef::Scripted { .. }) {
+                continue;
+            }
+            let spend = self.spend_of(spec.id);
+            if spend.turns == 0 {
+                continue;
+            }
+            model_turns = model_turns.saturating_add(spend.turns);
+            model_usage_known |= spend_usage_known(spend);
+            model_usage_complete &= spend.usage.complete;
+            model_input = model_input.saturating_add(spend.usage.input_tokens);
+            model_output = model_output.saturating_add(spend.usage.output_tokens);
+            model_cache_read = model_cache_read.saturating_add(spend.usage.cache_read_tokens);
+            model_cache_write = model_cache_write.saturating_add(spend.usage.cache_write_tokens);
+            let is_api = match &spec.provider {
+                orgbot_proto::ProviderRef::Anthropic { .. }
+                | orgbot_proto::ProviderRef::DeepSeek { .. } => true,
+                orgbot_proto::ProviderRef::OpenAiCompatible { profile, .. } => {
+                    profile != "codex" && profile != "chatgpt" && profile != "ollama"
+                }
+                orgbot_proto::ProviderRef::CliAgent { .. }
+                | orgbot_proto::ProviderRef::Scripted { .. } => false,
+            };
+            if is_api {
+                api_turns = api_turns.saturating_add(spend.turns);
+                if spend.actual_cost_turns == spend.turns {
+                    api_cost = api_cost
+                        .saturating_add(spend.usage.actual_api_cost_microusd.unwrap_or_default());
+                } else {
+                    api_cost_known = false;
+                }
+            }
+            if spend.equivalent_cost_turns == spend.turns {
+                equivalent_cost = equivalent_cost
+                    .saturating_add(spend.usage.api_equivalent_cost_microusd.unwrap_or_default());
+            } else {
+                equivalent_cost_known = false;
+            }
+        }
+        view.total_spend = crate::digest::RoomSpend {
+            turns: model_turns,
+            input_tokens: model_input,
+            output_tokens: model_output,
+            cache_read_tokens: model_cache_read,
+            cache_write_tokens: model_cache_write,
+            usage_known: model_turns > 0 && model_usage_known,
+            usage_complete: model_turns > 0 && model_usage_complete,
+            actual_api_cost_microusd: (api_turns > 0 && api_cost_known).then_some(api_cost),
+            api_equivalent_cost_microusd: (model_turns > 0 && equivalent_cost_known)
+                .then_some(equivalent_cost),
+        };
 
         // Review history lives here, not on the tasks, so the digest cannot
         // work this out for itself.
@@ -2016,7 +2132,8 @@ impl Engine {
         if !options.is_empty() {
             if !(2..=6).contains(&options.len()) {
                 return Err(EngineError::InvalidOwnerQuestion {
-                    reason: "provide between 2 and 6 options, or none for a free-form answer".into(),
+                    reason: "provide between 2 and 6 options, or none for a free-form answer"
+                        .into(),
                 });
             }
             let mut seen = BTreeSet::new();
@@ -2110,9 +2227,7 @@ impl Engine {
                     events.extend(self.transition(
                         task,
                         TaskTransition::Block {
-                            reason: BlockReason::AwaitingDecision {
-                                decision: prior_id,
-                            },
+                            reason: BlockReason::AwaitingDecision { decision: prior_id },
                         },
                         Some(by),
                     )?);
@@ -2852,11 +2967,14 @@ impl Engine {
         self.require_agent(agent)?;
         self.room.turns_used = self.room.turns_used.saturating_add(1);
         self.spend.entry(agent).or_default().record(usage);
+        let recorded = self.emit(Event::UsageRecorded { agent, usage });
         self.error_streak.insert(agent, 0);
         if self.room.is_out_of_turns() {
-            return self.set_phase(RoomPhase::Paused, "turn budget exhausted");
+            let mut events = vec![recorded];
+            events.extend(self.set_phase(RoomPhase::Paused, "turn budget exhausted")?);
+            return Ok(events);
         }
-        Ok(Vec::new())
+        Ok(vec![recorded])
     }
 
     fn report_error(

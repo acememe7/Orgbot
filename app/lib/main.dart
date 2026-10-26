@@ -11,7 +11,11 @@ import 'state/background_rooms.dart';
 import 'ui/orgbot_screen.dart';
 import 'ui/themes.dart';
 
-void main() => runApp(const OrgBotApp());
+void main(List<String> arguments) {
+  WidgetsFlutterBinding.ensureInitialized();
+  RoomStore.attentions.listenForDesktopActivation(arguments);
+  runApp(const OrgBotApp());
+}
 
 ThemeData orgBotTheme(
   Brightness brightness, {

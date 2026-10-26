@@ -27,13 +27,16 @@
 //! `claim_task`.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::StreamExt;
+use orgbot_engine::Command;
+use orgbot_proto::AgentId;
 use orgbot_providers::types::ToolDef;
 use orgbot_tools::ToolOutcome;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
@@ -108,6 +111,7 @@ pub struct McpServerSpec {
 /// A server that answered, and what it offers.
 struct Connected {
     name: String,
+    config_hash: [u8; 32],
     tools: Vec<ToolDef>,
     channel: Channel,
 }
@@ -149,6 +153,7 @@ struct StdioPipe {
 #[derive(Default)]
 pub struct McpClient {
     servers: Vec<Connected>,
+    approval_state: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for McpClient {
@@ -207,7 +212,16 @@ impl McpClient {
                 }
             }
         }
-        Self { servers }
+        Self {
+            servers,
+            approval_state: None,
+        }
+    }
+
+    /// Require a fresh owner approval for every external server call.
+    pub fn with_owner_approval(mut self, state_dir: PathBuf) -> Self {
+        self.approval_state = Some(state_dir);
+        self
     }
 
     /// Every tool available, named for the model.
@@ -252,6 +266,143 @@ impl McpClient {
             Err(error) => ToolOutcome::error(format!(
                 "`{tool}` did not answer: {error}. The server may have stopped."
             )),
+        }
+    }
+
+    /// Call an external tool only after the room owner approved this exact
+    /// agent, tool, arguments, server configuration, and room state identity.
+    pub async fn call_for(
+        &self,
+        engine: &crate::SharedEngine,
+        actor: AgentId,
+        tool: &str,
+        arguments: &Value,
+    ) -> ToolOutcome {
+        let Some(state_dir) = self.approval_state.as_deref() else {
+            return self.call(tool, arguments).await;
+        };
+        let Some(server) = self
+            .servers
+            .iter()
+            .find(|server| tool.starts_with(&format!("{}{NAMESPACE}", server.name)))
+        else {
+            return ToolOutcome::error(format!("No MCP server offers `{tool}`."));
+        };
+        let args = crate::mcp_approval::canonical_json(arguments);
+        let state_identity = match crate::mcp_approval::canonical_state_identity(
+            state_dir.to_path_buf(),
+            engine.clone(),
+        )
+        .await
+        {
+            Ok(identity) => identity,
+            Err(error) => return ToolOutcome::error(error),
+        };
+        let config_hash = crate::mcp_approval::hex_digest(&server.config_hash);
+        let base = format!(
+            "External MCP call: agent={actor}; server={}; tool={tool}; config_sha256={config_hash}; room_state={state_identity}; args={args}",
+            server.name,
+        );
+        if base.chars().count() > 1_900 {
+            return ToolOutcome::error("External MCP approval request is too large; call refused.");
+        }
+
+        let prior = engine.with(|room| {
+            room.decisions()
+                .decisions
+                .iter()
+                .filter(|decision| {
+                    decision.owner_question
+                        && decision.asked_by.contains(&actor)
+                        && decision.because.starts_with(&base)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        let denied = prior.iter().any(|decision| {
+            decision
+                .answer
+                .as_ref()
+                .is_some_and(|answer| answer.chosen != "Allow once")
+        });
+        if denied {
+            return ToolOutcome::error("Owner denied this external MCP call.");
+        }
+        let latest = prior.last();
+        let latest_pending = latest.filter(|decision| decision.is_pending());
+        let latest_approved = latest.filter(|decision| {
+            decision.is_authoritative()
+                && decision
+                    .answer
+                    .as_ref()
+                    .is_some_and(|answer| answer.chosen == "Allow once")
+        });
+        let reusable = if let Some(decision) = latest_pending {
+            Some(decision.clone())
+        } else if let Some(decision) = latest_approved {
+            match crate::mcp_approval::approval_consumed(state_dir.to_path_buf(), decision.id).await
+            {
+                Ok(false) => Some(decision.clone()),
+                Ok(true) => None,
+                Err(error) => return ToolOutcome::error(error),
+            }
+        } else {
+            None
+        };
+        let question = reusable
+            .as_ref()
+            .map(|decision| decision.because.clone())
+            .unwrap_or_else(|| format!("{base}; approval_sequence={}", prior.len()));
+        let matching = reusable.or_else(|| {
+            engine.with(|room| {
+                room.decisions()
+                    .decisions
+                    .iter()
+                    .find(|decision| {
+                        decision.owner_question
+                            && decision.asked_by.contains(&actor)
+                            && decision.because == question
+                    })
+                    .cloned()
+            })
+        });
+        if question.chars().count() > 2_000 {
+            return ToolOutcome::error(
+                "External MCP approval request exceeds the safe size limit.",
+            );
+        }
+        let Some(decision) = matching else {
+            let result = engine.with(|room| {
+                room.apply(Command::AskOwner {
+                    by: actor,
+                    task: None,
+                    question: question.clone(),
+                    options: vec!["Allow once".into(), "Deny".into()],
+                })
+            });
+            return match result {
+                Ok(_) => ToolOutcome::error(
+                    "Waiting for owner approval. No external tool call was made.",
+                ),
+                Err(error) => {
+                    ToolOutcome::error(format!("Could not request owner approval: {error}"))
+                }
+            };
+        };
+        let Some(answer) = decision.answer.as_ref() else {
+            return ToolOutcome::error(
+                "Waiting for owner approval. No external tool call was made.",
+            );
+        };
+        if answer.chosen == "Deny" {
+            return ToolOutcome::error("Owner denied this external MCP call.");
+        }
+        if answer.chosen != "Allow once" {
+            return ToolOutcome::error("Owner response did not grant this external MCP call.");
+        }
+        match crate::mcp_approval::consume_approval(state_dir.to_path_buf(), decision.id).await {
+            Ok(()) => self.call(tool, arguments).await,
+            Err(error) => ToolOutcome::error(error),
         }
     }
 
@@ -372,6 +523,10 @@ async fn connect_one(
 
     Ok(Connected {
         name: spec.name.clone(),
+        config_hash: {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(serde_json::to_vec(spec).map_err(|error| error.to_string())?).into()
+        },
         tools,
         channel,
     })
@@ -764,6 +919,273 @@ impl Drop for StdioPipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orgbot_proto::DecisionId;
+
+    fn approval_engine(agents: Vec<AgentId>) -> crate::SharedEngine {
+        use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+        let engine = crate::SharedEngine::new(orgbot_engine::Engine::new(RoomSpec {
+            name: "approval-test".into(),
+            goal: "test exact owner approval".into(),
+            roster: vec![],
+            completion: CompletionRule::AllTasksTerminal,
+            limits: RoomLimits::default(),
+        }));
+        for (index, id) in agents.into_iter().enumerate() {
+            let mut spec = orgbot_proto::AgentSpec::new(
+                format!("agent-{index}"),
+                format!("Agent {index}"),
+                orgbot_proto::ProviderRef::Scripted {
+                    script: "test".into(),
+                },
+            );
+            spec.id = id;
+            engine.with(|room| {
+                room.apply(orgbot_engine::Command::JoinAgent {
+                    spec: Box::new(spec),
+                })
+                .unwrap()
+            });
+        }
+        engine.with(|room| room.apply(orgbot_engine::Command::StartRoom).unwrap());
+        engine
+    }
+
+    fn gated_test_client() -> McpClient {
+        let path = std::env::temp_dir().join(format!(
+            "orgbot-approval-test-{}-{}",
+            std::process::id(),
+            DecisionId::new()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        McpClient {
+            servers: vec![Connected {
+                name: "remote".into(),
+                config_hash: [7; 32],
+                tools: vec![],
+                channel: Channel::Http {
+                    url: "http://127.0.0.1:1/should-not-be-called".into(),
+                    headers: BTreeMap::new(),
+                    client: reqwest::Client::new(),
+                    session: Arc::new(Mutex::new(HttpSession::default())),
+                },
+            }],
+            approval_state: None,
+        }
+        .with_owner_approval(path)
+    }
+
+    #[tokio::test]
+    async fn external_call_waits_for_exact_agent_and_arguments_without_forwarding() {
+        let first = AgentId::new();
+        let second = AgentId::new();
+        let engine = approval_engine(vec![first, second]);
+        let mut client = gated_test_client();
+        let args = json!({"query":"private"});
+        let pending = client
+            .call_for(&engine, first, "remote__lookup", &args)
+            .await;
+        assert!(
+            pending.content.contains("Waiting for owner approval"),
+            "{}",
+            pending.content
+        );
+        assert_eq!(engine.borrow().decisions().pending().count(), 1);
+        let asked = engine
+            .borrow()
+            .decisions()
+            .pending()
+            .next()
+            .unwrap()
+            .clone();
+        assert!(asked.because.contains(&format!("agent={first}")));
+        assert!(asked.because.contains("args={\"query\":\"private\"}"));
+        assert!(asked.because.contains("config_sha256=07070707"));
+
+        let repeated = client
+            .call_for(&engine, first, "remote__lookup", &args)
+            .await;
+        assert!(repeated.content.contains("Waiting for owner approval"));
+        assert_eq!(engine.borrow().decisions().pending().count(), 1);
+
+        let changed = client
+            .call_for(
+                &engine,
+                first,
+                "remote__lookup",
+                &json!({"query":"different"}),
+            )
+            .await;
+        assert!(changed.content.contains("Waiting for owner approval"));
+        let denied_id = engine.borrow().decisions().pending().nth(1).unwrap().id;
+        engine.with(|room| {
+            room.apply(orgbot_engine::Command::AnswerDecision {
+                decision: denied_id,
+                answer: orgbot_proto::decision::Answer {
+                    chosen: "Deny".into(),
+                    note: String::new(),
+                    at: orgbot_proto::Timestamp::now(),
+                },
+            })
+            .unwrap()
+        });
+        let denied = client
+            .call_for(
+                &engine,
+                first,
+                "remote__lookup",
+                &json!({"query":"different"}),
+            )
+            .await;
+        assert!(denied.content.contains("Owner denied"));
+        let other_agent = client
+            .call_for(&engine, second, "remote__lookup", &args)
+            .await;
+        assert!(other_agent.content.contains("Waiting for owner approval"));
+        assert_eq!(engine.borrow().decisions().pending().count(), 2);
+        client.servers[0].config_hash = [8; 32];
+        let new_config = client
+            .call_for(&engine, first, "remote__lookup", &args)
+            .await;
+        assert!(new_config.content.contains("Waiting for owner approval"));
+        let restored_room = approval_engine(vec![first]);
+        let new_room = client
+            .call_for(&restored_room, first, "remote__lookup", &args)
+            .await;
+        assert!(new_room.content.contains("Waiting for owner approval"));
+        let state = client.approval_state.as_deref().unwrap();
+        let _ = std::fs::remove_dir_all(state);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_call_is_forwarded_only_once_after_allow_once_and_restart_needs_new_approval()
+    {
+        use orgbot_engine::Command;
+        use orgbot_proto::decision::Answer;
+        use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+
+        let root = std::env::temp_dir().join(format!(
+            "orgbot-approval-forward-test-{}-{}",
+            std::process::id(),
+            DecisionId::new()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let script = root.join("fake-mcp.py");
+        let marker = root.join("called");
+        std::fs::write(
+            &script,
+            format!(
+                "import json,sys\nfor line in sys.stdin:\n m=json.loads(line)\n method=m.get('method')\n if method == 'initialize': r={{'protocolVersion':'2025-06-18','capabilities':{{}},'serverInfo':{{'name':'fake','version':'1'}}}}\n elif method == 'tools/list': r={{'tools':[{{'name':'lookup','inputSchema':{{'type':'object'}}}}]}}\n elif method == 'tools/call':\n  open({:?},'a').write('called\\n')\n  r={{'content':[{{'type':'text','text':'ok'}}]}}\n else: r={{}}\n if 'id' in m: print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':r}}),flush=True)\n",
+                marker.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let actor = AgentId::new();
+        let engine = crate::SharedEngine::new(orgbot_engine::Engine::new(RoomSpec {
+            name: "approval-forward".into(),
+            goal: "test explicit approval".into(),
+            roster: vec![],
+            completion: CompletionRule::AllTasksTerminal,
+            limits: RoomLimits::default(),
+        }));
+        let mut agent = orgbot_proto::AgentSpec::new(
+            "approval-agent",
+            "Approval Agent",
+            orgbot_proto::ProviderRef::Scripted {
+                script: "test".into(),
+            },
+        );
+        agent.id = actor;
+        engine.with(|room| {
+            room.apply(Command::JoinAgent {
+                spec: Box::new(agent),
+            })
+            .unwrap()
+        });
+        engine.with(|room| room.apply(Command::StartRoom).unwrap());
+        let spec = McpServerSpec {
+            name: "fake".into(),
+            transport: McpTransport::Stdio {
+                command: "python3".into(),
+                args: vec![script.to_string_lossy().into_owned()],
+                env: BTreeMap::new(),
+            },
+        };
+        let client = McpClient::connect(&[spec.clone()])
+            .await
+            .with_owner_approval(root.clone());
+        assert_eq!(client.len(), 1, "the local fixture server should connect");
+        let args = json!({"query":"approved"});
+        let pending = client.call_for(&engine, actor, "fake__lookup", &args).await;
+        assert!(
+            pending.content.contains("Waiting for owner approval"),
+            "{}",
+            pending.content
+        );
+        assert!(
+            !marker.exists(),
+            "no call may cross the boundary before approval"
+        );
+        let decision = engine.borrow().decisions().pending().next().unwrap().id;
+        engine.with(|room| {
+            room.apply(Command::AnswerDecision {
+                decision,
+                answer: Answer {
+                    chosen: "Allow once".into(),
+                    note: String::new(),
+                    at: orgbot_proto::Timestamp::now(),
+                },
+            })
+            .unwrap()
+        });
+        let allowed = client.call_for(&engine, actor, "fake__lookup", &args).await;
+        assert!(!allowed.is_error, "{}", allowed.content);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 1);
+
+        let replay = client.call_for(&engine, actor, "fake__lookup", &args).await;
+        assert!(replay.content.contains("Waiting for owner approval"));
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 1);
+
+        let restarted = McpClient::connect(&[spec])
+            .await
+            .with_owner_approval(root.clone());
+        let after_restart = restarted
+            .call_for(&engine, actor, "fake__lookup", &args)
+            .await;
+        assert!(after_restart.content.contains("Waiting for owner approval"));
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn consumed_approval_is_durable_once_and_rejects_symlink_ledger() {
+        let root = std::env::temp_dir().join(format!(
+            "orgbot-approval-ledger-test-{}-{}",
+            std::process::id(),
+            DecisionId::new()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let decision = DecisionId::new();
+        crate::mcp_approval::test_consume_approval_sync(&root, decision).unwrap();
+        assert!(crate::mcp_approval::test_consume_approval_sync(&root, decision).is_err());
+        let file = root.join("mcp-approvals").join(decision.to_string());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let outside = root.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let other = root.join("symlink-root");
+        std::fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(&outside, other.join("mcp-approvals")).unwrap();
+        assert!(
+            crate::mcp_approval::test_consume_approval_sync(&other, DecisionId::new()).is_err()
+        );
+        assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn a_tool_is_named_for_the_server_it_came_from() {
@@ -1029,12 +1451,10 @@ mod tests {
                     protocol_version: Some(PROTOCOL_VERSION.into()),
                 })),
             };
-            assert!(
-                channel
-                    .request(json!({"method": "tools/call", "params": {}}))
-                    .await
-                    .is_err()
-            );
+            assert!(channel
+                .request(json!({"method": "tools/call", "params": {}}))
+                .await
+                .is_err());
             origin_task.await.unwrap();
             assert!(
                 tokio::time::timeout(std::time::Duration::from_millis(150), destination.accept())
@@ -1172,6 +1592,7 @@ some = true
         let client = McpClient {
             servers: vec![Connected {
                 name: "history".into(),
+                config_hash: [0; 32],
                 tools: vec![],
                 channel: Channel::Http {
                     url: String::new(),
@@ -1180,6 +1601,7 @@ some = true
                     session: Arc::new(Mutex::new(HttpSession::default())),
                 },
             }],
+            approval_state: None,
         };
         assert!(client.owns("history__claim_task"));
         assert!(

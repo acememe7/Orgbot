@@ -154,6 +154,22 @@ class _AllowanceDialogState extends State<_AllowanceDialog> {
   late final _output = TextEditingController(
     text: '${widget.policy.outputPrice / 1000000}',
   );
+  late final _cacheRead = TextEditingController(
+    text:
+        '${(widget.policy.cacheReadPrice ?? widget.policy.inputPrice) / 1000000}',
+  );
+  late final _cacheWrite = TextEditingController(
+    text:
+        '${(widget.policy.cacheWritePrice ?? widget.policy.inputPrice) / 1000000}',
+  );
+  late final _modelRates = TextEditingController(
+    text: widget.policy.modelRates.entries
+        .map(
+          (entry) =>
+              '${entry.key},${entry.value.input / 1000000},${entry.value.output / 1000000},${entry.value.cacheRead / 1000000},${entry.value.cacheWrite / 1000000}',
+        )
+        .join('\n'),
+  );
   late final _ceiling = TextEditingController(
     text: '${widget.policy.outputTokens}',
   );
@@ -162,7 +178,17 @@ class _AllowanceDialogState extends State<_AllowanceDialog> {
   String? _error;
   @override
   void dispose() {
-    for (final c in [_requests, _tokens, _cost, _input, _output, _ceiling]) {
+    for (final c in [
+      _requests,
+      _tokens,
+      _cost,
+      _input,
+      _output,
+      _cacheRead,
+      _cacheWrite,
+      _modelRates,
+      _ceiling,
+    ]) {
       c.dispose();
     }
     super.dispose();
@@ -241,18 +267,39 @@ class _AllowanceDialogState extends State<_AllowanceDialog> {
               ),
               if (widget.cli)
                 const Text(
-                  'CLI subscriptions do not expose a reliable hard token or money ceiling. This limit counts agent launches, across all rooms.',
+                  'The CLI subscription does not provide a metered API bill. Prices below show only its API-equivalent estimate.',
                 )
               else ...[
                 _number('Tokens (0 = unlimited)', _tokens),
                 _number('USD (0 = unlimited)', _cost, money: true),
-                _number('Input USD per million tokens', _input, money: true),
-                _number('Output USD per million tokens', _output, money: true),
                 _number('Maximum output tokens per request', _ceiling),
                 const Text(
                   'Token and money limits reserve each text request before sending. Enter current provider prices. Image work requires a request limit; unknown usage keeps its reservation.',
                 ),
               ],
+              _number('Input USD per million tokens', _input, money: true),
+              _number('Output USD per million tokens', _output, money: true),
+              _number(
+                'Cache read USD per million tokens',
+                _cacheRead,
+                money: true,
+              ),
+              _number(
+                'Cache write USD per million tokens',
+                _cacheWrite,
+                money: true,
+              ),
+              TextFormField(
+                controller: _modelRates,
+                minLines: 2,
+                maxLines: 6,
+                decoration: const InputDecoration(
+                  labelText: 'Model rates',
+                  hintText:
+                      'model,input,output,cache read,cache write (USD per million)',
+                ),
+                validator: _validateModelRates,
+              ),
               if (_error != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 12),
@@ -287,12 +334,11 @@ class _AllowanceDialogState extends State<_AllowanceDialog> {
         costMicrousd: widget.cli
             ? 0
             : (double.parse(_cost.text) * 1000000).round(),
-        inputPrice: widget.cli
-            ? 0
-            : (double.parse(_input.text) * 1000000).round(),
-        outputPrice: widget.cli
-            ? 0
-            : (double.parse(_output.text) * 1000000).round(),
+        inputPrice: (double.parse(_input.text) * 1000000).round(),
+        outputPrice: (double.parse(_output.text) * 1000000).round(),
+        cacheReadPrice: (double.parse(_cacheRead.text) * 1000000).round(),
+        cacheWritePrice: (double.parse(_cacheWrite.text) * 1000000).round(),
+        modelRates: _parseModelRates(_modelRates.text),
         outputTokens: widget.cli ? 8192 : int.parse(_ceiling.text),
         enabled: _enabled,
       );
@@ -301,5 +347,51 @@ class _AllowanceDialogState extends State<_AllowanceDialog> {
     } catch (error) {
       setState(() => _error = '$error');
     }
+  }
+
+  String? _validateModelRates(String? raw) {
+    try {
+      _parseModelRates(raw ?? '');
+      return null;
+    } on FormatException catch (error) {
+      return error.message;
+    }
+  }
+
+  Map<String, ModelTokenRates> _parseModelRates(String raw) {
+    final rates = <String, ModelTokenRates>{};
+    for (final line
+        in raw
+            .split('\n')
+            .map((line) => line.trim())
+            .where((line) => line.isNotEmpty)) {
+      final fields = line.split(',').map((field) => field.trim()).toList();
+      if (fields.length != 5 ||
+          fields.first.isEmpty ||
+          rates.containsKey(fields.first)) {
+        throw const FormatException(
+          'Use one unique model,input,output,cache read,cache write row per model',
+        );
+      }
+      final prices = fields
+          .skip(1)
+          .map((field) => double.tryParse(field))
+          .toList();
+      if (prices.any(
+        (price) =>
+            price == null || !price.isFinite || price < 0 || price > 1000000000,
+      )) {
+        throw const FormatException(
+          'Model rates must be nonnegative USD per million tokens',
+        );
+      }
+      rates[fields.first] = ModelTokenRates(
+        (prices[0]! * 1000000).round(),
+        (prices[1]! * 1000000).round(),
+        (prices[2]! * 1000000).round(),
+        (prices[3]! * 1000000).round(),
+      );
+    }
+    return rates;
   }
 }

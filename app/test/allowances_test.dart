@@ -20,6 +20,35 @@ class MemoryAllowances extends DesktopAllowances {
 
 void main() {
   test(
+    'model rates preserve explicit zero cache prices and legacy omissions',
+    () {
+      const configured = ProviderAllowance(
+        inputPrice: 3,
+        outputPrice: 7,
+        cacheReadPrice: 0,
+        cacheWritePrice: 0,
+        modelRates: {'model-a': ModelTokenRates(11, 22, 0, 0)},
+      );
+      final restored = ProviderAllowance.fromJson(configured.toJson());
+      expect(restored.cacheReadPrice, 0);
+      expect(restored.cacheWritePrice, 0);
+      expect(restored.modelRates['model-a']!.values, [11, 22, 0, 0]);
+
+      final legacy = ProviderAllowance.fromJson({
+        'input_microusd_per_million': 3,
+        'output_microusd_per_million': 7,
+      });
+      expect(legacy.cacheReadPrice, isNull);
+      expect(legacy.cacheWritePrice, isNull);
+      expect(legacy.modelRates, isEmpty);
+      expect(
+        legacy.toJson().containsKey('cache_read_microusd_per_million'),
+        isFalse,
+      );
+    },
+  );
+
+  test(
     'saved caps preserve other providers and reject invalid money settings',
     () async {
       final root = await Directory.systemTemp.createTemp('orgbot-allowances-');

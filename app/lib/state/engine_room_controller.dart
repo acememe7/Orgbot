@@ -239,7 +239,7 @@ class EngineRoomController extends ChangeNotifier {
                       'label': 'Project files',
                       'root': Directory(expandHome(room.path)).absolute.path,
                       'writable': true,
-                      'commands': false,
+                      'commands': room.workspace.commands,
                     }
                   : null
             : {
@@ -255,8 +255,7 @@ class EngineRoomController extends ChangeNotifier {
         projectId: projectId,
         skillsPath: await unpackBundledSkills(),
         priorBoards: await RoomArchive.otherBoards(room.id),
-        desktopIntegrations:
-            !runsInProcess && bots.any((bot) => bot.provider.needsApiKey)
+        desktopIntegrations: !runsInProcess
             ? await DesktopIntegrations.discover()
             : null,
       );

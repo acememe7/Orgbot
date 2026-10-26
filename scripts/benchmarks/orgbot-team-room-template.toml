@@ -1,0 +1,32 @@
+[room]
+name = {{TASK_TITLE}}
+goal = {{TASK}}
+completion = "root_task_submitted"
+state_path = {{STATE_PATH}}
+
+[[bots]]
+handle = "coordinator"
+display_name = "Codex coordinator"
+roles = ["coordinator"]
+persona = "Coordinate the work, delegate by role, and verify the finished result."
+provider = {{COORDINATOR_PROVIDER}}
+
+[[bots]]
+handle = "frontend"
+display_name = "Claude CLI frontend"
+roles = ["implementation"]
+persona = "Own the frontend portion of the task and verify its behavior."
+provider = {{FRONTEND_PROVIDER}}
+
+[[bots]]
+handle = "backend"
+display_name = "DeepSeek backend"
+roles = ["implementation"]
+persona = "Own the backend portion of the task and verify its behavior."
+provider = {{BACKEND_PROVIDER}}
+
+[[tasks]]
+title = {{TASK_TITLE}}
+brief = {{TASK}}
+acceptance_criteria = ["Complete the task using the project's independent test suite."]
+open = true

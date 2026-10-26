@@ -35,6 +35,8 @@ pub mod provider;
 pub mod scripted;
 pub mod sse;
 pub mod types;
+#[cfg(target_os = "linux")]
+pub mod workspace_guard;
 
 use std::sync::Arc;
 

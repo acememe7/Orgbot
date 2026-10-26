@@ -672,11 +672,33 @@ def _remove_known_tree_inner(
             raise
 
 
-def move(root: Path, project: str, source: Path) -> str:
+def move(root: Path, project: str, source: Path, *, expected_sha256: str | None = None) -> str:
     if not project.strip() or len(project) > 160:
         _fail("Project name must contain 1 to 160 characters")
     parent_fd, name, initial = _source_parent(source, root)
     try:
+        if expected_sha256 is not None:
+            if not re.fullmatch(r"[a-f0-9]{64}", expected_sha256) or not stat.S_ISREG(initial.st_mode):
+                _fail("Expected SHA-256 requires a valid regular-file digest")
+            source_fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+            try:
+                before = os.fstat(source_fd)
+                expected_stat = (initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns)
+                if not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != expected_stat:
+                    _fail("Source changed before expected-content verification")
+                digest = hashlib.sha256()
+                while True:
+                    chunk = os.read(source_fd, COPY_CHUNK)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                after = os.fstat(source_fd)
+                if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != expected_stat:
+                    _fail("Source changed during expected-content verification")
+                if digest.hexdigest() != expected_sha256:
+                    _fail("Source content does not match the reviewed SHA-256; source retained")
+            finally:
+                os.close(source_fd)
         project_dir = root / "projects" / _safe_component(project)
         _private_dir(project_dir, create=True)
         entry_id = uuid.uuid4().hex
@@ -970,6 +992,7 @@ def _cli() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     move_parser = sub.add_parser("move", help="Move files or directories into project trash")
     move_parser.add_argument("--project", required=True)
+    move_parser.add_argument("--expected-sha256")
     move_parser.add_argument("paths", nargs="+", type=Path)
     sub.add_parser("list", help="List trashed entries")
     restore_parser = sub.add_parser("restore", help="Restore one entry without overwriting")
@@ -981,8 +1004,10 @@ def _cli() -> int:
         root = _prepare_root(TRASH_ROOT, require_mount=True)
         with _locked(root):
             if args.command == "move":
+                if args.expected_sha256 is not None and len(args.paths) != 1:
+                    _fail("Expected SHA-256 can be used with exactly one source path")
                 for source in args.paths:
-                    print(move(root, args.project, source))
+                    print(move(root, args.project, source, expected_sha256=args.expected_sha256))
             elif args.command == "list":
                 for row in list_entries(root):
                     print(json.dumps({key: row[key] for key in ("id", "project", "status", "moved_at", "original_path", "source_recovery")}, ensure_ascii=False, sort_keys=True))

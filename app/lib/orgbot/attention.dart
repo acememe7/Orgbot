@@ -21,6 +21,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 const _workspaceChannel = MethodChannel('orgbot/workspace');
+const _activationChannel = MethodChannel('orgbot/activation');
 
 /// Why the room is asking for you, mirroring the engine's own list.
 enum Attention {
@@ -127,6 +128,44 @@ class Attentions {
     : _plugin = plugin ?? FlutterLocalNotificationsPlugin();
 
   final FlutterLocalNotificationsPlugin _plugin;
+
+  void listenForDesktopActivation(List<String> arguments) {
+    if (kIsWeb || !Platform.isLinux) return;
+    for (var index = 0; index + 1 < arguments.length; index++) {
+      if (arguments[index] == '--orgbot-attention') {
+        openPayload(arguments[index + 1]);
+        break;
+      }
+    }
+    _activationChannel.setMethodCallHandler((call) async {
+      if (call.method == 'open_attention' && call.arguments is String) {
+        openPayload(call.arguments as String);
+      }
+    });
+    unawaited(_announceActivationReady());
+  }
+
+  Future<void> _announceActivationReady() async {
+    try {
+      await _activationChannel.invokeMethod<void>('activation_ready');
+    } on MissingPluginException {
+      // Non-Linux test hosts and older runners have no native activation peer.
+    } on PlatformException catch (error) {
+      debugPrint('desktop activation unavailable: ${error.message}');
+    }
+  }
+
+  void openPayload(String payload) {
+    final target = AttentionTarget.fromPayload(payload);
+    if (target == null) return;
+    final callback = _onRouteRequested;
+    if (callback == null) {
+      _pendingRoute = target;
+    } else {
+      callback(target);
+    }
+  }
+
   bool _ready = false;
   Future<void>? _starting;
   void Function(AttentionTarget target)? _onRouteRequested;

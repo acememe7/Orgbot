@@ -1139,8 +1139,11 @@ class _OrgBotScreenState extends State<OrgBotScreen>
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) =>
-                      RoomHistoryScreen(roomId: room.id, roomName: room.name),
+                  builder: (_) => RoomHistoryScreen(
+                    roomId: room.id,
+                    roomName: room.name,
+                    library: lib,
+                  ),
                 ),
               );
             }
@@ -1514,6 +1517,17 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                               setLocal(() => workspace = selected);
                             }
                           },
+                        ),
+                      if (canRunAgentClis)
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: workspace.commands,
+                          title: const Text('Allow builds and tests'),
+                          subtitle: const Text(
+                            'System CLIs may run build and test commands in this local project folder.',
+                          ),
+                          onChanged: (value) =>
+                              setLocal(() => workspace.commands = value),
                         ),
                     ],
                   ),

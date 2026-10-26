@@ -13,9 +13,39 @@
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
+  FlMethodChannel* activation_channel;
+  gchar* pending_activation_payload;
+  gboolean activation_handler_ready;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
+
+static void my_application_deliver_activation(MyApplication* self,
+                                               const gchar* payload) {
+  if (self->activation_channel == nullptr || !self->activation_handler_ready) {
+    g_free(self->pending_activation_payload);
+    self->pending_activation_payload = g_strdup(payload);
+    return;
+  }
+  g_autoptr(FlValue) value = fl_value_new_string(payload);
+  fl_method_channel_invoke_method(self->activation_channel, "open_attention",
+                                 value, nullptr, nullptr, nullptr);
+}
+
+static void my_application_activation_call(FlMethodChannel*, FlMethodCall* call,
+                                           gpointer user_data) {
+  auto* self = MY_APPLICATION(user_data);
+  if (g_strcmp0(fl_method_call_get_name(call), "activation_ready") == 0) {
+    self->activation_handler_ready = TRUE;
+    if (self->pending_activation_payload != nullptr) {
+      g_autofree gchar* payload = g_steal_pointer(&self->pending_activation_payload);
+      my_application_deliver_activation(self, payload);
+    }
+    fl_method_call_respond_success(call, nullptr, nullptr);
+    return;
+  }
+  fl_method_call_respond_not_implemented(call, nullptr);
+}
 
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
@@ -50,6 +80,20 @@ static void my_application_set_icon(GtkWindow* window) {
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
+  GtkWindow* existing = gtk_application_get_active_window(GTK_APPLICATION(application));
+  if (existing == nullptr) {
+    // The first window is not active until GTK presents the first Flutter
+    // frame. A notification can arrive during that interval, so reuse the
+    // registered application window instead of creating a second engine.
+    GList* windows = gtk_application_get_windows(GTK_APPLICATION(application));
+    if (windows != nullptr) {
+      existing = GTK_WINDOW(windows->data);
+    }
+  }
+  if (existing != nullptr) {
+    gtk_window_present(existing);
+    return;
+  }
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
 
@@ -119,6 +163,15 @@ static void my_application_activate(GApplication* application) {
                            self);
   gtk_widget_realize(GTK_WIDGET(view));
 
+  g_autoptr(FlStandardMethodCodec) activation_codec = fl_standard_method_codec_new();
+  g_clear_object(&self->activation_channel);
+  self->activation_channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      "orgbot/activation", FL_METHOD_CODEC(activation_codec));
+  self->activation_handler_ready = FALSE;
+  fl_method_channel_set_method_call_handler(
+      self->activation_channel, my_application_activation_call, self, nullptr);
+
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
   desktop_files_channel_register(view);
   desktop_editor_channel_register(view);
@@ -127,25 +180,25 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
 
-// Implements GApplication::local_command_line.
-static gboolean my_application_local_command_line(GApplication* application,
-                                                  gchar*** arguments,
-                                                  int* exit_status) {
+// Forward notification actions to an existing window instead of a second app.
+static gint my_application_command_line(GApplication* application,
+                                        GApplicationCommandLine* command_line) {
   MyApplication* self = MY_APPLICATION(application);
-  // Strip out the first argument as it is the binary name.
-  self->dart_entrypoint_arguments = g_strdupv(*arguments + 1);
-
-  g_autoptr(GError) error = nullptr;
-  if (!g_application_register(application, nullptr, &error)) {
-    g_warning("Failed to register: %s", error->message);
-    *exit_status = 1;
-    return TRUE;
+  gint count = 0;
+  g_auto(GStrv) arguments = g_application_command_line_get_arguments(command_line, &count);
+  if (self->activation_channel != nullptr) {
+    for (gint i = 1; i + 1 < count; ++i) {
+      if (g_strcmp0(arguments[i], "--orgbot-attention") == 0) {
+        my_application_deliver_activation(self, arguments[i + 1]);
+        break;
+      }
+    }
+  } else {
+    g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
+    self->dart_entrypoint_arguments = g_strdupv(arguments + 1);
   }
-
   g_application_activate(application);
-  *exit_status = 0;
-
-  return TRUE;
+  return 0;
 }
 
 // Implements GApplication::startup.
@@ -170,13 +223,14 @@ static void my_application_shutdown(GApplication* application) {
 static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
+  g_clear_pointer(&self->pending_activation_payload, g_free);
+  g_clear_object(&self->activation_channel);
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
 }
 
 static void my_application_class_init(MyApplicationClass* klass) {
   G_APPLICATION_CLASS(klass)->activate = my_application_activate;
-  G_APPLICATION_CLASS(klass)->local_command_line =
-      my_application_local_command_line;
+  G_APPLICATION_CLASS(klass)->command_line = my_application_command_line;
   G_APPLICATION_CLASS(klass)->startup = my_application_startup;
   G_APPLICATION_CLASS(klass)->shutdown = my_application_shutdown;
   G_OBJECT_CLASS(klass)->dispose = my_application_dispose;
@@ -193,5 +247,5 @@ MyApplication* my_application_new() {
 
   return MY_APPLICATION(g_object_new(my_application_get_type(),
                                      "application-id", APPLICATION_ID, "flags",
-                                     G_APPLICATION_NON_UNIQUE, nullptr));
+                                     G_APPLICATION_HANDLES_COMMAND_LINE, nullptr));
 }

@@ -236,6 +236,12 @@ pub struct RoomDigest {
     /// one limit, and a per-bot list hides that completely.
     #[serde(default)]
     pub spend: Vec<AccountSpend>,
+    /// Per-agent draw, for comparing bot contribution and cost.
+    #[serde(default)]
+    pub agent_spend: Vec<AgentSpend>,
+    /// Room-wide totals, with costs absent when any turn is unknown or unpriced.
+    #[serde(default)]
+    pub total_spend: RoomSpend,
 }
 
 /// What one account has been asked for.
@@ -250,6 +256,50 @@ pub struct AccountSpend {
     pub tokens: u32,
     /// Average tokens per turn.
     pub per_turn: u32,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub cache_write_tokens: u32,
+    /// Whether at least one provider usage report contributed these totals.
+    pub usage_known: bool,
+    /// Whether every provider turn supplied a complete usage report.
+    #[serde(default)]
+    pub usage_complete: bool,
+    pub actual_api_cost_microusd: Option<u64>,
+    pub api_equivalent_cost_microusd: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSpend {
+    pub handle: String,
+    pub turns: u32,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub cache_write_tokens: u32,
+    /// Whether at least one provider usage report contributed these totals.
+    pub usage_known: bool,
+    /// Whether every provider turn supplied a complete usage report.
+    #[serde(default)]
+    pub usage_complete: bool,
+    pub actual_api_cost_microusd: Option<u64>,
+    pub api_equivalent_cost_microusd: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomSpend {
+    pub turns: u32,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub cache_write_tokens: u32,
+    /// Whether at least one provider usage report contributed these totals.
+    pub usage_known: bool,
+    /// Whether every provider turn supplied a complete usage report.
+    #[serde(default)]
+    pub usage_complete: bool,
+    pub actual_api_cost_microusd: Option<u64>,
+    pub api_equivalent_cost_microusd: Option<u64>,
 }
 
 impl RoomDigest {
@@ -268,7 +318,10 @@ impl RoomDigest {
             lines.push(format!("{} in flight", c.active));
         }
         if c.waiting_internally > 0 {
-            lines.push(format!("{} waiting on the room itself", c.waiting_internally));
+            lines.push(format!(
+                "{} waiting on the room itself",
+                c.waiting_internally
+            ));
         }
         lines.push(match c.needs_you {
             0 => "0 decisions needed from you".into(),
@@ -301,10 +354,7 @@ impl RoomDigest {
 /// Takes an iterator rather than the engine so it can be tested on a handful
 /// of tasks without standing a room up, and so the same computation can serve
 /// a snapshot as easily as a live room.
-pub fn digest<'a>(
-    tasks: impl Iterator<Item = &'a Task>,
-    decisions: &DecisionLog,
-) -> RoomDigest {
+pub fn digest<'a>(tasks: impl Iterator<Item = &'a Task>, decisions: &DecisionLog) -> RoomDigest {
     let tasks: Vec<&Task> = tasks.collect();
     let by_id: HashMap<TaskId, &Task> = tasks.iter().map(|t| (t.id, *t)).collect();
 
@@ -398,9 +448,7 @@ pub fn digest<'a>(
             supporting_records: supporting,
             closed_as_duplicate: tasks
                 .iter()
-                .filter(|t| {
-                    matches!(t.state, TaskState::Superseded | TaskState::Retired)
-                })
+                .filter(|t| matches!(t.state, TaskState::Superseded | TaskState::Retired))
                 .count() as u32,
             coordination_expansion: counts.objectives > 0
                 && inflation > Health::EXPANSION_THRESHOLD,
@@ -414,6 +462,8 @@ pub fn digest<'a>(
         // Filled by the engine, which can see the roster.
         utilization: Utilization::default(),
         spend: Vec::new(),
+        agent_spend: Vec::new(),
+        total_spend: RoomSpend::default(),
     }
 }
 
@@ -492,8 +542,8 @@ fn card_for(objective: &Task, records: &[&Task]) -> ObjectiveCard {
     // What is actually holding this up: the objective's own state first, then
     // the most pressing thing beneath it.
     let readiness = objective.readiness();
-    let needs_operator = readiness.needs_operator()
-        || live.iter().any(|t| t.readiness().needs_operator());
+    let needs_operator =
+        readiness.needs_operator() || live.iter().any(|t| t.readiness().needs_operator());
 
     let blocker = blocking_line(&readiness).or_else(|| {
         live.iter()
@@ -546,9 +596,9 @@ fn blocking_line(readiness: &Readiness) -> Option<String> {
         Readiness::Closed { .. } => None,
         // Worth naming on the card: this is work that stopped without anyone
         // deciding it should, and it looked finished while it sat there.
-        Readiness::Recovering { state } => {
-            Some(format!("left {state} with nobody on it; being returned to the pool"))
-        }
+        Readiness::Recovering { state } => Some(format!(
+            "left {state} with nobody on it; being returned to the pool"
+        )),
     }
 }
 
@@ -717,10 +767,8 @@ mod tests {
         // The inbox is the decision log: a question is a record with an id an
         // answer can be addressed to, not a flag on a task.
         let mut log = DecisionLog::default();
-        let mut question = orgbot_proto::decision::Decision::ask(
-            room,
-            "it provisions paid infrastructure",
-        );
+        let mut question =
+            orgbot_proto::decision::Decision::ask(room, "it provisions paid infrastructure");
         question.options = vec!["Approve".into(), "Decline".into()];
         question.task = Some(waiting.id);
         log.decisions.push(question);
@@ -731,7 +779,10 @@ mod tests {
             1,
             "the security hold and the dependency wait are the room's own work"
         );
-        assert_eq!(view.needs_you[0].because, "it provisions paid infrastructure");
+        assert_eq!(
+            view.needs_you[0].because,
+            "it provisions paid infrastructure"
+        );
         assert_eq!(view.needs_you[0].options.len(), 2);
         assert_eq!(view.needs_you[0].task, Some(waiting_id));
         assert_eq!(view.needs_you[0].title, "provision the VPS");
@@ -813,8 +864,14 @@ mod tests {
         replaced.lineage.superseded_by = Some(live.id);
 
         let view = digest([goal, live, replaced].iter(), &DecisionLog::default());
-        assert_eq!(view.counts.raw_records, 2, "the replaced record is not live");
-        assert_eq!(view.health.closed_as_duplicate, 1, "but it is still counted");
+        assert_eq!(
+            view.counts.raw_records, 2,
+            "the replaced record is not live"
+        );
+        assert_eq!(
+            view.health.closed_as_duplicate, 1,
+            "but it is still counted"
+        );
         assert_eq!(view.objectives[0].records.len(), 1);
     }
 
@@ -831,7 +888,10 @@ mod tests {
         let mut side = objective(room, "update the docs");
         side.depends_on = vec![a.id];
 
-        let view = digest([a.clone(), b.clone(), c.clone(), side].iter(), &DecisionLog::default());
+        let view = digest(
+            [a.clone(), b.clone(), c.clone(), side].iter(),
+            &DecisionLog::default(),
+        );
         assert_eq!(view.critical_path, vec![a.id, b.id, c.id]);
     }
 
@@ -855,7 +915,12 @@ mod tests {
         let goal = objective(room, "one outcome");
         let mut all = vec![goal.clone()];
         for i in 0..12 {
-            all.push(under(room, &format!("review {i}"), TaskKind::Review, goal.id));
+            all.push(under(
+                room,
+                &format!("review {i}"),
+                TaskKind::Review,
+                goal.id,
+            ));
         }
 
         let view = digest(all.iter(), &DecisionLog::default());
@@ -915,7 +980,10 @@ mod tests {
         let summary = view.summary("Leo room repair");
         assert!(summary.starts_with("Leo room repair"));
         assert!(summary.contains("objectives complete"), "got:\n{summary}");
-        assert!(summary.contains("0 decisions needed from you"), "got:\n{summary}");
+        assert!(
+            summary.contains("0 decisions needed from you"),
+            "got:\n{summary}"
+        );
         assert!(
             summary.contains("B3-C source recovery"),
             "the current blocker should be named:\n{summary}"
@@ -957,7 +1025,11 @@ mod tests {
         let mut first = objective(room, "first");
         let second = objective(room, "second");
 
-        let before = digest([first.clone(), second.clone()].iter(), &DecisionLog::default()).counts;
+        let before = digest(
+            [first.clone(), second.clone()].iter(),
+            &DecisionLog::default(),
+        )
+        .counts;
         assert_eq!((before.delivered, before.objectives), (0, 2));
 
         first.state = TaskState::Submitted;
@@ -994,9 +1066,6 @@ mod tests {
     fn progress_with_nothing_broken_down_says_so() {
         assert_eq!(Progress::default().label(), "not broken down yet");
         assert_eq!(Progress::default().fraction(), None);
-        assert_eq!(
-            Progress { done: 1, total: 2 }.fraction(),
-            Some(0.5)
-        );
+        assert_eq!(Progress { done: 1, total: 2 }.fraction(), Some(0.5));
     }
 }

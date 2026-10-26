@@ -393,15 +393,15 @@ class Handoff {
 
   /// A line for whoever is waiting on it.
   String get progress => switch (state) {
-        'offered' => 'nobody has picked this up yet',
-        'accepted' => 'accepted and being worked on',
-        'completed' => 'finished',
-        'rejected' => 'declined',
-        'expired' => 'nobody answered in time',
-        'withdrawn' => 'pulled back',
-        'failed' => 'the delegate could not finish it',
-        _ => state,
-      };
+    'offered' => 'nobody has picked this up yet',
+    'accepted' => 'accepted and being worked on',
+    'completed' => 'finished',
+    'rejected' => 'declined',
+    'expired' => 'nobody answered in time',
+    'withdrawn' => 'pulled back',
+    'failed' => 'the delegate could not finish it',
+    _ => state,
+  };
 
   factory Handoff.fromJson(Map<String, Object?> json) => Handoff(
     id: json['id'] as String? ?? '',
@@ -473,9 +473,9 @@ class Progress {
       total == 0 ? 'not broken down yet' : '$done / $total stages';
 
   factory Progress.fromJson(Map<String, Object?> json) => Progress(
-        done: (json['done'] as num?)?.toInt() ?? 0,
-        total: (json['total'] as num?)?.toInt() ?? 0,
-      );
+    done: (json['done'] as num?)?.toInt() ?? 0,
+    total: (json['total'] as num?)?.toInt() ?? 0,
+  );
 }
 
 /// One outcome, as a person should see it.
@@ -517,16 +517,17 @@ class ObjectiveCard {
   final List<String> records;
 
   factory ObjectiveCard.fromJson(Map<String, Object?> json) => ObjectiveCard(
-        task: json['task'] as String? ?? '',
-        title: json['title'] as String? ?? '',
-        progress: Progress.fromJson(
-            (json['progress'] as Map?)?.cast<String, Object?>() ?? const {}),
-        status: json['status'] as String? ?? '',
-        blocker: json['blocker'] as String?,
-        owners: (json['owners'] as List? ?? const []).cast<String>(),
-        needsOperator: json['needs_operator'] as bool? ?? false,
-        records: (json['records'] as List? ?? const []).cast<String>(),
-      );
+    task: json['task'] as String? ?? '',
+    title: json['title'] as String? ?? '',
+    progress: Progress.fromJson(
+      (json['progress'] as Map?)?.cast<String, Object?>() ?? const {},
+    ),
+    status: json['status'] as String? ?? '',
+    blocker: json['blocker'] as String?,
+    owners: (json['owners'] as List? ?? const []).cast<String>(),
+    needsOperator: json['needs_operator'] as bool? ?? false,
+    records: (json['records'] as List? ?? const []).cast<String>(),
+  );
 }
 
 /// A decision waiting on a person, with everything needed to answer it.
@@ -555,7 +556,8 @@ class PendingDecision {
   /// The answers offered, for a one-tap reply.
   final List<String> options;
 
-  factory PendingDecision.fromJson(Map<String, Object?> json) => PendingDecision(
+  factory PendingDecision.fromJson(Map<String, Object?> json) =>
+      PendingDecision(
         id: json['id'] as String? ?? '',
         task: json['task'] as String? ?? '',
         title: json['title'] as String? ?? '',
@@ -586,21 +588,21 @@ class BoardCounts {
   final int rawRecords;
 
   const BoardCounts.empty()
-      : objectives = 0,
-        active = 0,
-        waitingInternally = 0,
-        needsYou = 0,
-        delivered = 0,
-        rawRecords = 0;
+    : objectives = 0,
+      active = 0,
+      waitingInternally = 0,
+      needsYou = 0,
+      delivered = 0,
+      rawRecords = 0;
 
   factory BoardCounts.fromJson(Map<String, Object?> json) => BoardCounts(
-        objectives: (json['objectives'] as num?)?.toInt() ?? 0,
-        active: (json['active'] as num?)?.toInt() ?? 0,
-        waitingInternally: (json['waiting_internally'] as num?)?.toInt() ?? 0,
-        needsYou: (json['needs_you'] as num?)?.toInt() ?? 0,
-        delivered: (json['delivered'] as num?)?.toInt() ?? 0,
-        rawRecords: (json['raw_records'] as num?)?.toInt() ?? 0,
-      );
+    objectives: (json['objectives'] as num?)?.toInt() ?? 0,
+    active: (json['active'] as num?)?.toInt() ?? 0,
+    waitingInternally: (json['waiting_internally'] as num?)?.toInt() ?? 0,
+    needsYou: (json['needs_you'] as num?)?.toInt() ?? 0,
+    delivered: (json['delivered'] as num?)?.toInt() ?? 0,
+    rawRecords: (json['raw_records'] as num?)?.toInt() ?? 0,
+  );
 }
 
 /// What one bot is doing.
@@ -626,12 +628,12 @@ class BotState {
   final bool free;
 
   factory BotState.fromJson(Map<String, Object?> json) => BotState(
-        agent: json['agent'] as String? ?? '',
-        handle: json['handle'] as String? ?? '',
-        doing: json['doing'] as String? ?? 'idle',
-        holding: (json['holding'] as num?)?.toInt() ?? 0,
-        free: json['free'] as bool? ?? false,
-      );
+    agent: json['agent'] as String? ?? '',
+    handle: json['handle'] as String? ?? '',
+    doing: json['doing'] as String? ?? 'idle',
+    holding: (json['holding'] as num?)?.toInt() ?? 0,
+    free: json['free'] as bool? ?? false,
+  );
 }
 
 /// Where the room's effort is going.
@@ -651,10 +653,10 @@ class Utilization {
   final List<({String role, int tasks})> starvedRoles;
 
   const Utilization.empty()
-      : bots = const [],
-        idle = 0,
-        unclaimed = 0,
-        starvedRoles = const [];
+    : bots = const [],
+      idle = 0,
+      unclaimed = 0,
+      starvedRoles = const [];
 
   /// Open work no free bot can cover.
   int get starvedCount =>
@@ -668,20 +670,22 @@ class Utilization {
   bool get isShortHanded => starvedRoles.isNotEmpty;
 
   factory Utilization.fromJson(Map<String, Object?> json) => Utilization(
-        bots: (json['bots'] as List? ?? const [])
-            .whereType<Map>()
-            .map((b) => BotState.fromJson(b.cast<String, Object?>()))
-            .toList(),
-        idle: (json['idle'] as num?)?.toInt() ?? 0,
-        unclaimed: (json['unclaimed'] as num?)?.toInt() ?? 0,
-        starvedRoles: (json['starved_roles'] as List? ?? const [])
-            .whereType<List>()
-            .map((pair) => (
-                  role: pair.isNotEmpty ? pair[0] as String : '',
-                  tasks: pair.length > 1 ? (pair[1] as num).toInt() : 0,
-                ))
-            .toList(),
-      );
+    bots: (json['bots'] as List? ?? const [])
+        .whereType<Map>()
+        .map((b) => BotState.fromJson(b.cast<String, Object?>()))
+        .toList(),
+    idle: (json['idle'] as num?)?.toInt() ?? 0,
+    unclaimed: (json['unclaimed'] as num?)?.toInt() ?? 0,
+    starvedRoles: (json['starved_roles'] as List? ?? const [])
+        .whereType<List>()
+        .map(
+          (pair) => (
+            role: pair.isNotEmpty ? pair[0] as String : '',
+            tasks: pair.length > 1 ? (pair[1] as num).toInt() : 0,
+          ),
+        )
+        .toList(),
+  );
 }
 
 /// Signals that the room is coordinating more than it is working.
@@ -716,24 +720,22 @@ class RoomHealth {
   final int criticalPathLength;
 
   const RoomHealth.healthy()
-      : inflationRatio = 0,
-        supportingRecords = 0,
-        coordinationExpansion = false,
-        averageReviewCycles = 0,
-        standInRecords = 0,
-        criticalPathLength = 0;
+    : inflationRatio = 0,
+      supportingRecords = 0,
+      coordinationExpansion = false,
+      averageReviewCycles = 0,
+      standInRecords = 0,
+      criticalPathLength = 0;
 
   factory RoomHealth.fromJson(Map<String, Object?> json) => RoomHealth(
-        inflationRatio: (json['inflation_ratio'] as num?)?.toDouble() ?? 0,
-        supportingRecords: (json['supporting_records'] as num?)?.toInt() ?? 0,
-        coordinationExpansion:
-            json['coordination_expansion'] as bool? ?? false,
-        averageReviewCycles:
-            (json['average_review_cycles'] as num?)?.toDouble() ?? 0,
-        standInRecords: (json['stand_in_records'] as num?)?.toInt() ?? 0,
-        criticalPathLength:
-            (json['critical_path_length'] as num?)?.toInt() ?? 0,
-      );
+    inflationRatio: (json['inflation_ratio'] as num?)?.toDouble() ?? 0,
+    supportingRecords: (json['supporting_records'] as num?)?.toInt() ?? 0,
+    coordinationExpansion: json['coordination_expansion'] as bool? ?? false,
+    averageReviewCycles:
+        (json['average_review_cycles'] as num?)?.toDouble() ?? 0,
+    standInRecords: (json['stand_in_records'] as num?)?.toInt() ?? 0,
+    criticalPathLength: (json['critical_path_length'] as num?)?.toInt() ?? 0,
+  );
 }
 
 /// Everything a person needs, and nothing they do not.
@@ -746,6 +748,8 @@ class RoomDigest {
     required this.health,
     required this.utilization,
     this.spend = const [],
+    this.agentSpend = const [],
+    this.totalSpend = const RoomSpend(),
   });
 
   /// The outcomes, most urgent first.
@@ -772,41 +776,55 @@ class RoomDigest {
   /// granted in: a roster mostly on one subscription draws on one limit, and
   /// per-bot numbers hide that entirely.
   final List<AccountSpend> spend;
+  final List<AgentSpend> agentSpend;
+  final RoomSpend totalSpend;
 
   /// The state before a room has said anything.
   const RoomDigest.empty()
-      : objectives = const [],
-        counts = const BoardCounts.empty(),
-        needsYou = const [],
-        criticalPath = const [],
-        health = const RoomHealth.healthy(),
-        utilization = const Utilization.empty(),
-        spend = const [];
+    : objectives = const [],
+      counts = const BoardCounts.empty(),
+      needsYou = const [],
+      criticalPath = const [],
+      health = const RoomHealth.healthy(),
+      utilization = const Utilization.empty(),
+      spend = const [],
+      agentSpend = const [],
+      totalSpend = const RoomSpend();
 
   /// Whether there is anything to show yet.
   bool get isEmpty => objectives.isEmpty && needsYou.isEmpty;
 
   factory RoomDigest.fromJson(Map<String, Object?> json) => RoomDigest(
-        objectives: (json['objectives'] as List? ?? const [])
-            .whereType<Map>()
-            .map((o) => ObjectiveCard.fromJson(o.cast<String, Object?>()))
-            .toList(),
-        counts: BoardCounts.fromJson(
-            (json['counts'] as Map?)?.cast<String, Object?>() ?? const {}),
-        needsYou: (json['needs_you'] as List? ?? const [])
-            .whereType<Map>()
-            .map((d) => PendingDecision.fromJson(d.cast<String, Object?>()))
-            .toList(),
-        criticalPath: (json['critical_path'] as List? ?? const []).cast<String>(),
-        health: RoomHealth.fromJson(
-            (json['health'] as Map?)?.cast<String, Object?>() ?? const {}),
-        utilization: Utilization.fromJson(
-            (json['utilization'] as Map?)?.cast<String, Object?>() ?? const {}),
-        spend: (json['spend'] as List? ?? const [])
-            .whereType<Map>()
-            .map((s) => AccountSpend.fromJson(s.cast<String, Object?>()))
-            .toList(),
-      );
+    objectives: (json['objectives'] as List? ?? const [])
+        .whereType<Map>()
+        .map((o) => ObjectiveCard.fromJson(o.cast<String, Object?>()))
+        .toList(),
+    counts: BoardCounts.fromJson(
+      (json['counts'] as Map?)?.cast<String, Object?>() ?? const {},
+    ),
+    needsYou: (json['needs_you'] as List? ?? const [])
+        .whereType<Map>()
+        .map((d) => PendingDecision.fromJson(d.cast<String, Object?>()))
+        .toList(),
+    criticalPath: (json['critical_path'] as List? ?? const []).cast<String>(),
+    health: RoomHealth.fromJson(
+      (json['health'] as Map?)?.cast<String, Object?>() ?? const {},
+    ),
+    utilization: Utilization.fromJson(
+      (json['utilization'] as Map?)?.cast<String, Object?>() ?? const {},
+    ),
+    spend: (json['spend'] as List? ?? const [])
+        .whereType<Map>()
+        .map((s) => AccountSpend.fromJson(s.cast<String, Object?>()))
+        .toList(),
+    agentSpend: (json['agent_spend'] as List? ?? const [])
+        .whereType<Map>()
+        .map((s) => AgentSpend.fromJson(s.cast<String, Object?>()))
+        .toList(),
+    totalSpend: RoomSpend.fromJson(
+      (json['total_spend'] as Map?)?.cast<String, Object?>() ?? const {},
+    ),
+  );
 }
 
 /// What one account has been asked for.
@@ -816,6 +834,14 @@ class AccountSpend {
     required this.turns,
     required this.tokens,
     required this.perTurn,
+    this.inputTokens = 0,
+    this.outputTokens = 0,
+    this.cacheReadTokens = 0,
+    this.cacheWriteTokens = 0,
+    this.usageKnown = false,
+    this.usageComplete = false,
+    this.actualApiCostMicrousd,
+    this.apiEquivalentCostMicrousd,
   });
 
   /// The account, as the scheduler groups it.
@@ -824,20 +850,103 @@ class AccountSpend {
   /// Turns taken against it.
   final int turns;
 
-  /// Tokens across those turns. Zero means this backend does not report
-  /// usage — which is not the same as free, and should not be shown as it.
+  /// Tokens across those turns. Check usageKnown and usageComplete before
+  /// treating zero as a real count.
   final int tokens;
 
   /// Average tokens per turn.
   final int perTurn;
+  final int inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens;
+  final bool usageKnown, usageComplete;
+  final int? actualApiCostMicrousd, apiEquivalentCostMicrousd;
 
   /// Whether the backend reported anything at all.
-  bool get isMetered => tokens > 0;
+  bool get isMetered => usageKnown;
 
   factory AccountSpend.fromJson(Map<String, Object?> json) => AccountSpend(
-        backend: json['backend'] as String? ?? '',
-        turns: (json['turns'] as num?)?.toInt() ?? 0,
-        tokens: (json['tokens'] as num?)?.toInt() ?? 0,
-        perTurn: (json['per_turn'] as num?)?.toInt() ?? 0,
-      );
+    backend: json['backend'] as String? ?? '',
+    turns: (json['turns'] as num?)?.toInt() ?? 0,
+    tokens: (json['tokens'] as num?)?.toInt() ?? 0,
+    perTurn: (json['per_turn'] as num?)?.toInt() ?? 0,
+    inputTokens: (json['input_tokens'] as num?)?.toInt() ?? 0,
+    outputTokens: (json['output_tokens'] as num?)?.toInt() ?? 0,
+    cacheReadTokens: (json['cache_read_tokens'] as num?)?.toInt() ?? 0,
+    cacheWriteTokens: (json['cache_write_tokens'] as num?)?.toInt() ?? 0,
+    usageKnown: json['usage_known'] == true,
+    usageComplete: json.containsKey('usage_complete')
+        ? json['usage_complete'] == true
+        : json['usage_known'] == true,
+    actualApiCostMicrousd: (json['actual_api_cost_microusd'] as num?)?.toInt(),
+    apiEquivalentCostMicrousd: (json['api_equivalent_cost_microusd'] as num?)
+        ?.toInt(),
+  );
+}
+
+class AgentSpend {
+  const AgentSpend({
+    required this.handle,
+    required this.turns,
+    required this.inputTokens,
+    required this.outputTokens,
+    required this.cacheReadTokens,
+    required this.cacheWriteTokens,
+    required this.usageKnown,
+    required this.usageComplete,
+    this.actualApiCostMicrousd,
+    this.apiEquivalentCostMicrousd,
+  });
+
+  final String handle;
+  final int turns, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens;
+  final bool usageKnown, usageComplete;
+  final int? actualApiCostMicrousd, apiEquivalentCostMicrousd;
+
+  factory AgentSpend.fromJson(Map<String, Object?> json) => AgentSpend(
+    handle: json['handle'] as String? ?? '',
+    turns: (json['turns'] as num?)?.toInt() ?? 0,
+    inputTokens: (json['input_tokens'] as num?)?.toInt() ?? 0,
+    outputTokens: (json['output_tokens'] as num?)?.toInt() ?? 0,
+    cacheReadTokens: (json['cache_read_tokens'] as num?)?.toInt() ?? 0,
+    cacheWriteTokens: (json['cache_write_tokens'] as num?)?.toInt() ?? 0,
+    usageKnown: json['usage_known'] == true,
+    usageComplete: json.containsKey('usage_complete')
+        ? json['usage_complete'] == true
+        : json['usage_known'] == true,
+    actualApiCostMicrousd: (json['actual_api_cost_microusd'] as num?)?.toInt(),
+    apiEquivalentCostMicrousd: (json['api_equivalent_cost_microusd'] as num?)
+        ?.toInt(),
+  );
+}
+
+class RoomSpend {
+  const RoomSpend({
+    this.turns = 0,
+    this.inputTokens = 0,
+    this.outputTokens = 0,
+    this.cacheReadTokens = 0,
+    this.cacheWriteTokens = 0,
+    this.usageKnown = false,
+    this.usageComplete = false,
+    this.actualApiCostMicrousd,
+    this.apiEquivalentCostMicrousd,
+  });
+
+  final int turns, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens;
+  final bool usageKnown, usageComplete;
+  final int? actualApiCostMicrousd, apiEquivalentCostMicrousd;
+
+  factory RoomSpend.fromJson(Map<String, Object?> json) => RoomSpend(
+    turns: (json['turns'] as num?)?.toInt() ?? 0,
+    inputTokens: (json['input_tokens'] as num?)?.toInt() ?? 0,
+    outputTokens: (json['output_tokens'] as num?)?.toInt() ?? 0,
+    cacheReadTokens: (json['cache_read_tokens'] as num?)?.toInt() ?? 0,
+    cacheWriteTokens: (json['cache_write_tokens'] as num?)?.toInt() ?? 0,
+    usageKnown: json['usage_known'] == true,
+    usageComplete: json.containsKey('usage_complete')
+        ? json['usage_complete'] == true
+        : json['usage_known'] == true,
+    actualApiCostMicrousd: (json['actual_api_cost_microusd'] as num?)?.toInt(),
+    apiEquivalentCostMicrousd: (json['api_equivalent_cost_microusd'] as num?)
+        ?.toInt(),
+  );
 }

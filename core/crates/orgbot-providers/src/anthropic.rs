@@ -365,14 +365,26 @@ fn parse_stop_reason(raw: &str) -> StopReason {
 
 fn parse_usage(usage: Option<&Value>) -> Usage {
     let Some(usage) = usage else {
-        return Usage::default();
+        return Usage::missing();
     };
     let field = |name: &str| usage.get(name).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     Usage {
+        reported: [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ]
+        .iter()
+        .any(|key| usage.get(*key).and_then(Value::as_u64).is_some()),
+        complete: usage.get("input_tokens").and_then(Value::as_u64).is_some()
+            && usage.get("output_tokens").and_then(Value::as_u64).is_some(),
+        calls: 1,
         input_tokens: field("input_tokens"),
         output_tokens: field("output_tokens"),
         cache_read_tokens: field("cache_read_input_tokens"),
         cache_write_tokens: field("cache_creation_input_tokens"),
+        ..Usage::default()
     }
 }
 
@@ -588,7 +600,11 @@ impl Accumulator {
             model: self.model,
             content,
             stop_reason: self.stop_reason.unwrap_or(StopReason::EndTurn),
-            usage: self.usage,
+            usage: if self.usage.calls == 0 {
+                Usage::missing()
+            } else {
+                self.usage
+            },
         }
     }
 }
@@ -647,15 +663,30 @@ mod tests {
     async fn streams_finish_at_message_stop_and_reject_truncated_tool_turns() {
         let tool = "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"c1\",\"name\":\"shell\",\"input\":{}}}\n\n";
         for (terminal, keep_open, succeeds) in [
-            ("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", true, true),
-            ("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}", false, true),
+            (
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+                true,
+                true,
+            ),
+            (
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}",
+                false,
+                true,
+            ),
             ("", false, false),
         ] {
-            let (http, _release) = crate::sse::test_response(&format!("{tool}{terminal}"), keep_open).await;
-            let result = tokio::time::timeout(std::time::Duration::from_secs(1), stream_response(http, None))
-                .await.expect("a completed turn must not wait for the server to close HTTP");
+            let (http, _release) =
+                crate::sse::test_response(&format!("{tool}{terminal}"), keep_open).await;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                stream_response(http, None),
+            )
+            .await
+            .expect("a completed turn must not wait for the server to close HTTP");
             assert_eq!(result.is_ok(), succeeds, "{result:?}");
-            if let Ok(turn) = result { assert_eq!(turn.stop_reason, StopReason::ToolUse); }
+            if let Ok(turn) = result {
+                assert_eq!(turn.stop_reason, StopReason::ToolUse);
+            }
         }
     }
     use crate::types::{Effort, ToolDef};

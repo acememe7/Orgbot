@@ -1,0 +1,71 @@
+name: Publish APT repository to GitHub Pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      pages: write
+    steps:
+      - name: Check out the prepared Pages tree
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: apt
+          path: site
+          persist-credentials: false
+
+      - name: Verify repository signatures and APT metadata
+        env:
+          GH_WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          repo="$GH_WORKSPACE/site/apt"
+          keyring="$repo/orgbots-archive-keyring.gpg"
+          test -s "$keyring"
+          test -s "$repo/dists/stable/Release"
+          test -s "$repo/dists/stable/InRelease"
+          test -s "$repo/dists/stable/Release.gpg"
+          test -s "$repo/dists/stable/main/binary-amd64/Packages"
+          test -s "$repo/dists/stable/main/binary-amd64/Packages.gz"
+          gpgv --keyring "$keyring" "$repo/dists/stable/InRelease"
+          gpgv --keyring "$keyring" "$repo/dists/stable/Release.gpg" "$repo/dists/stable/Release"
+          mkdir -p "$GH_WORKSPACE/public"
+          cp -a "$repo" "$GH_WORKSPACE/public/apt"
+          touch "$GH_WORKSPACE/public/.nojekyll"
+          temp=$(mktemp -d)
+          trap 'rm -rf "$temp"' EXIT
+          mkdir -p "$temp/lists/partial" "$temp/cache/archives/partial"
+          printf 'deb [signed-by=%s] file:%s stable main\n' "$keyring" "$repo" > "$temp/sources.list"
+          apt-get -o Debug::NoLocking=1 \
+            -o "Dir::Etc::sourcelist=$temp/sources.list" -o Dir::Etc::sourceparts=- \
+            -o "Dir::State::lists=$temp/lists" -o "Dir::State::status=$temp/status" \
+            -o "Dir::Cache::archives=$temp/cache/archives" \
+            -o "Dir::Cache::pkgcache=$temp/pkgcache" -o "Dir::Cache::srcpkgcache=$temp/srcpkgcache" \
+            -o APT::Get::List-Cleanup=0 update
+
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: public
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

@@ -1,0 +1,22 @@
+[
+  {
+    "id": "usage-dialect-normalizer",
+    "task": "Repair src/usage_normalizer.py so OpenAI-compatible cached_tokens are split out of inclusive prompt_tokens, while Anthropic cache_read_input_tokens remain disjoint from input_tokens. Preserve output and cache-write totals. Use the fixtures in test_usage_normalizer.py as the acceptance contract.",
+    "acceptance": [],
+    "verify": ["python3", "-m", "unittest", "-v"],
+    "workspace_files": {
+      "src/usage_normalizer.py": "def normalize_usage(payload, dialect):\n    usage = payload.get(\"usage\", {})\n    # TODO: split inclusive OpenAI cache tokens and preserve disjoint Anthropic fields.\n    return {\n        \"input_tokens\": usage.get(\"prompt_tokens\", usage.get(\"input_tokens\", 0)),\n        \"output_tokens\": usage.get(\"completion_tokens\", usage.get(\"output_tokens\", 0)),\n        \"cache_read_tokens\": 0,\n        \"cache_write_tokens\": usage.get(\"cache_creation_input_tokens\", 0),\n    }\n",
+      "test_usage_normalizer.py": "import unittest\nfrom src.usage_normalizer import normalize_usage\n\nclass UsageNormalizerTests(unittest.TestCase):\n    def test_openai_cached_prompt_tokens_are_disjoint(self):\n        result = normalize_usage({\"usage\": {\"prompt_tokens\": 1000, \"completion_tokens\": 50, \"prompt_tokens_details\": {\"cached_tokens\": 900}}}, \"openai\")\n        self.assertEqual(result, {\"input_tokens\": 100, \"output_tokens\": 50, \"cache_read_tokens\": 900, \"cache_write_tokens\": 0})\n\n    def test_anthropic_cache_reads_are_already_disjoint(self):\n        result = normalize_usage({\"usage\": {\"input_tokens\": 15, \"output_tokens\": 7, \"cache_read_input_tokens\": 3, \"cache_creation_input_tokens\": 2}}, \"anthropic\")\n        self.assertEqual(result, {\"input_tokens\": 15, \"output_tokens\": 7, \"cache_read_tokens\": 3, \"cache_write_tokens\": 2})\n\n    def test_unknown_dialect_fails_explicitly(self):\n        with self.assertRaises(ValueError):\n            normalize_usage({\"usage\": {}}, \"unknown\")\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+    }
+  },
+  {
+    "id": "persistent-task-store",
+    "task": "Implement src/task_store.py as a small file-backed task store. Support creating a task with a stable id, listing tasks, updating a task title, and deleting a task. Data must survive constructing a new TaskStore over the same path. Use only the Python standard library and pass test_task_store.py.",
+    "acceptance": [],
+    "verify": ["python3", "-m", "unittest", "-v"],
+    "workspace_files": {
+      "src/task_store.py": "class TaskStore:\n    def __init__(self, path):\n        self.path = path\n        raise NotImplementedError(\"implement file-backed task storage\")\n\n    def create(self, title):\n        raise NotImplementedError\n\n    def list_tasks(self):\n        raise NotImplementedError\n\n    def update_title(self, task_id, title):\n        raise NotImplementedError\n\n    def delete(self, task_id):\n        raise NotImplementedError\n",
+      "test_task_store.py": "import tempfile\nimport unittest\nfrom pathlib import Path\nfrom src.task_store import TaskStore\n\nclass TaskStoreTests(unittest.TestCase):\n    def test_crud_survives_reopening_the_store(self):\n        with tempfile.TemporaryDirectory() as directory:\n            path = Path(directory) / \"tasks.json\"\n            first = TaskStore(path)\n            task_id = first.create(\"Draft report\")\n            self.assertEqual(first.list_tasks(), [{\"id\": task_id, \"title\": \"Draft report\"}])\n            reopened = TaskStore(path)\n            self.assertTrue(reopened.update_title(task_id, \"Review report\"))\n            again = TaskStore(path)\n            self.assertEqual(again.list_tasks(), [{\"id\": task_id, \"title\": \"Review report\"}])\n            self.assertTrue(again.delete(task_id))\n            self.assertEqual(TaskStore(path).list_tasks(), [])\n\n    def test_unknown_ids_are_reported_without_mutation(self):\n        with tempfile.TemporaryDirectory() as directory:\n            store = TaskStore(Path(directory) / \"tasks.json\")\n            self.assertFalse(store.update_title(\"missing\", \"x\"))\n            self.assertFalse(store.delete(\"missing\"))\n            self.assertEqual(store.list_tasks(), [])\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+    }
+  }
+]

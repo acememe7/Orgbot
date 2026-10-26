@@ -177,6 +177,8 @@ struct Published {
 /// A room and the machinery to run it.
 #[derive(Debug)]
 pub struct RoomSession {
+    #[cfg(target_os = "linux")]
+    desktop_notifications: Option<crate::desktop_notifications::DesktopNotifications>,
     state_path: Option<std::path::PathBuf>,
     saved_at: Option<(Seq, orgbot_proto::room::RoomPhase, u32)>,
     orchestrator: Orchestrator,
@@ -390,6 +392,8 @@ impl RoomSession {
         orchestrator.attach_input_interrupt(input_token.clone());
         let input_interrupt = Arc::new(Mutex::new(input_token));
         let mut session = Self {
+            #[cfg(target_os = "linux")]
+            desktop_notifications: None,
             state_path,
             saved_at: None,
             orchestrator,
@@ -425,6 +429,14 @@ impl RoomSession {
 
     pub(crate) fn state_path(&self) -> Option<&std::path::Path> {
         self.state_path.as_deref()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn enable_desktop_notifications(&mut self) {
+        self.desktop_notifications = self
+            .state_path
+            .as_deref()
+            .and_then(crate::desktop_notifications::DesktopNotifications::new);
     }
 
     /// Save completed state atomically before announcing it to clients.
@@ -523,6 +535,14 @@ impl RoomSession {
                 self.orchestrator.workspace(),
             )
             .await;
+            #[cfg(target_os = "linux")]
+            let servers = match self.state_path.as_ref().and_then(|p| p.parent()) {
+                Some(path) => servers.with_owner_approval(path.to_path_buf()),
+                None => {
+                    tracing::warn!("External MCP tools require a private state_path for durable owner approvals");
+                    orgbot_runtime::mcp_client::McpClient::default()
+                }
+            };
             tracing::info!(
                 servers = servers.len(),
                 tools = servers.tools().len(),
@@ -706,8 +726,17 @@ impl RoomSession {
 
         for envelope in new {
             self.broadcast_head = self.broadcast_head.max(envelope.seq);
+            let notification = orgbot_engine::notification_for(&envelope.event);
+            #[cfg(target_os = "linux")]
+            if self.events.receiver_count() == 0 {
+                if let (Some(delivery), Some(notice)) =
+                    (&mut self.desktop_notifications, &notification)
+                {
+                    delivery.show(envelope.seq.0, envelope.id.to_string(), notice.clone());
+                }
+            }
             let _ = self.events.send(ServerMessage::Event {
-                notification: orgbot_engine::notification_for(&envelope.event),
+                notification,
                 envelope: Box::new(envelope),
             });
         }
@@ -1199,7 +1228,18 @@ fn touches_the_board(event: &orgbot_proto::event::Event) -> bool {
             | Event::DecisionAnswered { .. }
             | Event::ReviewRecorded { .. }
             | Event::ArtifactAdded { .. }
+            | Event::UsageRecorded { .. }
     )
+}
+
+#[test]
+fn usage_updates_the_live_room_digest_without_a_task_transition() {
+    assert!(touches_the_board(
+        &orgbot_proto::event::Event::UsageRecorded {
+            agent: orgbot_proto::AgentId::new(),
+            usage: orgbot_proto::spend::TokenUsage::missing(),
+        }
+    ));
 }
 
 /// Tags direct attention; the room transcript remains visible to everyone.

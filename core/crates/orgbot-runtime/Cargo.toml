@@ -23,6 +23,7 @@ reqwest.workspace = true
 toml.workspace = true
 fs2 = "0.4"
 libc = "0.2"
+sha2.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

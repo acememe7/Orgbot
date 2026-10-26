@@ -176,7 +176,11 @@ class _ObjectivesPaneState extends State<ObjectivesPane> {
               _UtilizationStrip(utilization: digest.utilization),
               if (digest.spend.isNotEmpty) ...[
                 const SizedBox(height: 14),
-                _SpendStrip(spend: digest.spend),
+                _SpendStrip(
+                  spend: digest.spend,
+                  agents: digest.agentSpend,
+                  total: digest.totalSpend,
+                ),
               ],
               if (digest.health.coordinationExpansion) ...[
                 const SizedBox(height: 16),
@@ -1172,12 +1176,19 @@ class _CriticalPath extends StatelessWidget {
 /// roster mostly on one subscription draws on one allowance, and drawing on
 /// it four times faster is not visible anywhere until the allowance is gone.
 class _SpendStrip extends StatelessWidget {
-  const _SpendStrip({required this.spend});
+  const _SpendStrip({
+    required this.spend,
+    required this.agents,
+    required this.total,
+  });
 
   final List<AccountSpend> spend;
+  final List<AgentSpend> agents;
+  final RoomSpend total;
 
   /// Group digits: a seven-figure token count is unreadable otherwise.
   static String _grouped(int value) {
+    if (value >= 0xffffffff) return '≥4,294,967,295';
     final digits = value.toString();
     final out = StringBuffer();
     for (var i = 0; i < digits.length; i++) {
@@ -1185,6 +1196,35 @@ class _SpendStrip extends StatelessWidget {
       out.write(digits[i]);
     }
     return out.toString();
+  }
+
+  static String _money(int microusd) =>
+      '\$${(microusd / 1000000).toStringAsFixed(4)}';
+
+  static String _tokens({
+    required bool known,
+    required int input,
+    required int output,
+    required int read,
+    required int write,
+  }) => known
+      ? '${_grouped(input)} in · ${_grouped(output)} out · ${_grouped(read)} cache read · ${_grouped(write)} cache write'
+      : 'usage unknown';
+
+  static String _metering({required bool known, required bool complete}) =>
+      !known
+      ? 'usage unknown'
+      : complete
+      ? 'metered'
+      : 'partial usage';
+
+  static String _cost(int? actual, int? equivalent) {
+    if (actual != null && equivalent != null) {
+      return 'API ${_money(actual)} · equivalent ${_money(equivalent)}';
+    }
+    if (actual != null) return 'API ${_money(actual)}';
+    if (equivalent != null) return 'API equivalent ${_money(equivalent)}';
+    return 'cost unknown';
   }
 
   @override
@@ -1203,38 +1243,191 @@ class _SpendStrip extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 6),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Room · ${_grouped(total.turns)} turns',
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Text(
+                _tokens(
+                  known:
+                      total.usageKnown ||
+                      total.inputTokens +
+                              total.outputTokens +
+                              total.cacheReadTokens +
+                              total.cacheWriteTokens >
+                          0,
+                  input: total.inputTokens,
+                  output: total.outputTokens,
+                  read: total.cacheReadTokens,
+                  write: total.cacheWriteTokens,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+              ),
+              Text(
+                _metering(
+                  known:
+                      total.usageKnown ||
+                      total.inputTokens +
+                              total.outputTokens +
+                              total.cacheReadTokens +
+                              total.cacheWriteTokens >
+                          0,
+                  complete: total.usageComplete,
+                ),
+                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+              ),
+              Text(
+                _cost(
+                  total.actualApiCostMicrousd,
+                  total.apiEquivalentCostMicrousd,
+                ),
+                style: const TextStyle(fontSize: 12),
+              ),
+            ],
+          ),
+        ),
         for (final account in spend)
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 2),
-            child: Row(
+            padding: const EdgeInsets.only(top: 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: Text(
-                    account.backend,
-                    style: const TextStyle(fontSize: 12),
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        account.backend,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Text(
+                      '${_grouped(account.turns)} turns',
+                      style: TextStyle(color: scheme.onSurfaceVariant),
+                    ),
+                  ],
                 ),
                 Text(
-                  '${account.turns} turns',
+                  _tokens(
+                    known:
+                        account.usageKnown ||
+                        account.inputTokens +
+                                account.outputTokens +
+                                account.cacheReadTokens +
+                                account.cacheWriteTokens >
+                            0,
+                    input: account.inputTokens,
+                    output: account.outputTokens,
+                    read: account.cacheReadTokens,
+                    write: account.cacheWriteTokens,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 12,
                     color: scheme.onSurfaceVariant,
                   ),
                 ),
-                const SizedBox(width: 10),
                 Text(
-                  // Zero is "this backend does not report usage", not "free".
-                  account.isMetered
-                      ? '${_grouped(account.tokens)} tokens'
-                      : 'not metered',
+                  _metering(
+                    known:
+                        account.usageKnown ||
+                        account.inputTokens +
+                                account.outputTokens +
+                                account.cacheReadTokens +
+                                account.cacheWriteTokens >
+                            0,
+                    complete: account.usageComplete,
+                  ),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+                Text(
+                  _cost(
+                    account.actualApiCostMicrousd,
+                    account.apiEquivalentCostMicrousd,
+                  ),
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+        if (agents.isNotEmpty) const SizedBox(height: 6),
+        for (final agent in agents)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        agent.handle,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                    Text(
+                      '${_grouped(agent.turns)} turns',
+                      style: TextStyle(color: scheme.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+                Text(
+                  _tokens(
+                    known:
+                        agent.usageKnown ||
+                        agent.inputTokens +
+                                agent.outputTokens +
+                                agent.cacheReadTokens +
+                                agent.cacheWriteTokens >
+                            0,
+                    input: agent.inputTokens,
+                    output: agent.outputTokens,
+                    read: agent.cacheReadTokens,
+                    write: agent.cacheWriteTokens,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: account.isMetered
-                        ? scheme.onSurface
-                        : scheme.onSurfaceVariant,
+                    color: scheme.onSurfaceVariant,
                   ),
+                ),
+                Text(
+                  _metering(
+                    known:
+                        agent.usageKnown ||
+                        agent.inputTokens +
+                                agent.outputTokens +
+                                agent.cacheReadTokens +
+                                agent.cacheWriteTokens >
+                            0,
+                    complete: agent.usageComplete,
+                  ),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+                Text(
+                  _cost(
+                    agent.actualApiCostMicrousd,
+                    agent.apiEquivalentCostMicrousd,
+                  ),
+                  style: const TextStyle(fontSize: 12),
                 ),
               ],
             ),

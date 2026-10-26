@@ -9,8 +9,8 @@ Runs on Linux and Android. Bots can be backed by Claude (Anthropic), DeepSeek,
 or any OpenAI-compatible endpoint — including a Codex/ChatGPT sign-in — and a
 single room can mix providers. A bot can also be a full agent session on this
 machine — the Codex CLI, Claude Code, or Grok CLI — so it brings that CLI's own
-sign-in, memories, skills, and MCP servers into the room and works a real
-project folder.
+sign-in, memories and skills into the room and works a real project folder.
+Linux external MCP calls pass through the room's one-use owner approvals.
 
 ## Why it holds together
 
@@ -31,7 +31,17 @@ The design puts every coordination rule in one tested place:
 - **Rework is bounded.** A worker and an inspector who never agree fail the task
   on a revision budget instead of looping until the room's turn budget is gone.
 
-The engine records coordination events and serves snapshots with replay for reconnecting clients. Flutter saves each run as a local, read-only transcript, available under **Room options → Saved run history**. A crash does not automatically restart models or repeat computer operations. The CLI and Tauri session state remains in memory; engine-state restoration is not implemented.
+The engine records coordination events and serves snapshots with replay for reconnecting clients. Flutter saves each run under **Room options → Saved run history**. Linux room services retain checkpoints, agent memory and CLI session identity across restarts; paused rooms stay paused, and interrupted operations are not blindly replayed. The separate Tauri shell is not the supported Linux delivery target.
+
+Linux 2.0 adds protected per-agent working copies with conflict checks, explicit
+file-removal approval and HDD retention, opt-in sandboxed API commands, background
+service notifications, and portable room/project backups restored paused.
+Room usage shows input, output and cache tokens per agent and in total. API cost
+estimates and subscription API equivalents stay separate; missing usage or prices
+remain unknown. See [workspace boundaries](docs/WORKSPACE_SAFETY.md),
+[acceptance coverage](scripts/LINUX_ACCEPTANCE.md) and the
+[repeatable benchmark](scripts/benchmarks/README.md). Fixture benchmarks do not
+establish real subscription savings.
 
 ## Layout
 
@@ -115,6 +125,8 @@ adb install --user 0 --no-streaming -r build/app/outputs/flutter-apk/app-debug.a
 Gradle builds and copies the current Rust engine before packaging, and checks the required workspace ABI symbol. Set `ANDROID_NDK_HOME` if NDK discovery needs an override. Android requires API 24+. Release APK/AAB builds require your own `app/android/key.properties` (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`); production builds cannot silently use the debug signing key. Keep that file and the keystore private.
 
 Linux still uses the local `orgbot` executable and installed model CLIs. Install the Flutter desktop prerequisites and `libsecret-1-dev` (Ubuntu/Debian) for secure storage. Build the engine and set `ORGBOT_ENGINE` when its path is not automatically found.
+
+Linux package builds and the signed third-party APT repository setup are in the [APT distribution guide](docs/apt-distribution.md). After the one-time repository/key setup, install with `sudo apt install orgbots`.
 
 ### Credentials
 

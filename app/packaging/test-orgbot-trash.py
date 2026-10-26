@@ -57,6 +57,15 @@ class TrashTests(unittest.TestCase):
             trash._reject_overlap(trash.TRASH_ROOT / "child", trash.TRASH_ROOT)
         self.assertEqual(target.read_text(encoding="utf-8"), "keep")
 
+    def test_expected_sha256_rejects_replaced_source_before_removal(self):
+        source = self.sources / "reviewed.txt"
+        source.write_text("owner replacement", encoding="utf-8")
+        reviewed = trash.hashlib.sha256(b"agent reviewed bytes").hexdigest()
+        with self.assertRaisesRegex(trash.TrashError, "does not match the reviewed SHA-256"):
+            trash.move(self.root, "Demo", source, expected_sha256=reviewed)
+        self.assertEqual(source.read_text(encoding="utf-8"), "owner replacement")
+        self.assertEqual(trash.list_entries(self.root), [])
+
     def test_production_root_fails_closed_when_hdd_is_unmounted(self):
         with patch.object(trash.os.path, "ismount", return_value=False):
             with self.assertRaisesRegex(trash.TrashError, "unavailable"):

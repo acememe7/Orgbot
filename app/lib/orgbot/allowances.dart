@@ -11,6 +11,9 @@ class ProviderAllowance {
     this.costMicrousd = 0,
     this.inputPrice = 0,
     this.outputPrice = 0,
+    this.cacheReadPrice,
+    this.cacheWritePrice,
+    this.modelRates = const {},
     this.outputTokens = 16000,
     this.enabled = true,
   });
@@ -21,6 +24,8 @@ class ProviderAllowance {
       inputPrice,
       outputPrice,
       outputTokens;
+  final int? cacheReadPrice, cacheWritePrice;
+  final Map<String, ModelTokenRates> modelRates;
   final bool enabled;
 
   factory ProviderAllowance.fromJson(Map<String, dynamic> value) {
@@ -40,6 +45,13 @@ class ProviderAllowance {
       costMicrousd: read('max_cost_microusd'),
       inputPrice: read('input_microusd_per_million'),
       outputPrice: read('output_microusd_per_million'),
+      cacheReadPrice: value['cache_read_microusd_per_million'] == null
+          ? null
+          : read('cache_read_microusd_per_million'),
+      cacheWritePrice: value['cache_write_microusd_per_million'] == null
+          ? null
+          : read('cache_write_microusd_per_million'),
+      modelRates: _readModelRates(value['model_rates']),
       outputTokens: read('max_output_tokens', 16000),
       enabled: value['enabled'] != false,
     );
@@ -58,13 +70,23 @@ class ProviderAllowance {
           costMicrousd,
           inputPrice,
           outputPrice,
+          cacheReadPrice ?? 0,
+          cacheWritePrice ?? 0,
         ].any((v) => v < 0 || v > 9007199254740991)) {
       throw const FormatException('Invalid spending limit');
     }
-    if (costMicrousd > 0 && (inputPrice == 0 || outputPrice == 0)) {
+    if (costMicrousd > 0 &&
+        modelRates.isEmpty &&
+        (inputPrice == 0 || outputPrice == 0)) {
       throw const FormatException(
         'Enter both token prices before setting a money limit',
       );
+    }
+    for (final entry in modelRates.entries) {
+      if (entry.key.trim().isEmpty ||
+          entry.value.values.any((v) => v < 0 || v > 9007199254740991)) {
+        throw const FormatException('Invalid model token rates');
+      }
     }
   }
 
@@ -75,8 +97,60 @@ class ProviderAllowance {
     'max_cost_microusd': costMicrousd,
     'input_microusd_per_million': inputPrice,
     'output_microusd_per_million': outputPrice,
+    'cache_read_microusd_per_million': ?cacheReadPrice,
+    'cache_write_microusd_per_million': ?cacheWritePrice,
+    if (modelRates.isNotEmpty)
+      'model_rates': modelRates.map(
+        (key, value) => MapEntry(key, value.toJson()),
+      ),
     'max_output_tokens': outputTokens,
     'enabled': enabled,
+  };
+
+  static Map<String, ModelTokenRates> _readModelRates(Object? raw) {
+    if (raw == null) return const {};
+    if (raw is! Map<String, dynamic>) {
+      throw const FormatException('Invalid model rates');
+    }
+    return raw.map((model, value) {
+      if (value is! Map<String, dynamic>) {
+        throw const FormatException('Invalid model rate');
+      }
+      return MapEntry(model, ModelTokenRates.fromJson(value));
+    });
+  }
+}
+
+class ModelTokenRates {
+  const ModelTokenRates(
+    this.input,
+    this.output,
+    this.cacheRead,
+    this.cacheWrite,
+  );
+  final int input, output, cacheRead, cacheWrite;
+  List<int> get values => [input, output, cacheRead, cacheWrite];
+  factory ModelTokenRates.fromJson(Map<String, dynamic> json) {
+    int rate(String key) {
+      final value = json[key];
+      if (value is! int || value < 0 || value > 9007199254740991) {
+        throw FormatException('Invalid model rate: $key');
+      }
+      return value;
+    }
+
+    return ModelTokenRates(
+      rate('input_microusd_per_million'),
+      rate('output_microusd_per_million'),
+      rate('cache_read_microusd_per_million'),
+      rate('cache_write_microusd_per_million'),
+    );
+  }
+  Map<String, int> toJson() => {
+    'input_microusd_per_million': input,
+    'output_microusd_per_million': output,
+    'cache_read_microusd_per_million': cacheRead,
+    'cache_write_microusd_per_million': cacheWrite,
   };
 }
 

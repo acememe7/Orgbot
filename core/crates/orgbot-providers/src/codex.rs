@@ -470,14 +470,24 @@ impl StreamState {
     fn take_usage(&mut self, usage: Option<&Value>) {
         let Some(usage) = usage else { return };
         let number = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or_default() as u32;
+        let cached = usage
+            .pointer("/input_tokens_details/cached_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as u32;
         self.usage = Usage {
-            input_tokens: number("input_tokens"),
+            reported: ["input_tokens", "output_tokens"]
+                .iter()
+                .any(|key| usage.get(*key).and_then(Value::as_u64).is_some())
+                || cached > 0,
+            complete: usage.get("input_tokens").and_then(Value::as_u64).is_some()
+                && usage.get("output_tokens").and_then(Value::as_u64).is_some(),
+            calls: 1,
+            // OpenAI-compatible input_tokens includes cached tokens.
+            input_tokens: number("input_tokens").saturating_sub(cached),
             output_tokens: number("output_tokens"),
-            cache_read_tokens: usage
-                .pointer("/input_tokens_details/cached_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or_default() as u32,
+            cache_read_tokens: cached,
             cache_write_tokens: 0,
+            ..Usage::default()
         };
     }
 
@@ -506,7 +516,11 @@ impl StreamState {
                 // rather than presenting a truncated turn as finished.
                 StopReason::Other("stream ended without response.completed".into())
             },
-            usage: self.usage,
+            usage: if self.usage.calls == 0 {
+                Usage::missing()
+            } else {
+                self.usage
+            },
         }
     }
 }
@@ -692,8 +706,9 @@ mod tests {
         let response = state.finish();
         assert_eq!(response.model, "gpt-5.6-sol");
         assert_eq!(response.stop_reason, StopReason::ToolUse);
-        assert_eq!(response.usage.input_tokens, 10);
+        assert_eq!(response.usage.input_tokens, 6);
         assert_eq!(response.usage.cache_read_tokens, 4);
+        assert_eq!(response.usage.total_input(), 10);
         assert!(matches!(
             &response.content[0],
             ContentBlock::Text { text } if text == "on it"

@@ -61,7 +61,14 @@ fn room() -> Room {
     let lead = AgentSpec::new("lead", "Lead", provider())
         .with_roles(["coordinator"])
         .with_autonomy(Autonomy::coordinator());
-    let a = AgentSpec::new("a", "Worker A", provider()).with_roles(["writer"]);
+    let a = AgentSpec::new(
+        "a",
+        "Worker A",
+        ProviderRef::DeepSeek {
+            model: "deepseek-chat".into(),
+        },
+    )
+    .with_roles(["writer"]);
     let b = AgentSpec::new("b", "Worker B", provider()).with_roles(["writer"]);
     let qa = AgentSpec::new("qa", "Inspector", provider())
         .with_roles(["reviewer"])
@@ -279,7 +286,9 @@ fn review_only_artifacts_and_submission_require_assigned_review_work() {
             task: ordinary,
             author: r.qa,
             name: "report.md".into(),
-            body: ArtifactBody::Text { text: "report".into() },
+            body: ArtifactBody::Text {
+                text: "report".into()
+            },
             authority_bearing: false,
         }),
         Err(EngineError::NotPermitted { .. })
@@ -293,14 +302,22 @@ fn review_only_artifacts_and_submission_require_assigned_review_work() {
             ..TaskOrigin::plain()
         },
     );
-    r.apply(Command::ClaimTask { task: review, by: r.qa });
-    r.apply(Command::StartTask { task: review, by: r.qa });
+    r.apply(Command::ClaimTask {
+        task: review,
+        by: r.qa,
+    });
+    r.apply(Command::StartTask {
+        task: review,
+        by: r.qa,
+    });
     let artifact = r
         .apply(Command::AddArtifact {
             task: review,
             author: r.qa,
             name: "review.md".into(),
-            body: ArtifactBody::Text { text: "findings".into() },
+            body: ArtifactBody::Text {
+                text: "findings".into(),
+            },
             authority_bearing: false,
         })
         .iter()
@@ -1098,10 +1115,14 @@ fn a_room_counts_what_it_draws_and_from_which_account() {
 
     let mut r = room();
     let cost = |input: u32, output: u32| TokenUsage {
+        reported: true,
+        complete: true,
+        calls: 1,
         input_tokens: input,
         output_tokens: output,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        ..TokenUsage::default()
     };
 
     // Two bots on one account, one on another.
@@ -1184,6 +1205,90 @@ fn an_unmetered_backend_is_counted_but_not_presented_as_free() {
         spend.usage.is_empty(),
         "and its cost is unknown, which is not the same as zero"
     );
+}
+
+#[test]
+fn usage_events_restore_per_agent_and_room_totals() {
+    let mut r = room();
+    let usage = orgbot_proto::spend::TokenUsage {
+        reported: true,
+        complete: true,
+        calls: 1,
+        input_tokens: 11,
+        output_tokens: 5,
+        cache_read_tokens: 7,
+        cache_write_tokens: 2,
+        actual_api_cost_microusd: Some(31),
+        api_equivalent_cost_microusd: Some(31),
+    };
+    let events = r.apply(Command::RecordTurn { agent: r.a, usage });
+    assert!(events
+        .iter()
+        .any(|event| matches!(event.event, orgbot_proto::Event::UsageRecorded { .. })));
+    let restored = Engine::from_archive(r.engine.room().clone(), r.engine.log().to_vec()).unwrap();
+    assert_eq!(restored.spend_of(r.a).usage, usage);
+    assert_eq!(restored.digest().total_spend.cache_write_tokens, 2);
+    assert_eq!(
+        restored
+            .digest()
+            .agent_spend
+            .iter()
+            .find(|spend| spend.handle == "a")
+            .unwrap()
+            .actual_api_cost_microusd,
+        Some(31)
+    );
+    assert!(
+        restored
+            .digest()
+            .agent_spend
+            .iter()
+            .find(|spend| spend.handle == "a")
+            .unwrap()
+            .usage_complete
+    );
+}
+
+#[test]
+fn partial_agent_usage_keeps_known_tokens_and_marks_the_gap() {
+    use orgbot_proto::spend::TokenUsage;
+
+    let mut r = room();
+    r.apply(Command::RecordTurn {
+        agent: r.a,
+        usage: TokenUsage {
+            reported: true,
+            complete: true,
+            calls: 1,
+            input_tokens: 11,
+            output_tokens: 5,
+            cache_read_tokens: 7,
+            cache_write_tokens: 2,
+            ..TokenUsage::default()
+        },
+    });
+    r.apply(Command::RecordTurn {
+        agent: r.a,
+        usage: TokenUsage::missing(),
+    });
+
+    let spend = r
+        .engine
+        .digest()
+        .agent_spend
+        .into_iter()
+        .find(|spend| spend.handle == "a")
+        .unwrap();
+    assert_eq!(spend.turns, 2);
+    assert_eq!(spend.input_tokens, 11);
+    assert_eq!(spend.output_tokens, 5);
+    assert_eq!(spend.cache_read_tokens, 7);
+    assert_eq!(spend.cache_write_tokens, 2);
+    assert!(
+        spend.usage_known,
+        "the first complete report still contributes known tokens"
+    );
+    assert!(!spend.usage_complete);
 }
 
 /// A leftover claim on unheld work is cleared, not just prevented.

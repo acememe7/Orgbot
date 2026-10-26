@@ -6,6 +6,7 @@
 
 import 'dart:convert';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:orgbot_app/orgbot/attention.dart';
@@ -26,6 +27,50 @@ Map<String, Object?> event({
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test('desktop activation registers before announcing readiness', () async {
+    final calls = <MethodCall>[];
+    const channel = MethodChannel('orgbot/activation');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call);
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null),
+    );
+
+    final attentions = Attentions();
+    final payload = jsonEncode({
+      'room_id': 'cold_room',
+      'event_id': 'cold_event',
+      'reason': 'decision',
+    });
+    attentions.listenForDesktopActivation(['--orgbot-attention', payload]);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(attentions.takePendingRoute()?.roomId, 'cold_room');
+    expect(calls.map((call) => call.method), ['activation_ready']);
+  });
+
+  test('a service notification routes before and after the window opens', () {
+    final attentions = Attentions();
+    final payload = jsonEncode({
+      'room_id': 'room_1',
+      'event_id': 'event_2',
+      'reason': 'decision',
+    });
+    attentions.openPayload(payload);
+    expect(attentions.takePendingRoute()?.roomId, 'room_1');
+    AttentionTarget? routed;
+    attentions.onRouteRequested = (target) => routed = target;
+    attentions.openPayload(payload);
+    expect(routed?.eventId, 'event_2');
+    expect(routed?.reason, Attention.decision);
+    routed = null;
+    attentions.openPayload('{broken');
+    expect(routed, isNull);
+  });
   group('what gets through', () {
     test('an event with no notification tells nobody', () async {
       final attentions = Attentions();
