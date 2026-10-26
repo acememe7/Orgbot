@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import importlib.util
 import json
@@ -360,7 +361,8 @@ Path('/tmp/private.txt').write_text('temporary')
         private_home = self.state / "agents" / workspace._project_id(self.project) / "dev" / "profiles" / "home"
         profile = private_home / ".codex"
         mount = f"/run/user/{os.getuid()}/orgbot-home"
-        code = f"from pathlib import Path; import os; assert os.getcwd() == '/tmp/orgbot-workspace'; assert os.environ['HOME'] == {mount!r}; assert os.environ['CODEX_HOME'] == {mount + '/.codex'!r}; assert os.environ['CLAUDE_CONFIG_DIR'] == {mount + '/.claude'!r}; assert os.environ['GROK_HOME'] == {mount + '/.grok'!r}; Path.home().joinpath('.codex/session').write_text('saved'); Path('cwd-check').write_text('yes')"
+        resolver_hash = hashlib.sha256(Path("/etc/resolv.conf").read_bytes()).hexdigest()
+        code = f"from pathlib import Path; import hashlib, os; assert os.getcwd() == '/tmp/orgbot-workspace'; resolver = Path('/etc/resolv.conf'); assert hashlib.sha256(resolver.read_bytes()).hexdigest() == {resolver_hash!r};\ntry: resolver.write_bytes(b'blocked'); raise SystemExit(5)\nexcept OSError: pass\nassert os.environ['HOME'] == {mount!r}; assert os.environ['CODEX_HOME'] == {mount + '/.codex'!r}; assert os.environ['CLAUDE_CONFIG_DIR'] == {mount + '/.claude'!r}; assert os.environ['GROK_HOME'] == {mount + '/.grok'!r}; Path.home().joinpath('.codex/session').write_text('saved'); Path('cwd-check').write_text('yes')"
         result = workspace._run(os.fspath(self.state), "dev", [sys.executable, "-c", code], read_only=False, profiles=[f"codex={profile}"], private_home_arg=os.fspath(private_home), mcp_socket=None)
         self.assertEqual(result, 0)
         self.assertEqual((profile / "session").read_text(encoding="utf-8"), "saved")

@@ -1,7 +1,10 @@
 # Paired code-work benchmark
 
 `run.py` gives the same isolated project fixture to a baseline adapter and a team
-adapter for repeated, alternating trials. The included fixtures are concrete
+adapter for repeated, alternating trials. Each run is retained under
+`<output>/runs/<variant>-trial-<n>-<case>` with its workspace, room config,
+checkpoint, and stdout/stderr logs. Reports are rewritten after each run; a
+failed run is recorded and stops the benchmark. The included fixtures are concrete
 code work: normalizing provider cache-token dialects and implementing a
 persistent task store. Their acceptance comes from Python test commands run
 against each adapter's resulting files in a fresh temporary workspace. Adapter
@@ -32,8 +35,8 @@ usage separate from hypothetical API-equivalent cost.
 
 Copy or review `orgbot-room-template.toml`, then configure both adapters with
 the exact same provider configuration and separate baseline/team room policies.
-The `--provider-toml` value is an inline TOML `ProviderRef` table. For a local
-smoke-test provider, use `{ provider = "scripted", script = "..." }`; for an
+The `--provider-toml` value is an inline TOML `ProviderConfig` table tagged by
+`kind`. For a local smoke-test provider, use `{ kind = "scripted", script = "..." }`; for an
 installed agent CLI, provide its CLI kind, model, workdir, and policy. The
 placeholder `{{WORKSPACE}}` must not be surrounded by quotes because the
 adapter inserts a TOML-quoted path. Remote providers (including agent CLIs) are
@@ -43,7 +46,7 @@ checks.
 
 For a multi-agent comparison, use
 `orgbot-team-room-template.toml`. It defines a Codex coordinator, Claude CLI
-frontend worker, and DeepSeek API backend. Supply full valid `ProviderRef`
+frontend worker, and DeepSeek API backend. Supply full valid `ProviderConfig`
 tables through repeatable `--template-value NAME=VALUE` arguments. The owner
 can change agent count, model IDs, role descriptions, and provider settings in
 a copied template; there is no adapter-imposed fixed team configuration.
@@ -52,8 +55,8 @@ Example shape (substitute the reviewed template and provider settings):
 
 ```sh
 python3 scripts/benchmarks/run.py \
-  --baseline-cmd 'python3 scripts/benchmarks/orgbot_adapter.py --config-template scripts/benchmarks/orgbot-room-template.toml --provider-toml '\''{ provider = "cli_agent", cli = "codex", model = "gpt-5.4", workdir={{WORKSPACE}}, policy = "workspace_write" }'\''' \
-  --team-cmd 'python3 scripts/benchmarks/orgbot_adapter.py --config-template scripts/benchmarks/orgbot-room-template.toml --provider-toml '\''{ provider = "cli_agent", cli = "codex", model = "gpt-5.4", workdir={{WORKSPACE}}, policy = "workspace_write" }'\''' \
+  --baseline-cmd 'python3 scripts/benchmarks/orgbot_adapter.py --config-template scripts/benchmarks/orgbot-room-template.toml --provider-toml '\''{ kind = "cli_agent", cli = "codex", model = "MODEL_ID", workdir={{WORKSPACE}}, policy = "workspace_write" }'\''' \
+  --team-cmd 'python3 scripts/benchmarks/orgbot_adapter.py --config-template scripts/benchmarks/orgbot-room-template.toml --provider-toml '\''{ kind = "cli_agent", cli = "codex", model = "MODEL_ID", workdir={{WORKSPACE}}, policy = "workspace_write" }'\''' \
   --trials 5 --mode paid --allow-paid --output benchmark-report
 ```
 
@@ -69,3 +72,7 @@ independent acceptance, usage completeness, actual API estimate,
 API-equivalent estimate, and human intervention count when persisted in the
 engine log. Compare accepted work alongside cost; do not infer savings from
 synthetic runs or from unaccepted outputs.
+
+The [Astra/Sol/DeepSeek live pilot](../../docs/benchmarks/2026-10-26-astra-sol-deepseek.md)
+records actual usage and workflow failures. It did not produce a completed
+comparison and provides no savings claim.

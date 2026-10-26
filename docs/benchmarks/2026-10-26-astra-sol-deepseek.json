@@ -1,0 +1,248 @@
+{
+  "date": "2026-10-26",
+  "status": "failed_pilot_no_comparable_pair",
+  "completed_pairs": 0,
+  "source_base_commit": "e523c7f6b4a89008bd1c87c91ab4bebfd1e6876f",
+  "retry_binary_sha256": "75e050da57d29d8f48a7620cba1eeaa918a41a0ba1f2048baae67eeedd67dd23",
+  "codex_cli_version": "0.164.0",
+  "experiment": "scripts/benchmarks/experiments/astra-sol-deepseek",
+  "token_fields_are_disjoint": true,
+  "all_attempts_metered": false,
+  "attempts": [
+    {
+      "attempt": "trial-1",
+      "variant": "baseline",
+      "room_phase": "running",
+      "accepted": false,
+      "latency_ms": 931.947,
+      "agent_errors": 1,
+      "all_attempts_metered": false,
+      "observed_usage": null,
+      "agent_usage": [],
+      "independent_suite_passed": false,
+      "task_states": [
+        {
+          "title": "usage-dialect-normalizer",
+          "state": "ready"
+        },
+        {
+          "title": "persistent-task-store",
+          "state": "ready"
+        }
+      ],
+      "blockers": [
+        "CLI profile file exceeded the previous per-file copy cap."
+      ]
+    },
+    {
+      "attempt": "trial-1",
+      "variant": "team",
+      "room_phase": "running",
+      "accepted": false,
+      "latency_ms": 36279.375,
+      "agent_errors": 2,
+      "all_attempts_metered": false,
+      "observed_usage": {
+        "input_tokens": 18082,
+        "output_tokens": 5020,
+        "cache_read_tokens": 115712,
+        "cache_write_tokens": 0
+      },
+      "agent_usage": [
+        {
+          "handle": "devon",
+          "provider": "deep_seek",
+          "model": "deepseek-flash",
+          "billing_kind": "api",
+          "calls": 15,
+          "usage_reported": true,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 18082,
+            "output_tokens": 5020,
+            "cache_read_tokens": 115712,
+            "cache_write_tokens": 0
+          },
+          "actual_api_cost_microusd": 6080
+        }
+      ],
+      "independent_suite_passed": false,
+      "task_states": [
+        {
+          "title": "usage-dialect-normalizer",
+          "state": "ready"
+        },
+        {
+          "title": "persistent-task-store",
+          "state": "in_review"
+        }
+      ],
+      "blockers": [
+        "Codex CLI profile copies exceeded the previous per-file copy cap; DeepSeek task reached review."
+      ]
+    },
+    {
+      "attempt": "trial-2",
+      "variant": "baseline",
+      "room_phase": "running",
+      "accepted": false,
+      "latency_ms": 234176.563,
+      "agent_errors": 1,
+      "all_attempts_metered": false,
+      "observed_usage": null,
+      "agent_usage": [],
+      "independent_suite_passed": false,
+      "task_states": [
+        {
+          "title": "persistent-task-store",
+          "state": "ready"
+        },
+        {
+          "title": "usage-dialect-normalizer",
+          "state": "ready"
+        }
+      ],
+      "blockers": [
+        "Protected CLI failed DNS/routing discovery."
+      ]
+    },
+    {
+      "attempt": "trial-3",
+      "variant": "baseline",
+      "room_phase": "running",
+      "accepted": false,
+      "latency_ms": 383849.588,
+      "agent_errors": 1,
+      "all_attempts_metered": false,
+      "observed_usage": {
+        "input_tokens": 143190,
+        "output_tokens": 13970,
+        "cache_read_tokens": 1352192,
+        "cache_write_tokens": 0
+      },
+      "agent_usage": [
+        {
+          "handle": "sol",
+          "provider": "cli_agent",
+          "model": "gpt-6.1-sol",
+          "billing_kind": "subscription",
+          "calls": 1,
+          "usage_reported": true,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 66951,
+            "output_tokens": 8614,
+            "cache_read_tokens": 842624,
+            "cache_write_tokens": 0
+          },
+          "actual_api_cost_microusd": null
+        },
+        {
+          "handle": "astra",
+          "provider": "cli_agent",
+          "model": "gpt-6-astra",
+          "billing_kind": "subscription",
+          "calls": 1,
+          "usage_reported": true,
+          "usage_complete": true,
+          "usage": {
+            "input_tokens": 76239,
+            "output_tokens": 5356,
+            "cache_read_tokens": 509568,
+            "cache_write_tokens": 0
+          },
+          "actual_api_cost_microusd": null
+        }
+      ],
+      "independent_suite_passed": true,
+      "task_states": [
+        {
+          "title": "persistent-task-store",
+          "state": "ready"
+        },
+        {
+          "title": "usage-dialect-normalizer",
+          "state": "ready"
+        }
+      ],
+      "blockers": [
+        "Review-only agent cannot run the required combined tests.",
+        "Codex resume invocation rejected by the installed CLI parser."
+      ]
+    }
+  ],
+  "observed_task_attempt_usage": {
+    "input_tokens": 161272,
+    "output_tokens": 18990,
+    "cache_read_tokens": 1467904,
+    "cache_write_tokens": 0
+  },
+  "standalone_cli_diagnostics": [
+    {
+      "diagnostic": "codex-direct-diagnostic",
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "low",
+      "seconds": 10.65,
+      "usage": {
+        "input_tokens": 33602,
+        "output_tokens": 5,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0
+      }
+    },
+    {
+      "diagnostic": "codex-fixture-path-diagnostic",
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "low",
+      "seconds": 10.57,
+      "usage": {
+        "input_tokens": 33249,
+        "output_tokens": 5,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0
+      }
+    },
+    {
+      "diagnostic": "codex-private-profile-diagnostic",
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "low",
+      "seconds": 9.91,
+      "usage": {
+        "input_tokens": 26832,
+        "output_tokens": 5,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0
+      }
+    }
+  ],
+  "diagnostic_usage": {
+    "input_tokens": 93683,
+    "output_tokens": 15,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0
+  },
+  "observed_task_and_diagnostic_usage": {
+    "input_tokens": 254955,
+    "output_tokens": 19005,
+    "cache_read_tokens": 1467904,
+    "cache_write_tokens": 0
+  },
+  "deepseek_estimated_api_cost_microusd": 6080,
+  "deepseek_pricing": {
+    "source": "https://api-docs.deepseek.com/quick_start/pricing/",
+    "model": "deepseek-flash",
+    "period": "off_peak",
+    "input_usd_per_million": 0.15,
+    "output_usd_per_million": 0.6,
+    "cache_read_usd_per_million": 0.003,
+    "cost_rounding": "sum of per-request microusd estimates"
+  },
+  "limitations": [
+    "Recorded subtotals only; five engine-tracked CLI attempts did not emit usage.",
+    "Astra and Sol use the same Codex subscription; quota percentages and API-equivalent prices are unknown.",
+    "The three model rows come from different failed attempts and do not form an accepted comparison.",
+    "Native CLI episode counts are not counts of internal model requests.",
+    "This report excludes engineering conversation and subagent usage; those totals were not available.",
+    "The account balance endpoint exposes cents; exact invoice charges were not retrieved."
+  ]
+}

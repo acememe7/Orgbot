@@ -43,7 +43,8 @@ a signed GitHub Pages APT repository for `apt install orgbots`.
   installation; public Pages availability after publication.
 - [x] Secret scan, mandatory Astra final review and verified local commit.
 
-Real subscription benchmarks wait for the owner's Claude/Ollama/Grok accounts.
+The Astra/Sol/DeepSeek live pilot is recorded below. Broader subscription
+benchmarks still wait for the owner's Claude/Ollama/Grok accounts.
 Elapsed multi-day operation and physical suspend/reboot are separate evidence:
 accelerated clocks/process restarts cannot be reported as those checks.
 Live host suspension/reboot must not interrupt unrelated user work.
@@ -103,3 +104,23 @@ See `apt-distribution.md` for the one-time client setup and maintenance window.
 - [x] Existing Debian packaging fixture passes with the corrected license.
   No app build, host installation or paid-provider benchmark was performed for
   this documentation-only change; the published 2.0.0 package is unchanged.
+
+## Live Astra / Sol / DeepSeek pilot — 2026-10-26
+
+- [x] Use the saved DeepSeek key and existing Codex CLI login for isolated,
+  bounded live attempts. Retain raw evidence privately; commit sanitized usage.
+- [x] Correct CLI profile-copy limits/errors and restore protected DNS without
+  exposing the host runtime directory. Release engine build, three focused Rust
+  tests, 25 workspace helper tests and 18 benchmark harness tests pass.
+- [x] Preserve failed-run usage, require room completion and unchanged independent
+  acceptance tests, and count requests from usage events correctly.
+- [x] Record model usage, API estimate and separate CLI diagnostic consumption
+  in the [pilot report](benchmarks/2026-10-26-astra-sol-deepseek.md).
+- [ ] Complete an accepted baseline/team pair. The latest baseline code passed
+  six tests, but review-only command restrictions blocked combined reviewer
+  testing, and the next Codex resume invocation failed CLI argument parsing.
+  Those observed workflow blockers remain unresolved. No savings are claimed.
+
+The installed application, public package and website were not changed by this
+pilot. Earlier verification records above describe their original scoped runs;
+they do not supersede these live failures.

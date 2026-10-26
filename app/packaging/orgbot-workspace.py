@@ -813,6 +813,21 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
         args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--size", "1073741824", "--tmpfs", "/tmp", "--dir", "/tmp/orgbot-workspace", "--tmpfs", "/run", "--dir", "/run/user", "--dir", f"/run/user/{os.getuid()}", "--dir", private_home_mount, "--bind", os.fspath(supplied_home), private_home_mount]
         if not Path("/var/run").is_symlink():
             args.extend(["--tmpfs", "/var/run"])
+        resolver = Path("/etc/resolv.conf")
+        if resolver.is_symlink():
+            target = Path(os.path.abspath(os.path.join(resolver.parent, os.readlink(resolver))))
+            target = Path(os.path.realpath(target.parent)) / target.name
+            try:
+                relative_target = target.relative_to("/run")
+            except ValueError:
+                pass
+            else:
+                # /run is private in the sandbox, but its resolver file is needed for network access.
+                for depth in range(1, len(relative_target.parts)):
+                    parent = Path("/run").joinpath(*relative_target.parts[:depth])
+                    if parent not in (Path("/run/user"), Path(f"/run/user/{os.getuid()}")):
+                        args.extend(["--dir", os.fspath(parent)])
+                args.extend(["--ro-bind", os.fspath(resolver), os.fspath(target)])
         for profile, target in binds:
             args.extend(["--bind", os.fspath(profile), target])
         if not ro:

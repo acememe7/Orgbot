@@ -1,0 +1,47 @@
+[workspace]
+label = "Disposable benchmark project"
+root = {{WORKSPACE}}
+writable = true
+commands = true
+
+[room]
+name = {{TASK_TITLE}}
+goal = {{TASK}}
+completion = "all_tasks_terminal"
+state_path = {{STATE_PATH}}
+[room.limits]
+max_total_turns = 30
+max_duration_ms = 600000
+max_parallel_turns = 1
+max_consecutive_errors = 2
+handoff_timeout_ms = 120000
+
+[[bots]]
+handle = "astra"
+display_name = "Astra"
+roles = ["coordinator", "reviewer"]
+persona = "Coordinate and independently review the two seeded tasks. Do not implement code or create duplicate tasks. Assign work by the existing required roles. Wait for verification artifacts, inspect the implementation and run the combined tests with python3 -B -m unittest -v, approve only passing work, and submit approved tasks. Do not spawn agents outside this room. Keep replies concise."
+autonomy = { review_only = true, may_inspect = true, may_submit = true, may_create_tasks = false, max_turns_per_task = 10 }
+provider = { kind = "cli_agent", cli = "codex", model = "gpt-6-astra", workdir = {{WORKSPACE}}, policy = "read_only", mcp = true }
+
+[[bots]]
+handle = "sol"
+display_name = "Sol"
+roles = ["normalizer", "task_store"]
+persona = "Implement only the seeded task(s) matching your roles. Claim and start each task, edit its src module, run its tests, add artifacts with implementation and exact verification evidence, then submit_for_review. Tests are acceptance contracts; do not modify them. Do not spawn agents outside this room or duplicate Astra review. Keep replies concise."
+autonomy = { max_turns_per_task = 10 }
+provider = { kind = "cli_agent", cli = "codex", model = "gpt-6.1-sol", workdir = {{WORKSPACE}}, policy = "workspace_write", mcp = true }
+
+[[tasks]]
+title = "usage-dialect-normalizer"
+brief = "Repair src/usage_normalizer.py so OpenAI-compatible cached_tokens are split out of inclusive prompt_tokens, while Anthropic cache_read_input_tokens remain disjoint from input_tokens. Preserve output and cache-write totals. Use the fixtures in test_usage_normalizer.py as the acceptance contract. Keep the test files unchanged. Do not spawn agents outside this benchmark room."
+required_role = "normalizer"
+acceptance_criteria = ["Original tests pass without modification and reviewed code is integrated into the project."]
+open = true
+
+[[tasks]]
+title = "persistent-task-store"
+brief = "Implement src/task_store.py as a small file-backed task store. Support creating a task with a stable id, listing tasks, updating a task title, and deleting a task. Data must survive constructing a new TaskStore over the same path. Use only the Python standard library and pass test_task_store.py. Keep the test files unchanged. Do not spawn agents outside this benchmark room."
+required_role = "task_store"
+acceptance_criteria = ["Original tests pass without modification and reviewed code is integrated into the project."]
+open = true

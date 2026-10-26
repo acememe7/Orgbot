@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const PROFILE_MAX_ENTRIES: usize = 50_000;
-const PROFILE_MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const PROFILE_MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const PROFILE_MAX_TREE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -583,9 +583,10 @@ fn copy_file_if_missing(from: &Path, to: &Path, budget: &mut CopyBudget) -> Resu
     if !source_meta.is_file() || source_meta.file_type().is_symlink() {
         return Ok(());
     }
-    if source_meta.len() > PROFILE_MAX_FILE_BYTES
-        || budget.bytes.saturating_add(source_meta.len()) > PROFILE_MAX_TREE_BYTES
-    {
+    if source_meta.len() > PROFILE_MAX_FILE_BYTES {
+        return Err("CLI profile file exceeds the 512 MiB size limit".into());
+    }
+    if budget.bytes.saturating_add(source_meta.len()) > PROFILE_MAX_TREE_BYTES {
         return Err("CLI profile exceeds the 1 GiB size limit".into());
     }
     let mut source_options = std::fs::OpenOptions::new();
@@ -701,6 +702,47 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(source.join(".codex/auth.json")).unwrap(),
             "original-auth"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_copy_allows_large_plugin_file_but_keeps_file_and_tree_limits() {
+        let root = temp();
+        let source = root.join("source");
+        let copied = root.join("copied");
+        std::fs::create_dir_all(&source).unwrap();
+        let large_source = source.join("codex-plugin-runtime");
+        std::fs::File::create(&large_source)
+            .unwrap()
+            .set_len(256 * 1024 * 1024 + 1)
+            .unwrap();
+        let mut budget = CopyBudget::default();
+        copy_file_if_missing(&large_source, &copied, &mut budget).unwrap();
+        assert_eq!(
+            std::fs::metadata(&copied).unwrap().len(),
+            256 * 1024 * 1024 + 1
+        );
+        assert_eq!(budget.bytes, 256 * 1024 * 1024 + 1);
+
+        let oversized = source.join("oversized");
+        std::fs::File::create(&oversized)
+            .unwrap()
+            .set_len(PROFILE_MAX_FILE_BYTES + 1)
+            .unwrap();
+        assert_eq!(
+            copy_file_if_missing(&oversized, &root.join("oversized-copy"), &mut budget)
+                .unwrap_err(),
+            "CLI profile file exceeds the 512 MiB size limit"
+        );
+
+        let small = source.join("small");
+        std::fs::write(&small, b"x").unwrap();
+        budget.bytes = PROFILE_MAX_TREE_BYTES;
+        assert_eq!(
+            copy_file_if_missing(&small, &root.join("tree-overflow"), &mut budget).unwrap_err(),
+            "CLI profile exceeds the 1 GiB size limit"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

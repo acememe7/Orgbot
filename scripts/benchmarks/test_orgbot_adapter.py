@@ -15,9 +15,10 @@ def joined(agent, handle, provider):
     }}}
 
 
-def usage(agent, *, actual=None, equivalent=None, reported=True, complete=True, inputs=1):
+def usage(agent, *, actual=None, equivalent=None, reported=True, complete=True, inputs=1, calls=1):
     return {"event": {"event": "usage_recorded", "agent": agent, "usage": {
         "reported": reported, "complete": complete,
+        "calls": calls,
         "input_tokens": inputs if reported else 0, "output_tokens": 2 if reported else 0,
         "cache_read_tokens": 3 if reported else 0, "cache_write_tokens": 4 if reported else 0,
         "actual_api_cost_microusd": actual,
@@ -39,6 +40,8 @@ class OrgBotAdapterTests(unittest.TestCase):
         self.assertEqual(result["model"], "deepseek-chat")
         self.assertEqual(result["agent_usage"][0]["provider"], "deep_seek")
         self.assertEqual(result["agent_usage"][0]["billing_kind"], "api")
+        self.assertEqual(result["agent_usage"][0]["calls"], 1)
+        self.assertFalse(result["completion_accepted"])
 
     def test_missing_engine_call_marks_usage_unknown_and_incomplete(self):
         result = orgbot_adapter.read_engine_usage({"engine": {"log": [
@@ -60,6 +63,18 @@ class OrgBotAdapterTests(unittest.TestCase):
         self.assertEqual(result["usage"]["input_tokens"], 1)
         self.assertIsNone(result["actual_api_cost_microusd"])
         self.assertIsNone(result["api_equivalent_cost_microusd"])
+
+    def test_call_totals_sum_engine_calls_and_failed_tasks_reject_completion(self):
+        result = orgbot_adapter.read_engine_usage({"engine": {
+            "room": {"phase": "completed"},
+            "tasks": {"t1": {"state": "failed"}},
+            "log": [joined("api", "api", {"provider": "deep_seek", "model": "m"}),
+                    usage("api", calls=12), usage("api", calls=3)],
+        }})
+        self.assertEqual(result["agent_usage"][0]["calls"], 15)
+        self.assertEqual(result["provider_usage"][0]["calls"], 15)
+        self.assertEqual(result["failed_tasks"], 1)
+        self.assertFalse(result["completion_accepted"])
 
     def test_room_costs_group_by_provider_and_exclude_subscription_from_actual_api_spend(self):
         result = orgbot_adapter.read_engine_usage({"engine": {"log": [
@@ -94,7 +109,7 @@ class OrgBotAdapterTests(unittest.TestCase):
             orgbot_adapter.enforce_paid_gate(config, "recorded", "0")
         orgbot_adapter.enforce_paid_gate(config, "paid", "1")
         with self.assertRaisesRegex(ValueError, "require benchmark"):
-            orgbot_adapter.enforce_paid_gate({"bots": [{"provider": {"provider": "deep_seek"}}]}, "recorded", "0")
+            orgbot_adapter.enforce_paid_gate({"bots": [{"provider": {"kind": "deepseek"}}]}, "recorded", "0")
 
     def test_template_serializes_paths_once_and_supports_custom_team_values(self):
         template = 'workdir={{WORKSPACE}}\nstate={{STATE_PATH}}\nprovider={{PROVIDER_CONFIG}}\nname={{TASK_TITLE}}\ngoal={{TASK}}\nbackend={{BACKEND}}'
@@ -112,22 +127,22 @@ class OrgBotAdapterTests(unittest.TestCase):
         single = (root / "orgbot-room-template.toml").read_text(encoding="utf-8")
         config = tomllib.loads(orgbot_adapter.render_template(
             single, "Implement the fixture", Path("/tmp/project"), Path("/tmp/room.json"), "crud",
-            '{ provider = "scripted", script = "local" }',
+            '{ kind = "scripted", script = "local" }',
         ))
         self.assertEqual(config["room"]["state_path"], "/tmp/room.json")
         self.assertEqual(config["tasks"][0]["brief"], "Implement the fixture")
-        self.assertEqual(config["bots"][0]["provider"]["provider"], "scripted")
+        self.assertEqual(config["bots"][0]["provider"]["kind"], "scripted")
 
         team = (root / "orgbot-team-room-template.toml").read_text(encoding="utf-8")
         team_config = tomllib.loads(orgbot_adapter.render_template(
             team, "Implement the fixture", Path("/tmp/project"), Path("/tmp/room.json"), "crud",
             template_values={
-                "COORDINATOR_PROVIDER": '{ provider = "cli_agent", cli = "codex", model = "OWNER_MODEL", workdir = "/tmp/project", policy = "workspace_write" }',
-                "FRONTEND_PROVIDER": '{ provider = "cli_agent", cli = "claude", model = "OWNER_MODEL", workdir = "/tmp/project", policy = "workspace_write" }',
-                "BACKEND_PROVIDER": '{ provider = "deep_seek", model = "OWNER_MODEL" }',
+                "COORDINATOR_PROVIDER": '{ kind = "cli_agent", cli = "codex", model = "OWNER_MODEL", workdir = "/tmp/project", policy = "workspace_write" }',
+                "FRONTEND_PROVIDER": '{ kind = "cli_agent", cli = "claude", model = "OWNER_MODEL", workdir = "/tmp/project", policy = "workspace_write" }',
+                "BACKEND_PROVIDER": '{ kind = "deepseek", model = "OWNER_MODEL" }',
             },
         ))
-        self.assertEqual([bot["provider"]["provider"] for bot in team_config["bots"]], ["cli_agent", "cli_agent", "deep_seek"])
+        self.assertEqual([bot["provider"]["kind"] for bot in team_config["bots"]], ["cli_agent", "cli_agent", "deepseek"])
 
 
 if __name__ == "__main__":

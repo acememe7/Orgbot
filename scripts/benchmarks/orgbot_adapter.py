@@ -106,10 +106,11 @@ def read_engine_usage(checkpoint: dict[str, Any]) -> dict[str, Any]:
         })
         reported = any(item.get("reported") is True for item in items)
         complete = bool(items) and all(item.get("reported") is True and item.get("complete") is True for item in items)
+        calls = sum(_nonnegative_calls(item.get("calls", 1)) for item in items)
         row = {
             "agent": agent_id,
             **provider,
-            "calls": len(items),
+            "calls": calls,
             "usage_reported": reported,
             "usage_complete": complete,
             "usage": token_totals(items),
@@ -146,11 +147,20 @@ def read_engine_usage(checkpoint: dict[str, Any]) -> dict[str, Any]:
     providers_summary = []
     for (kind, model, billing), rows in sorted(provider_totals.items(), key=lambda item: (item[0][0], item[0][1] or "", item[0][2])):
         summary = {field: sum(row["usage"][field] for row in rows) for field in USAGE_FIELDS}
+        summary["calls"] = sum(row["calls"] for row in rows)
         summary.update({"provider": kind, "model": model, "billing_kind": billing, "agents": [row["handle"] for row in rows]})
         providers_summary.append(summary)
 
+    room_state = engine.get("room")
+    room_phase = room_state.get("phase") if isinstance(room_state, dict) else None
+    tasks = engine.get("tasks")
+    task_states = [task.get("state") for task in tasks.values() if isinstance(task, dict)] if isinstance(tasks, dict) else []
+    failed_tasks = sum(state == "failed" for state in task_states)
     return {
         "measurement_source": "orgbot_engine",
+        "room_phase": room_phase,
+        "failed_tasks": failed_tasks,
+        "completion_accepted": room_phase == "completed" and failed_tasks == 0,
         "billing_kind": billing_kind,
         "usage_reported": reported,
         "usage_complete": complete,
@@ -162,6 +172,12 @@ def read_engine_usage(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "provider_usage": providers_summary,
         "model": next(iter(model_ids)) if len(model_ids) == 1 else None,
     }
+
+
+def _nonnegative_calls(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("OrgBots usage event has invalid calls")
+    return value
 
 
 def render_template(
@@ -252,6 +268,13 @@ def main() -> int:
             timeout=float(os.environ.get("ORGBOT_BENCH_TIMEOUT", "1799")),
         )
         if completed.returncode != 0:
+            if state_path.is_file():
+                try:
+                    partial_checkpoint = json.loads(state_path.read_text(encoding="utf-8"))
+                    partial = read_engine_usage(partial_checkpoint)
+                    json.dump({"deliverable": "OrgBots run failed", **partial}, sys.stdout)
+                except (OSError, json.JSONDecodeError, ValueError) as checkpoint_error:
+                    print(f"partial usage unavailable: {checkpoint_error}", file=sys.stderr)
             raise ValueError(f"OrgBots run failed ({completed.returncode}): {completed.stderr[-2000:]}")
         checkpoint = json.loads(state_path.read_text(encoding="utf-8"))
         measurement = read_engine_usage(checkpoint)
@@ -272,7 +295,15 @@ def main() -> int:
             sys.stdout,
         )
         return 0
-    except (OSError, json.JSONDecodeError, tomllib.TOMLDecodeError, ValueError, subprocess.TimeoutExpired) as error:
+    except subprocess.TimeoutExpired as error:
+        if state_path.is_file():
+            try:
+                json.dump({"deliverable": "OrgBots run timed out", **read_engine_usage(json.loads(state_path.read_text(encoding="utf-8")))}, sys.stdout)
+            except (OSError, json.JSONDecodeError, ValueError) as checkpoint_error:
+                print(f"partial usage unavailable: {checkpoint_error}", file=sys.stderr)
+        print(f"OrgBots benchmark adapter timed out: {error}", file=sys.stderr)
+        return 2
+    except (OSError, json.JSONDecodeError, tomllib.TOMLDecodeError, ValueError) as error:
         print(f"OrgBots benchmark adapter failed: {error}", file=sys.stderr)
         return 2
 
