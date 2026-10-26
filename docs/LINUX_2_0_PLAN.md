@@ -24,7 +24,7 @@ a signed GitHub Pages APT repository for `apt install orgbots`.
 - [x] Portable private backup/import into a fresh paused room/project with
   integrity/path/resource validation and no credential export or execution.
   Worker: portable_backup (backup/UI/native picker).
-- [ ] `orgbots` 2.0.0 Debian package preserving existing paths/data, signed
+- [x] `orgbots` 2.0.0 Debian package preserving existing paths/data, signed
   APT repository and one-time Signed-By setup. Host selected by owner:
   https://acememe7.github.io/Orgbot/ . Worker: apt_distribution; primary
   performs final artifact verification and publication.
@@ -39,9 +39,9 @@ a signed GitHub Pages APT repository for `apt install orgbots`.
 - [x] Controlled crash/restart, disconnect, quota cooldown, pause/resume and
   long-running scripted workload; no paid provider calls in these fixtures.
 - [x] Current release build, rendered Linux flows, package content/dependencies.
-- [ ] Signed APT metadata, untrusted/tampered/expired rejection and isolated
+- [x] Signed APT metadata, untrusted/tampered/expired rejection and isolated
   installation; public Pages availability after publication.
-- [x] Secret scan and mandatory Astra final review. Local commit follows checks.
+- [x] Secret scan, mandatory Astra final review and verified local commit.
 
 Real subscription benchmarks wait for the owner's Claude/Ollama/Grok accounts.
 Elapsed multi-day operation and physical suspend/reboot are separate evidence:
@@ -70,7 +70,9 @@ Live host suspension/reboot must not interrupt unrelated user work.
 - Astra approved the scoped implementation after all requested corrections.
   Clean native GTK cold/warm activation passes in a private session.
   Signed actual package refresh/download verifies the expected SHA-256.
-  Astra approved final source/artifacts for publication; live APT remains pending.
+  Astra approved final source/artifacts for publication. GitHub Pages deployment
+  `40348136526` succeeded; public APT refresh and both package downloads passed
+  with the expected package hash. No host installation was performed.
 
 Local logs are under `/tmp/orgbots2-*`; the acceptance report is
 `/tmp/gptbots-linux-acceptance-current.json`. No live provider calls, host
@@ -80,3 +82,8 @@ or every network/Unix service. See `WORKSPACE_SAFETY.md`. Portable backups are
 private, unencrypted and capped at 64 MiB; pasted secrets in history must be
 treated as sensitive. Existing-file replacement requires the configured HDD
 trash mount to be available.
+
+Publication: `https://acememe7.github.io/Orgbot/apt/`, source milestone
+`cc100d5`, archive branch milestone `f4e5d24`. The actual public package SHA-256
+is `7597e7729aabb629735fd71aa05a287a0e255b2c79c817d497560e468baa8da1`.
+See `apt-distribution.md` for the one-time client setup and maintenance window.

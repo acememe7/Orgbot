@@ -59,21 +59,18 @@ exported public keyring belongs in `apt/`.
 
 ## One-time client setup
 
-The intended static host is the project GitHub Pages site at
-`https://acememe7.github.io/Orgbot/apt/`. Read-only checks on 2026-10-26 found
-that path returns 404 and the GitHub Pages API reports no configured site. Do
-not give these commands to users until Pages serves the generated archive and
-the archive key fingerprint is published through a separately trusted
-channel.
+The signed archive is published at
+`https://acememe7.github.io/Orgbot/apt/`. GitHub Pages uses the manually
+dispatched Actions workflow and the dedicated `apt` branch.
 
-After publication, users compare the downloaded key's fingerprint with the
-trusted fingerprint, install the keyring, and create the Deb822 source:
+Compare the downloaded key with the fingerprint above, install its scoped
+keyring, and create the Deb822 source once:
 
 ```sh
 curl -fsSLo /tmp/orgbots-archive-keyring.gpg \
   https://acememe7.github.io/Orgbot/apt/orgbots-archive-keyring.gpg
 gpg --show-keys --with-fingerprint /tmp/orgbots-archive-keyring.gpg
-# Confirm the full fingerprint through the separately trusted release channel.
+# Expected fingerprint: 81445722C3B9265312C12039F831B11611E6D198
 sudo install -D -m 0644 /tmp/orgbots-archive-keyring.gpg \
   /etc/apt/keyrings/orgbots-archive-keyring.gpg
 sudo tee /etc/apt/sources.list.d/orgbots.sources >/dev/null <<'EOF'
@@ -92,11 +89,29 @@ APT verifies repository metadata with only the key named by `Signed-By`; the
 package files are covered by hashes in that signed metadata. Do not use
 `apt-key`, `trusted=yes`, or an unscoped global keyring for this archive.
 
-## Hosting gate
+## Published release and maintenance
 
-GitHub Pages can serve this static archive, but its project site must first be
-enabled and configured to publish the `apt/` subtree or a generated Pages
-artifact. The repository must also retain old package files while publishing
-new indices, and the owner must provide the dedicated signing key through a
-secure signing environment. No live Pages settings, GitHub workflow, or
-publication is configured by this preparation.
+OrgBots **2.0.0** was published on 2026-10-26 with
+[GitHub Actions run 40348136526](https://github.com/acememe7/Orgbot/actions/runs/40348136526).
+The public repository passes an isolated APT metadata refresh and package
+download using the scoped archive key; the downloaded package hash matches. The expected `orgbots_2.0.0_amd64.deb` SHA-256 is:
+
+```text
+7597e7729aabb629735fd71aa05a287a0e255b2c79c817d497560e468baa8da1
+```
+
+Keep existing package files when publishing later archive snapshots. Refresh
+metadata at least every 60 days and rotate the signing key before its expiry;
+expired metadata is intentionally rejected. Private signing material and its
+revocation certificate stay outside GitHub. Publishing the archive does not
+add an APT source or install/upgrade software on the owner's machine.
+
+This is a signed third-party repository, not an entry in Ubuntu's built-in
+archive. A new computer needs the one-time setup above before
+`sudo apt install orgbots` can find the package.
+
+Protected replacement/removal also requires the owner's writable ext4 HDD
+mounted at `/mnt/hdd`; originals are retained in `/mnt/hdd/OrgBots Trash`.
+If that mount is absent, integration stops rather than discarding originals.
+Packaging does not configure disks or enable an automatic cleanup timer on
+other people's computers. See [workspace safety](WORKSPACE_SAFETY.md).
