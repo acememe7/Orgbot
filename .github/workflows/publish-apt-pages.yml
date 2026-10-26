@@ -29,6 +29,18 @@ jobs:
           path: site
           persist-credentials: false
 
+      - name: Check out the root landing page source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          path: source
+          persist-credentials: false
+
+      - name: Check the Pages root landing page
+        env:
+          GH_WORKSPACE: ${{ github.workspace }}
+        run: python3 "$GH_WORKSPACE/source/deploy/apt-pages/test_index.py"
+
       - name: Verify repository signatures and APT metadata
         env:
           GH_WORKSPACE: ${{ github.workspace }}
@@ -46,6 +58,7 @@ jobs:
           gpgv --keyring "$keyring" "$repo/dists/stable/Release.gpg" "$repo/dists/stable/Release"
           mkdir -p "$GH_WORKSPACE/public"
           cp -a "$repo" "$GH_WORKSPACE/public/apt"
+          install -m 0644 "$GH_WORKSPACE/source/deploy/apt-pages/index.html" "$GH_WORKSPACE/public/index.html"
           touch "$GH_WORKSPACE/public/.nojekyll"
           temp=$(mktemp -d)
           trap 'rm -rf "$temp"' EXIT
