@@ -1,0 +1,20 @@
+Architectures: amd64
+Codename: stable
+Components: main
+Date: Mon, 26 Oct 2026 15:16:30 +0000
+Valid-Until: Sun, 24 Jan 2027 15:16:30 +0000
+Label: OrgBots
+Origin: OrgBots
+Suite: stable
+MD5Sum:
+ 41108df161dfa4734d91ca501fd73bf6             2018 main/binary-amd64/Packages
+ 5d024329366f004e313ad3e2b93d4904             1070 main/binary-amd64/Packages.gz
+SHA1:
+ 46c8ebd603c9cd6686140d1df563b9198cb7a5ac             2018 main/binary-amd64/Packages
+ d048a7d1445936a163b6287717d9cbdb75f0949c             1070 main/binary-amd64/Packages.gz
+SHA256:
+ 94e837214d11b67a66fba1585f07ddec1cc4f1ef9280efe08340f9caf4ee9c79             2018 main/binary-amd64/Packages
+ 72c804713b7839df56e3034b53f3f08140980cf49bf95788eb21d0903ec0851f             1070 main/binary-amd64/Packages.gz
+SHA512:
+ 7f4837c573933ce7ac7c9fefbf29dbf418ad640aecf1f960c19c9142c945ac3d6f7104fcf68c64171e120068405da5b185fbd5fb0c9b942dc2d4f5a4cb78e44a             2018 main/binary-amd64/Packages
+ efad1663fb7bc08165733211198746b3bcc25250572a0b8f88fe1af59f207d0dc170a46940d9af41fd688685ea8c698ead36380700fe43b81fec4b69825d6e3e             1070 main/binary-amd64/Packages.gz
