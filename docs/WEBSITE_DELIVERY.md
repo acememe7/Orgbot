@@ -43,7 +43,37 @@ clock or process restart is not paid savings or real multi-day evidence.
 
 ## Delivery record
 
-Deployment and browser verification are recorded here when performed. Google
-Search Console, analytics configuration, independent backup and restore, and
-jurisdiction-specific legal assessment must be reported separately from source
-checks; none is established by this document.
+Verified on 26 October 2026:
+
+- Installer fixtures pass for fingerprint mismatch, extra primary keys, GPG and
+  download failures, unsupported platforms, missing prerequisites, symlinks,
+  unchanged setup and preserved backups using GNU `install`. No host APT files
+  were changed by those fixtures. The public script matches the repository.
+- Six-page metadata, headings, internal links/assets, sitemap and CSP hash
+  checks pass. Bash and JavaScript syntax checks pass. GitHub Actions checks
+  passed for source `136dcb5` (run `40358905685`).
+- Browser checks at measured content widths of 375, 768 and 1440 pixels show
+  no document overflow. Mobile menu/Escape focus, installation copy success,
+  screenshot switching and privacy dismissal/reopening work. A local failure
+  fixture verified blocked clipboard guidance and screenshot error, loading
+  skeleton and successful retry. Main text/background pairs exceed 4.5:1.
+  Reduced-motion rules were inspected; OS-level motion emulation was not run.
+- The dedicated subdomain is live behind Cloudflare with strict origin TLS.
+  HTTP redirects to HTTPS; all five public pages, scripts, styles, sample
+  image/favicon/share assets, sitemap and robots return 200; a missing page
+  returns the custom 404. Tested responses include HSTS, nosniff and CSP.
+  Site-script errors were not observed in the tested browser; unrelated
+  installed-extension warnings were excluded.
+- The first deployed release and its replacement are retained separately.
+  All 19 deployed website files matched a SHA-256 manifest. A downloaded copy
+  was extracted into an isolated local folder and all 19 checksums matched.
+  This is a static-content restore check, not a full host recovery exercise.
+
+Paid provider comparisons, physical suspend/reboot and real multi-day runs
+remain unperformed. This task changed installation/distribution and the website,
+not application code. Google Search Console, optional analytics, independent
+owner-controlled Google Cloud backups, full host recovery, complete edge and
+origin hardening, and jurisdiction-specific legal review remain open. Existing
+host hardening deviations were reported to the owner without changing shared
+firewall rules or service identities. The site's privacy page describes actual
+local preferences, origin log rotation and Cloudflare security processing.
