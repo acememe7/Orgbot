@@ -1137,6 +1137,14 @@ impl Engine {
         convergence::assess(&self.review_cycles(task))
     }
 
+    fn authored_review_artifact(&self, task: &Task, agent: AgentId) -> bool {
+        task.artifacts.iter().any(|id| {
+            self.artifacts
+                .get(id)
+                .is_some_and(|artifact| artifact.author == agent)
+        })
+    }
+
     /// A bot that could review `task`, chosen so nobody has to be asked.
     ///
     /// Independence first: a bot cannot inspect its own work, and neither can
@@ -1152,6 +1160,7 @@ impl Engine {
             .filter(|spec| spec.autonomy.may_inspect)
             // Independence, encoded rather than left to convention.
             .filter(|spec| Some(spec.id) != record.assignee)
+            .filter(|spec| !self.authored_review_artifact(record, spec.id))
             .filter(|spec| {
                 self.roles
                     .eligibility(&spec.roles, record.required_role.as_deref())
@@ -1312,6 +1321,7 @@ impl Engine {
             .values()
             .filter(|t| t.state == TaskState::InReview)
             .filter(|t| t.assignee != Some(inspector))
+            .filter(|t| !self.authored_review_artifact(t, inspector))
             .map(|t| t.id)
             .collect()
     }
@@ -2675,7 +2685,7 @@ impl Engine {
         }
         let record = self.require_task(task)?;
         // The author of the work can never be its inspector.
-        if record.assignee == Some(inspector) {
+        if record.assignee == Some(inspector) || self.authored_review_artifact(record, inspector) {
             return Err(EngineError::SelfInspection {
                 task,
                 agent: inspector,

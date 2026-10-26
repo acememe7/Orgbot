@@ -1,3 +1,32 @@
+# OrgBots PR #1 review fixes — 1.8.6, 2026-10-26
+
+- [x] Artifact authors remain ineligible to review their work after delegation.
+  Reviewer selection, review queues and review submission use the same author
+  check. Regression covers multiple authors, rejection without mutation and
+  successful approval by an independent reviewer.
+- [x] Flutter records the accepting agent and immediately transfers displayed
+  task ownership for accepted delegation. Assist, review and escalation retain
+  ownership. Tests cover live events, snapshot/journal replay and duplicates
+  after a later release. Both regressions failed before their respective fixes.
+- [x] Rust workspace: 802 passed, zero failed, one ignored. Flutter: 311 passed,
+  zero failed, four opt-in SSH/D-Bus checks skipped. Flutter analyzer clean;
+  debug/release engines, Linux release GUI and packaging fixtures passed.
+  Flutter tests used an isolated keyring and data directories.
+- [x] Package 1.8.6: all 28 bundle files and the engine match their build
+  sources; all six native ELF dependency checks resolve. Evidence:
+  `/tmp/orgbots-review-fixes-artifact.json`. Test/build logs use
+  `/tmp/orgbots-review-fixes-*.log`.
+
+Package: `app/orgbot_1.8.6_amd64.deb`, 15,326,326 bytes.
+SHA-256: `7de18a0820cddefd83e6c127f289c2556435a21831690504a5ab4fd543c4a055`.
+
+No installation, live room/provider test, GUI acceptance check or push was
+performed. Three pre-existing Rust test warnings remain. Packaging emitted
+RPATH/library-name/unused-dependency warnings; dependency resolution passed.
+Existing workspace formatting differences were left untouched.
+
+---
+
 # OrgBots dock association 1.8.1 — 2026-10-25
 
 - [x] Corrected the launcher's `StartupWMClass` from `orgbot_app` to

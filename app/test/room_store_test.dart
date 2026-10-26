@@ -508,6 +508,83 @@ void main() {
     expect(task.assignee, 'bot_b');
   });
 
+  for (final kind in ['delegate', 'assist', 'review', 'escalate']) {
+    test('accepted $kind handoff folds ownership live and on replay', () async {
+      final client = FakeClient();
+      final store = RoomStore(client);
+      addTearDown(store.dispose);
+      final frames = [
+        event({
+          'event': 'task_created',
+          'task': {
+            'id': 'task_1',
+            'title': 'Finish the work',
+            'state': 'in_progress',
+            'assignee': 'bot_a',
+          },
+        }),
+        event({
+          'event': 'handoff_offered',
+          'handoff': {
+            'id': 'handoff_1',
+            'task': 'task_1',
+            'from': 'bot_a',
+            'kind': kind,
+            'state': 'offered',
+          },
+        }, seq: 2),
+        event({
+          'event': 'handoff_transitioned',
+          'handoff': 'handoff_1',
+          'from': 'offered',
+          'to': 'accepted',
+          'transition': {'transition': 'accept', 'by': 'bot_b'},
+        }, seq: 3),
+      ];
+      for (final frame in frames) {
+        client.emit(frame);
+      }
+      await Future<void>.delayed(Duration.zero);
+
+      void expectAccepted(RoomStore view) {
+        expect(view.handoffs.single.state, 'accepted');
+        expect(view.handoffs.single.acceptedBy, 'bot_b');
+        expect(view.tasks.single.assignee, kind == 'delegate' ? 'bot_b' : 'bot_a');
+      }
+
+      expectAccepted(store);
+      final restored = RoomStore(FakeClient());
+      addTearDown(restored.dispose);
+      restored.restore([
+        {
+          'type': 'snapshot',
+          'head': 3,
+          'tasks': [
+            {
+              'id': 'task_1',
+              'title': 'Finish the work',
+              'state': 'in_progress',
+              'assignee': kind == 'delegate' ? 'bot_b' : 'bot_a',
+            },
+          ],
+        },
+        ...frames,
+      ]);
+      expectAccepted(restored);
+
+      // A duplicate acceptance must not undo a later release during reconnect.
+      final release = event({
+        'event': 'task_transitioned',
+        'task': 'task_1',
+        'to': 'ready',
+        'transition': {'transition': 'release'},
+      }, seq: 4);
+      store.restore([release, frames.last]);
+      expect(store.tasks.single.assignee, isNull);
+      expect(store.handoffs.single.acceptedBy, 'bot_b');
+    });
+  }
+
   test('request_changes bumps the revision counter', () async {
     final client = FakeClient();
     final store = RoomStore(client);

@@ -271,6 +271,93 @@ fn a_bot_cannot_inspect_its_own_work() {
 }
 
 #[test]
+fn an_artifact_author_cannot_review_after_delegating_the_task() {
+    let mut f = fixture();
+    let (author, recipient) = (f.inspector, f.worker2);
+    let second_author = AgentSpec::new("qa2", "Second Author", provider())
+        .with_roles(["reviewer"])
+        .with_autonomy(Autonomy::inspector());
+    let second_author_id = second_author.id;
+    f.apply(Command::JoinAgent {
+        spec: Box::new(second_author),
+    });
+    let independent = AgentSpec::new("qa3", "Independent Inspector", provider())
+        .with_roles(["reviewer"])
+        .with_autonomy(Autonomy::inspector());
+    let independent_id = independent.id;
+    f.apply(Command::JoinAgent {
+        spec: Box::new(independent),
+    });
+
+    let task = f.start_task("write the release notes", author);
+    let artifact = f.add_artifact(task, author);
+    f.add_artifact(task, second_author_id);
+    let events = f.apply(Command::OfferHandoff {
+        task,
+        from: author,
+        to: Recipient::Agent { agent: recipient },
+        kind: HandoffKind::Delegate,
+        brief: "finish the release notes".into(),
+        expects: vec![],
+        context: vec![artifact],
+        blocks_sender: None,
+        timeout_ms: None,
+    });
+    f.apply(Command::AcceptHandoff {
+        handoff: offered_handoff(&events),
+        by: recipient,
+    });
+    f.apply(Command::SubmitForReview {
+        task,
+        by: recipient,
+        artifacts: vec![artifact],
+    });
+
+    assert!(!f.engine.review_queue_for(author).contains(&task));
+    assert!(!f.engine.review_queue_for(second_author_id).contains(&task));
+    assert_eq!(f.engine.reviewer_for(task), Some(independent_id));
+    let event_count = f.engine.head();
+    assert_eq!(
+        f.reject(Command::RecordReview {
+            task,
+            inspector: author,
+            findings: vec![],
+            summary: "looks good".into(),
+            criteria_met: vec![],
+            criteria_failed: vec![],
+        }),
+        EngineError::SelfInspection { task, agent: author }
+    );
+    assert_eq!(f.engine.head(), event_count);
+    assert_eq!(f.state(task), TaskState::InReview);
+    assert_eq!(
+        f.reject(Command::RecordReview {
+            task,
+            inspector: second_author_id,
+            findings: vec![],
+            summary: "also looks good".into(),
+            criteria_met: vec![],
+            criteria_failed: vec![],
+        }),
+        EngineError::SelfInspection {
+            task,
+            agent: second_author_id,
+        }
+    );
+    assert_eq!(f.engine.head(), event_count);
+
+    f.apply(Command::RecordReview {
+        task,
+        inspector: independent_id,
+        findings: vec![],
+        summary: "independent review passed".into(),
+        criteria_met: vec![],
+        criteria_failed: vec![],
+    });
+    assert_eq!(f.state(task), TaskState::Approved);
+}
+
+#[test]
 fn a_worker_cannot_record_a_review_at_all() {
     let mut f = fixture();
     let (worker, worker2) = (f.worker, f.worker2);

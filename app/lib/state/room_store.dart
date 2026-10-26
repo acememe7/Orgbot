@@ -648,6 +648,16 @@ class RoomStore extends ChangeNotifier {
         final handoff = id == null ? null : _handoffs[id];
         if (handoff != null) {
           handoff.state = event['to'] as String? ?? handoff.state;
+          final transition = (event['transition'] as Map?)?.cast<String, Object?>();
+          final by = transition?['by'] as String?;
+          if (handoff.state == 'accepted' &&
+              transition?['transition'] == 'accept' &&
+              by != null) {
+            handoff.acceptedBy = by;
+            if (handoff.kind == 'delegate') {
+              _tasks[handoff.taskId]?.assignee = by;
+            }
+          }
         }
       case 'review_recorded':
         final review = (event['review'] as Map?)?.cast<String, Object?>();
