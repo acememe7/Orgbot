@@ -97,12 +97,14 @@ struct AppState {
 
 #[derive(Default)]
 struct HostState {
+    token: Option<String>,
     config: Option<PathBuf>,
     task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
 #[derive(Serialize, Clone)]
 struct HostInfo {
+    token: Option<String>,
     running: bool,
     config: Option<String>,
     ws_url: String,
@@ -277,7 +279,7 @@ fn room_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn room_start(app: tauri::AppHandle, id: String) -> Result<HostInfo, String> {
+async fn room_start(app: tauri::AppHandle, id: String) -> Result<HostInfo, String> {
     let config_path = {
         let managed = app.state::<AppState>();
         let store = managed.store.lock().map_err(|_| "store locked".to_string())?;
@@ -291,34 +293,37 @@ fn room_start(app: tauri::AppHandle, id: String) -> Result<HostInfo, String> {
         std::fs::write(&path, toml).map_err(|e| format!("cannot write room file: {e}"))?;
         path
     };
-    start_host(app, config_path)
+    start_host(app, config_path).await
 }
 
 /// Host the given room file, waiting for real readiness (never hangs).
-fn start_host(app: tauri::AppHandle, config: PathBuf) -> Result<HostInfo, String> {
+async fn start_host(app: tauri::AppHandle, config: PathBuf) -> Result<HostInfo, String> {
     let addr: SocketAddr = HOST_ADDR.parse().expect("static host addr parses");
     let managed = app.state::<AppState>();
+    let access = orgbot_server::Access::default();
+    let token = access.token.clone();
     {
-        let state = managed.host.lock().map_err(|_| "state lock poisoned".to_string())?;
-        if state.config.is_some() {
-            return Ok(HostInfo {
-                running: true,
-                config: Some(config.display().to_string()),
-                ws_url: format!("ws://{HOST_ADDR}/ws"),
-            });
-        }
+        let mut state = managed.host.lock().map_err(|_| "state lock poisoned".to_string())?;
+        if state.config.is_some() { return Err("Stop the current room before starting another.".into()); }
+        state.config = Some(config.clone());
+        state.token = token.clone();
     }
     let shown = config.display().to_string();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<SocketAddr, String>>();
     let owned = config.clone();
     let task = tauri::async_runtime::spawn(async move {
         if let Err(error) =
-            orgbot_server::serve_room_with_readiness(&owned, addr, Some(ready_tx)).await
+            orgbot_server::serve_room_with_readiness(&owned, addr, access, Some(ready_tx)).await
         {
             eprintln!("room host failed: {error}");
         }
     });
-    let bound = tauri::async_runtime::block_on(async {
+    {
+        let mut state = managed.host.lock().map_err(|_| "state lock poisoned".to_string())?;
+        if state.token != token { task.abort(); return Err("Room start was cancelled.".into()); }
+        state.task = Some(task);
+    }
+    let bound = {
         let wait = tokio::time::timeout(std::time::Duration::from_secs(15), ready_rx).await;
         match wait {
             Ok(Ok(Ok(addr))) => Ok(addr),
@@ -326,16 +331,27 @@ fn start_host(app: tauri::AppHandle, config: PathBuf) -> Result<HostInfo, String
             Ok(Err(_)) => Err("room host stopped before it was ready".into()),
             Err(_) => Err("room host did not become ready within 15s".into()),
         }
-    })?;
-    {
-        let mut state = managed.host.lock().map_err(|_| "state lock poisoned".to_string())?;
-        state.config = Some(config);
-        state.task = Some(task);
+    };
+    let bound = match bound {
+        Ok(addr) => addr,
+        Err(error) => {
+            let mut state = managed.host.lock().map_err(|_| "state lock poisoned".to_string())?;
+            if state.token == token {
+                if let Some(task) = state.task.take() { task.abort(); }
+                state.config = None;
+                state.token = None;
+            }
+            return Err(error);
+        }
+    };
+    if managed.host.lock().map_err(|_| "state lock poisoned".to_string())?.token != token {
+        return Err("Room start was cancelled.".into());
     }
     Ok(HostInfo {
         running: true,
         config: Some(shown),
         ws_url: format!("ws://{bound}/ws"),
+        token,
     })
 }
 
@@ -347,10 +363,12 @@ fn host_stop(app: tauri::AppHandle) -> Result<HostInfo, String> {
         task.abort();
     }
     state.config = None;
+    state.token = None;
     Ok(HostInfo {
         running: false,
         config: None,
         ws_url: format!("ws://{HOST_ADDR}/ws"),
+        token: state.token.clone(),
     })
 }
 
@@ -362,6 +380,7 @@ fn host_status(app: tauri::AppHandle) -> HostInfo {
         running: state.config.is_some(),
         config: state.config.as_ref().map(|p| p.display().to_string()),
         ws_url: format!("ws://{HOST_ADDR}/ws"),
+        token: state.token.clone(),
     }
 }
 

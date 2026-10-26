@@ -1,0 +1,967 @@
+Path/environment: `Orgbot` → Room orchestration / Work board / task engine / artifact system.
+Context: **Orgbot is the app; “Leo” is one room inside Orgbot with 16 bots repairing your separate Leo coding harness.**
+
+Here is the full fix/feature list again, consolidated from everything this Leo-room stress test exposed.
+
+1. **Three-level work hierarchy**
+
+   * Project / Epic / Root Objective
+   * Task
+   * Subtask / Review / Remediation / Evidence / Recovery
+     Reviews and evidence jobs should not all become top-level cards.
+
+2. **Canonical task identity**
+   Add durable fields like:
+
+   * `canonical_task_id`
+   * `root_objective_id`
+   * `parent_task_id`
+   * `supersedes_task_id`
+   * `superseded_by_task_id`
+   * `review_of_task_id`
+   * `remediation_of_task_id`
+   * `recovery_for_task_id`
+
+3. **Proper lifecycle states**
+   Replace the overly broad `ready/blocked` model with states such as:
+
+   * `DRAFT`
+   * `READY_NOW`
+   * `WAITING_DEPENDENCY`
+   * `CONDITIONALLY_READY`
+   * `CLAIMED`
+   * `IN_PROGRESS`
+   * `SUBMITTED`
+   * `IN_REVIEW`
+   * `REVIEW_REMEDIATION`
+   * `BLOCKED_INTERNAL`
+   * `BLOCKED_OPERATOR`
+   * `HELD_BY_POLICY`
+   * `DELIVERED`
+   * `CANCELLED`
+   * `SUPERSEDED`
+   * `RETIRED`
+   * `ARCHIVED`
+
+4. **Fix the meaning of “Ready”**
+   A task should only be `READY_NOW` when all mandatory dependencies, policy gates, reviews, artifacts, execution permissions and role requirements are actually satisfied.
+
+5. **Real dependency DAG**
+   Orgbot needs authoritative `depends_on` / `blocks` relationships, cycle detection and automatic downstream state recomputation.
+
+6. **Future tasks should show dependency waits**
+   Example:
+
+```text
+N1-C0  READY NOW
+N1-C1  WAITING ON C0
+N1-C2  WAITING ON C1
+N1-C3  WAITING ON C2
+N1-D2  WAITING ON C3
+...
+N1-I   WAITING ON H
+```
+
+Not eleven tasks all marked `ready`.
+
+7. **Shared upstream blockers**
+   One missing source should be represented once:
+
+```text
+B3-C/B3-E recovery
+      ↓
+ ┌────┼────┐
+N1-D0B N1-D1 E0
+```
+
+Do not create three separate “Reply to unblock” cards for the same dependency.
+
+8. **Internal blocker vs human/operator blocker**
+   This is one of the biggest fixes.
+
+   `BLOCKED_INTERNAL`:
+
+   * review remediation
+   * missing test
+   * missing artifact
+   * source recovery
+   * retry
+   * provenance generation
+   * dependency wait
+   * evidence gathering
+
+   `BLOCKED_OPERATOR`:
+
+   * new paid infrastructure
+   * destructive action
+   * privilege expansion
+   * new secret rotation class
+   * production deployment approval
+   * new external data destination
+   * architecture exception
+   * explicit risk acceptance
+
+9. **Mandatory operator-block reason**
+   Every true human blocker must contain:
+
+```text
+Operator decision required because: __________
+```
+
+If the coordinator cannot fill that sentence with a genuinely human-only decision, the task must stay internal.
+
+10. **Standing execution authority**
+    Once you approve a task/security envelope, bots should not return for approval for:
+
+    * reruns
+    * read-only evidence gathering
+    * synthetic tests
+    * internal remediation
+    * disposable container recreation
+    * evidence regeneration
+    * review resubmission
+    * approved firewall-pattern reuse
+    * artifact manifests/hashes
+    * rebuilds from already-approved pinned sources
+
+    Only expansion of the approved boundary should come back to you.
+
+11. **Reviews stay attached to the canonical task**
+    Instead of:
+
+```text
+Task
+Review task
+Fix task
+Review #2
+Evidence task
+Fix #2
+Reinspection task
+```
+
+Use:
+
+```text
+Task
+ ├─ implementation
+ ├─ review cycle 1
+ │   ├─ findings
+ │   └─ remediation
+ ├─ review cycle 2
+ │   ├─ findings
+ │   └─ remediation
+ └─ final disposition
+```
+
+12. **Structural-remediation detection**
+    If review fails twice on the same root invariant, Orgbot should detect the pattern and recommend a structural fix rather than more symptom patches.
+
+    Example from this run: repeated stale async mutation bugs should lead to one admitted reducer/choke point, not 20 individual fences.
+
+13. **Task creation control**
+    Before creating a top-level task, ask:
+
+> “Is this a new independently owned outcome?”
+
+```
+If not, attach it as a:
+- subtask
+- review
+- remediation
+- evidence requirement
+- recovery action
+- continuation
+- dependency
+```
+
+14. **Duplicate/overlap detection**
+Before creating a task, search active/historical work for:
+- same objective
+- same artifact
+- same missing dependency
+- same remediation invariant
+- same source-recovery requirement
+
+```
+Then reuse the canonical task or explicitly supersede it.
+```
+
+15. **Mechanically safe superseded/retired tasks**
+If task A is replaced by B:
+
+```text
+A.status = SUPERSEDED
+A.superseded_by = B
+```
+
+```
+A must immediately become:
+- unclaimable
+- undelegatable
+- excluded from ready scans
+- excluded from active counts
+- excluded from human blocker calculations
+```
+
+16. **Scheduler must use graph state**
+Before claim ranking:
+
+```text
+1. Remove retired/superseded/terminal tasks
+2. Resolve dependency DAG
+3. Resolve policy/security HOLDs
+4. Resolve operator gates
+5. Resolve role eligibility
+6. Resolve ownership
+7. Resolve workload
+8. Rank actual READY_NOW tasks
+```
+
+17. **Task graph compaction**
+    The board should compress:
+
+```text
+96 raw work records
+```
+
+into something like:
+
+```text
+Objectives: 14
+Active: 6
+Waiting internally: 3
+Needs you: 0
+```
+
+18. **Separate top-level views**
+    Work tab should have views such as:
+
+    * Overview
+    * Active
+    * Needs Me
+    * Blocked
+    * All Activity
+
+    `Needs Me` should contain **only `BLOCKED_OPERATOR`** work.
+
+19. **Root objective cards**
+    Example:
+
+```text
+E0: Blank Preview Reproduction
+
+Status:
+Internal remediation
+
+Progress:
+7 / 10 stages complete
+
+Current blocker:
+B3-C/B3-E source recovery
+
+Owners:
+Savage, Iris, Pete, Aether
+
+Needs operator:
+No
+```
+
+```
+Expand for raw tasks/reviews/evidence.
+```
+
+20. **Better task-count semantics**
+Do not make `Tasks · 96` the main headline.
+
+```
+Prefer:
+```
+
+```text
+Objectives · 14
+Active · 6
+Needs you · 0
+```
+
+```
+Keep raw work item count in an advanced diagnostics view.
+```
+
+21. **Room-scoped task graph**
+Everything must be scoped by `room_id`.
+
+```
+The Leo room's:
+- tasks
+- DAG
+- SSH target
+- artifacts
+- blockers
+- reviews
+- scheduler
+- bot roster
+
+must not collide with another Orgbot room.
+```
+
+22. **Automatic large-artifact chunking**
+Large architecture/review artifacts must never silently truncate.
+
+```
+Automatically create:
+```
+
+```text
+artifact_manifest
+├── part_001
+├── part_002
+├── part_003
+└── part_N
+```
+
+```
+With:
+- canonical artifact ID
+- part index
+- total parts
+- byte count
+- per-part digest
+- reading order
+- BEGIN/END completeness
+- aggregate digest where feasible
+```
+
+23. **Transparent continuation reading**
+Reviewers should be able to consume split artifacts as one logical document without manually chasing 10 pieces.
+
+24. **Originating-author recovery**
+    When generated source is truncated or missing, default recovery owner should be the bot/task that originally authored it.
+
+    Do not ask you to reproduce files generated by the room.
+
+25. **No probabilistic reconstruction of authority-bearing data**
+    Never guess missing:
+
+    * cryptographic bytes
+    * signatures
+    * public keys
+    * schemas
+    * canonical registries
+    * protocol constants
+    * wire values
+
+    Require exact source re-emission.
+
+26. **Recovery format**
+    Author re-emission should use:
+
+```text
+BEGIN
+part 1
+part 2
+part 3
+...
+END
+```
+
+```
+plus:
+- exact order
+- hashes
+- source identity
+- aggregate manifest
+```
+
+27. **Dependency deduplication**
+If five downstream tasks depend on the same missing source, create one canonical recovery node and point all five at it.
+
+28. **Artifact provenance**
+    Store:
+
+    * originating bot
+    * originating task
+    * room
+    * source revision
+    * digest
+    * parent artifact
+    * continuation chain
+    * review disposition
+
+29. **Human-readable executive status**
+    Generate summaries like:
+
+```text
+Leo room repair
+
+12/16 objectives complete
+3 in flight
+1 internal dependency
+0 decisions needed from you
+
+Current:
+• A2 — implementation
+• E0 — waiting on source recovery
+• N1-B — review remediation
+```
+
+```
+Instead of dumping:
+```
+
+```text
+96 tasks
+13 in flight
+27 blocked
+31 ready
+```
+
+30. **Notification policy**
+    Do not notify you for internal blockers.
+
+    Notify you for:
+
+    * true operator decision
+    * material security incident
+    * production deployment approval
+    * new cost/infrastructure
+    * architecture exception
+    * milestone completion
+    * room completion
+
+31. **Coordinator blocker validation**
+    Before presenting a block to you, coordinator checks whether the task genuinely meets an operator-escalation condition.
+
+32. **Internal remediation should auto-loop**
+    The expected lifecycle should be:
+
+```text
+Reviewer rejects
+   ↓
+Owner remediates
+   ↓
+Reviewer rechecks
+   ↓
+Pass
+   ↓
+Continue automatically
+```
+
+```
+Not:
+```
+
+```text
+Reviewer rejects
+   ↓
+Ask TheAeceStudio
+   ↓
+Wait
+   ↓
+Owner remediates
+   ↓
+Ask TheAeceStudio again
+```
+
+33. **Automatic task assignment for independent reviewers**
+    If a task needs an independent reviewer, the coordinator should find an eligible idle bot automatically.
+
+    It should not ask you to choose a reviewer unless no eligible reviewer exists.
+
+34. **Role-lock fallback**
+    The run exposed cases where tasks were role-locked while the only bot with that role was busy.
+
+    Orgbot needs a safe policy for:
+
+    * authorized role fallback
+    * delegated equivalent role
+    * temporary open recreation
+    * canonical supersession
+
+    without leaving duplicates behind.
+
+35. **Delegation acceptance visibility**
+    Distinguish:
+
+```text
+Assigned
+Awaiting delegate acceptance
+Accepted
+Started
+```
+
+```
+so “assigned” is not confused with actual execution.
+```
+
+36. **Awaiting-task should be explicit**
+Replace generic:
+
+```text
+blocked
+awaiting_task
+```
+
+```
+with:
+```
+
+```text
+WAITING_DEPENDENCY
+waiting_on: task_x
+reason: source recovery
+```
+
+37. **No board-only contradictory truth**
+    Conversational “do not execute” rules should become persisted task-policy state, not social convention.
+
+38. **Audit log stays complete**
+    All compaction must preserve:
+
+    * raw tasks
+    * reviews
+    * findings
+    * changes
+    * assignments
+    * artifacts
+    * operator decisions
+    * supersession history
+
+    Compression is a UX layer, not deletion.
+
+39. **Legacy migration**
+    Existing Orgbot rooms must survive the upgrade.
+
+    Preserve old task IDs and infer relationships conservatively.
+
+    Unknown legacy relationships should remain `unknown`, not fabricated.
+
+40. **Database/API overhaul**
+    This cannot be a UI-only patch.
+
+    Update:
+
+    * DB schema
+    * task models
+    * API contracts
+    * serialization
+    * scheduler
+    * claiming
+    * delegation
+    * review engine
+    * artifact system
+    * activity feed
+    * notifications
+    * Work UI
+
+41. **Automated consistency checks**
+    Add invariants such as:
+
+    * superseded task cannot be ready
+    * waiting task cannot be claimed
+    * archived task cannot notify operator
+    * delivered dependency can unblock downstream
+    * missing artifact cannot count as reviewed
+    * one canonical task cannot have conflicting active replacements
+
+42. **Comprehensive orchestration test suite**
+    Test:
+
+    * DAG behavior
+    * supersession
+    * retirement
+    * blocker classification
+    * duplicate detection
+    * scheduler
+    * artifact splitting
+    * recovery
+    * migration
+    * Work UI aggregation
+    * operator notifications
+
+43. **Progressive disclosure UI**
+    Default view = high-level objective state.
+
+    Expand only when you want:
+
+    * subtasks
+    * reviews
+    * evidence
+    * artifacts
+    * raw task graph
+    * audit trail
+
+44. **Bot utilization view**
+    Since rooms can have many bots, show:
+
+    * working
+    * reviewing
+    * waiting
+    * idle
+    * blocked internally
+    * awaiting delegation acceptance
+
+    That helps prevent 5 bots sitting idle while 20 future tasks show `ready`.
+
+45. **Critical-path view**
+    Orgbot should identify the task chain currently controlling completion time.
+
+    Example:
+
+```text
+B3 recovery
+   ↓
+N1-B
+   ↓
+N1-D1
+   ↓
+E0
+```
+
+```
+This is far more useful than task count.
+```
+
+46. **Dependency-aware progress**
+Progress should reflect meaningful objectives/stages, not raw task records.
+
+```
+Creating ten review subtasks should not make the project look larger or less complete.
+```
+
+47. **Board inflation detection**
+If raw work-item count grows much faster than root objectives, Orgbot should flag:
+
+> “Coordination expansion detected.”
+
+```
+and recommend compaction/deduplication.
+```
+
+48. **Task fan-out guard**
+Prevent a single review finding from spawning uncontrolled chains of top-level tasks unless explicitly necessary.
+
+49. **Canonical remediation finding IDs**
+    Repeated findings should have stable identities so Orgbot can see that multiple review cycles are complaining about the same invariant.
+
+50. **Room health metrics**
+    Useful metrics:
+
+    * objectives complete
+    * active objectives
+    * internal blockers
+    * operator blockers
+    * average review cycles
+    * duplicate/superseded count
+    * task inflation ratio
+    * idle-agent ratio
+    * critical-path age
+    * artifact recovery count
+
+51. **Task inflation ratio**
+    For example:
+
+```text
+raw work records / root objectives
+```
+
+```
+If 96 records belong to 12 actual objectives, Orgbot should know that `8×` coordination inflation exists.
+```
+
+52. **Operator-decision inbox**
+Instead of searching Work for yellow cards, give you one clean place:
+
+```text
+Needs You · 1
+```
+
+```
+with the exact decision, consequences and recommended options.
+```
+
+53. **One-click operator decisions**
+Where appropriate:
+
+```text
+Approve
+Decline
+Defer
+Accept risk
+Choose A
+Choose B
+```
+
+```
+tied to the exact persisted decision record.
+```
+
+54. **Decision inheritance**
+Once you establish a standing policy—e.g. “same VPS + confined Docker is approved”—child tasks inside that exact boundary should inherit it.
+
+```
+Bots should not repeatedly ask you the same question.
+```
+
+55. **Authorization envelope**
+Persist approvals as structured capabilities:
+
+```text
+scope
+allowed_actions
+forbidden_actions
+environment
+expiry/condition
+source_operator_decision
+```
+
+```
+Then bots can mechanically determine whether an action is already authorized.
+```
+
+56. **Scope-expansion detection**
+Ask you again only when the requested action falls outside the inherited authorization envelope.
+
+57. **Room governance policies**
+    Persist standing rules such as:
+
+    * internal evidence recovery does not require operator
+    * originating author owns truncation recovery
+    * no new machine unless technical impossibility proven
+    * superseded task IDs never actionable
+    * same-VPS confined Docker approved within defined boundary
+
+58. **Security-review distinction**
+    Separate:
+
+    * `INSUFFICIENT_EVIDENCE`
+    * `SECURITY_FINDING`
+    * `MATERIAL_SECURITY_INCIDENT`
+
+    Missing proof should usually route to more evidence gathering, not automatically to you.
+
+59. **Evidence-gathering auto-remediation**
+    If security says:
+
+    > “Need merged-filesystem classification”
+
+    Orgbot should generate internal evidence work automatically and requeue review.
+
+60. **Reviewer completeness contract**
+    Reviewer should return the full set of known blocking findings where reasonably possible, not one tiny issue per cycle.
+
+    This reduces review ping-pong.
+
+61. **Review convergence detection**
+    Track whether successive reviews are shrinking the unresolved set.
+
+    If not, escalate internally to architecture-level remediation.
+
+62. **Artifact size prediction**
+    Before writing a huge artifact, Orgbot should estimate whether it will exceed limits and switch to multipart mode proactively.
+
+63. **No silent truncation**
+    Critical. If storage cuts off a document, mark:
+
+```text
+INCOMPLETE
+```
+
+```
+Never present it as a successful artifact.
+```
+
+64. **Artifact completeness markers**
+Require explicit:
+- `BEGIN`
+- numbered parts
+- `END`
+
+```
+for authority-bearing large artifacts.
+```
+
+65. **Artifact dependency graph**
+Tasks should understand which exact artifact/version they depend on rather than vague conversational references.
+
+66. **Artifact replacement lineage**
+    New corrected artifact should explicitly supersede old artifact while retaining audit history.
+
+67. **Immutable review inputs**
+    Once something enters formal review, freeze the reviewed artifact/version so it cannot mutate under the reviewer.
+
+68. **Room-level source of truth**
+    Critical coordination facts should live in Orgbot state/database, not only chat messages.
+
+69. **Chat remains conversational; Work remains authoritative**
+    Messages can explain decisions, but scheduler/task truth comes from structured Work state.
+
+70. **Better room summaries**
+    Bots should periodically generate compact internal summaries and deduplicate outdated status statements.
+
+71. **Human-friendly blocker wording**
+    Instead of:
+
+> `awaiting_task`
+
+```
+show:
+```
+
+> “Waiting for Savage to restore the missing B3-C source. No action needed from you.”
+
+72. **Explicit “No action needed”**
+    This would have saved you a lot of frustration.
+
+    Every card should indicate:
+
+```text
+Needs you: NO
+```
+
+or:
+
+```text
+Needs you: YES
+```
+
+73. **Dependency ownership**
+    A waiting task should show who owns the dependency:
+
+```text
+Waiting on:
+B3-C recovery
+
+Owner:
+@savage
+```
+
+74. **Automatic routing after dependency completion**
+    When upstream passes, downstream task should become eligible automatically without another coordinator prompt.
+
+75. **Do not create work merely to represent state**
+    Not every status transition needs a new task record.
+
+76. **Separate work objects from events**
+    Orgbot needs:
+
+    * tasks = things someone must do
+    * events = things that happened
+
+    Many of the 96 records probably should have been events.
+
+77. **Separate evidence records from tasks**
+    Evidence itself should be an artifact/evidence object attached to work, not another task unless someone genuinely has to produce it.
+
+78. **Separate review records from tasks**
+    Reviews can be structured review objects attached to canonical tasks where appropriate.
+
+79. **Separate decisions from tasks**
+    Operator decisions should be persisted decision objects, not arbitrary yellow task cards.
+
+80. **Graph visualization**
+    Optional but valuable: provide an expandable dependency graph for complex rooms.
+
+81. **Critical-path highlighting**
+    Highlight the chain actually delaying completion.
+
+82. **Room workload balancing**
+    If 16 bots exist and some are idle while eligible work exists, scheduler should surface or automatically route that work according to role constraints.
+
+83. **Reviewer independence constraints**
+    Explicitly encode who cannot review their own work rather than relying on conversation.
+
+84. **Role capability model**
+    Roles should express capabilities, not rigidly lock a task to one named bot when multiple agents can perform equivalent work.
+
+85. **Controlled role fallback**
+    If the primary role holder is occupied, allow predefined fallback roles without recreating duplicate tasks manually.
+
+86. **Task reservation/lease**
+    Prevent abandoned “claimed” work by using leases/heartbeats and returning stale assignments safely to the queue.
+
+87. **Delegation timeout handling**
+    If a delegate does not accept within a threshold, reroute automatically instead of silently leaving the task inert.
+
+88. **No repeated human prompts**
+    Hash/identity the operator decision request. If the same exact question has already been answered and the scope has not changed, suppress re-asking.
+
+89. **Decision supersession**
+    Later operator policy should supersede earlier policy cleanly so obsolete rules cannot resurface.
+
+90. **Policy versioning**
+    Store which policy/authorization version governed each execution or review.
+
+91. **Historical tasks must not resurrect**
+    Old IR-0 was repeatedly resurfacing. Fix that permanently with terminal state + policy supersession.
+
+92. **Room memory of authoritative decisions**
+    Orgbot should know:
+
+    * current authoritative task
+    * current security disposition
+    * current operator policy
+    * superseded instructions
+
+93. **Status vocabulary cleanup**
+    Avoid overloaded terms like:
+
+    * eligible
+    * cleared
+    * authorized
+    * ready
+
+    Give each a precise machine meaning.
+
+94. **Execution eligibility is separate from authorization**
+    A task may be authorized but still waiting on dependencies.
+
+95. **Authorization is separate from security clearance**
+    A human can approve an action class while Security can still hold a specific artifact.
+
+96. **Security clearance is separate from task readiness**
+    A security-approved component may still depend on unfinished engineering.
+
+97. **Board should derive status from all three dimensions**
+    Ideally model:
+
+    * workflow state
+    * dependency state
+    * authorization/security state
+
+    rather than forcing everything into one status badge.
+
+98. **Post-run orchestration analytics**
+    After a room finishes, generate a report:
+
+    * where tasks multiplied
+    * review loops
+    * long waits
+    * unnecessary operator prompts
+    * idle agents
+    * critical path
+    * artifact failures
+    * suggested Orgbot improvements
+
+99. **Stress-test mode**
+    Use this Leo room as a regression fixture for Orgbot itself. Recreate a synthetic version of:
+
+    * 16 bots
+    * 10–15 objectives
+    * 100 internal work/evidence/review records
+    * dependencies
+    * supersession
+    * reviews
+    * security HOLDs
+    * artifact recovery
+
+    and ensure the human-facing board remains clean.
+
+100. **Core design goal**
+     The final Orgbot principle should be:
+
+> **Bots see the full operational graph.
+> The human sees objectives, progress, and decisions.**
+
+That is the complete feature/fix set I would carry forward from this run.
+
+The highest-priority ones are #1–18, #21–25, #31–32, #52–59, #72–79, and #88–97. Those solve the exact pain you’re experiencing now.

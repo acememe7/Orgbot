@@ -16,7 +16,7 @@
   nav { display: flex; gap: 4px; padding: 8px 18px 0; }
   nav button { background: none; border: 0; color: inherit; padding: 8px 16px; border-radius: 8px 8px 0 0; cursor: pointer; font-size: 14px; }
   nav button.active { background: #1d222b; box-shadow: inset 0 -2px 0 #6d8bff; }
-  main { flex: 1; overflow: auto; padding: 18px; }
+  main { min-height: 0; flex: 1; overflow: auto; padding: 18px; }
   .panel { display: none; }
   .panel.active { display: block; }
   h2 { font-size: 15px; margin: 0 0 12px; }
@@ -34,12 +34,15 @@
   .botrow select, .botrow .who { flex: 1; }
   .err { color: #ff8f8f; font-size: 13px; margin-top: 8px; white-space: pre-wrap; }
   .ok { color: #93d9a0; }
-  #live { display: none; height: 100%; flex-direction: column; }
+  #live { display: none; flex: 1; min-height: 0; flex-direction: column; }
   #live.show { display: flex; }
-  main.hasLive { padding: 0; overflow: hidden; }
+  main.hasLive { display: none; }
   .livecols { flex: 1; display: flex; min-height: 0; }
-  #lchat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #lmessages { flex: 1; overflow: auto; padding: 10px 14px; }
+  #lchat { position: relative; min-height: 0; flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #lmessages { min-height: 0; flex: 1; overflow-y: auto; overflow-anchor: auto; overscroll-behavior: contain; padding: 10px 14px; }
+  #chatLatest { position: absolute; bottom: 78px; left: 50%; transform: translateX(-50%); border: 1px solid #46535a; box-shadow: 0 4px 18px #0005; }
+  #chatLatest[hidden] { display: none; }
+  #lmessages:empty::before { content: 'No messages yet'; color: #a5afb6; }
   #lboard { width: 300px; border-left: 1px solid #262b34; overflow: auto; padding: 10px; }
   .bmsg { margin: 8px 0; }
   .bmsg .who { font-size: 12px; font-weight: 600; }
@@ -90,7 +93,8 @@
   </div>
   <div class="livecols">
     <div id="lchat">
-      <div id="lmessages"></div>
+      <div id="lmessages" tabindex="0" aria-label="Room messages"></div>
+      <button id="chatLatest" class="ghost" hidden>Jump to latest</button>
       <div id="composer"><input id="msgBox" placeholder="Message the room…" /><button class="primary" id="sendBtn">Send</button></div>
     </div>
     <div id="lboard"></div>

@@ -151,13 +151,13 @@ async function deleteRoom(id) { await invoke('room_delete', { id }); await refre
 let ws = null;
 let currentRoomName = '';
 
-function enterLive(name, goal, url) {
+function enterLive(name, goal, url, token) {
   currentRoomName = name;
   $('liveName').textContent = name;
   $('liveGoal').textContent = goal || '';
   $('main').classList.add('hasLive');
   $('live').classList.add('show');
-  connect(url);
+  connect(url, token);
 }
 
 function exitLive() {
@@ -173,14 +173,14 @@ async function startRoom(id) {
     const info = await invoke('room_start', { id });
     banner('room running');
     const room = rooms.find((r) => r.id === id) || {};
-    enterLive(room.name || 'Room', room.goal, info.ws_url);
+    enterLive(room.name || 'Room', room.goal, info.ws_url, info.token);
   } catch (err) { banner('Start failed: ' + ((err && (err.message || err)) || 'unknown error'), true); }
 }
 
 document.getElementById('stopRoomBtn').onclick = async () => { await invoke('host_stop', {}); exitLive(); };
 
 // ws store
-const store = { room: null, agents: new Map(), tasks: new Map(), messages: [], phase: null };
+const store = { room: null, agents: new Map(), tasks: new Map(), messages: [], phase: null, head: 0 };
 
 function handleMessage(raw) {
   let msg;
@@ -189,14 +189,16 @@ function handleMessage(raw) {
   else if (msg.type === 'event') applyEnvelope(msg.envelope);
   else if (msg.type === 'phase') setPhase(msg.phase);
   else if (msg.type === 'closed') setPhase('completed');
-  else if (msg.type === 'error') resync();
+  else if (msg.type === 'error') banner(msg.message || 'Room request failed', true);
 }
 
 function resync() { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'resync' })); }
 
 function applySnapshot(snap) {
   const room = snap.room || {};
+  chatReplayHead = room.id === store.room?.id ? (snap.head || 0) : 0;
   store.room = room;
+  store.head = 0;
   store.agents.clear();
   (snap.roster || []).forEach((a) => store.agents.set(a.id, a));
   store.tasks.clear();
@@ -207,6 +209,8 @@ function applySnapshot(snap) {
 }
 
 function applyEnvelope(env) {
+  if (!env || env.seq <= store.head) return;
+  store.head = env.seq;
   const e = (env && env.event) || {};
   if (e.event === 'message_posted') { store.messages.push(e.message || {}); renderChat(); }
   else if (e.event === 'task_created' && e.task) { store.tasks.set(e.task.id, e.task); renderBoard(); }
@@ -217,6 +221,10 @@ function applyEnvelope(env) {
   } else if (e.event === 'agent_status_changed' && e.agent) {
     const a = store.agents.get(e.agent);
     if (a) a.status = e.to;
+  }
+  if (chatReplayHead && store.head >= chatReplayHead) {
+    chatReplayHead = 0;
+    renderChat();
   }
 }
 
@@ -242,15 +250,81 @@ function renderHeader() {
   $('pauseBtn').textContent = store.phase === 'paused' ? 'Resume' : 'Pause';
 }
 
+// Keep message nodes alive so native browser anchoring can preserve selection
+// and the visible message. Only a reader at the bottom follows new content.
+const chatBox = $('lmessages');
+const chatLatest = $('chatLatest');
+let chatFollowing = true;
+let chatInteracting = false;
+let chatFrame = 0;
+let chatRoom = null;
+let chatReplayHead = 0;
+const chatNodes = new Map();
+const chatAtBottom = () => chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight <= 24;
+function scheduleChatFollow() {
+  if (chatFrame) return;
+  chatFrame = requestAnimationFrame(() => {
+    chatFrame = 0;
+    if (chatFollowing && !chatInteracting) chatBox.scrollTop = chatBox.scrollHeight;
+    chatLatest.hidden = chatFollowing;
+  });
+}
+chatBox.addEventListener('pointerdown', () => { chatInteracting = true; chatFollowing = false; }, { passive: true });
+window.addEventListener('pointerup', () => {
+  if (!chatInteracting) return;
+  chatInteracting = false;
+  scheduleChatFollow();
+}, { passive: true });
+window.addEventListener('pointercancel', () => { chatInteracting = false; }, { passive: true });
+chatBox.addEventListener('wheel', (event) => {
+  if (event.deltaY < 0) chatFollowing = false;
+}, { passive: true });
+chatBox.addEventListener('keydown', (event) => {
+  if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) chatFollowing = false;
+}, { passive: true });
+chatBox.addEventListener('scrollend', () => {
+  if (!chatInteracting && chatAtBottom()) chatFollowing = true;
+  scheduleChatFollow();
+}, { passive: true });
+chatBox.addEventListener('scroll', () => {
+  // A resize can also dispatch scroll; only reaching the bottom restores follow.
+  if (!chatInteracting && chatAtBottom()) chatFollowing = true;
+  else if (!chatAtBottom()) chatFollowing = false;
+  scheduleChatFollow();
+}, { passive: true });
+chatLatest.onclick = () => { chatFollowing = true; chatInteracting = false; scheduleChatFollow(); };
+new ResizeObserver(scheduleChatFollow).observe(chatBox);
+const chatContentResize = new ResizeObserver(scheduleChatFollow);
 function renderChat() {
-  const box = $('lmessages');
-  if (!store.messages.length) { box.innerHTML = '<div class="muted">No messages yet</div>'; return; }
-  box.innerHTML = store.messages.map((m) => {
-    const a = m.author || {};
-    const who = a.kind === 'human' ? 'you' : '@' + agentHandle(a.agent || a.id);
-    return '<div class="bmsg"><div class="who">' + esc(who) + '</div><div class="body">' + esc(m.body || '') + '</div></div>';
-  }).join('');
-  box.scrollTop = box.scrollHeight;
+  if (store.head < chatReplayHead) return;
+  const room = store.room?.id;
+  if (room !== chatRoom) {
+    chatRoom = room;
+    chatFollowing = true;
+  }
+  const ids = new Set(store.messages.map((m) => m.id));
+  for (const [id, node] of chatNodes) {
+    if (!ids.has(id)) { chatContentResize.unobserve(node); node.remove(); chatNodes.delete(id); }
+  }
+  for (const message of store.messages) {
+    const author = message.author || {};
+    const who = author.kind === 'human' ? 'you' : '@' + agentHandle(author.agent || author.id);
+    let node = chatNodes.get(message.id);
+    if (!node) {
+      node = document.createElement('div');
+      node.className = 'bmsg';
+      node.dataset.messageId = message.id;
+      node.append(document.createElement('div'), document.createElement('div'));
+      node.children[0].className = 'who';
+      node.children[1].className = 'body';
+      chatNodes.set(message.id, node);
+      chatBox.append(node);
+      chatContentResize.observe(node);
+    }
+    if (node.children[0].textContent !== who) node.children[0].textContent = who;
+    if (node.children[1].textContent !== (message.body || '')) node.children[1].textContent = message.body || '';
+  }
+  scheduleChatFollow();
 }
 
 const COLOR = { claimed: '#6d8bff', started: '#6d8bff', in_progress: '#6d8bff',
@@ -267,10 +341,10 @@ function renderBoard() {
     (t.assignee ? ' · ' + esc(agentHandle(t.assignee)) : '') + '</div></div>').join('');
 }
 
-function connect(url) {
+function connect(url, token) {
   if (ws && ws.readyState <= 1) return;
   ws = new WebSocket(url);
-  ws.onopen = () => { $('connChip').textContent = 'connected'; };
+  ws.onopen = () => { ws.send(JSON.stringify({type: 'hello', wire_version: 1, token})); $('connChip').textContent = 'connected'; };
   ws.onclose = () => { $('connChip').textContent = 'disconnected'; };
   ws.onmessage = (ev) => handleMessage(ev.data);
 }
