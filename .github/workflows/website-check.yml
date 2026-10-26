@@ -27,3 +27,5 @@ jobs:
       - run: python3 scripts/test-install-orgbots.py
       - run: python3 scripts/check-website.py
       - run: node --check website/site.js
+      - run: node scripts/test-website-consent.mjs
+      - run: python3 -m unittest discover -s deploy/website -p 'test_*.py'

@@ -71,9 +71,41 @@ Verified on 26 October 2026:
 
 Paid provider comparisons, physical suspend/reboot and real multi-day runs
 remain unperformed. This task changed installation/distribution and the website,
-not application code. Google Search Console, optional analytics, independent
-owner-controlled Google Cloud backups, full host recovery, complete edge and
-origin hardening, and jurisdiction-specific legal review remain open. Existing
-host hardening deviations were reported to the owner without changing shared
-firewall rules or service identities. The site's privacy page describes actual
-local preferences, origin log rotation and Cloudflare security processing.
+not application code. The following record updates the earlier setup gates.
+
+## Follow-up on 26 October 2026
+
+- Google Search Console ownership is verified for the HTTPS OrgBots URL-prefix
+  property. Google fetched `sitemap.xml` successfully and discovered five pages.
+  This is not proof that the pages are indexed or have search traffic.
+- Decorative arrows were removed from the home and evidence links. The layout
+  is preserved. Copyright notices identify 2026 The AECE Studio; the owner
+  confirmed this is a business name registered in Nigeria. Standard Apache 2.0
+  license terms remain intact. Package builders now include the notices in
+  future packages; already-published 2.0 binaries have not been rebuilt.
+- A real manual Cloudflare Web Analytics property exists. The implementation is
+  prepared behind `data-analytics-enabled="true"`, but every public page sets
+  it to `false`. The disabled path does not access consent storage or load a
+  beacon. The privacy page and footer describe that actual state. Before
+  enabling, resolve GAID Article 31 applicability with qualified review, complete
+  any required DPIA, reconcile the studio's wider no-tracking statement, update
+  public notices/CSP, and verify real consent/network behavior. Fixture coverage
+  includes cross-tab withdrawal, page restoration, expiry, and storage failures.
+- Cloudflare automatic beacon injection is prevented by `public, no-transform`;
+  the CSP continues to allow only same-origin scripts/connections and exact
+  JSON-LD hashes. The OrgBots-only Nginx check uses the original socket peer,
+  preserving the visitor address for logs. Direct HTTP and HTTPS origin
+  requests return 403; the proxied website and a real HTTP ACME challenge file
+  return 200. The main and games websites still return 200. Nginx validation
+  passes with the same four pre-existing protocol warnings.
+- The owner selected Google Drive instead of Google Cloud Storage. One private
+  copy of release `414104c` and its vhost was uploaded, downloaded and restored:
+  20 files, with the exact original SHA-256. This is evidence for that website
+  snapshot, not a scheduled backup or complete host recovery. See
+  `orgbots-recovery.md` for the recovery procedure and remaining automation gap.
+
+Host-wide SSH restriction, a TLS-1.3-only edge, complete WAF coverage, recurring
+Drive uploads/failure alerts, and qualified legal/transfer review remain open.
+Shared-host SSH was not changed without a tested recovery path. Field Core Web
+Vitals and search results require real traffic and time. The public PageSpeed
+API returned HTTP 429 during this follow-up; no score is claimed from that call.

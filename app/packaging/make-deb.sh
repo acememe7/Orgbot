@@ -45,6 +45,20 @@ if [ ! -f "$TRASH_HELPER" ]; then
   exit 1
 fi
 
+write_package_copyright() {
+  local destination=$1
+  mkdir -p "$(dirname "$destination")"
+  {
+    printf '%s\n' \
+      'Upstream-Name: OrgBots' \
+      'Source: https://github.com/acememe7/Orgbot' \
+      'Upstream-Contact: https://github.com/acememe7/Orgbot/issues' \
+      ''
+    cat ../LICENSE
+  } > "$destination"
+  chmod 0644 "$destination"
+}
+
 STAGE=$(mktemp -d)
 TRANSITIONAL_STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE" "$TRANSITIONAL_STAGE"' EXIT
@@ -66,6 +80,7 @@ ln -s "/usr/lib/$APP/orgbot-engine" "$STAGE/usr/bin/orgbot-engine"
 ln -s "/usr/lib/$APP/orgbot-trash.py" "$STAGE/usr/bin/orgbot-trash"
 install -m644 packaging/orgbot.desktop "$STAGE/usr/share/applications/orgbot.desktop"
 install -m644 packaging/orgbots-icon-256.png "$STAGE/usr/share/icons/hicolor/256x256/apps/$APP.png"
+write_package_copyright "$STAGE/usr/share/doc/$PACKAGE/copyright"
 ln -s "/usr/lib/$APP/orgbot_app" "$STAGE/usr/bin/$APP"
 ln -s "/usr/lib/$APP/orgbot_app" "$STAGE/usr/bin/$PACKAGE"
 
@@ -120,6 +135,7 @@ CONTROL
 dpkg-deb --build --root-owner-group "$STAGE" "${PACKAGE}_${VERSION}_amd64.deb" >/dev/null
 
 mkdir -p "$TRANSITIONAL_STAGE/DEBIAN"
+write_package_copyright "$TRANSITIONAL_STAGE/usr/share/doc/$APP/copyright"
 cat > "$TRANSITIONAL_STAGE/DEBIAN/control" <<TRANSITIONAL
 Package: orgbot
 Version: $VERSION

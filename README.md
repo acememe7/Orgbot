@@ -234,3 +234,10 @@ ORG_GRADLE_PROJECT_orgbotQa=true flutter test integration_test/workspace_device_
 Integration-test targets are refused unless `orgbotQa=true`, protecting the normal app package. The QA property uses `com.orgbot.app.qa`, keeping device tests separate from the normal package. Verify the reverse mapping remains active during the test (ADB reconnection clears it). Use `--no-uninstall`: Flutter otherwise removes its test package on completion. These deterministic tests do not validate a real paid model account or your own VPS configuration.
 
 If Wi-Fi ADB repeatedly loses the test debugger, `integration_test/smoke_main.dart` runs phone-file, native-engine/tag, room navigation/restart and pinned-SSH-reconnect checks without a debugger. During its `background window` stage, background the QA app and turn off the display; `heartbeat.json` records progress and a native message plus an SSH reconnect run during that window. Reopen the QA app after 34 seconds to capture the restored chat and Memory screen. Build it with the same QA property and fixture defines using `flutter build apk --profile --target-platform android-arm64 -t integration_test/smoke_main.dart`, then install the QA APK, restore `adb reverse tcp:22222 tcp:22222`, and launch `com.orgbot.app.qa/com.orgbot.app.MainActivity`. Results are in the QA app’s `files/workspaces/smoke-result.json`. This smoke check supplements the widget/integration suite.
+
+## License
+
+Original OrgBots work is licensed under Apache License 2.0. Copyright 2026 The
+AECE Studio. Bundled third-party components retain their own license terms and
+notices; for example, the Inter font's SIL Open Font License and attribution
+remain in `app/assets/fonts/OFL.txt` and in the desktop bundle.
