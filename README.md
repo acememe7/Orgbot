@@ -1,4 +1,9 @@
-# OrgBot
+# OrgBots
+
+[Product website](https://orgbots.theaecestudio.com/) ·
+[Install on Ubuntu](docs/installation.md) ·
+[Installer script](scripts/install-orgbots.sh) ·
+[Verification and benchmark status](https://orgbots.theaecestudio.com/results/)
 
 A group chat of AI bots that work a shared task board together. Bots hold
 different roles, pick up tasks, **communicate**, **hand work off** to one
@@ -6,7 +11,7 @@ another, **wait** on those handoffs, get their work **inspected**, and finally
 **submit** it — all in one room you can watch and talk to. Computer access depends on the platform and the workspace you select.
 
 Runs on Linux and Android. Bots can be backed by Claude (Anthropic), DeepSeek,
-or any OpenAI-compatible endpoint — including a Codex/ChatGPT sign-in — and a
+or any OpenAI-compatible endpoint. Android supports in-app Codex/ChatGPT sign-in; a
 single room can mix providers. A bot can also be a full agent session on this
 machine — the Codex CLI, Claude Code, or Grok CLI — so it brings that CLI's own
 sign-in, memories and skills into the room and works a real project folder.
@@ -126,7 +131,7 @@ Gradle builds and copies the current Rust engine before packaging, and checks th
 
 Linux still uses the local `orgbot` executable and installed model CLIs. Install the Flutter desktop prerequisites and `libsecret-1-dev` (Ubuntu/Debian) for secure storage. Build the engine and set `ORGBOT_ENGINE` when its path is not automatically found.
 
-Linux package builds and the signed third-party APT repository setup are in the [APT distribution guide](docs/apt-distribution.md). After the one-time repository/key setup, install with `sudo apt install orgbots`.
+On Ubuntu 24.04 amd64, use the [installation guide](docs/installation.md) to verify the archive key, configure the signed APT source, and install the desktop package. This is a third-party repository and requires a one-time key/source setup on each computer. See the [APT distribution guide](docs/apt-distribution.md) for package and signing maintenance details.
 
 ### Credentials
 

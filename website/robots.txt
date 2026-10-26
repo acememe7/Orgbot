@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://orgbots.theaecestudio.com/sitemap.xml

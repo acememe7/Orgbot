@@ -63,31 +63,26 @@ The signed archive is published at
 `https://acememe7.github.io/Orgbot/apt/`. GitHub Pages uses the manually
 dispatched Actions workflow and the dedicated `apt` branch.
 
-Compare the downloaded key with the fingerprint above, install its scoped
-keyring, and create the Deb822 source once:
+The installer supports Ubuntu 24.04 amd64. Review the
+[installer source](../scripts/install-orgbots.sh), download it, then run it
+with Bash:
 
 ```sh
-curl -fsSLo /tmp/orgbots-archive-keyring.gpg \
-  https://acememe7.github.io/Orgbot/apt/orgbots-archive-keyring.gpg
-gpg --show-keys --with-fingerprint /tmp/orgbots-archive-keyring.gpg
-# Expected fingerprint: 81445722C3B9265312C12039F831B11611E6D198
-sudo install -D -m 0644 /tmp/orgbots-archive-keyring.gpg \
-  /etc/apt/keyrings/orgbots-archive-keyring.gpg
-sudo tee /etc/apt/sources.list.d/orgbots.sources >/dev/null <<'EOF'
-Types: deb
-URIs: https://acememe7.github.io/Orgbot/apt
-Suites: stable
-Components: main
-Architectures: amd64
-Signed-By: /etc/apt/keyrings/orgbots-archive-keyring.gpg
-EOF
-sudo apt update
-sudo apt install orgbots
+curl -fsSLo install-orgbots.sh \
+  https://raw.githubusercontent.com/acememe7/Orgbot/main/scripts/install-orgbots.sh
+sed -n '1,220p' install-orgbots.sh
+bash install-orgbots.sh
 ```
 
-APT verifies repository metadata with only the key named by `Signed-By`; the
-package files are covered by hashes in that signed metadata. Do not use
-`apt-key`, `trusted=yes`, or an unscoped global keyring for this archive.
+The script downloads the public key over HTTPS and verifies its full pinned
+fingerprint before changing system files. It installs the key into
+`/etc/apt/keyrings/` and writes a Deb822 source scoped with `Signed-By`. If an
+existing key or source file differs, it preserves the original beside that
+file before replacing it. Identical configuration is left untouched. It then
+runs `apt-get update` and `apt-get install orgbots` with APT's normal
+confirmation prompt. Missing prerequisites are reported; the script does not
+install them automatically. APT verifies repository metadata only with the
+scoped key, and the package hashes are covered by that signed metadata.
 
 ## Published release and maintenance
 

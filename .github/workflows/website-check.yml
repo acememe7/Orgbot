@@ -1,0 +1,29 @@
+name: Website and installer checks
+on:
+  push:
+    paths:
+      - 'website/**'
+      - 'deploy/website/**'
+      - 'scripts/*website*'
+      - 'scripts/*install-orgbots*'
+      - '.github/workflows/website-check.yml'
+  pull_request:
+    paths:
+      - 'website/**'
+      - 'deploy/website/**'
+      - 'scripts/*website*'
+      - 'scripts/*install-orgbots*'
+      - '.github/workflows/website-check.yml'
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - run: bash -n scripts/install-orgbots.sh
+      - run: python3 scripts/test-install-orgbots.py
+      - run: python3 scripts/check-website.py
+      - run: node --check website/site.js
