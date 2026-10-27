@@ -87,7 +87,7 @@ Private profiles, credentials and raw transcripts remain outside Git.
 - [x] Final package upgrade, signed metadata and dependency-solver checks.
 - [x] Astra prepublication review of source, evidence and package identity.
   Scoped approval: no unresolved blocking findings; public verification follows.
-- [ ] Publication and independent public signed-archive download verification.
+- [x] Publication and independent public signed-archive download verification.
 
 ## Operational scope
 
@@ -99,14 +99,13 @@ publishing the archive.
 
 | Gate | Configuration and verification status on 2026-10-27 |
 | --- | --- |
-| Live protections | Local sandbox/approval tests and signed archive validation passed; final public HTTPS/signature checks pending. GitHub-managed WAF, firewall and TLS-only policy configuration were not inspected. |
+| Live protections | Local sandbox/approval tests and signed archive validation passed; public HTTPS, signatures, candidate selection and both downloaded package hashes verified. GitHub-managed WAF, firewall and TLS-only policy configuration were not inspected. |
 | Backups | Earlier signed package versions and private local evidence are retained. Scheduled independent archive/signing-key backup configuration was not checked; no new transfer or backup schedule is claimed. |
 | Restore tests | Final rebuilt candidate passed isolated fixture upgrade/data preservation. No full machine or signing-key disaster recovery exercise was performed. |
 | Legal/privacy | No new data flow or jurisdiction is introduced. Product-wide legal compliance was not reassessed or certified. Existing website/legal review gaps remain outside this package change. |
 
 Saved evidence is in the owner's private release archive, grouped by immutable
-live engine, trial, lifecycle probe and check run. Public hashes and the
-publication record will be recorded here after those gates pass.
+live engine, trial, lifecycle probe and check run. Public hashes and the publication record are below.
 
 Final engine SHA-256: `318aabb8673e7ac283003932c9feade1770918c00b36472f7bb84acb264feb29`.
 
@@ -114,3 +113,24 @@ Final engine SHA-256: `318aabb8673e7ac283003932c9feade1770918c00b36472f7bb84acb2
 | --- | --- |
 | orgbots_2.0.2_amd64.deb | `1e06aaca19a903f06022a21ccc39d319179753dbb8f68bbee8f82bb1c68dc610` |
 | orgbot_2.0.2_all.deb | `9985b991f93cde50c3479bd5b09b197963d738321a8dd517aad0dcbcd4cdd007` |
+
+## Publication
+
+Published on 2026-10-27 using
+[GitHub Actions run 40480618565](https://github.com/acememe7/Orgbot/actions/runs/40480618565).
+Implementation source is `72492bcb12aa8285e2c9220f8cb018d67a432441`; the workflow
+checked out signed archive commit `e89f2517dc287ac69b913397da0761372fe54ee4`.
+The first dispatch picked up the previous archive while its upload was still
+finishing; the second dispatch and independent public verification confirm the
+new archive.
+
+A fresh isolated APT refresh against the public HTTPS archive verified both
+OpenPGP signatures, selected 2.0.2, solved the 2.0.1 upgrade with no removals,
+and downloaded both packages. Their hashes exactly match the table above.
+The four older package files remain byte-for-byte unchanged in the archive.
+Host APT sources, installed packages and saved rooms were not modified.
+
+The staged diff and all newly published source commits passed Gitleaks. Public
+verification evidence is retained privately as `apt-public-final/result.json`
+and its command log. The release is published; the explicitly documented
+operational and live-rerun limits remain.

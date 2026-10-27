@@ -116,10 +116,11 @@ See `apt-distribution.md` for the one-time client setup and maintenance window.
   acceptance tests, and count requests from usage events correctly.
 - [x] Record model usage, API estimate and separate CLI diagnostic consumption
   in the [pilot report](benchmarks/2026-10-26-astra-sol-deepseek.md).
-- [ ] Complete an accepted baseline/team pair. The latest baseline code passed
-  six tests, but review-only command restrictions blocked combined reviewer
-  testing, and the next Codex resume invocation failed CLI argument parsing.
-  Those observed workflow blockers remain unresolved. No savings are claimed.
+- [x] Complete an accepted baseline/team pair (resolved 2026-10-27 for 2.0.2).
+  The original pilot failed reviewer testing and native resume; the follow-up
+  pair completed both rooms and passed six unchanged tests in each arm. See
+  [accepted evidence and corrected usage](benchmarks/2026-10-27-release-validation.md).
+  One accepted pair does not establish general savings.
 
 The installed application, public package and website were not changed by this
 pilot. Earlier verification records above describe their original scoped runs;
@@ -195,7 +196,10 @@ skill/MCP lifecycle and pause/restart; pass package/signature/upgrade checks.
   signed APT selection/download verified. Public verification follows publication.
 - [x] Obtain Astra review of the final implementation and evidence.
   Scoped prepublication approval covers exact signed artifacts and recorded limits.
-- [ ] Publish 2.0.2 and independently verify the public signed archive/download.
+- [x] Publish 2.0.2 and independently verify the public signed archive/download.
+  Actions run 40480618565 deployed archive e89f251. Fresh public APT refresh,
+  signature verification, upgrade solver and both package downloads passed;
+  hashes match the reviewed final packages. Owner installation is unchanged.
 
 Keep private logs/profiles/credentials outside Git. Do not infer subscription
 quota savings from token counts or claim general savings from one pilot pair.

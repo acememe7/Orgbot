@@ -88,6 +88,23 @@ scoped key, and the package hashes are covered by that signed metadata.
 
 ## Published release and maintenance
 
+OrgBots **2.0.2** was published on 2026-10-27 with
+[GitHub Actions run 40480618565](https://github.com/acememe7/Orgbot/actions/runs/40480618565).
+A fresh isolated public APT refresh, signature check, upgrade simulation and
+download of both packages passed. The main package SHA-256 is:
+
+```text
+1e06aaca19a903f06022a21ccc39d319179753dbb8f68bbee8f82bb1c68dc610
+```
+
+This release adds scoped rule/skill/MCP loading, fixes native Codex resume and
+cumulative usage accounting, adds isolated reviewer verification, and patches
+TLS/QUIC dependencies. Earlier package files remain available in the archive.
+See the [verification record](RELEASE_2_0_2_VERIFICATION.md) for tests, exact
+package identities, live evidence and remaining limits. Publishing did not
+upgrade the owner's installed app.
+
+
 OrgBots **2.0.1** was published on 2026-10-26 with
 [GitHub Actions run 40387218167](https://github.com/acememe7/Orgbot/actions/runs/40387218167).
 A fresh isolated APT metadata refresh and download passed against the public
