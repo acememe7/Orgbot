@@ -118,16 +118,21 @@ usage limits depend on each account.
 The development source also includes OpenCode and Antigravity provider
 configuration. OpenCode requires an explicit `provider/model` and the selected
 provider's existing OpenCode API credential; OAuth reuse is unavailable.
-Antigravity has a separate private sign-in flow in the development source;
-model execution remains blocked until authentication and runtime permissions
-pass live verification. These additions
-are not in the published 2.0.2 package. See the
-[integration status and verification](docs/NATIVE_CLI_INTEGRATIONS.md).
+Antigravity uses a separate private sign-in. A protected Linux server smoke
+completed on `gemini-3.8-flash-medium` through the room MCP bridge. A separate
+11-check context test passed exact Astra-to-Gemini nonce routing, same-session
+recall after restart, and a distinct isolated room that returned `UNKNOWN`.
+An authorized room-MCP file write and readback also passed while direct native
+file tools remained denied. Provider billing classification is unknown. These
+additions are not in the published 2.0.2 package. See the
+[integration status and verification](docs/NATIVE_CLI_INTEGRATIONS.md)
+and [Antigravity runtime evidence](docs/benchmarks/2026-10-27-antigravity-runtime.json).
 
 The [development live-test report](docs/benchmarks/2026-10-27-subscription-free-validation.md)
 records the Astra/DeepSeek coding test, separate provider usage, and the
-OpenCode free-allowance and Antigravity authentication blockers. It does not
-change the published release or establish subscription savings.
+OpenCode free-allowance result. The later Antigravity runtime smoke is recorded
+separately. Neither report changes the published release or establishes general
+subscription savings.
 
 Rooms have a shared conversation, task board, artifacts and editable memory.
 Reply to a message or use `@handle` to direct work to an agent; an untagged
@@ -478,7 +483,10 @@ provider = { kind = "cli", cli = "codex", workdir = "/path/to/project", policy =
 In the development source, OpenCode uses `cli = "opencode"` with an explicit
 `model = "provider/model"`. Antigravity's saved identifier is
 `cli = "antigravity"` (`agy` is also accepted); its executable is `agy`, and
-execution is blocked pending isolated authentication and permission checks.
+the explicit model slug `gemini-3.8-flash-medium` passed a guarded Linux room
+MCP smoke, an 11-check context/restart test, and an authorized MCP file
+write/readback with direct native file tools denied. Billing treatment remains
+unknown; credential refresh and live external-MCP approvals remain unverified.
 On Linux, `orgbot agy login` opens the separate private sign-in in your terminal;
 `orgbot agy status` reports stored-credential presence only. Connections & tools
 also exposes these actions in a source build. Neither new provider

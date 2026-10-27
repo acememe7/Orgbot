@@ -13,7 +13,7 @@ separate from that blocked live attempt.
 | Provider | Executable | Model selection | Status |
 | --- | --- | --- | --- |
 | OpenCode | `opencode` | Explicit `provider/model` | Protected Linux adapter using an existing API credential; OAuth reuse blocked |
-| Antigravity | `agy` | Explicit model slug | Separate private sign-in implemented in source; execution blocked pending live authentication and permission checks |
+| Antigravity | `agy` | Explicit model slug, tested as `gemini-3.8-flash-medium` | Protected room-MCP smoke, 11-check context/restart test, and authorized MCP workspace write/readback passed |
 
 `antigravity` on this machine launches the IDE and is not the CLI adapter.
 Finding either executable does not establish account access. Sign-in starts
@@ -42,14 +42,18 @@ allow the OrgBots room MCP bridge; native tools are denied.
 The room's existing workspace permissions and exact-call external-MCP approvals
 still apply through that bridge.
 
-Antigravity's native authentication uses the Linux keyring. No narrowly selected
-credential transfer has been verified on this machine. The adapter therefore
-fails before invoking a model instead of forwarding the host Secret Service or
-switching to Gemini API billing. No Antigravity process, project hook or plugin
-is started by the adapter. Isolated authentication and executable configuration
-boundaries remain integration requirements, not a working subscription connection.
+In the initial implementation, Antigravity's native authentication used the
+Linux keyring, and no narrowly selected credential transfer had been verified.
+That adapter failed before invoking a model rather than forwarding the host
+Secret Service or switching to Gemini API billing. The historical diagnosis
+below records that state; the later private sign-in and guarded execution path
+are described separately.
 
-### Antigravity authentication diagnosis, 27 October 2026
+### Antigravity authentication diagnosis, 27 October 2026 (historical)
+
+The following records the state before owner sign-in and protected runtime
+integration. Later sections document the successful runtime smoke and the
+remaining acceptance gates.
 
 The installed `agy` 1.4.8 is present. OrgBots deliberately rejects it in the
 provider constructor, private-profile builder and workspace launcher because
@@ -71,11 +75,9 @@ timeout. Current headless documentation describes an authentication-required
 exit without a terminal; the installed binary behaved differently here.
 No browser sign-in, provider completion or API/ADC fallback occurred.
 
-This establishes a possible private-keyring foundation, not working AGY
-authentication. Application integration and an owner-completed sign-in into
-that isolated profile are still required, followed by restart/refresh,
-subscription/overage, configuration-boundary and live context/usage checks.
-The production execution gates remain enabled. The
+At that point this established a possible private-keyring foundation, not
+working AGY authentication. Subsequent owner sign-in and guarded execution are
+described below. The
 [sanitized diagnosis](benchmarks/2026-10-27-antigravity-auth-diagnosis.json)
 records the exact tested binary and scope.
 
@@ -90,7 +92,8 @@ the items remain visible after a locked restart. If credentials are already
 stored, it returns immediately without launching AGY or reading the desktop
 wrapping key.
 `orgbot agy status` and **Check sign-in** report only whether the private keyring
-contains credential items; they do not certify authentication or enable bots.
+contains credential items. They do not certify account access or runtime
+readiness; account access is checked when the selected bot runs.
 
 The helper creates a dedicated encrypted keyring under
 `$XDG_DATA_HOME/orgbot/agy` (normally `~/.local/share/orgbot/agy`). A generated
@@ -118,19 +121,20 @@ submit a model prompt. Status uses locked private-keyring metadata and does not
 query the desktop keyring. The package declares its D-Bus and GNOME Keyring
 dependencies, but no updated package has been installed or published.
 
-The first owner sign-in saved private credentials, then showed **Settings
+The initial owner sign-in saved private credentials, then showed **Settings
 Error**: AGY's interactive startup tried to normalize and atomically replace
 the read-only settings file. The earlier networkless test reached OAuth only
 and did not exercise that authenticated startup. The helper now ends at
 credential storage instead of continuing into the full interactive session;
-the protected settings remain read-only. Neither continuing with defaults nor
-overwriting the controlled policy is part of this flow.
+the protected settings remain read-only. Continuing with defaults or
+overwriting the controlled policy remains prohibited. This is an enrollment
+flow stop, not the current protected model-runtime path.
 
 The owner's stored-credential path now returns successfully. Separately,
 `agy -p /changelog --output-format json` completed inside the empty-root sandbox
 using the existing private keyring with networking disabled and settings
 unchanged. This proves that the saved credentials can be loaded for that
-built-in command; it does not establish model execution or token refresh.
+built-in command; it did not establish model execution or token refresh.
 
 The next response test exposed a separate missing default-project record. The
 helper now precreates the exact structural metadata written by AGY 1.4.8 and
@@ -140,20 +144,90 @@ returned `READY`; the final source-generated-profile probe reported 6,781 input
 tokens, 30 output tokens (including 29 thinking tokens), and zero cache reads.
 It confirmed model `gemini-3.8-flash-medium`, unchanged protected configuration,
 and no stderr. No API credential was supplied and `useG1Credits` remained false.
-These direct CLI checks do not validate the OrgBots room MCP/runtime adapter,
-shared context or separate room-ledger usage.
+These direct CLI checks did not validate the OrgBots room MCP/runtime adapter,
+shared context or separate room-ledger usage. One guarded server MCP smoke is
+now recorded below.
 
-Credential refresh, subscription/overage behavior, actual native
-tool permissions, room MCP, and live context/usage checks remain required
-before removing the three execution gates. The
+Cross-context restart, isolated-room behavior and room-ledger usage
+reconciliation are now covered by the separate context proof below. The
 [enrollment verification record](benchmarks/2026-10-27-antigravity-enrollment.json)
 separates synthetic/offline proof from those remaining account tests.
 
 These measures preserve the existing [workspace boundary](WORKSPACE_SAFETY.md).
 The normal room CLI sandbox still exposes the host filesystem read-only, including
 readable files in the host home; it is not complete credential secrecy from a
-malicious CLI. Private profile copies isolate writable state. The separate AGY
-enrollment sandbox described above uses an empty filesystem instead.
+malicious CLI. Private profile copies isolate writable state. Both AGY enrollment
+and protected runtime use empty-root filesystems, with only their specific
+private home, runtime paths and private D-Bus socket mounted.
+
+### Protected Antigravity room-MCP smoke, 27 October 2026
+
+The owner completed private sign-in. The current protected Linux server path
+passed a real AGY 1.4.8 room-MCP smoke using the explicit model
+`gemini-3.8-flash-medium`. The model returned `READY`; the episode recorded
+20,515 input tokens, 1,945 output tokens and zero cache tokens. This is one
+successful guarded server execution, not broad context-sharing acceptance.
+
+The runtime gives this bot a private `HOME`, uses the existing isolated
+keyring wrapped by one exact host Secret Service item, and provides only the
+private D-Bus socket. AGY's settings, global configuration and seeded default
+project record are read-only. The private project `.agents` path and plugin
+directory are empty. The room MCP bridge is the only allowed MCP server;
+native command, file and URL tools are denied. No API credential or API
+environment variable is supplied, and `useG1Credits` is false. The adapter
+rejects a concurrent AGY session before making a provider call; only one
+active AGY run is supported.
+
+The account route is the stored native account sign-in. Provider billing
+classification remains unknown: the smoke does not prove an invoice amount,
+quota treatment or zero charge. The separate 11-check context/restart proof is
+described below. See the
+[sanitized runtime report](benchmarks/2026-10-27-antigravity-runtime.json).
+
+### Context, restart and isolated-room proof
+
+A second guarded run passed all eleven checks in
+`context-2/proof.json`. Astra routed an exact nonce challenge to Gemini 3.8 Flash
+Medium. After restart, Gemini resumed the same native session and recalled the
+marker. A fresh room used a distinct native session and returned `UNKNOWN` for
+the marker. A hostile `.agents` input remained masked, and its source checksum
+was unchanged. Independent AGY transcript totals matched the engine usage and
+persisted baseline; the restart episode was recorded as a delta once.
+
+| CLI episode scope | Episodes | Input | Output | Cache read / write |
+| --- | ---: | ---: | ---: | ---: |
+| Main room, Astra `gpt-6-astra` via Codex | 1 | 13,100 | 246 | 61,184 / 0 |
+| Main room, Gemini `gemini-3.8-flash-medium` via AGY | 2 | 53,013 | 5,010 | 29,868 / 0 |
+| Isolated room, Gemini via AGY | 1 | 12,707 | 278 | 0 / 0 |
+
+These counts are CLI episodes, not AGY internal model steps or invoice events.
+The isolated room's usage is separate from the main-room totals. The usage
+ledger reports AGY `billing_kind` as unknown and leaves actual API cost unset.
+
+### Authorized workspace write and direct-write denial
+
+A separate guarded run passed the room workspace's `workspace_write` policy:
+the agent created `authorized.txt` through the room MCP tool and read back the
+exact content. The original synthetic file remained unchanged. The project
+mount remained read-only and native file tools retained their deny rules;
+shell commands were disabled. The separate read-only `permissions-2` probe
+attempted a native filesystem write and confirmed its denial. The authorized
+write run tests the room-tool path without
+granting the CLI native filesystem write access. Usage for the one CLI episode
+was 53,980 input tokens, 844 output tokens, and zero cache tokens. The
+provider's billing classification remains unknown.
+
+Native schema-file reads remained blocked; room tool schemas were supplied in
+the standing brief. Credential refresh and live approvals for external MCP
+tools and shell-command workflows have not been tested.
+
+For local reproduction, the protected relay artifact must be owner-controlled,
+single-linked and not group- or world-writable. A Cargo artifact with hardlinks and mode
+`0775` was correctly rejected; the test used a private checksum-identical copy
+without installing it. AGY log compatibility permits only the `cli.log`
+symlink to a relative `log/cli-YYYYMMDD_HHMMSS.log` target, which must resolve
+to an owner-owned, single-link regular file in the private log directory. Logs
+are retained. All other symlinks and path escapes are rejected.
 
 ## Sessions and usage
 
@@ -193,16 +267,16 @@ a separate bubblewrap invocation:
 
 The [sanitized conformance record](benchmarks/2026-10-27-opencode-cli-conformance.json)
 contains the commands, checksums, effective configuration checks and mock
-request results. There were **zero external model calls**. These checks prove
-CLI protocol and sandbox behavior against fixtures; they do not prove real
-account authentication, provider billing, paid inference or a completed live
-OrgBots team run with these new providers.
+request results. These OpenCode checks made **zero external model calls** and
+prove CLI protocol and sandbox behavior against fixtures; they do not prove
+real account authentication or provider billing. The separate Antigravity live
+smoke is documented above.
 
 Rendered Flutter widget fixtures with the app's Inter font were inspected at
 375px and 1280px: provider choices, explicit-model fields, OpenCode's credential
-limit and Antigravity's unavailable status. These are source UI fixtures, not
-captures of a rebuilt or installed desktop package. Fifteen host configuration
-and rule files matched their pre-task SHA-256 hashes.
+limit, and Antigravity's separate sign-in and account-check-on-run status. These
+are source UI fixtures, not captures of a rebuilt or installed desktop package.
+Fifteen host configuration and rule files matched their pre-task SHA-256 hashes.
 
 Final source suite totals and Astra review status are recorded in the
 [project task log](LINUX_2_0_PLAN.md).
@@ -213,7 +287,8 @@ matching the official release asset digest. The extracted executable SHA-256 is
 `538fcb1b6408c8d4608822acee19f7ff5b3a3eb3383c0633c4f06170857312a7`.
 It was not installed into the
 owner's CLI path. The installed `agy` reports **1.4.8**. Its `models` command
-succeeded, but that alone does not prove authenticated model execution.
+alone does not prove authenticated execution; the later guarded smoke above
+provides the current limited runtime evidence.
 
 ## Upstream contracts checked
 

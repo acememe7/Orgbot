@@ -243,7 +243,7 @@ class _AntigravityAuthTileState extends State<AntigravityAuthTile> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final statusText = switch (_credentialsPresent) {
-      true => 'Private sign-in stored · execution verification pending.',
+      true => 'Private sign-in stored · account checked when bot runs.',
       false => 'No private sign-in is stored yet.',
       null => _statusError ?? 'Sign-in status has not been checked.',
     };
@@ -278,7 +278,7 @@ class _AntigravityAuthTileState extends State<AntigravityAuthTile> {
                       ),
                       const SizedBox(height: 4),
                       const Text(
-                        'Uses a separate OrgBots sign-in. Model execution is still disabled.',
+                        'Uses a separate OrgBots sign-in.',
                         style: TextStyle(fontSize: 12),
                       ),
                       const SizedBox(height: 4),
@@ -305,7 +305,7 @@ class _AntigravityAuthTileState extends State<AntigravityAuthTile> {
                       ),
                       const SizedBox(height: 5),
                       const Text(
-                        'Uses a separate OrgBots sign-in. Model execution is still disabled.',
+                        'Uses a separate OrgBots sign-in.',
                         style: TextStyle(fontSize: 12),
                       ),
                     ],

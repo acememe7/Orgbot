@@ -2392,23 +2392,6 @@ class _BotEditorState extends State<_BotEditor> {
         onEditingComplete: () => _loadModels(refresh: true),
       );
     }
-    if (_provider == ProviderKind.antigravity) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          StatusPill(
-            color: scheme.error,
-            label: 'Execution unavailable',
-            icon: Icons.error_outline,
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Sign-in can be started from Connections & tools. Account access and protected execution still require verification.',
-            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
-          ),
-        ],
-      );
-    }
     if (widget.desktopClis &&
         _provider.cli != null &&
         _isSupportedDesktopProvider) {

@@ -1345,8 +1345,19 @@ def _agy_private_secret_service(profile: dict[str, Path], passphrase: bytearray 
             _stop_owned_process(bus_process)
 
 
-def _agy_sandbox_args(profile: dict[str, Path], binary: Path, runtime: Path) -> list[str]:
-    _ensure_default_project_seed(profile, create=True)
+def _agy_sandbox_args(
+    profile: dict[str, Path],
+    binary: Path,
+    runtime: Path,
+    *,
+    program: list[str] | None = None,
+    relay: Path | None = None,
+    room_socket: Path | None = None,
+    create_project_seed: bool = True,
+    writable_xdg: bool = True,
+) -> list[str]:
+    _ensure_default_project_seed(profile, create=create_project_seed)
+    empty_agents = profile.get("empty_agents", profile["project"] / ".agents")
     uid = os.getuid()
     runtime_mount = f"/run/user/{uid}/orgbots-agy-runtime"
     args = [
@@ -1380,21 +1391,30 @@ def _agy_sandbox_args(profile: dict[str, Path], binary: Path, runtime: Path) -> 
         "--dir", "/home/orgbot/.config", "--dir", "/home/orgbot/.local", "--dir", "/home/orgbot/.local/share",
         "--dir", "/home/orgbot/.local/state", "--dir", "/home/orgbot/.cache",
         "--ro-bind", os.fspath(profile["home"]), "/home/orgbot",
-        "--bind", os.fspath(profile["config"]), "/home/orgbot/.config",
-        "--bind", os.fspath(profile["data"]), "/home/orgbot/.local/share",
-        "--bind", os.fspath(profile["state"]), "/home/orgbot/.local/state",
-        "--bind", os.fspath(profile["cache"]), "/home/orgbot/.cache",
-        "--bind", os.fspath(profile["cli_config"]), "/home/orgbot/.gemini/antigravity-cli",
     ])
+    if writable_xdg:
+        for key, target in (
+            ("config", "/home/orgbot/.config"),
+            ("data", "/home/orgbot/.local/share"),
+            ("state", "/home/orgbot/.local/state"),
+            ("cache", "/home/orgbot/.cache"),
+        ):
+            args.extend(["--bind", os.fspath(profile[key]), target])
+    args.extend(["--bind", os.fspath(profile["cli_config"]), "/home/orgbot/.gemini/antigravity-cli"])
     args.extend([
         "--dir", runtime_mount,
         "--ro-bind", os.fspath(runtime / "bus.sock"), f"{runtime_mount}/bus.sock",
         "--ro-bind", os.fspath(binary), "/opt/orgbots/agy",
-        "--dir", "/tmp/orgbot-workspace/.agents",
         "--ro-bind", os.fspath(profile["project"]), "/tmp/orgbot-workspace",
+        "--ro-bind", os.fspath(empty_agents), "/tmp/orgbot-workspace/.agents",
         "--ro-bind", os.fspath(profile["settings"]), "/home/orgbot/.gemini/antigravity-cli/settings.json",
         "--ro-bind", os.fspath(profile["global_config"]), "/home/orgbot/.gemini/config",
     ])
+    if relay is not None:
+        args.extend(["--ro-bind", os.fspath(relay), "/opt/orgbots/room-relay"])
+    if room_socket is not None:
+        socket_mount = f"/run/user/{uid}/orgbot-room-mcp.sock"
+        args.extend(["--bind", os.fspath(room_socket), socket_mount])
     private_bus = f"unix:path={runtime_mount}/bus.sock"
     args.extend([
         "--clearenv", "--setenv", "PATH", "/opt/orgbots:/usr/local/bin:/usr/bin:/bin",
@@ -1405,10 +1425,286 @@ def _agy_sandbox_args(profile: dict[str, Path], binary: Path, runtime: Path) -> 
         "--setenv", "XDG_RUNTIME_DIR", runtime_mount,
         "--setenv", "DBUS_SESSION_BUS_ADDRESS", private_bus,
         "--setenv", "BROWSER", "/bin/false", "--setenv", "LANG", "C.UTF-8",
-        "--setenv", "TERM", "xterm-256color", "--chdir", "/tmp/orgbot-workspace",
-        "--", "/opt/orgbots/agy",
+        "--setenv", "TERM", "xterm-256color",
     ])
+    if room_socket is not None:
+        args.extend(["--setenv", "ORGBOT_ROOM_MCP_SOCKET", f"/run/user/{uid}/orgbot-room-mcp.sock"])
+    args.extend(["--chdir", "/tmp/orgbot-workspace", "--", "/opt/orgbots/agy"])
+    if program is not None:
+        args.extend(program[1:])
     return args
+
+
+def _agy_runtime_command(program: list[str], binary: Path) -> list[str]:
+    if not program or not Path(program[0]).is_absolute():
+        _fail("Antigravity command must start with its validated absolute binary path")
+    try:
+        requested = Path(program[0]).resolve(strict=True)
+    except OSError as exc:
+        _fail(f"Antigravity binary path is unavailable: {exc}")
+    if requested != binary:
+        _fail("Antigravity command binary does not match the installed CLI")
+    arguments = program[1:]
+    if len(arguments) < 5 or arguments[0] != "-p" or not arguments[1]:
+        _fail("Antigravity command is not the controlled headless invocation")
+    if arguments[2:5] != ["--disable-slash-commands", "--output-format", "stream-json"]:
+        _fail("Antigravity command is not the controlled headless invocation")
+    index = 5
+    if index < len(arguments) and arguments[index] == "--conversation":
+        if index + 1 >= len(arguments) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", arguments[index + 1]):
+            _fail("Antigravity conversation identifier is invalid")
+        index += 2
+    if index + 2 != len(arguments) or arguments[index] != "--model" or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", arguments[index + 1]):
+        _fail("Antigravity command must specify one explicit model")
+    return arguments
+
+
+def _agy_safe_executable(path: Path, label: str) -> Path:
+    if not path.is_absolute():
+        _fail(f"{label} path must be absolute")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            if stat.S_ISLNK(current.lstat().st_mode):
+                _fail(f"{label} path cannot contain symlink components")
+        except OSError as exc:
+            _fail(f"{label} path is unavailable: {exc}")
+    resolved = path.resolve(strict=True)
+    info = resolved.lstat()
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid not in (0, os.getuid())
+        or info.st_nlink != 1
+        or info.st_mode & 0o022
+        or not os.access(resolved, os.X_OK)
+    ):
+        _fail(f"{label} binary is unsafe")
+    return resolved
+
+
+def _agy_json_file(path: Path, expected: dict[str, Any], label: str) -> None:
+    _check_private_file(path)
+    if path.stat().st_size > 16 * 1024:
+        _fail(f"Private Antigravity {label} is too large")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        _fail(f"Private Antigravity {label} is invalid")
+    if value != expected:
+        _fail(f"Private Antigravity {label} differs from the controlled profile")
+
+
+def _agy_validate_runtime_home(home: Path, room_socket: Path | None) -> dict[str, Path]:
+    _check_private_dir(home)
+    config = home / ".config"
+    local = home / ".local"
+    data = local / "share"
+    state = local / "state"
+    cache = home / ".cache"
+    gemini = home / ".gemini"
+    cli_config = gemini / "antigravity-cli"
+    global_config = gemini / "config"
+    settings = cli_config / "settings.json"
+    mcp_config = global_config / "mcp_config.json"
+    plugins = global_config / "plugins"
+    projects = global_config / "projects"
+    empty_agents = home / ".orgbot-empty-agents"
+    for directory in (config, local, data, state, cache, gemini, cli_config, global_config, plugins, projects, empty_agents):
+        _check_private_dir(directory)
+    for directory, allowed in (
+        (home, {".config", ".local", ".cache", ".gemini", ".orgbot-empty-agents"}),
+        (config, set()),
+        (local, {"share", "state"}),
+        (data, set()),
+        (state, set()),
+        (cache, set()),
+        (gemini, {"antigravity-cli", "config"}),
+        (global_config, {"mcp_config.json", "plugins", "projects"}),
+        (plugins, set()),
+        (projects, {AGY_DEFAULT_PROJECT_FILENAME}),
+        (empty_agents, set()),
+    ):
+        try:
+            entries = {entry.name for entry in directory.iterdir()}
+        except OSError as exc:
+            _fail(f"Cannot inspect private Antigravity profile: {exc}")
+        if directory == cli_config:
+            if "settings.json" not in entries:
+                _fail("Private Antigravity settings are missing")
+        elif entries != allowed:
+            _fail("Private Antigravity profile contains unmanaged configuration")
+    settings_value = {
+        "useG1Credits": False,
+        "permissions": {
+            "allow": ["mcp(orgbot_room/*)"] if room_socket is not None else [],
+            "ask": [],
+            "deny": [
+                "command(*)", "unsandboxed(*)", "read_file(*)", "write_file(*)",
+                "read_url(*)", "execute_url(*)",
+            ] + ([] if room_socket is not None else ["mcp(*)"]),
+        },
+    }
+    socket_mount = f"/run/user/{os.getuid()}/orgbot-room-mcp.sock"
+    mcp_value = {
+        "mcpServers": ({
+            "orgbot_room": {
+                "command": "/opt/orgbots/room-relay",
+                "args": ["room-mcp", "--socket", socket_mount],
+            },
+        } if room_socket is not None else {}),
+    }
+    _agy_json_file(settings, settings_value, "settings")
+    _agy_json_file(mcp_config, mcp_value, "MCP configuration")
+    _validate_default_project_seed(projects / AGY_DEFAULT_PROJECT_FILENAME)
+    _agy_validate_native_cli_data(cli_config)
+    return {
+        "home": home,
+        "config": config, "data": data, "state": state, "cache": cache,
+        "cli_config": cli_config, "global_config": global_config,
+        "settings": settings, "mcp_config": mcp_config, "plugins": plugins,
+        "projects": projects, "empty_agents": empty_agents,
+    }
+
+
+def _agy_validate_native_cli_data(cli_config: Path) -> None:
+    count = 0
+    total_size = 0
+    for parent, directories, files in os.walk(cli_config, followlinks=False):
+        parent_path = Path(parent)
+        _check_private_dir(parent_path)
+        for name in directories:
+            child = parent_path / name
+            try:
+                info = child.lstat()
+            except OSError as exc:
+                _fail(f"Cannot inspect private Antigravity CLI data: {exc}")
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                _fail("Private Antigravity CLI data contains an unsafe directory")
+            count += 1
+        for name in files:
+            child = parent_path / name
+            if child == cli_config / "settings.json":
+                continue
+            try:
+                info = child.lstat()
+            except OSError as exc:
+                _fail(f"Cannot inspect private Antigravity CLI data: {exc}")
+            if child == cli_config / "cli.log" and stat.S_ISLNK(info.st_mode):
+                target_info = _agy_cli_log_link_target(cli_config, child, info)
+                total_size += target_info.st_size
+                count += 1
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+                _fail("Private Antigravity CLI data contains an unsafe file")
+            total_size += info.st_size
+            count += 1
+        if count > MAX_ENTRIES or total_size > MAX_TREE_BYTES:
+            _fail("Private Antigravity CLI data exceeds its safety limits")
+
+
+def _agy_cli_log_link_target(cli_config: Path, link: Path, link_info: os.stat_result) -> os.stat_result:
+    if link_info.st_uid != os.getuid() or link_info.st_nlink != 1:
+        _fail("Private Antigravity CLI data contains an unsafe entry")
+    try:
+        relative = os.readlink(link)
+    except OSError as exc:
+        _fail(f"Cannot inspect private Antigravity CLI log link: {exc}")
+    if not re.fullmatch(r"log/cli-[0-9]{8}_[0-9]{6}\.log", relative):
+        _fail("Private Antigravity CLI data contains an unsafe entry")
+    log_dir = cli_config / "log"
+    _check_private_dir(log_dir)
+    target = log_dir / relative.removeprefix("log/")
+    try:
+        info = target.lstat()
+    except OSError as exc:
+        _fail(f"Cannot inspect private Antigravity CLI log target: {exc}")
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+        _fail("Private Antigravity CLI data contains an unsafe file")
+    return info
+
+
+def _agy_ensure_workspace_agents_mount(workspace: Path) -> None:
+    agents = workspace / ".agents"
+    try:
+        info = agents.lstat()
+    except FileNotFoundError:
+        agents.mkdir(mode=0o700)
+        info = agents.lstat()
+    except OSError as exc:
+        _fail(f"Cannot inspect Antigravity workspace rules mask: {exc}")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        _fail("Antigravity workspace .agents mask is unsafe")
+
+
+def _agy_run_protected(
+    program: list[str],
+    private_home: Path,
+    workspace: Path,
+    room_socket: Path | None,
+    relay: Path | None,
+    project_lock_fd: int,
+) -> int:
+    auth_lock_fd: int | None = None
+    passphrase: bytearray | None = None
+    previous_umask = os.umask(0o077)
+    try:
+        with _agy_signal_scope():
+            auth_profile = _agy_profile_paths(create=False)
+            if auth_profile is None:
+                _fail("Antigravity private sign-in is required; run agy-auth login first")
+            auth_lock_fd = _agy_auth_lock(auth_profile["root"])
+            auth_profile = _agy_profile_paths(create=False)
+            if auth_profile is None:
+                _fail("Antigravity private sign-in is required; run agy-auth login first")
+            if not _agy_keyring_has_data(auth_profile):
+                _fail("Antigravity private sign-in is required; run agy-auth login first")
+            passphrase = _host_wrapping_passphrase(auth_profile)
+            binary = _agy_binary()
+            runtime_arguments = _agy_runtime_command(program, binary)
+            runtime_home = _agy_validate_runtime_home(private_home, room_socket)
+            if room_socket is not None:
+                if relay is None:
+                    _fail("Antigravity room MCP relay is unavailable")
+                relay = _agy_safe_executable(relay, "Antigravity MCP relay")
+            _agy_ensure_workspace_agents_mount(workspace)
+            runtime_home["project"] = workspace
+            runtime_home["empty_agents"] = private_home / ".orgbot-empty-agents"
+            with _agy_private_secret_service(auth_profile, passphrase) as (private_env, runtime):
+                if not _secret_item_paths(private_env["DBUS_SESSION_BUS_ADDRESS"], {}):
+                    _fail("Antigravity private sign-in has no stored credentials")
+                args = _agy_sandbox_args(
+                    runtime_home,
+                    binary,
+                    runtime,
+                    program=[os.fspath(binary), *runtime_arguments],
+                    relay=relay,
+                    room_socket=room_socket,
+                    create_project_seed=False,
+                    writable_xdg=False,
+                )
+                os.close(project_lock_fd)
+                project_lock_fd = -1
+                process = _agy_owned_popen(
+                    args,
+                    env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
+                )
+                try:
+                    return process.wait()
+                except BaseException:
+                    _stop_owned_process(process)
+                    raise
+                finally:
+                    _AGY_CHILDREN.discard(process)
+    except _AgyAuthCancelled:
+        _fail("Antigravity process was cancelled")
+    finally:
+        if passphrase is not None:
+            _zero_bytes(passphrase)
+        if auth_lock_fd is not None:
+            os.close(auth_lock_fd)
+        if project_lock_fd >= 0:
+            os.close(project_lock_fd)
 
 
 def _agy_binary() -> Path:
@@ -1589,14 +1885,23 @@ def _agy_auth_login_inner() -> dict[str, Any]:
         os.close(lock_fd)
 
 
-def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool, profiles: list[str], private_home_arg: str | None, mcp_socket: str | None, agent_cli: str | None = None, verify: bool = False) -> int:
+def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool, profiles: list[str], private_home_arg: str | None, mcp_socket: str | None, agent_cli: str | None = None, mcp_relay: str | None = None, verify: bool = False) -> int:
     agent = _safe_agent(agent_arg)
     if not program:
         _fail("run requires a program after --")
     if agent_cli is not None and not AGENT_CLI_RE.fullmatch(agent_cli):
         _fail("Agent CLI must be opencode or agy")
     if agent_cli == "agy":
-        _fail("Antigravity is unavailable in the protected workspace because no verified isolated authentication source is configured")
+        if sys.platform != "linux":
+            _fail("Antigravity protected execution is available only on Linux")
+        if private_home_arg is None:
+            _fail("Antigravity requires its guarded per-agent private HOME")
+        if profiles:
+            _fail("Antigravity cannot mount legacy CLI profiles")
+        if (mcp_socket is None) != (mcp_relay is None):
+            _fail("Antigravity room MCP requires both a socket and the fixed relay binary")
+    elif mcp_relay is not None:
+        _fail("The MCP relay binary is supported only by Antigravity")
     state = _canonical_directory(state_arg, "state")
     _check_private_dir(state)
     manifest_paths = _manifest_candidates(state, agent)
@@ -1668,6 +1973,17 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
             socket_info = socket_path.lstat()
             if not stat.S_ISSOCK(socket_info.st_mode) or socket_info.st_uid != os.getuid():
                 _fail("Room MCP endpoint must be a Unix socket")
+        if agent_cli == "agy":
+            project_lock_fd = lock_fd
+            lock_fd = None
+            return _agy_run_protected(
+                program,
+                supplied_home,
+                workspace,
+                socket_path,
+                Path(mcp_relay) if mcp_relay is not None else None,
+                project_lock_fd,
+            )
         private_cli_overlays: list[tuple[Path, str]] = []
         private_home_bind = "--ro-bind" if agent_cli == "opencode" else "--bind"
         args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--size", "1073741824", "--tmpfs", "/tmp", "--dir", "/tmp/orgbot-workspace", "--tmpfs", "/run", "--dir", "/run/user", "--dir", f"/run/user/{os.getuid()}", "--dir", private_home_mount, private_home_bind, os.fspath(supplied_home), private_home_mount]
@@ -2028,6 +2344,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--profile", action="append", default=[])
     run.add_argument("--private-home")
     run.add_argument("--mcp-socket")
+    run.add_argument("--mcp-relay")
     run.add_argument("--agent-cli", choices=("opencode", "agy"))
     run.add_argument("program", nargs=argparse.REMAINDER)
     apply = sub.add_parser("apply")
@@ -2050,7 +2367,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "run":
             program = args.program[1:] if args.program and args.program[0] == "--" else args.program
-            return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket, agent_cli=args.agent_cli, verify=args.verify)
+            return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket, agent_cli=args.agent_cli, mcp_relay=args.mcp_relay, verify=args.verify)
         if args.command == "agy-auth":
             result = _agy_auth_login() if args.action == "login" else _agy_auth_status()
             _json(result)
@@ -2059,6 +2376,8 @@ def main(argv: list[str] | None = None) -> int:
         _json(result)
         return 0 if result.get("ok") else 1
     except (WorkspaceError, OSError, ValueError, json.JSONDecodeError) as exc:
+        if args.command == "run" and getattr(args, "agent_cli", None) == "agy":
+            print(f"Antigravity workspace helper: {str(exc)[:600]}", file=sys.stderr)
         _json({"ok": False, "error": str(exc)[:600]})
         return 2
 

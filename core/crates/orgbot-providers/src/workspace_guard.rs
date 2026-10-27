@@ -8,6 +8,11 @@ const PROFILE_MAX_TREE_BYTES: u64 = 1024 * 1024 * 1024;
 const OPENCODE_AUTH_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const OPENCODE_CONFIG_GITIGNORE: &[u8] =
     b"node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore";
+const AGY_RELAY_MOUNT: &str = "/opt/orgbots/room-relay";
+const AGY_NATIVE_MAX_ENTRIES: usize = 150_000;
+const AGY_NATIVE_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+const AGY_DEFAULT_PROJECT: &[u8] =
+    br#"{"id":"default-cli-project","name":"CLI Project","projectResources":{}}"#;
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceGuard {
@@ -271,10 +276,6 @@ fn configure_new_cli_profile_inner(
 ) -> Result<(), String> {
     use orgbot_proto::agent::CliKind;
 
-    if cli == CliKind::Antigravity {
-        return Err("Antigravity execution remains disabled until isolated authentication and runtime permissions are verified; use `orgbot agy login` only to initialize its private sign-in profile".into());
-    }
-
     if !mount.is_absolute() {
         return Err("isolated CLI home mount must be absolute".into());
     }
@@ -293,6 +294,118 @@ fn configure_new_cli_profile_inner(
         })
         .transpose()?;
     match cli {
+        CliKind::Antigravity => {
+            if !valid_agy_model_slug(model) {
+                return Err("Antigravity model must be a valid explicit model slug".into());
+            }
+            if let Some(socket) = room_socket {
+                if !socket.is_absolute() {
+                    return Err("Antigravity room MCP socket must be absolute".into());
+                }
+                if !relay_command.is_some() {
+                    return Err("Antigravity room MCP relay is unavailable".into());
+                }
+            }
+
+            let gemini = home.join(".gemini");
+            let cli_config = gemini.join("antigravity-cli");
+            let global_config = gemini.join("config");
+            let plugins = global_config.join("plugins");
+            let projects = global_config.join("projects");
+            let settings = cli_config.join("settings.json");
+            let mcp_config = global_config.join("mcp_config.json");
+            let empty_agents = home.join(".orgbot-empty-agents");
+
+            for path in [
+                &gemini,
+                &cli_config,
+                &global_config,
+                &plugins,
+                &projects,
+                &empty_agents,
+                &home.join(".local/state"),
+                &home.join(".cache"),
+            ] {
+                ensure_private_directory(path)?;
+            }
+            ensure_exact_entries(&gemini, &["antigravity-cli", "config"], "Antigravity home")?;
+            ensure_agy_native_cli_data(&cli_config)?;
+            ensure_exact_entries(&plugins, &[], "Antigravity plugins")?;
+            ensure_allowed_entries(
+                &projects,
+                &["default-cli-project.json"],
+                "Antigravity projects",
+            )?;
+            ensure_allowed_entries(
+                &global_config,
+                &["mcp_config.json", "plugins", "projects"],
+                "Antigravity global config",
+            )?;
+            ensure_exact_entries(&empty_agents, &[], "Antigravity empty .agents mask")?;
+
+            let mut deny = vec![
+                "command(*)",
+                "unsandboxed(*)",
+                "read_file(*)",
+                "write_file(*)",
+                "read_url(*)",
+                "execute_url(*)",
+            ];
+            if room_socket.is_none() {
+                deny.push("mcp(*)");
+            }
+            let allow = if room_socket.is_some() {
+                vec!["mcp(orgbot_room/*)"]
+            } else {
+                Vec::new()
+            };
+            let settings_value = serde_json::json!({
+                "useG1Credits": false,
+                "permissions": {
+                    "allow": allow,
+                    "ask": [],
+                    "deny": deny
+                }
+            });
+            let mcp_servers = if let Some((_relay, socket)) = &relay_command {
+                serde_json::json!({
+                    "orgbot_room": {
+                        "command": AGY_RELAY_MOUNT,
+                        "args": ["room-mcp", "--socket", socket]
+                    }
+                })
+            } else {
+                serde_json::json!({})
+            };
+            ensure_managed_private_file(
+                &projects.join("default-cli-project.json"),
+                AGY_DEFAULT_PROJECT,
+                "Antigravity default project",
+            )?;
+            ensure_managed_private_file(
+                &settings,
+                &serde_json::to_vec(&settings_value)
+                    .map_err(|e| format!("encode Antigravity settings: {e}"))?,
+                "Antigravity settings",
+            )?;
+            ensure_managed_private_file(
+                &mcp_config,
+                &serde_json::to_vec(&serde_json::json!({"mcpServers": mcp_servers}))
+                    .map_err(|e| format!("encode Antigravity MCP config: {e}"))?,
+                "Antigravity MCP config",
+            )?;
+            ensure_agy_native_cli_data(&cli_config)?;
+            ensure_exact_entries(
+                &global_config,
+                &["mcp_config.json", "plugins", "projects"],
+                "Antigravity global config",
+            )?;
+            ensure_exact_entries(
+                &projects,
+                &["default-cli-project.json"],
+                "Antigravity projects",
+            )
+        }
         CliKind::OpenCode => {
             let provider = opencode_provider(model)?;
             if let Some(source) = opencode_auth_source {
@@ -335,10 +448,189 @@ fn configure_new_cli_profile_inner(
                     .map_err(|e| format!("encode OpenCode profile: {e}"))?,
             )
         }
-        CliKind::Antigravity => unreachable!("Antigravity is rejected before profile generation"),
         _ => {
             Err("isolated profile generation is only available for OpenCode and Antigravity".into())
         }
+    }
+}
+
+fn valid_agy_model_slug(model: &str) -> bool {
+    !model.is_empty()
+        && model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn ensure_exact_entries(directory: &Path, expected: &[&str], label: &str) -> Result<(), String> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| format!("read {label} directory: {error}"))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .map_err(|error| format!("read {label} entry: {error}"))
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    let expected = expected
+        .iter()
+        .map(|entry| (*entry).to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    if entries != expected {
+        return Err(format!("{label} contains unmanaged files"));
+    }
+    Ok(())
+}
+
+fn ensure_allowed_entries(directory: &Path, allowed: &[&str], label: &str) -> Result<(), String> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| format!("read {label} directory: {error}"))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .map_err(|error| format!("read {label} entry: {error}"))
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    if entries
+        .iter()
+        .any(|entry| !allowed.iter().any(|candidate| *candidate == entry))
+    {
+        return Err(format!("{label} contains unmanaged files"));
+    }
+    Ok(())
+}
+
+fn ensure_agy_native_cli_data(root: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let settings = root.join("settings.json");
+    let mut pending = vec![root.to_path_buf()];
+    let mut entries = 0usize;
+    let mut bytes = 0u64;
+    while let Some(directory) = pending.pop() {
+        let directory_meta = std::fs::symlink_metadata(&directory)
+            .map_err(|error| format!("inspect Antigravity CLI data directory: {error}"))?;
+        if !directory_meta.is_dir()
+            || directory_meta.file_type().is_symlink()
+            || directory_meta.uid() != current_uid()
+            || directory_meta.mode() & 0o077 != 0
+        {
+            return Err("Antigravity CLI data contains an unsafe directory".into());
+        }
+        for entry in std::fs::read_dir(&directory)
+            .map_err(|error| format!("read Antigravity CLI data: {error}"))?
+        {
+            let path = entry
+                .map_err(|error| format!("read Antigravity CLI data entry: {error}"))?
+                .path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("inspect Antigravity CLI data entry: {error}"))?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                if metadata.uid() != current_uid() || metadata.mode() & 0o077 != 0 {
+                    return Err("Antigravity CLI data contains an unsafe directory".into());
+                }
+                entries += 1;
+                pending.push(path);
+            } else if metadata.is_file() && !metadata.file_type().is_symlink() {
+                if metadata.uid() != current_uid()
+                    || metadata.mode() & 0o077 != 0
+                    || metadata.nlink() != 1
+                {
+                    return Err("Antigravity CLI data contains an unsafe file".into());
+                }
+                if path != settings {
+                    entries += 1;
+                    bytes = bytes
+                        .checked_add(metadata.len())
+                        .ok_or("Antigravity CLI data size overflow")?;
+                }
+            } else if path == root.join("cli.log") && metadata.file_type().is_symlink() {
+                let target = ensure_agy_cli_log_link(root, &path, &metadata)?;
+                entries += 1;
+                bytes = bytes
+                    .checked_add(target.len())
+                    .ok_or("Antigravity CLI data size overflow")?;
+            } else {
+                return Err("Antigravity CLI data contains an unsafe entry".into());
+            }
+            if entries > AGY_NATIVE_MAX_ENTRIES || bytes > AGY_NATIVE_MAX_BYTES {
+                return Err("Antigravity CLI data exceeds its safety limits".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_agy_cli_log_link(
+    root: &Path,
+    link: &Path,
+    link_metadata: &std::fs::Metadata,
+) -> Result<std::fs::Metadata, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    if link_metadata.uid() != current_uid() || link_metadata.nlink() != 1 {
+        return Err("Antigravity CLI data contains an unsafe entry".into());
+    }
+    let relative = std::fs::read_link(link)
+        .map_err(|error| format!("inspect Antigravity CLI log link: {error}"))?;
+    let name = relative
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("Antigravity CLI log link has an invalid target")?;
+    let target_name_valid = name.len() == 23
+        && name.starts_with("cli-")
+        && name.as_bytes()[4..12].iter().all(u8::is_ascii_digit)
+        && name.as_bytes()[12] == b'_'
+        && name.as_bytes()[13..19].iter().all(u8::is_ascii_digit)
+        && name.ends_with(".log");
+    if relative != Path::new("log").join(name) || !target_name_valid {
+        return Err("Antigravity CLI data contains an unsafe entry".into());
+    }
+    let log_dir = root.join("log");
+    let directory = std::fs::symlink_metadata(&log_dir)
+        .map_err(|error| format!("inspect Antigravity CLI log directory: {error}"))?;
+    if !directory.is_dir()
+        || directory.file_type().is_symlink()
+        || directory.uid() != current_uid()
+        || directory.mode() & 0o077 != 0
+    {
+        return Err("Antigravity CLI data contains an unsafe directory".into());
+    }
+    let target = log_dir.join(name);
+    let target_metadata = std::fs::symlink_metadata(&target)
+        .map_err(|error| format!("inspect Antigravity CLI log target: {error}"))?;
+    if !target_metadata.is_file()
+        || target_metadata.file_type().is_symlink()
+        || target_metadata.uid() != current_uid()
+        || target_metadata.mode() & 0o077 != 0
+        || target_metadata.nlink() != 1
+    {
+        return Err("Antigravity CLI data contains an unsafe log target".into());
+    }
+    Ok(target_metadata)
+}
+
+fn ensure_managed_private_file(path: &Path, bytes: &[u8], label: &str) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata)
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.uid() != current_uid()
+                || metadata.nlink() != 1
+                || metadata.mode() & 0o077 != 0
+                || metadata.len() != bytes.len() as u64 =>
+        {
+            return Err(format!("unsafe {label} file"));
+        }
+        Ok(_) => {
+            if std::fs::read(path).map_err(|error| format!("read {label}: {error}"))? != bytes {
+                return Err(format!("{label} differs from the managed profile"));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write_private_file(path, bytes)
+        }
+        Err(error) => Err(format!("inspect {label}: {error}")),
     }
 }
 
@@ -623,6 +915,21 @@ impl WorkspaceGuard {
             .arg(&self.state)
             .arg("--agent")
             .arg(&self.agent);
+        Ok(command)
+    }
+
+    pub fn command_for_agent_cli(
+        &self,
+        operation: &str,
+        cli: orgbot_proto::agent::CliKind,
+        mcp: bool,
+    ) -> Result<Command, String> {
+        let mut command = self.command(operation)?;
+        if cli == orgbot_proto::agent::CliKind::Antigravity && mcp {
+            command
+                .arg("--mcp-relay")
+                .arg(crate::agent_cli::resolve_mcp_relay_binary()?);
+        }
         Ok(command)
     }
 
@@ -1319,19 +1626,301 @@ mod tests {
         .is_err());
         assert!(!private_auth.exists(), "stale auth copy must be removed");
 
+        let agy_home = root.join("home-agy");
+        std::fs::create_dir(&agy_home).unwrap();
+        configure_new_cli_profile_inner(
+            &agy_home,
+            mount,
+            CliKind::Antigravity,
+            "gemini-3.8-flash-medium",
+            Some(Path::new("/run/user/1000/orgbot-room-mcp.sock")),
+            Some(&auth_source),
+        )
+        .unwrap();
+        let agy_settings: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(agy_home.join(".gemini/antigravity-cli/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(agy_settings["useG1Credits"], false);
+        assert_eq!(
+            agy_settings["permissions"]["allow"][0],
+            "mcp(orgbot_room/*)"
+        );
+        assert_eq!(agy_settings["permissions"]["ask"], serde_json::json!([]));
+        assert_eq!(
+            agy_settings["permissions"]["deny"],
+            serde_json::json!([
+                "command(*)",
+                "unsandboxed(*)",
+                "read_file(*)",
+                "write_file(*)",
+                "read_url(*)",
+                "execute_url(*)"
+            ])
+        );
+        let agy_mcp: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(agy_home.join(".gemini/config/mcp_config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            agy_mcp["mcpServers"]["orgbot_room"]["command"],
+            AGY_RELAY_MOUNT
+        );
+        assert_eq!(
+            agy_mcp["mcpServers"]["orgbot_room"]["args"],
+            serde_json::json!([
+                "room-mcp",
+                "--socket",
+                "/run/user/1000/orgbot-room-mcp.sock"
+            ])
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(agy_home.join(".gemini/config/projects/default-cli-project.json"))
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({
+                "id": "default-cli-project", "name": "CLI Project", "projectResources": {}
+            })
+        );
+        assert!(!agy_home.join(".local/share/opencode/auth.json").exists());
+        std::fs::write(
+            agy_home.join(".gemini/antigravity-cli/settings.json"),
+            br#"{"permissions":{"allow":["command(*)"]}}"#,
+        )
+        .unwrap();
+        assert!(configure_new_cli_profile_inner(
+            &agy_home,
+            mount,
+            CliKind::Antigravity,
+            "gemini-3.8-flash-medium",
+            Some(Path::new("/run/user/1000/orgbot-room-mcp.sock")),
+            None,
+        )
+        .unwrap_err()
+        .contains("Antigravity settings"));
+        strip_private_agent_mcp_config(&home, CliKind::OpenCode).unwrap();
+        clear_private_agent_config(&home, CliKind::Antigravity).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_launcher_receives_only_the_fixed_room_relay_argument() {
+        use orgbot_proto::agent::CliKind;
+
+        let root = temp();
+        std::fs::create_dir_all(&root).unwrap();
+        let guard = WorkspaceGuard {
+            project: root.join("project"),
+            state: root.join("state"),
+            agent: "agent-a".into(),
+            read_only: true,
+            #[cfg(test)]
+            profile_source: None,
+        };
+        let relay = crate::agent_cli::resolve_mcp_relay_binary().unwrap();
+        let args = |cli, mcp| {
+            guard
+                .command_for_agent_cli("run", cli, mcp)
+                .unwrap()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let agy = args(CliKind::Antigravity, true);
+        let relay_arg = agy.iter().position(|arg| arg == "--mcp-relay").unwrap();
+        assert_eq!(agy[relay_arg + 1], relay.to_string_lossy());
+        assert_eq!(agy.iter().filter(|arg| *arg == "--mcp-relay").count(), 1);
+        assert!(!args(CliKind::Antigravity, false)
+            .iter()
+            .any(|arg| arg == "--mcp-relay"));
+        assert!(!args(CliKind::OpenCode, true)
+            .iter()
+            .any(|arg| arg == "--mcp-relay"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_native_conversation_files_survive_profile_reconfiguration() {
+        use orgbot_proto::agent::CliKind;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = temp();
+        std::fs::create_dir_all(&root).unwrap();
+        let home = root.join("home-agy");
+        std::fs::create_dir(&home).unwrap();
+        let mount = Path::new("/run/user/1000/orgbot-home");
+        configure_new_cli_profile_inner(
+            &home,
+            mount,
+            CliKind::Antigravity,
+            "gemini-3.8-flash-medium",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let native_dir = home.join(".gemini/antigravity-cli/conversations");
+        std::fs::create_dir(&native_dir).unwrap();
+        std::fs::set_permissions(&native_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let conversation = native_dir.join("conversation.json");
+        std::fs::write(&conversation, br#"{"conversationId":"synthetic"}"#).unwrap();
+        std::fs::set_permissions(&conversation, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        configure_new_cli_profile_inner(
+            &home,
+            mount,
+            CliKind::Antigravity,
+            "gemini-3.8-flash-medium",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&conversation).unwrap(),
+            br#"{"conversationId":"synthetic"}"#
+        );
+
+        let external = root.join("outside.json");
+        std::fs::write(&external, b"not private").unwrap();
+        symlink(&external, native_dir.join("unsafe-link.json")).unwrap();
         assert!(configure_new_cli_profile_inner(
             &home,
             mount,
             CliKind::Antigravity,
-            "gemini-3.5-pro",
-            Some(Path::new("/run/user/1000/orgbot-room-mcp.sock")),
-            Some(&auth_source),
+            "gemini-3.8-flash-medium",
+            None,
+            None,
         )
         .unwrap_err()
-        .contains("execution remains disabled until isolated authentication"));
-        assert!(!home.join(".gemini").exists());
-        strip_private_agent_mcp_config(&home, CliKind::OpenCode).unwrap();
-        clear_private_agent_config(&home, CliKind::Antigravity).unwrap();
+        .contains("unsafe entry"));
+        assert_eq!(std::fs::read(&external).unwrap(), b"not private");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_cli_log_symlink_accepts_only_owned_private_log_target() {
+        use orgbot_proto::agent::CliKind;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = temp();
+        std::fs::create_dir_all(&root).unwrap();
+        let home = root.join("home-agy");
+        std::fs::create_dir(&home).unwrap();
+        configure_new_cli_profile_inner(
+            &home,
+            Path::new("/run/user/1000/orgbot-home"),
+            CliKind::Antigravity,
+            "gemini-3.8-flash-medium",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let cli_config = home.join(".gemini/antigravity-cli");
+        let log_dir = cli_config.join("log");
+        std::fs::create_dir(&log_dir).unwrap();
+        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let target = log_dir.join("cli-20261027_142923.log");
+        std::fs::write(&target, b"synthetic cli log\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink("log/cli-20261027_142923.log", cli_config.join("cli.log")).unwrap();
+
+        configure_new_cli_profile_inner(
+            &home,
+            Path::new("/run/user/1000/orgbot-home"),
+            CliKind::Antigravity,
+            "gemini-3.8-flash-medium",
+            None,
+            None,
+        )
+        .unwrap();
+
+        std::fs::remove_file(cli_config.join("cli.log")).unwrap();
+        let outside = root.join("outside.log");
+        std::fs::write(&outside, b"outside synthetic file\n").unwrap();
+        symlink(&outside, cli_config.join("cli.log")).unwrap();
+        assert!(configure_new_cli_profile_inner(
+            &home,
+            Path::new("/run/user/1000/orgbot-home"),
+            CliKind::Antigravity,
+            "gemini-3.8-flash-medium",
+            None,
+            None,
+        )
+        .unwrap_err()
+        .contains("unsafe entry"));
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"outside synthetic file\n"
+        );
+
+        let reject = || {
+            configure_new_cli_profile_inner(
+                &home,
+                Path::new("/run/user/1000/orgbot-home"),
+                CliKind::Antigravity,
+                "gemini-3.8-flash-medium",
+                None,
+                None,
+            )
+            .is_err()
+        };
+        std::fs::remove_file(cli_config.join("cli.log")).unwrap();
+        symlink("log/cli-20261027_142924.log", cli_config.join("cli.log")).unwrap();
+        assert!(reject(), "dangling log target must be rejected");
+
+        std::fs::remove_file(cli_config.join("cli.log")).unwrap();
+        symlink("../outside.log", cli_config.join("cli.log")).unwrap();
+        assert!(reject(), "traversal target must be rejected");
+
+        std::fs::remove_file(cli_config.join("cli.log")).unwrap();
+        std::fs::remove_file(target).unwrap();
+        let external_log = root.join("external-log");
+        std::fs::create_dir(&external_log).unwrap();
+        std::fs::set_permissions(&external_log, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let external_target = external_log.join("cli-20261027_142923.log");
+        std::fs::write(&external_target, b"external target\n").unwrap();
+        std::fs::set_permissions(&external_target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::remove_dir(&log_dir).unwrap();
+        symlink(&external_log, &log_dir).unwrap();
+        symlink("log/cli-20261027_142923.log", cli_config.join("cli.log")).unwrap();
+        assert!(reject(), "symlinked log parent must be rejected");
+
+        std::fs::remove_file(cli_config.join("cli.log")).unwrap();
+        std::fs::remove_file(&log_dir).unwrap();
+        std::fs::create_dir(&log_dir).unwrap();
+        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let target = log_dir.join("cli-20261027_142923.log");
+        std::fs::write(&target, b"synthetic cli log\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let hard_link = root.join("hard-link.log");
+        std::fs::hard_link(&target, &hard_link).unwrap();
+        symlink("log/cli-20261027_142923.log", cli_config.join("cli.log")).unwrap();
+        assert!(reject(), "hard-linked log target must be rejected");
+
+        std::fs::remove_file(cli_config.join("cli.log")).unwrap();
+        std::fs::remove_file(hard_link).unwrap();
+        symlink("log/not-cli.log", cli_config.join("cli.log")).unwrap();
+        assert!(reject(), "malformed log basename must be rejected");
+
+        std::fs::remove_file(cli_config.join("cli.log")).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        symlink(&outside, &target).unwrap();
+        symlink("log/cli-20261027_142923.log", cli_config.join("cli.log")).unwrap();
+        assert!(reject(), "symlinked log target must be rejected");
+
+        std::fs::remove_file(cli_config.join("cli.log")).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        std::fs::write(&target, b"synthetic cli log\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink("log/cli-20261027_142923.log", cli_config.join("cli.log")).unwrap();
+        assert!(reject(), "non-private log target must be rejected");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1398,16 +1987,28 @@ mod tests {
             Some(&auth_source),
         )
         .unwrap();
-        assert!(configure_new_cli_profile_inner(
-            &home,
+        let agy_home = root.join("home-agy");
+        std::fs::create_dir(&agy_home).unwrap();
+        configure_new_cli_profile_inner(
+            &agy_home,
             Path::new("/run/user/1000/orgbot-home"),
             CliKind::Antigravity,
-            "gemini-3.5-pro",
+            "gemini-3.8-flash-medium",
             None,
             Some(&auth_source),
         )
-        .unwrap_err()
-        .contains("execution remains disabled until isolated authentication"));
+        .unwrap();
+        let agy_settings: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(agy_home.join(".gemini/antigravity-cli/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(agy_settings["permissions"]["allow"], serde_json::json!([]));
+        assert_eq!(agy_settings["permissions"]["deny"][6], "mcp(*)");
+        let agy_mcp: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(agy_home.join(".gemini/config/mcp_config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(agy_mcp["mcpServers"], serde_json::json!({}));
         let opencode: serde_json::Value =
             serde_json::from_slice(&std::fs::read(home.join("opencode.json")).unwrap()).unwrap();
         assert!(opencode["mcp"].as_object().unwrap().is_empty());

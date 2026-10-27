@@ -1,4 +1,5 @@
 import contextlib
+import fcntl
 import hashlib
 import io
 import importlib.util
@@ -57,6 +58,51 @@ class WorkspaceTests(unittest.TestCase):
         backup = trash / f"{len(list(trash.iterdir()))}-{target.name}"
         os.replace(target, backup)
         return os.fspath(backup)
+
+    def _agy_runtime_home(self, *, room_mcp, suffix=None):
+        name = "agy-runtime-home-room" if room_mcp else "agy-runtime-home-no-room"
+        home = self.root / (f"{name}-{suffix}" if suffix else name)
+        home.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(home, 0o700)
+        directories = [
+            ".config", ".local/share", ".local/state", ".cache",
+            ".gemini/antigravity-cli", ".gemini/config/plugins",
+            ".gemini/config/projects", ".orgbot-empty-agents",
+        ]
+        for relative in directories:
+            (home / relative).mkdir(mode=0o700, parents=True, exist_ok=True)
+        for directory in (home, *[path for path in home.rglob("*") if path.is_dir()]):
+            os.chmod(directory, 0o700)
+        settings = {
+            "useG1Credits": False,
+            "permissions": {
+                "allow": ["mcp(orgbot_room/*)"] if room_mcp else [],
+                "ask": [],
+                "deny": [
+                    "command(*)", "unsandboxed(*)", "read_file(*)", "write_file(*)",
+                    "read_url(*)", "execute_url(*)",
+                ] + ([] if room_mcp else ["mcp(*)"]),
+            },
+        }
+        socket_mount = f"/run/user/{os.getuid()}/orgbot-room-mcp.sock"
+        mcp = {
+            "mcpServers": ({
+                "orgbot_room": {
+                    "command": "/opt/orgbots/room-relay",
+                    "args": ["room-mcp", "--socket", socket_mount],
+                },
+            } if room_mcp else {}),
+        }
+        files = {
+            ".gemini/antigravity-cli/settings.json": settings,
+            ".gemini/config/mcp_config.json": mcp,
+            ".gemini/config/projects/default-cli-project.json": workspace.AGY_DEFAULT_PROJECT,
+        }
+        for relative, value in files.items():
+            target = home / relative
+            target.write_bytes(workspace._canonical_json_bytes(value))
+            os.chmod(target, 0o600)
+        return home
 
     def test_prepare_is_independent_and_reuses_workspace(self):
         first = self.prepare()
@@ -435,20 +481,23 @@ Path('/tmp/private.txt').write_text('temporary')
         self.assertEqual((work / "cwd-check").read_text(encoding="utf-8"), "yes")
         self.assertFalse((self.project / "cwd-check").exists())
 
-    def test_antigravity_fails_before_spawn_without_verified_isolated_auth(self):
+    def test_antigravity_missing_private_auth_fails_before_cli_spawn(self):
         (self.project / ".agents").mkdir()
         hook_source = self.project / ".agents/hooks.json"
         hook_source.write_text('{"hooks":{"startup":"must-remain-inert"}}', encoding="utf-8")
         work = self.prepare("agy")
         hook_copy = work / ".agents/hooks.json"
         marker = self.root / "agy-was-spawned"
-        command = [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()"]
-        with self.assertRaisesRegex(workspace.WorkspaceError, "no verified isolated authentication source"):
-            workspace._run(
-                os.fspath(self.state), "agy", command,
-                read_only=False, profiles=[], private_home_arg=None,
-                mcp_socket=None, agent_cli="agy",
-            )
+        private_home = self.state / "agents" / workspace._project_id(self.project) / "agy" / "profiles" / "home-agy"
+        private_home.mkdir(mode=0o700, parents=True)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(self.root / "missing-auth-data")}):
+            with patch.object(workspace, "_agy_owned_popen", side_effect=AssertionError("AGY must not start without private auth")):
+                with self.assertRaisesRegex(workspace.WorkspaceError, "private sign-in is required"):
+                    workspace._run(
+                        os.fspath(self.state), "agy", ["/usr/bin/agy"],
+                        read_only=False, profiles=[], private_home_arg=os.fspath(private_home),
+                        mcp_socket=None, agent_cli="agy",
+                    )
         self.assertFalse(marker.exists())
         self.assertEqual(hook_source.read_text(encoding="utf-8"), '{"hooks":{"startup":"must-remain-inert"}}')
         self.assertEqual(hook_copy.read_text(encoding="utf-8"), hook_source.read_text(encoding="utf-8"))
@@ -712,6 +761,336 @@ for path in (Path(os.environ['OPENCODE_CONFIG_DIR']), Path(os.environ['HOME']) /
             profile["settings"].write_text("{}", encoding="utf-8")
             with self.assertRaisesRegex(workspace.WorkspaceError, "unmanaged"):
                 workspace._agy_profile_paths(create=True)
+
+    def test_agy_runtime_profile_is_exact_and_room_permission_is_scoped(self):
+        enabled = self._agy_runtime_home(room_mcp=True)
+        disabled = self._agy_runtime_home(room_mcp=False)
+        enabled_profile = workspace._agy_validate_runtime_home(enabled, self.root / "room.sock")
+        disabled_profile = workspace._agy_validate_runtime_home(disabled, None)
+        enabled_settings = json.loads(enabled_profile["settings"].read_text())
+        disabled_settings = json.loads(disabled_profile["settings"].read_text())
+        self.assertEqual(enabled_settings["permissions"]["allow"], ["mcp(orgbot_room/*)"])
+        self.assertEqual(enabled_settings["permissions"]["ask"], [])
+        self.assertNotIn("mcp(*)", enabled_settings["permissions"]["deny"])
+        self.assertEqual(disabled_settings["permissions"]["allow"], [])
+        self.assertIn("mcp(*)", disabled_settings["permissions"]["deny"])
+        self.assertEqual(json.loads(enabled_profile["mcp_config"].read_text())["mcpServers"]["orgbot_room"]["command"],
+                         "/opt/orgbots/room-relay")
+        self.assertEqual(json.loads(disabled_profile["mcp_config"].read_text()), {"mcpServers": {}})
+
+        bad_settings = enabled_profile["settings"]
+        original = bad_settings.read_bytes()
+        bad_settings.write_bytes(workspace._canonical_json_bytes({
+            "useG1Credits": True,
+            "permissions": {"allow": ["command(*)"], "ask": [], "deny": []},
+        }))
+        with self.assertRaisesRegex(workspace.WorkspaceError, "controlled profile"):
+            workspace._agy_validate_runtime_home(enabled, self.root / "room.sock")
+        bad_settings.write_bytes(original)
+        foreign_plugin = enabled / ".gemini/config/plugins/foreign.json"
+        foreign_plugin.write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(workspace.WorkspaceError, "unmanaged configuration"):
+            workspace._agy_validate_runtime_home(enabled, self.root / "room.sock")
+
+        foreign_plugin.unlink()
+        linked = self._agy_runtime_home(room_mcp=True)
+        native_data = linked / ".gemini/antigravity-cli/native-state"
+        native_data.symlink_to(self.root / "outside-native-state", target_is_directory=True)
+        with self.assertRaisesRegex(workspace.WorkspaceError, "unsafe"):
+            workspace._agy_validate_runtime_home(linked, self.root / "room.sock")
+
+    def test_agy_native_cli_log_link_accepts_only_private_owned_log_file(self):
+        valid = self._agy_runtime_home(room_mcp=True, suffix="valid-log")
+        cli_config = valid / ".gemini/antigravity-cli"
+        log_dir = cli_config / "log"
+        log_dir.mkdir(mode=0o700)
+        os.chmod(log_dir, 0o700)
+        valid_target = log_dir / "cli-20261027_142923.log"
+        valid_target.write_text("synthetic cli output\n", encoding="utf-8")
+        os.chmod(valid_target, 0o600)
+        (cli_config / "cli.log").symlink_to("log/cli-20261027_142923.log")
+        workspace._agy_validate_runtime_home(valid, self.root / "room.sock")
+
+        for case in (
+            "absolute-escape", "bad-name", "dangling", "traversal", "log-parent-symlink",
+            "other-link", "target-symlink", "target-hardlink", "target-mode",
+        ):
+            with self.subTest(case=case):
+                home = self._agy_runtime_home(room_mcp=True, suffix=case)
+                config = home / ".gemini/antigravity-cli"
+                logs = config / "log"
+                logs.mkdir(mode=0o700)
+                os.chmod(logs, 0o700)
+                target = logs / "cli-20261027_142923.log"
+                if case == "absolute-escape":
+                    external = self.root / "outside-cli-log"
+                    external.write_text("synthetic external file\n", encoding="utf-8")
+                    os.chmod(external, 0o600)
+                    (config / "cli.log").symlink_to(external)
+                elif case == "bad-name":
+                    (logs / "debug.log").write_text("synthetic\n", encoding="utf-8")
+                    os.chmod(logs / "debug.log", 0o600)
+                    (config / "cli.log").symlink_to("log/debug.log")
+                elif case == "dangling":
+                    (config / "cli.log").symlink_to("log/cli-20261027_142923.log")
+                elif case == "traversal":
+                    (config / "cli.log").symlink_to("log/../outside.log")
+                elif case == "log-parent-symlink":
+                    logs.rmdir()
+                    outside_dir = self.root / "outside-log-directory"
+                    outside_dir.mkdir(mode=0o700)
+                    os.chmod(outside_dir, 0o700)
+                    target = outside_dir / "cli-20261027_142923.log"
+                    target.write_text("synthetic\n", encoding="utf-8")
+                    os.chmod(target, 0o600)
+                    logs.symlink_to(outside_dir, target_is_directory=True)
+                    (config / "cli.log").symlink_to("log/cli-20261027_142923.log")
+                elif case == "other-link":
+                    outside = self.root / "outside-native-state"
+                    outside.write_text("synthetic\n", encoding="utf-8")
+                    os.chmod(outside, 0o600)
+                    (config / "native-state").symlink_to(outside)
+                    target.write_text("synthetic log\n", encoding="utf-8")
+                    os.chmod(target, 0o600)
+                    (config / "cli.log").symlink_to("log/cli-20261027_142923.log")
+                elif case == "target-symlink":
+                    external = self.root / "outside-cli-target"
+                    external.write_text("synthetic external file\n", encoding="utf-8")
+                    os.chmod(external, 0o600)
+                    target.symlink_to(external)
+                    (config / "cli.log").symlink_to("log/cli-20261027_142923.log")
+                else:
+                    target.write_text("synthetic log\n", encoding="utf-8")
+                    os.chmod(target, 0o644 if case == "target-mode" else 0o600)
+                    if case == "target-hardlink":
+                        os.link(target, self.root / "linked-cli-log")
+                    (config / "cli.log").symlink_to("log/cli-20261027_142923.log")
+                with self.assertRaises(workspace.WorkspaceError):
+                    workspace._agy_validate_runtime_home(home, self.root / "room.sock")
+
+    def test_agy_runtime_command_accepts_only_fixed_headless_contract(self):
+        binary = self.root / "agy-bin"
+        binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(binary, 0o700)
+        good = [
+            os.fspath(binary), "-p", "READY", "--disable-slash-commands",
+            "--output-format", "stream-json", "--conversation", "conversation_1",
+            "--model", "gemini-3.8-flash-medium",
+        ]
+        self.assertEqual(workspace._agy_runtime_command(good, binary), good[1:])
+        for extra in ("--approval-mode", "yolo", "--new-project", "--model", "fallback"):
+            with self.subTest(extra=extra), self.assertRaises(workspace.WorkspaceError):
+                workspace._agy_runtime_command([*good, extra], binary)
+        with self.assertRaisesRegex(workspace.WorkspaceError, "installed CLI"):
+            workspace._agy_runtime_command(["/bin/echo", *good[1:]], binary)
+
+    def test_agy_relay_must_be_single_link_private_executable(self):
+        relay = self.root / "room-relay"
+        relay.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(relay, 0o700)
+        self.assertEqual(workspace._agy_safe_executable(relay, "Antigravity MCP relay"), relay)
+        linked = self.root / "room-relay-linked"
+        os.link(relay, linked)
+        with self.assertRaisesRegex(workspace.WorkspaceError, "unsafe"):
+            workspace._agy_safe_executable(relay, "Antigravity MCP relay")
+        linked.unlink()
+        os.chmod(relay, 0o775)
+        with self.assertRaisesRegex(workspace.WorkspaceError, "unsafe"):
+            workspace._agy_safe_executable(relay, "Antigravity MCP relay")
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
+                         "Linux bubblewrap is required")
+    def test_agy_guarded_runtime_uses_private_keyring_and_mounts_room_only(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            auth_profile = workspace._agy_profile_paths(create=True)
+
+            (self.project / ".agents").mkdir()
+            (self.project / ".agents/hooks.json").write_text('{"startup":"synthetic"}', encoding="utf-8")
+            project_workspace = self.prepare("agy-runtime")
+            private_home = self._agy_runtime_home(room_mcp=True)
+            fake_agy = self.root / "agy-fake"
+            marker = self.root / "host-canary"
+            fake_agy.write_text(
+                "#!/usr/bin/python3\n"
+                "import os, socket, stat\n"
+                "from pathlib import Path\n"
+                "assert os.environ['HOME'] == '/home/orgbot'\n"
+                "assert 'GEMINI_API_KEY' not in os.environ\n"
+                "assert 'GOOGLE_APPLICATION_CREDENTIALS' not in os.environ\n"
+                "sock = Path(os.environ['ORGBOT_ROOM_MCP_SOCKET'])\n"
+                "assert stat.S_ISSOCK(sock.stat().st_mode)\n"
+                "relay = Path('/opt/orgbots/room-relay')\n"
+                "assert relay.is_file() and os.access(relay, os.X_OK)\n"
+                "assert not Path('/tmp/orgbot-workspace/.agents/hooks.json').exists()\n"
+                "try: Path('/tmp/orgbot-workspace/blocked').write_text('blocked'); raise SystemExit(7)\n"
+                "except OSError: pass\n"
+                "for path in ['/home/orgbot/.gemini/antigravity-cli/settings.json', '/home/orgbot/.gemini/config/mcp_config.json']:\n"
+                "  try: Path(path).write_text('blocked'); raise SystemExit(8)\n"
+                "  except OSError: pass\n"
+                "Path('/home/orgbot/.gemini/antigravity-cli/cli.log').write_text('synthetic')\n"
+                f"assert not Path({str(marker)!r}).exists()\n"
+                "print('guarded-runtime-passed')\n",
+                encoding="utf-8",
+            )
+            os.chmod(fake_agy, 0o700)
+            relay = self.root / "room-relay"
+            relay.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(relay, 0o700)
+            room_socket = self.root / "room.sock"
+            socket_owner = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            socket_owner.bind(os.fspath(room_socket))
+            try:
+                runtime_home = workspace._agy_validate_runtime_home(private_home, room_socket)
+                runtime_home["project"] = project_workspace
+                runtime_home["empty_agents"] = private_home / ".orgbot-empty-agents"
+
+                from contextlib import contextmanager
+
+                @contextmanager
+                def fake_private_service(_profile, _passphrase):
+                    with tempfile.TemporaryDirectory(prefix="private-bus-", dir=self.root) as temporary:
+                        runtime = Path(temporary)
+                        bus_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        bus_socket.bind(os.fspath(runtime / "bus.sock"))
+                        try:
+                            yield {"DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime / 'bus.sock'}"}, runtime
+                        finally:
+                            bus_socket.close()
+
+                passphrase = bytearray(b"synthetic-test-wrapping-key")
+                command = [
+                    os.fspath(fake_agy), "-p", "READY", "--disable-slash-commands",
+                    "--output-format", "stream-json", "--model", "gemini-3.8-flash-medium",
+                ]
+                project_lock_fd = os.open(self.root / "project.lock", os.O_CREAT | os.O_RDWR, 0o600)
+                with patch.object(workspace, "_agy_profile_paths", return_value=auth_profile), \
+                     patch.object(workspace, "_agy_keyring_has_data", return_value=True), \
+                     patch.object(workspace, "_host_wrapping_passphrase", return_value=passphrase), \
+                     patch.object(workspace, "_agy_binary", return_value=fake_agy), \
+                     patch.object(workspace, "_agy_private_secret_service", side_effect=fake_private_service), \
+                     patch.object(workspace, "_secret_item_paths", return_value=["/org/freedesktop/secrets/item/synthetic"]):
+                    result = workspace._agy_run_protected(
+                        command, private_home, project_workspace, room_socket, relay, project_lock_fd,
+                    )
+                self.assertEqual(result, 0)
+                self.assertEqual(passphrase, bytearray(len(passphrase)))
+                self.assertEqual((private_home / ".gemini/antigravity-cli/cli.log").read_text(), "synthetic")
+                self.assertFalse((project_workspace / "blocked").exists())
+                self.assertEqual((self.project / ".agents/hooks.json").read_text(), '{"startup":"synthetic"}')
+            finally:
+                socket_owner.close()
+
+    def test_agy_run_requires_private_credentials_before_any_cli_or_host_key_lookup(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            project_lock_fd = os.open(self.root / "project.lock", os.O_CREAT | os.O_RDWR, 0o600)
+            with patch.object(workspace, "_agy_keyring_has_data", return_value=False), \
+                 patch.object(workspace, "_host_wrapping_passphrase", side_effect=AssertionError("must not query host keyring")), \
+                 patch.object(workspace, "_agy_binary", side_effect=AssertionError("must not locate or launch AGY")), \
+                 patch.object(workspace, "_agy_owned_popen", side_effect=AssertionError("must not spawn a process")), \
+                 self.assertRaisesRegex(workspace.WorkspaceError, "private sign-in is required"):
+                workspace._agy_run_protected(
+                    ["/usr/bin/agy"], self.root, self.root, None, None, project_lock_fd,
+                )
+
+    def test_agy_run_auth_lock_busy_fails_before_wrap_lookup_or_spawn_and_releases_project_lock(self):
+        self.prepare("agy-busy")
+        private_home = workspace._safe_state_child(
+            self.state,
+            f"agents/{workspace._project_id(self.project)}/agy-busy/profiles/home-agy",
+            create=True,
+        )
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            held_auth_lock = workspace._agy_auth_lock(profile["root"])
+            try:
+                with patch.object(workspace, "_host_wrapping_passphrase", side_effect=AssertionError("busy path must not query host wrapping key")), \
+                     patch.object(workspace, "_agy_private_secret_service", side_effect=AssertionError("busy path must not start Secret Service")), \
+                     patch.object(workspace, "_agy_owned_popen", side_effect=AssertionError("busy path must not spawn a process")), \
+                     self.assertRaisesRegex(workspace.WorkspaceError, "Another Antigravity authentication operation"):
+                    workspace._run(
+                        os.fspath(self.state), "agy-busy", ["/usr/bin/agy"],
+                        read_only=False, profiles=[], private_home_arg=os.fspath(private_home),
+                        mcp_socket=None, agent_cli="agy",
+                    )
+                project_lock_path = Path(f"/run/user/{os.getuid()}/orgbot-workspace-locks") / f"{workspace._project_id(self.project)}.lock"
+                project_lock_check = os.open(project_lock_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    fcntl.flock(project_lock_check, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(project_lock_check)
+            finally:
+                os.close(held_auth_lock)
+
+    def test_agy_relay_argument_is_only_valid_with_room_mcp(self):
+        with self.assertRaisesRegex(workspace.WorkspaceError, "only by Antigravity"):
+            workspace._run(
+                os.fspath(self.state), "dev", ["/bin/true"], read_only=False,
+                profiles=[], private_home_arg=None, mcp_socket=None,
+                agent_cli="opencode", mcp_relay="/bin/true",
+            )
+        with self.assertRaisesRegex(workspace.WorkspaceError, "both a socket and the fixed relay"):
+            workspace._run(
+                os.fspath(self.state), "dev", ["/bin/true"], read_only=False,
+                profiles=[], private_home_arg="/tmp/private-home", mcp_socket=None,
+                agent_cli="agy", mcp_relay="/bin/true",
+            )
+
+    def test_agy_run_errors_are_visible_to_native_cli_stderr_parser(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.object(workspace, "_run", side_effect=workspace.WorkspaceError("synthetic profile mismatch")), \
+             contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            result = workspace.main([
+                "run", "--state", "/private/state", "--agent", "agy",
+                "--agent-cli", "agy", "--", "/usr/bin/agy",
+            ])
+        self.assertEqual(result, 2)
+        self.assertEqual(json.loads(stdout.getvalue()), {"ok": False, "error": "synthetic profile mismatch"})
+        self.assertEqual(stderr.getvalue(), "Antigravity workspace helper: synthetic profile mismatch\n")
+
+    def test_agy_run_routes_only_validated_room_socket_and_relay(self):
+        work = self.prepare("agy-route")
+        private_home = workspace._safe_state_child(
+            self.state,
+            f"agents/{workspace._project_id(self.project)}/agy-route/profiles/home-agy",
+            create=True,
+        )
+        room_socket = self.root / "room.sock"
+        agy_binary = self.root / "agy"
+        relay_binary = self.root / "room-relay"
+        socket_owner = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        socket_owner.bind(os.fspath(room_socket))
+        try:
+            captured = []
+
+            def route(program, home, project_workspace, socket_path, relay, project_lock_fd):
+                captured.append((program, home, project_workspace, socket_path, relay))
+                os.close(project_lock_fd)
+                return 19
+
+            with patch.object(workspace, "_agy_run_protected", side_effect=route):
+                result = workspace._run(
+                    os.fspath(self.state), "agy-route",
+                    [os.fspath(agy_binary), "-p", "READY", "--disable-slash-commands",
+                     "--output-format", "stream-json", "--model", "gemini-3.8-flash-medium"],
+                    read_only=False, profiles=[], private_home_arg=os.fspath(private_home),
+                    mcp_socket=os.fspath(room_socket), agent_cli="agy", mcp_relay=os.fspath(relay_binary),
+                )
+            self.assertEqual(result, 19)
+            self.assertEqual(captured[0][0][0], os.fspath(agy_binary))
+            self.assertEqual(captured[0][1], private_home)
+            self.assertEqual(captured[0][2], work)
+            self.assertEqual(captured[0][3], room_socket)
+            self.assertEqual(captured[0][4], relay_binary)
+        finally:
+            socket_owner.close()
 
     def test_agy_wrapping_key_never_uses_ambiguous_or_missing_existing_secret(self):
         xdg_data = self.root / "xdg-data"

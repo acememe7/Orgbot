@@ -204,7 +204,11 @@ skill/MCP lifecycle and pause/restart; pass package/signature/upgrade checks.
 Keep private logs/profiles/credentials outside Git. Do not infer subscription
 quota savings from token counts or claim general savings from one pilot pair.
 
-## OpenCode and Antigravity CLI integration, 2026-10-27
+## OpenCode and Antigravity CLI integration, 2026-10-27 (initial status)
+
+This records the source milestone before private AGY enrollment and runtime
+verification. Current AGY results and remaining gates are summarized in the
+later **Protected Antigravity runtime smoke** section.
 
 Add desktop provider choices through the existing protected room runtime.
 OpenCode uses the released 1.19.4 interface, not the separate v2 documentation;
@@ -219,10 +223,9 @@ room's external-tool approvals. Published 2.0.2 artifacts remain unchanged.
   Real OpenCode 1.19.4 passed fresh/resumed local mock-provider execution and an
   allowed MCP tool call through the production Python workspace helper.
   Only an already configured, selected API credential is supported.
-- [ ] Resolve Antigravity authentication without exposing host D-Bus.
-  Blocked: no verified isolated credential transfer. Constructor and launcher
-  reject execution; UI says unavailable. Parser/configuration tests do not
-  establish a working Antigravity integration.
+- [x] Resolve Antigravity authentication without exposing host D-Bus.
+  Later owner enrollment and protected Linux execution are documented below;
+  one room-MCP smoke passed. Cross-context and usage acceptance remains open.
 - [ ] Verify safe OpenCode OAuth reuse.
   Blocked: copied refresh credentials may invalidate the owner's native session.
   OAuth is rejected; no automatic API billing fallback is used.
@@ -243,10 +246,15 @@ room's external-tool approvals. Published 2.0.2 artifacts remain unchanged.
   prompts, session IDs or private profiles are included in the proof artifact.
 
 See [native CLI integration status](NATIVE_CLI_INTEGRATIONS.md) and its sanitized
-conformance record. No real-provider inference, subscription proof, package
+conformance record. A later Antigravity live inference is recorded separately;
+it does not establish subscription billing or general savings. No package
 rebuild/install, push, publication or deployment is included in this milestone.
 
-## Subscription and free-model live validation, 2026-10-27
+## Subscription and free-model live validation, 2026-10-27 (initial snapshot)
+
+This is the earlier live-test snapshot before the isolated Antigravity runtime
+smoke below. Its OpenCode allowance result and completed Astra/DeepSeek run are
+retained as historical evidence.
 
 Owner requested context sharing, split usage and broader runtime checks before
 any installation or publication. The selected team is Astra through the existing
@@ -302,7 +310,7 @@ targeted Flutter analysis clean, rendered allowance dialog at 375/1280 px,
 and 16 host configuration/rule/auth hashes unchanged. No runtime Rust changes,
 package installation, push, website deployment or publication were performed.
 
-## Antigravity authentication diagnosis, 2026-10-27
+## Antigravity authentication diagnosis, 2026-10-27 (historical)
 
 - [x] Confirm installed AGY 1.4.8 and trace the three deliberate execution gates.
   The blocker is access to its saved subscription sign-in from a protected
@@ -315,9 +323,9 @@ package installation, push, website deployment or publication were performed.
 - [x] Run installed AGY in a network-disabled protected empty profile.
   It waited for an OAuth code until the 20-second timeout; no sign-in or live
   inference completed. This differs from the documented fail-fast behavior.
-- [ ] Implement the private AGY sign-in/keyring lifecycle in the application;
-  complete owner sign-in and verify refresh, restart, subscription/overage
-  policy, configuration isolation, live context and usage before enabling it.
+- [x] Implement private AGY sign-in/keyring lifecycle and complete owner sign-in.
+  The guarded runtime smoke is documented below. Cross-context and isolated-room
+  checks were still pending at the time of this diagnosis.
 
 See the [diagnosis and evidence](NATIVE_CLI_INTEGRATIONS.md#antigravity-authentication-diagnosis-27-october-2026).
 This milestone diagnoses and prototypes the missing authentication boundary;
@@ -347,12 +355,18 @@ desktop Connections & tools, packaging dependencies and their focused tests.
   fixture; no model prompt or completed authentication was part of that test.
 - [x] Resolve Astra's helper-discovery, passphrase-pipe and configuration-parent
   findings; final enrollment review approved. Open the owner sign-in terminal.
-- [ ] Complete owner sign-in, then prove refresh/restart, permission enforcement,
-  room MCP, subscription/overage behavior, context sharing and usage reporting.
+- [x] Complete owner sign-in and a protected room-MCP smoke.
+- [x] Pass the 11-check cross-context/restart and isolated-room test, including
+  session distinction and usage reconciliation; details follow below.
+- [x] Complete the authorized room-MCP write/readback test with direct native
+  writes denied; details are in the runtime-smoke section below.
+- [ ] Check credential refresh and external-MCP approval behavior. Provider
+  billing classification remains unknown.
 
-Credential presence is enrollment metadata, not proof of usable authentication.
-The three runtime execution gates stay in place until the remaining real-CLI
-checks pass. No installation, publication or deployment is part of this change.
+Credential presence is enrollment metadata; account access is checked when the
+bot runs. The separate runtime smoke and remaining acceptance gates are
+recorded below. No installation, publication or deployment is part of this
+change.
 See the [sanitized enrollment proof](benchmarks/2026-10-27-antigravity-enrollment.json).
 
 ### Enrollment follow-up: post-login settings error
@@ -372,8 +386,10 @@ metadata is now present and must be preserved.
   settings unchanged. Astra approved the source correction.
 - [x] Complete final documentation/evidence review; Astra approved the
   enrollment correction. Commit it as a separate verified milestone.
-- [ ] Resolve authenticated model-runtime settings compatibility and the
-  existing live permission/context/usage gates before enabling AGY execution.
+- [x] Resolve authenticated model-runtime settings compatibility by retaining
+  read-only settings and seeding the required default project record. The
+  guarded runtime smoke is documented below; broader context and usage
+  acceptance remains open.
 
 ### Protected headless startup compatibility
 
@@ -394,10 +410,56 @@ metadata is now present and must be preserved.
   input / 30 output / 0 cache tokens), pass all 51 helper tests, and obtain
   Astra approval for the separate compatibility milestone.
 
-Remaining runtime integration must keep per-bot CLI homes separate from the
-global keyring. The current Rust launcher applies private XDG overrides to its
-host Python helper; AGY must retain the host auth-root resolution there and set
-per-bot XDG paths only inside bubblewrap. Runtime also needs a protected room
-MCP relay, exclusion of workspace `.agents` configuration, the supported
-`--conversation` resume flag, and actual native permission/context/usage tests.
-The three application execution gates remain intact until those checks pass.
+The guarded runtime now keeps per-bot CLI homes separate from the isolated
+global keyring, retains host auth-root resolution only for the trusted helper,
+and sets per-bot XDG paths inside bubblewrap. It excludes workspace `.agents`
+configuration, invokes AGY with the supported `--conversation` resume flag,
+and exposes the protected room MCP relay. The live room-MCP smoke, 11-check
+context/restart/isolated-room test and authorized room write/readback passed;
+credential refresh and external-MCP approval checks remain open below.
+
+## Protected Antigravity runtime smoke, 27 October 2026
+
+- [x] Complete a real AGY 1.4.8 guarded server run with explicit model
+  `gemini-3.8-flash-medium`; the agent returned `READY` through one room-MCP
+  call. One usage event recorded 20,515 input, 1,945 output, and zero cache
+  tokens.
+- [x] Pass all eleven context-2 checks: Astra routed an exact nonce challenge to
+  Gemini; after restart Gemini recalled the marker in the same native session;
+  a fresh room with a distinct session returned `UNKNOWN`; hostile `.agents`
+  content stayed masked and its source checksum remained unchanged.
+- [x] Reconcile independent AGY transcript usage with engine totals and saved
+  baseline; count the restart episode's delta once.
+  Main room: Astra/Codex 13,100 input, 246 output, 61,184 cache-read tokens in
+  one CLI episode; Gemini/AGY 53,013 input, 5,010 output, 29,868 cache-read
+  tokens across two episodes. Isolated room: Gemini/AGY 12,707 input, 278
+  output, zero cache-read tokens in one episode. Cache-write usage was zero.
+  These are CLI episodes, not AGY internal model steps or invoice events.
+- [x] Confirm per-agent private `HOME`, isolated keyring opened using one
+  exact OrgBots Secret Service item, private D-Bus only, read-only settings,
+  global configuration and default-project seed, empty `.agents`/plugin paths,
+  only the room MCP server allowed, native command/file/URL tools denied, no
+  API-key environment, and `useG1Credits=false`.
+- [x] Confirm only one active AGY run is supported; a concurrent request fails
+  before the provider call. Owner login remains explicit.
+- [x] Pass 61 Python workspace-helper tests, 150 Rust tests, 14 probe-validator
+  tests, 13 Flutter tests, Flutter analysis, and rendered 375/1280 px UI review.
+- [x] Pass authorized `workspace_write` through room MCP: create
+  `authorized.txt`, read back exact content, retain original fixture, and keep
+  native file deny rules intact, project mount read-only, and shell
+  commands disabled. This one CLI episode used 53,980 input, 844 output and
+  zero cache tokens; billing classification is unknown.
+- [x] Confirm room MCP read/post and direct native write-denial behavior in the
+  separate read-only permissions run; native schema-file reads were avoided.
+- [ ] Check credential refresh and live external-MCP approval behavior.
+
+The route used the existing native AGY account sign-in. `billing_kind` remains
+unknown; no invoice, quota treatment or zero-charge claim is available. The
+[sanitized runtime report](benchmarks/2026-10-27-antigravity-runtime.json)
+records the smoke and context proof. The relay artifact must be owner-controlled,
+single-linked and not group- or world-writable; a Cargo hardlink at mode `0775` was
+rejected and the run used a private checksum-identical copy without install.
+AGY log compatibility allows only `cli.log` to point to relative
+`log/cli-YYYYMMDD_HHMMSS.log`, resolving to a private owner-owned regular file
+with one link; other symlinks and path escapes are rejected. No package
+installation, publication, push or website update is included.

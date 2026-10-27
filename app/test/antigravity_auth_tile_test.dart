@@ -50,12 +50,7 @@ void main() {
 
       expect(calls, isEmpty);
       expect(find.text('Sign-in status has not been checked.'), findsOneWidget);
-      expect(
-        find.text(
-          'Uses a separate OrgBots sign-in. Model execution is still disabled.',
-        ),
-        findsOneWidget,
-      );
+      expect(find.text('Uses a separate OrgBots sign-in.'), findsOneWidget);
       await tester.tap(find.text('Check sign-in'));
       await tester.pumpAndSettle();
 
@@ -67,7 +62,7 @@ void main() {
         'status',
       ]);
       expect(
-        find.text('Private sign-in stored · execution verification pending.'),
+        find.text('Private sign-in stored · account checked when bot runs.'),
         findsOneWidget,
       );
       expect(find.text('Signed in'), findsNothing);

@@ -1,0 +1,312 @@
+{
+  "schema": 1,
+  "date": "2026-10-27",
+  "status": "verified development source; not installed or published",
+  "source_base_commit": "03b4d4f46615fe91cc217a116d8531839e917914",
+  "source_sha256": {
+    "app/packaging/orgbot-workspace.py": "29320717285681961a19e1494a9390bb8b568326420d97a780506a8c86bd8ba9",
+    "app/packaging/test-orgbot-workspace.py": "39af922d1040a98906747dd948a2867ac5a5c1d788ca88146d0d87bc1d1dbc45",
+    "core/crates/orgbot-providers/src/agent_cli.rs": "0a37c073494df4b048e40c63eab0dcb33ed50bd5ed2314420d8d1e401644a41b",
+    "core/crates/orgbot-providers/src/workspace_guard.rs": "c5dfd4b606fca631cc01690bddc1511c5ede68c84e7bef1fd860c1619e2f173f",
+    "app/lib/ui/antigravity_auth_tile.dart": "eb9d99a8ca2d0679d9b4ac6eaeed72070dd85b800f6e044bed0b56ab09c71eb6",
+    "app/lib/ui/orgbot_screen.dart": "a26ee73de37fcf5a2bf4258456ab90457a93d64aa77dddfe9cd9199f2f8a2dd1",
+    "scripts/benchmarks/antigravity_probe.py": "35801b6f3a49e454dc1038f41e4310fb9ede063ec837aa675360c9e9efd54e12",
+    "scripts/benchmarks/test_antigravity_probe.py": "5b52cd5f416279de0d19c0fcafce71b5e4d93b3ca8538803a84e0686edc3bee0"
+  },
+  "tested_binary_sha256": {
+    "read_only_permissions": "9127d6cafb9426f013975879f6e7cafc048db1da7e20c5c3d917c5f22d1f4248",
+    "context_restart_isolation": "df670e9653ffd16967736eb2ba8b7786307358daf8fb89cd984ecff3d152db26",
+    "final_build": "df670e9653ffd16967736eb2ba8b7786307358daf8fb89cd984ecff3d152db26"
+  },
+  "cli_version": "agy 1.4.8",
+  "model": "gemini-3.8-flash-medium",
+  "settings_error_fix": {
+    "cause": "Interactive CLI startup atomically replaces settings; protected settings are read-only.",
+    "behavior": "Enrollment stops once credentials are stored; existing stored sign-in is retained. Headless runtime uses protected settings and a preseeded read-only default project.",
+    "overwrote_owner_settings": false,
+    "reused_host_agy_credentials": false
+  },
+  "security": {
+    "private_secret_service_only": true,
+    "exact_orgbots_wrapping_item_only": true,
+    "host_keyring_files_not_mounted": true,
+    "host_home_not_mounted": true,
+    "empty_root_sandbox": true,
+    "settings_global_config_project_seed_read_only": true,
+    "project_agents_masked": true,
+    "plugins_empty": true,
+    "only_room_mcp_configured": true,
+    "native_command_file_url_tools_denied": true,
+    "native_project_mount_read_only": true,
+    "api_credentials_not_supplied": true,
+    "g1_credits_enabled": false,
+    "runtime_never_provisions_auth": true,
+    "busy_runtime_fails_before_credentials_or_model": true,
+    "log_link_exception": "Only cli.log -> log/cli-YYYYMMDD_HHMMSS.log; real private owner directory and single-link regular private target; other symlinks rejected."
+  },
+  "verification": {
+    "workspace_helper_tests": 61,
+    "provider_library_tests": 150,
+    "proof_validator_tests": 14,
+    "flutter_tests": 13,
+    "flutter_targeted_analysis": "passed",
+    "rendered_widths": [
+      375,
+      1280
+    ],
+    "source_build": "passed",
+    "real_synthetic_bubblewrap_boundary": "passed"
+  },
+  "read_only_permissions": {
+    "passed": true,
+    "source_unchanged": true,
+    "room_workspace_read_confirmed": true,
+    "native_write_denied_by_config": true,
+    "schema_file_reads_avoided": true,
+    "native_transcript_usage": {
+      "input_tokens": 56100,
+      "output_tokens": 3188,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0
+    },
+    "usage": {
+      "gemini": {
+        "provider": "cli_agent",
+        "cli": "antigravity",
+        "model": "gemini-3.8-flash-medium",
+        "billing_kind": "unknown",
+        "calls": 1,
+        "usage": {
+          "input_tokens": 56100,
+          "output_tokens": 3188,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "actual_api_cost_microusd": null,
+        "api_equivalent_cost_microusd": null
+      }
+    },
+    "session": "a68494c66cfbe9d0a29c722cc8b2ca4c36d8853bbe03906b2ef72f52c36d30a3"
+  },
+  "context_restart_isolation": {
+    "antigravity_cumulative_usage_after": {
+      "cache_read_tokens": 29868,
+      "cache_write_tokens": 0,
+      "input_tokens": 53013,
+      "output_tokens": 5010
+    },
+    "antigravity_cumulative_usage_before": {
+      "cache_read_tokens": 14722,
+      "cache_write_tokens": 0,
+      "input_tokens": 31983,
+      "output_tokens": 4563
+    },
+    "antigravity_resume_episode_delta": {
+      "cache_read_tokens": 15146,
+      "cache_write_tokens": 0,
+      "input_tokens": 21030,
+      "output_tokens": 447
+    },
+    "antigravity_transcript_usage": {
+      "after_restart": {
+        "llm_steps": 5,
+        "usage": {
+          "cache_read_tokens": 29868,
+          "cache_write_tokens": 0,
+          "input_tokens": 53013,
+          "output_tokens": 5010
+        }
+      },
+      "before_restart": {
+        "llm_steps": 3,
+        "usage": {
+          "cache_read_tokens": 14722,
+          "cache_write_tokens": 0,
+          "input_tokens": 31983,
+          "output_tokens": 4563
+        }
+      },
+      "isolated_room": {
+        "llm_steps": 1,
+        "usage": {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_tokens": 12707,
+          "output_tokens": 278
+        }
+      }
+    },
+    "checks": {
+      "complete_positive_usage": true,
+      "hostile_agents_rule_unchanged": true,
+      "isolated_room_unknown": true,
+      "isolated_session_distinct": true,
+      "native_delta_accounting_exact": true,
+      "native_session_ids_retained": true,
+      "native_transcript_usage_independent": true,
+      "no_api_credential_environment": true,
+      "owner_targets_exact": true,
+      "primary_messages_exact": true,
+      "usage_identity_separated": true
+    },
+    "isolated_marker_sha256": "56b2a84bf5841aae2bed4034d8b1476b8b6b9e78b7392034b247cf8f1ea25942",
+    "isolated_marker_sha256_after": "56b2a84bf5841aae2bed4034d8b1476b8b6b9e78b7392034b247cf8f1ea25942",
+    "native_session_sha256": {
+      "astra": "75e235b58a616266abca2d93d67e491f54545b7ae3ce76d3f830a5757be4a05c",
+      "gemini": "5164aeca6e966b3fc27ca9d37c69dd4e3df7dd13e83b3863e345f6babc729727",
+      "isolated_gemini": "dbd04b08a7a95082cd92dac6ba233fac90719edf40d21124a80539b8acbdd7e8"
+    },
+    "participants": [
+      "astra",
+      "gemini"
+    ],
+    "primary_marker_sha256": "56b2a84bf5841aae2bed4034d8b1476b8b6b9e78b7392034b247cf8f1ea25942",
+    "primary_marker_sha256_after": "56b2a84bf5841aae2bed4034d8b1476b8b6b9e78b7392034b247cf8f1ea25942",
+    "schema": 1,
+    "seed_sha256": "d097772687931939f21d67f3d04d843fc875260252eff9f35884c930ef4fe6f2",
+    "usage": {
+      "after_restart": {
+        "astra": {
+          "actual_api_cost_microusd": null,
+          "billing_kind": "subscription",
+          "calls": 1,
+          "cli": "codex",
+          "model": "gpt-6-astra",
+          "provider": "cli_agent",
+          "usage": {
+            "cache_read_tokens": 61184,
+            "cache_write_tokens": 0,
+            "input_tokens": 13100,
+            "output_tokens": 246
+          },
+          "usage_complete": true,
+          "usage_reported": true
+        },
+        "gemini": {
+          "actual_api_cost_microusd": null,
+          "billing_kind": "unknown",
+          "calls": 2,
+          "cli": "antigravity",
+          "model": "gemini-3.8-flash-medium",
+          "provider": "cli_agent",
+          "usage": {
+            "cache_read_tokens": 29868,
+            "cache_write_tokens": 0,
+            "input_tokens": 53013,
+            "output_tokens": 5010
+          },
+          "usage_complete": true,
+          "usage_reported": true
+        }
+      },
+      "before_restart": {
+        "astra": {
+          "actual_api_cost_microusd": null,
+          "billing_kind": "subscription",
+          "calls": 1,
+          "cli": "codex",
+          "model": "gpt-6-astra",
+          "provider": "cli_agent",
+          "usage": {
+            "cache_read_tokens": 61184,
+            "cache_write_tokens": 0,
+            "input_tokens": 13100,
+            "output_tokens": 246
+          },
+          "usage_complete": true,
+          "usage_reported": true
+        },
+        "gemini": {
+          "actual_api_cost_microusd": null,
+          "billing_kind": "unknown",
+          "calls": 1,
+          "cli": "antigravity",
+          "model": "gemini-3.8-flash-medium",
+          "provider": "cli_agent",
+          "usage": {
+            "cache_read_tokens": 14722,
+            "cache_write_tokens": 0,
+            "input_tokens": 31983,
+            "output_tokens": 4563
+          },
+          "usage_complete": true,
+          "usage_reported": true
+        }
+      },
+      "isolated_room": {
+        "gemini": {
+          "actual_api_cost_microusd": null,
+          "billing_kind": "unknown",
+          "calls": 1,
+          "cli": "antigravity",
+          "model": "gemini-3.8-flash-medium",
+          "provider": "cli_agent",
+          "usage": {
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "input_tokens": 12707,
+            "output_tokens": 278
+          },
+          "usage_complete": true,
+          "usage_reported": true
+        }
+      }
+    }
+  },
+  "accounting_notes": [
+    "Calls are completed CLI episodes, not the number of native internal LLM requests.",
+    "Input, output and cache counters are separate. Native reasoning is already included in output.",
+    "AGY native PLANNER_RESPONSE transcript totals independently match engine totals, persisted counters and resume deltas.",
+    "Native account authentication and disabled API fallback do not establish subscription quota treatment or a zero invoice. AGY billing classification remains unknown."
+  ],
+  "fixed_during_validation": [
+    "Source Cargo relay artifact was correctly rejected for group-writable mode and hard links; tests use checksum-identical private single-link copies.",
+    "Native schema files remained blocked; current room tool schemas are supplied in the standing brief without weakening permissions.",
+    "Native cli.log shortcut initially blocked resume; the narrowly validated private relative log link is now supported."
+  ],
+  "remaining_limits": [
+    "One active AGY execution at a time; concurrent attempts fail before model execution.",
+    "Expired-token refresh has not been forced or tested.",
+    "Live external-MCP approval and shell-command workflows were not exercised in this AGY run.",
+    "No provider invoice or quota savings measured.",
+    "No installation, package publication, GitHub push, or live website update performed."
+  ],
+  "authorized_workspace_write": {
+    "passed": true,
+    "original_file_unchanged": true,
+    "authorized_file_created": true,
+    "room_workspace_read_confirmed": true,
+    "schema_file_reads_avoided": true,
+    "native_transcript_usage": {
+      "input_tokens": 53980,
+      "output_tokens": 844,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0
+    },
+    "usage": {
+      "gemini": {
+        "provider": "cli_agent",
+        "cli": "antigravity",
+        "model": "gemini-3.8-flash-medium",
+        "billing_kind": "unknown",
+        "calls": 1,
+        "usage": {
+          "input_tokens": 53980,
+          "output_tokens": 844,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "actual_api_cost_microusd": null,
+        "api_equivalent_cost_microusd": null
+      }
+    },
+    "session": "1305ad8dd2a85be3b908dc9625389693ebab62deec66dcd0d649adeb842c77f4"
+  },
+  "supported_tested_scope": [
+    "Linux private native account sign-in",
+    "One active Antigravity native process",
+    "Room messaging and workspace reads with direct native writes blocked",
+    "Explicitly writable room workspace: authorized MCP file creation and readback with original files retained",
+    "Astra to Gemini context transfer, process restart, isolated rooms and separate usage reconciliation"
+  ]
+}

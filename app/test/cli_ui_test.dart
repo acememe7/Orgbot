@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:orgbot_app/engine/agent_cli.dart';
 import 'package:orgbot_app/orgbot/credentials.dart';
 import 'package:orgbot_app/orgbot/library.dart';
 import 'package:orgbot_app/orgbot/model_catalog.dart';
@@ -389,9 +390,19 @@ void main() {
           findsOneWidget,
         );
       } else {
-        expect(find.text('Execution unavailable'), findsOneWidget);
+        final antigravityStatus = findCli(CliKind.antigravity);
         expect(
-          find.textContaining('Account access and protected execution'),
+          find.textContaining(
+            antigravityStatus.available
+                ? 'agy found · sign-in not checked'
+                : 'agy not found',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining(
+            'Account status and any provider charges are not checked here.',
+          ),
           findsOneWidget,
         );
       }

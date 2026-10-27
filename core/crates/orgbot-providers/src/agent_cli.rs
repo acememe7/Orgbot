@@ -5,8 +5,8 @@
 //! [CliKind::Antigravity]. In the protected workspace, each identity gets a
 //! separate private profile and only the configured room MCP server is exposed.
 //! OpenCode receives only the selected API-key credential; OAuth sharing is
-//! rejected. Antigravity stays unavailable in the protected workspace until a
-//! verified isolated authentication source exists. Each available CLI runs its
+//! rejected. Antigravity is accepted only inside the protected Linux workspace
+//! with a generated, room-scoped profile. Each available CLI runs its
 //! native tool loop inside the configured [AgentPolicy].
 //!
 //! Sessions make the bot's memory last. The first turn starts a fresh CLI
@@ -38,6 +38,16 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+
+/// The trusted workspace helper needs the owner's profile roots for the
+/// Antigravity wrapping-key lookup. It installs the private HOME only on the
+/// guarded CLI child. Legacy CLIs continue to receive their private HOME at
+/// the wrapper boundary as before.
+fn configure_wrapper_home(command: &mut Command, cli: CliKind, private_home: &Path) {
+    if cli != CliKind::Antigravity {
+        command.env("HOME", private_home);
+    }
+}
 
 async fn read_stderr_tail(
     reader: &mut (impl tokio::io::AsyncRead + Unpin),
@@ -190,15 +200,14 @@ impl AgentCliProvider {
                 }
             }
             CliKind::Antigravity
-                if model.trim().is_empty() || model.chars().any(char::is_whitespace) =>
+                if !cfg!(target_os = "linux")
+                    || model.is_empty()
+                    || model.bytes().any(|byte| {
+                        !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+                    }) =>
             {
                 return Err(ProviderError::Unsupported(
-                    "Antigravity requires an explicit model slug".into(),
-                ));
-            }
-            CliKind::Antigravity => {
-                return Err(ProviderError::Unsupported(
-                    "Antigravity execution remains disabled until isolated authentication and runtime permissions are verified; use `orgbot agy login` only to initialize its private sign-in profile".into(),
+                    "Antigravity requires Linux and an explicit valid model slug".into(),
                 ));
             }
             _ => {}
@@ -515,9 +524,10 @@ impl Provider for AgentCliProvider {
         *self.last_socket.lock().unwrap() = request.mcp_socket.clone();
         let resumed = self.session.lock().unwrap().clone();
         let situation = latest_instruction(&request.messages);
+        let system_brief = antigravity_system_brief(self.cli, self.mcp, &request)?;
         let previous_brief = self.session_system_brief.lock().unwrap().clone();
         let prompt = compose_prompt(
-            &request.system,
+            &system_brief,
             situation.as_deref(),
             resumed.is_some(),
             previous_brief.as_deref(),
@@ -579,7 +589,7 @@ impl Provider for AgentCliProvider {
                 "saved session is gone; starting a fresh one"
             );
             self.forget_session();
-            let fresh_prompt = compose_prompt(&request.system, situation.as_deref(), false, None);
+            let fresh_prompt = compose_prompt(&system_brief, situation.as_deref(), false, None);
             episode = Episode::default();
             result = self
                 .run_episode(
@@ -620,8 +630,8 @@ impl Provider for AgentCliProvider {
             *self.session.lock().unwrap() = Some(id);
         }
         if self.session.lock().unwrap().is_some() {
-            *self.session_system_brief.lock().unwrap() = Some(request.system.clone());
-            self.persist_session_brief(&request.system)?;
+            *self.session_system_brief.lock().unwrap() = Some(system_brief.clone());
+            self.persist_session_brief(&system_brief)?;
         }
 
         let _ = emit(
@@ -823,14 +833,12 @@ impl AgentCliProvider {
         }
         #[cfg(target_os = "linux")]
         if let Some(prepared) = &prepared {
-            if matches!(self.cli, CliKind::OpenCode | CliKind::Antigravity) {
+            if self.cli == CliKind::OpenCode {
                 let private = &prepared.private_home_mount;
-                if self.cli == CliKind::OpenCode {
-                    cmd.env("OPENCODE_CONFIG", private.join("opencode.json"));
-                    cmd.env("OPENCODE_CONFIG_DIR", private.join(".config/opencode"));
-                    cmd.env("OPENCODE_DISABLE_PROJECT_CONFIG", "true");
-                    cmd.env("OPENCODE_PURE", "true");
-                }
+                cmd.env("OPENCODE_CONFIG", private.join("opencode.json"));
+                cmd.env("OPENCODE_CONFIG_DIR", private.join(".config/opencode"));
+                cmd.env("OPENCODE_DISABLE_PROJECT_CONFIG", "true");
+                cmd.env("OPENCODE_PURE", "true");
                 cmd.env("XDG_CONFIG_HOME", private.join(".config"));
                 cmd.env("XDG_DATA_HOME", private.join(".local/share"));
             }
@@ -838,8 +846,11 @@ impl AgentCliProvider {
         #[cfg(target_os = "linux")]
         if let (Some(guard), Some(prepared)) = (&self.guard, &prepared) {
             let original = cmd.as_std();
-            let mut protected =
-                Command::from(guard.command("run").map_err(ProviderError::Unsupported)?);
+            let mut protected = Command::from(
+                guard
+                    .command_for_agent_cli("run", self.cli, self.mcp)
+                    .map_err(ProviderError::Unsupported)?,
+            );
             if guard.read_only || prepared.read_only {
                 protected.arg("--read-only");
             }
@@ -879,7 +890,7 @@ impl AgentCliProvider {
                 }
                 CliKind::OpenCode | CliKind::Antigravity => {}
             }
-            protected.env("HOME", &prepared.private_home_mount);
+            configure_wrapper_home(&mut protected, self.cli, &prepared.private_home_mount);
             cmd = protected;
         }
         cmd.stdin(Stdio::null())
@@ -1100,6 +1111,31 @@ fn compose_prompt(
     } else {
         situation.to_string()
     }
+}
+
+fn antigravity_system_brief(
+    cli: CliKind,
+    mcp: bool,
+    request: &CompletionRequest,
+) -> Result<String> {
+    if cli != CliKind::Antigravity
+        || !mcp
+        || request.mcp_socket.is_none()
+        || request.tools.is_empty()
+    {
+        return Ok(request.system.clone());
+    }
+    let definitions = serde_json::to_string(&request.tools).map_err(|error| {
+        ProviderError::Unsupported(format!(
+            "could not serialize Antigravity MCP schemas: {error}"
+        ))
+    })?;
+    Ok(format!(
+        "{}\n\nAntigravity MCP schemas are provided below. Do not read local MCP config or schema files; direct filesystem tools remain denied.\n\
+         Call a room tool using `call_mcp_tool` arguments with `ServerName` set to `orgbot_room`, `ToolName` set to the exact unprefixed schema name, and `Arguments` set to the object matching that schema's `input_schema`.\n\
+         Available room tool schemas (JSON array):\n{}",
+        request.system, definitions
+    ))
 }
 
 /// Read one JSONL line of agent output into the episode.
@@ -2062,10 +2098,11 @@ fn build_args(
         (CliKind::Antigravity, session) => {
             cmd.arg("-p")
                 .arg(prompt)
+                .arg("--disable-slash-commands")
                 .arg("--output-format")
                 .arg("stream-json");
             if let Some(session) = session {
-                cmd.arg("--conversationID").arg(session);
+                cmd.arg("--conversation").arg(session);
             }
             if !model.is_empty() {
                 cmd.arg("--model").arg(model);
@@ -2816,7 +2853,8 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
                         .any(|pair| pair == ["--output-format", "stream-json"]));
                     assert!(args
                         .windows(2)
-                        .any(|pair| pair == ["--conversationID", "conv_1"]));
+                        .any(|pair| pair == ["--conversation", "conv_1"]));
+                    assert!(args.iter().any(|arg| arg == "--disable-slash-commands"));
                     assert!(args.windows(2).any(|pair| pair == ["-p", "--- prompt"]));
                 }
                 _ => unreachable!(),
@@ -2871,14 +2909,159 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
         );
         assert!(AgentCliProvider::new(
             CliKind::Antigravity,
-            "gemini-model",
+            "gemini/model",
             "",
             AgentPolicy::ReadOnly,
             false,
         )
         .unwrap_err()
         .to_string()
-        .contains("execution remains disabled until isolated authentication"));
+        .contains("valid model slug"));
+    }
+
+    #[test]
+    fn antigravity_schema_brief_requires_the_live_room_mcp_socket() {
+        use crate::types::ToolDef;
+
+        let request = CompletionRequest::new("gemini-model", "base role", vec![])
+            .with_tools(vec![ToolDef {
+                name: "post_message".into(),
+                description: "Post a room message".into(),
+                input_schema: serde_json::json!({"type":"object","properties":{"body":{"type":"string"}}}),
+            }])
+            .with_mcp_socket(Some("/run/user/1000/room.sock".into()));
+        let brief = antigravity_system_brief(CliKind::Antigravity, true, &request).unwrap();
+        assert!(brief.contains("ServerName` set to `orgbot_room`"));
+        assert!(brief.contains("ToolName` set to the exact unprefixed schema name"));
+        assert!(brief.contains("\"name\":\"post_message\""));
+        assert!(brief.contains("\"input_schema\""));
+        assert!(!brief.contains("orgbot_room__post_message"));
+        assert_eq!(
+            antigravity_system_brief(CliKind::Antigravity, false, &request).unwrap(),
+            "base role"
+        );
+        assert_eq!(
+            antigravity_system_brief(
+                CliKind::Antigravity,
+                true,
+                &request.clone().with_mcp_socket(None),
+            )
+            .unwrap(),
+            "base role"
+        );
+        assert_eq!(
+            antigravity_system_brief(CliKind::OpenCode, true, &request).unwrap(),
+            "base role"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn antigravity_mcp_schemas_are_prompted_once_and_refreshed_when_changed() {
+        use crate::types::ToolDef;
+
+        let directory = test_directory("orgbot-antigravity-schema-prompt");
+        let binary = directory.join("agy");
+        let prompts_dir = directory
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'");
+        let script = format!(
+            "#!/bin/sh\ncount_file='{prompts_dir}/count'\ncount=0\nif [ -f \"$count_file\" ]; then read count < \"$count_file\"; fi\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > \"$count_file\"\nprintf '%s' \"$2\" > '{prompts_dir}/prompt-'\"$count\"\nif [ \"$count\" -gt 1 ]; then case \" $* \" in *\" --conversation conv_schema \"*) ;; *) exit 21 ;; esac; fi\nprintf '%s\\n' '{{\"event\":\"init\",\"conversation_id\":\"conv_schema\"}}'\nprintf '%s\\n' '{{\"event\":\"result\",\"result\":{{\"conversation_id\":\"conv_schema\",\"status\":\"SUCCESS\",\"response\":\"ok\"}}}}'\n"
+        );
+        write_executable_fixture(&binary, &script).unwrap();
+        let state_path = directory.join("session.json");
+        let provider = AgentCliProvider {
+            cli: CliKind::Antigravity,
+            bin: binary.to_string_lossy().into_owned(),
+            model: "gemini-3.8-flash-medium".into(),
+            workdir: directory.clone(),
+            policy: AgentPolicy::ReadOnly,
+            session: Mutex::new(None),
+            session_system_brief: Mutex::new(None),
+            last_socket: Mutex::new(None),
+            mcp: true,
+            timeout: Duration::from_secs(5),
+            session_store: Mutex::new(None),
+            native_usage: Mutex::new(None),
+            guard: None,
+        }
+        .with_session_store(state_path.clone());
+        let make_request = |turn: &str, description: &str, marker: &str| {
+            CompletionRequest::new(
+                "gemini-3.8-flash-medium",
+                "base role",
+                vec![Turn::user(turn)],
+            )
+            .with_tools(vec![ToolDef {
+                name: "post_message".into(),
+                description: description.into(),
+                input_schema: serde_json::json!({
+                    "type":"object",
+                    "properties":{"body":{"type":"string","const":marker}},
+                    "required":["body"],
+                    "additionalProperties":false
+                }),
+            }])
+            .with_mcp_socket(Some("/run/user/1000/orgbot-room-mcp.sock".into()))
+        };
+
+        provider
+            .complete(
+                make_request("first", "INITIAL_DESCRIPTION", "INITIAL_SCHEMA"),
+                None,
+            )
+            .await
+            .unwrap();
+        let persisted_first = read_session_record(&SessionStore {
+            path: state_path.clone(),
+            cli: CliKind::Antigravity,
+            model: "gemini-3.8-flash-medium".into(),
+            workdir: canonical_workdir(&directory),
+            policy: AgentPolicy::ReadOnly,
+            mcp: true,
+        })
+        .unwrap()
+        .system_brief
+        .unwrap();
+        assert!(persisted_first.contains("INITIAL_DESCRIPTION"));
+        assert!(persisted_first.contains("INITIAL_SCHEMA"));
+
+        provider
+            .complete(
+                make_request(
+                    "same schema resume",
+                    "INITIAL_DESCRIPTION",
+                    "INITIAL_SCHEMA",
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let prompts = [1, 2].map(|index| {
+            std::fs::read_to_string(directory.join(format!("prompt-{index}"))).unwrap()
+        });
+        assert!(prompts[0].contains("INITIAL_DESCRIPTION"));
+        assert!(prompts[0].contains("INITIAL_SCHEMA"));
+        assert!(!prompts[1].contains("INITIAL_DESCRIPTION"));
+        assert!(!prompts[1].contains("INITIAL_SCHEMA"));
+
+        provider
+            .complete(
+                make_request(
+                    "changed schema resume",
+                    "CHANGED_DESCRIPTION",
+                    "CHANGED_SCHEMA",
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let changed_prompt = std::fs::read_to_string(directory.join("prompt-3")).unwrap();
+        assert!(changed_prompt.contains("CHANGED_DESCRIPTION"));
+        assert!(changed_prompt.contains("CHANGED_SCHEMA"));
+        assert!(!changed_prompt.contains("INITIAL_SCHEMA"));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(unix)]
@@ -2952,7 +3135,7 @@ if [ -f "$count_file" ]; then read count < "$count_file"; fi
 count=$((count + 1))
 printf '%s\n' "$count" > "$count_file"
 if [ "$count" -gt 1 ]; then
-  case " $* " in *" --conversationID conv_fixture "*) ;; *) exit 21 ;; esac
+  case " $* " in *" --conversation conv_fixture "*) ;; *) exit 21 ;; esac
 fi
 printf '%s\n' '{"event":"init","conversation_id":"conv_fixture","init":{"cwd":"/tmp","tools":[],"permission_mode":"request-review"}}'
 if [ "$count" -eq 1 ]; then
@@ -3939,6 +4122,58 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
                 "{kept} remains"
             );
         }
+    }
+
+    #[test]
+    fn antigravity_wrapper_keeps_owner_profile_paths_for_private_key_lookup() {
+        let private_home = Path::new("/run/user/1000/orgbot-home");
+        let mut antigravity = Command::new("python3");
+        antigravity
+            .env("HOME", "/owner/home")
+            .env("XDG_DATA_HOME", "/owner/data");
+        configure_wrapper_home(&mut antigravity, CliKind::Antigravity, private_home);
+        let antigravity_env: std::collections::HashMap<_, _> = antigravity
+            .as_std()
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            antigravity_env.get("HOME").unwrap().as_deref(),
+            Some("/owner/home")
+        );
+        assert_eq!(
+            antigravity_env.get("XDG_DATA_HOME").unwrap().as_deref(),
+            Some("/owner/data")
+        );
+
+        let mut codex = Command::new("python3");
+        codex
+            .env("HOME", "/owner/home")
+            .env("XDG_DATA_HOME", "/owner/data");
+        configure_wrapper_home(&mut codex, CliKind::Codex, private_home);
+        let codex_env: std::collections::HashMap<_, _> = codex
+            .as_std()
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            codex_env.get("HOME").unwrap().as_deref(),
+            Some("/run/user/1000/orgbot-home")
+        );
+        assert_eq!(
+            codex_env.get("XDG_DATA_HOME").unwrap().as_deref(),
+            Some("/owner/data")
+        );
     }
 
     #[test]
