@@ -60,7 +60,10 @@ async fn codex_usage_reconciles_after_resume_and_provider_restart() {
         let counts = [usage.input_tokens, usage.cache_read_tokens, usage.output_tokens, usage.cache_write_tokens];
         for (total, count) in totals.iter_mut().zip(counts) { *total += u64::from(count); }
         let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&session_path).unwrap()).unwrap();
-        let cumulative = &saved["codex_usage"];
+        let cumulative = saved
+            .get("native_usage")
+            .or_else(|| saved.get("codex_usage"))
+            .expect("native cumulative usage must be persisted");
         for (field, total) in ["input_tokens", "cache_read_tokens", "output_tokens", "cache_write_tokens"].into_iter().zip(totals) {
             assert_eq!(cumulative[field].as_u64(), Some(total), "episode {episode}: {field}");
         }

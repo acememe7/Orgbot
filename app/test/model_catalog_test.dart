@@ -42,6 +42,30 @@ Available models:
     expect(list.options.any((o) => o.id.isEmpty), isTrue);
   });
 
+  test(
+    'OpenCode and Antigravity require explicit models without querying accounts',
+    () async {
+      if (!Platform.isLinux) return;
+      var called = false;
+      ModelCatalog.runner = (_, _) async {
+        called = true;
+        throw StateError('the CLI must not be queried for models');
+      };
+      for (final provider in [
+        ProviderKind.opencode,
+        ProviderKind.antigravity,
+      ]) {
+        final list = await ModelCatalog.load(provider, canRunClis: true);
+        expect(list.source, ModelSource.requiresExplicitModel);
+        expect(list.options, isEmpty);
+        expect(provider.requiresExplicitModel, isTrue);
+        expect(ModelCatalog.defaultFor(provider), isEmpty);
+        expect(ModelCatalog.fallbackFor(provider, canRunClis: false), isEmpty);
+      }
+      expect(called, isFalse);
+    },
+  );
+
   /// Without a key the API cannot be asked, so nothing is listed. Offering a
   /// written-down list here would be exactly the hardcoding this replaced, and
   /// would look authoritative while being a guess.

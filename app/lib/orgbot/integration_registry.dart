@@ -413,9 +413,10 @@ class IntegrationRegistry {
           throw FormatException(timeoutMessage);
         },
       );
-      await Future.wait([stdoutDone, stderrDone]).timeout(
-        const Duration(seconds: 1),
-      );
+      await Future.wait([
+        stdoutDone,
+        stderrDone,
+      ]).timeout(const Duration(seconds: 1));
       if (overflow || code != 0) throw FormatException(failureMessage);
       return bytes.takeBytes();
     } catch (_) {
@@ -555,7 +556,11 @@ class ProviderPluginManager {
     String? path,
   }) async {
     final found = <ProviderPluginStatus>[];
-    for (final provider in CliKind.values) {
+    for (final provider in const [
+      CliKind.codex,
+      CliKind.claude,
+      CliKind.grok,
+    ]) {
       final cli = findCli(provider, home: home, path: path);
       final executable = cli.path;
       if (executable == null) continue;

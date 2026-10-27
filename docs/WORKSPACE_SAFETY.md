@@ -13,7 +13,7 @@ the child process remains the child’s standard error.
 ```text
 orgbot-workspace.py prepare --project ABS --state ABS --agent ID [--read-only]
 orgbot-workspace.py status --state ABS --agent ID
-orgbot-workspace.py run --state ABS --agent ID [--read-only] [--verify] [--private-home ABS] [--profile codex=ABS] [--profile claude=ABS] [--profile grok=ABS] [--mcp-socket ABS] -- PROGRAM ARG...
+orgbot-workspace.py run --state ABS --agent ID [--read-only] [--verify] [--private-home ABS] [--profile codex=ABS] [--profile claude=ABS] [--profile grok=ABS] [--agent-cli opencode|agy] [--mcp-socket ABS] -- PROGRAM ARG...
 orgbot-workspace.py apply --state ABS --agent ID [--review-token SHA256]
 ```
 
@@ -56,6 +56,16 @@ writable for provider session state. Host CLI binaries and their installation
 files are readable through the read-only host root. Since the host home is also
 readable, a CLI or process can still access files there; the launcher’s copied
 profiles provide writable session isolation, not complete credential secrecy.
+
+The development OpenCode adapter uses a separate `profiles/home-opencode`
+directory and a generated, read-only configuration. It imports only the selected
+provider's existing API-key credential, excludes remote `wellknown`
+configuration, and masks `/etc/opencode` configuration. Project configuration
+and external plugin autoloading are disabled. Its private home is read-only,
+with writable data, state and cache directories. OAuth credential reuse is
+blocked. `--agent-cli agy` fails before starting a child process because
+isolated Antigravity authentication has not been verified. See
+[native CLI integration status](NATIVE_CLI_INTEGRATIONS.md).
 
 ## Independent reviewer tests
 

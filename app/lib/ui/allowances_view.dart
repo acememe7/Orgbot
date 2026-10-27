@@ -13,6 +13,8 @@ class _AllowancesViewState extends State<AllowancesView> {
     'cli:codex': 'Codex CLI',
     'cli:claude': 'Claude Code',
     'cli:grok': 'Grok CLI',
+    'cli:opencode': 'OpenCode CLI',
+    'cli:agy': 'Antigravity CLI',
     'deepseek': 'DeepSeek API',
     'openai:ollama': 'Ollama API',
   };

@@ -36,6 +36,17 @@ void main() {
     );
   });
 
+  test('OpenCode and Antigravity provider keys round-trip canonically', () {
+    for (final provider in [ProviderKind.opencode, ProviderKind.antigravity]) {
+      final bot = BotDef(name: 'Local CLI', provider: provider);
+      final saved = bot.toJson();
+      expect(saved['provider'], provider.key);
+      expect(saved['apiKey'], isEmpty);
+      expect(BotDef.fromJson(saved).provider, provider);
+    }
+    expect(ProviderKind.antigravity.key, 'antigravity');
+  });
+
   test('the library persists bots and rooms through a memory saver', () async {
     final saver = MemorySaver();
     final lib = Library(saver: saver);

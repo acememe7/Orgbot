@@ -141,13 +141,18 @@ mcp_servers = { tools = [] }
     },
   );
 
-  test('native discovery remains available without platform path provider', () async {
-    final home = await Directory.systemTemp.createTemp('orgbot-headless-');
-    addTearDown(() => home.delete(recursive: true));
-    final snapshot = await DesktopIntegrations.discover(homeDirectory: home.path);
-    expect(snapshot.mcpServers, isEmpty);
-    expect(snapshot.skills, isEmpty);
-  });
+  test(
+    'native discovery remains available without platform path provider',
+    () async {
+      final home = await Directory.systemTemp.createTemp('orgbot-headless-');
+      addTearDown(() => home.delete(recursive: true));
+      final snapshot = await DesktopIntegrations.discover(
+        homeDirectory: home.path,
+      );
+      expect(snapshot.mcpServers, isEmpty);
+      expect(snapshot.skills, isEmpty);
+    },
+  );
 
   test(
     'managed MCP secrets stay in secure storage and enter room env only',
@@ -493,7 +498,7 @@ tools = { remove_file = { enabled = false } }
     final root = await Directory.systemTemp.createTemp('orgbot-plugin-cli-');
     addTearDown(() => root.delete(recursive: true));
     final bin = Directory('${root.path}/bin')..createSync();
-    for (final name in ['codex', 'claude', 'grok']) {
+    for (final name in ['codex', 'claude', 'grok', 'opencode', 'agy']) {
       final cli = File('${bin.path}/$name')..writeAsStringSync('fixture');
       await Process.run('chmod', ['+x', cli.path]);
     }
@@ -506,16 +511,20 @@ tools = { remove_file = { enabled = false } }
           'Commands:\n  install Install\n  update Update\n  uninstall Remove\n\nOptions:\n',
     };
     final calls = <List<String>>[];
+    final invoked = <String>[];
     final manager = ProviderPluginManager(
       runner: (executable, arguments) async {
         calls.add(arguments);
         final provider = executable.split('/').last;
+        invoked.add(provider);
         return arguments.length == 2
             ? ProcessResult(1, 0, help[provider]!, '')
             : ProcessResult(1, 0, '', '');
       },
     );
     final providers = await manager.discover(home: root.path, path: bin.path);
+    expect(invoked, isNot(contains('opencode')));
+    expect(invoked, isNot(contains('agy')));
     final codex = providers.singleWhere(
       (provider) => provider.provider.name == 'codex',
     );

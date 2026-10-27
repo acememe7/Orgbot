@@ -115,6 +115,14 @@ Finding a CLI does not verify its account access; the CLI checks that when it
 runs. API keys are kept in encrypted platform storage. Available models and
 usage limits depend on each account.
 
+The development source also includes OpenCode and Antigravity provider
+configuration. OpenCode requires an explicit `provider/model` and the selected
+provider's existing OpenCode API credential; OAuth reuse is unavailable.
+Antigravity execution remains blocked
+until its sign-in can be used without exposing the host keyring. These additions
+are not in the published 2.0.2 package. See the
+[integration status and verification](docs/NATIVE_CLI_INTEGRATIONS.md).
+
 Rooms have a shared conversation, task board, artifacts and editable memory.
 Reply to a message or use `@handle` to direct work to an agent; an untagged
 message goes to one available bot, preferring a coordinator. `@all` wakes the
@@ -460,6 +468,12 @@ provider = { kind = "cli", cli = "codex", workdir = "/path/to/project", policy =
 # mcp = true serves the room's board to the agent as MCP tools, so it can
 # claim tasks, hand work off, and ask for review mid-episode.
 ```
+
+In the development source, OpenCode uses `cli = "opencode"` with an explicit
+`model = "provider/model"`. Antigravity's saved identifier is
+`cli = "antigravity"` (`agy` is also accepted); its executable is `agy`, and
+execution is blocked pending isolated authentication. Neither new provider
+uses the unprotected Dart runner or the Android engine.
 
 Each turn starts a CLI process and resumes that bot's saved native session when
 available. A new process does not mean a new conversation. Session reuse requires

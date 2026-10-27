@@ -18,6 +18,8 @@
 //! | Codex CLI session | [`agent_cli::AgentCliProvider`] with [`CliKind::Codex`] | `codex login` on this machine |
 //! | Claude Code session | [`agent_cli::AgentCliProvider`] with [`CliKind::Claude`] | Claude Code sign-in |
 //! | Grok CLI session | [`agent_cli::AgentCliProvider`] with [`CliKind::Grok`] | Grok CLI sign-in |
+//! | OpenCode CLI session | [`agent_cli::AgentCliProvider`] with [`CliKind::OpenCode`] | Selected provider's OpenCode sign-in; protected Linux runtime |
+//! | Antigravity CLI configuration | [`agent_cli::AgentCliProvider`] with [`CliKind::Antigravity`] | Execution blocked pending isolated authentication |
 //! | None (deterministic) | [`scripted::ScriptedProvider`] | — |
 
 #![forbid(unsafe_code)]

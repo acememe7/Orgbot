@@ -7,10 +7,9 @@ use crate::time::Timestamp;
 
 /// Which installed agent CLI answers for a bot.
 ///
-/// The CLI runs as a real agent session: `codex exec`, `claude -p`, or
-/// `grok -p`, each logged in on this machine. Because the CLI itself is the
-/// agent, a bot automatically inherits that CLI's memories, skills, MCP
-/// servers, and model configuration - nothing is reimplemented here.
+/// The CLI runs its own agent loop in the room's protected workspace.
+/// Authentication and private configuration depend on the selected CLI;
+/// external MCP servers remain behind the room's approval boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CliKind {
@@ -20,6 +19,11 @@ pub enum CliKind {
     Claude,
     /// The Grok CLI, signed in with an xAI account.
     Grok,
+    /// OpenCode, using its configured provider account.
+    OpenCode,
+    /// Google Antigravity's headless `agy` CLI, not the IDE launcher.
+    #[serde(alias = "agy")]
+    Antigravity,
 }
 
 impl CliKind {
@@ -29,6 +33,8 @@ impl CliKind {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Grok => "grok",
+            Self::OpenCode => "opencode",
+            Self::Antigravity => "agy",
         }
     }
 
@@ -38,6 +44,8 @@ impl CliKind {
             Self::Codex => "codex-cli",
             Self::Claude => "claude-cli",
             Self::Grok => "grok-cli",
+            Self::OpenCode => "opencode-cli",
+            Self::Antigravity => "antigravity-cli",
         }
     }
 }
@@ -316,6 +324,23 @@ impl AgentStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_cli_ids_round_trip_without_confusing_antigravity_with_its_ide() {
+        for (kind, wire, binary) in [
+            (CliKind::OpenCode, "opencode", "opencode"),
+            (CliKind::Antigravity, "antigravity", "agy"),
+        ] {
+            let encoded = serde_json::to_value(kind).unwrap();
+            assert_eq!(encoded, wire);
+            assert_eq!(serde_json::from_value::<CliKind>(encoded).unwrap(), kind);
+            assert_eq!(kind.binary(), binary);
+        }
+        assert_eq!(
+            serde_json::from_str::<CliKind>("\"agy\"").unwrap(),
+            CliKind::Antigravity
+        );
+    }
 
     fn spec() -> AgentSpec {
         AgentSpec::new(

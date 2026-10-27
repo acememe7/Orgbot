@@ -21,13 +21,15 @@ String genId(String prefix) {
 
 /// Which brain a bot uses.
 ///
-/// The three subscription backends run this machine's own agent CLI, so they
-/// inherit its sign-in — no key is asked for or stored. Only a raw API
-/// endpoint needs one.
+/// CLI-backed providers keep their provider configuration in the local CLI.
+/// OrgBots does not store an API key for them; API endpoints need a key stored
+/// by the app. Provider charges depend on the CLI and provider configuration.
 enum ProviderKind {
   anthropic('anthropic', 'Anthropic (Claude)'),
   codex('codex', 'Codex / ChatGPT'),
   grok('grok', 'Grok'),
+  opencode('opencode', 'OpenCode'),
+  antigravity('antigravity', 'Antigravity'),
   deepseek('deepseek', 'DeepSeek'),
   ollama('ollama', 'Ollama Cloud'),
   scripted('scripted', 'Demo (no model)');
@@ -52,6 +54,10 @@ enum ProviderKind {
         return CliKind.codex;
       case ProviderKind.grok:
         return CliKind.grok;
+      case ProviderKind.opencode:
+        return CliKind.opencode;
+      case ProviderKind.antigravity:
+        return CliKind.antigravity;
       case ProviderKind.deepseek:
       case ProviderKind.ollama:
       case ProviderKind.scripted:
@@ -61,6 +67,10 @@ enum ProviderKind {
 
   /// Whether this backend signs in through a CLI rather than taking a key.
   bool get usesSignIn => cli != null;
+
+  /// Whether this CLI requires the user to supply a model identifier.
+  bool get requiresExplicitModel =>
+      this == ProviderKind.opencode || this == ProviderKind.antigravity;
 
   /// Whether an API key must be supplied. Only a raw endpoint needs one.
   bool get needsApiKey =>

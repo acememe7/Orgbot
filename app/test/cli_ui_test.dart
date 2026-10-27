@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -42,7 +44,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(home: OrgBotScreen(library: library, desktopClis: true)),
       );
-      await tester.pumpAndSettle();
+      await pumpUiTransition(tester);
       await tester.tap(find.text('Team').first);
       await tester.pump();
       expect(
@@ -125,6 +127,10 @@ void main() {
       expect(find.text('Codex CLI'), findsOneWidget);
       expect(find.text('Claude Code'), findsOneWidget);
       expect(find.text('Grok CLI'), findsOneWidget);
+      if (Platform.isLinux) {
+        expect(find.text('OpenCode CLI'), findsOneWidget);
+        expect(find.text('Antigravity CLI'), findsOneWidget);
+      }
       expect(find.text('API access'), findsOneWidget);
       // Scroll to the rows rather than by a fixed distance, so sections
       // added further down the page do not carry them out of view.
@@ -135,11 +141,7 @@ void main() {
           )
           .first;
       for (final row in ['DeepSeek API', 'Ollama Cloud API']) {
-        await tester.scrollUntilVisible(
-          find.text(row),
-          100,
-          scrollable: setup,
-        );
+        await tester.scrollUntilVisible(find.text(row), 100, scrollable: setup);
         await tester.pump(const Duration(milliseconds: 200));
         expect(find.text(row), findsOneWidget);
       }
@@ -192,6 +194,10 @@ void main() {
         ProviderKind.codex,
         ProviderKind.anthropic,
         ProviderKind.grok,
+        if (Platform.isLinux) ...[
+          ProviderKind.opencode,
+          ProviderKind.antigravity,
+        ],
         ProviderKind.deepseek,
         ProviderKind.ollama,
       ]);
@@ -217,9 +223,38 @@ void main() {
       expect(savedBot.provider, ProviderKind.deepseek);
       expect(savedBot.apiKey, isEmpty);
 
-      await tester.tap(find.text('Connections & tools').first);
+      await tester.tap(
+        find
+            .ancestor(
+              of: find.text('Connections & tools'),
+              matching: find.byType(ListTile),
+            )
+            .first,
+      );
       await pumpUiTransition(tester);
-      await tester.ensureVisible(find.byTooltip('Remove DeepSeek API key'));
+      final setupAfterEditor = find.byKey(const ValueKey('cli-setup'));
+      final setupScroller = find
+          .descendant(
+            of: setupAfterEditor,
+            matching: find.byType(Scrollable),
+          )
+          .first;
+      if (Platform.isLinux) {
+        expect(find.byKey(const ValueKey('cli-setup')), findsOneWidget);
+        await tester.drag(setupAfterEditor, const Offset(0, 1000));
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(find.text('Antigravity CLI'), findsOneWidget);
+        expect(find.text('Unavailable'), findsOneWidget);
+        expect(
+          find.text('Isolated sign-in is not supported yet.'),
+          findsOneWidget,
+        );
+      }
+      await tester.scrollUntilVisible(
+        find.byTooltip('Remove DeepSeek API key'),
+        100,
+        scrollable: setupScroller,
+      );
       await tester.tap(find.byTooltip('Remove DeepSeek API key'));
       await pumpUiTransition(tester);
       expect(credentials.forProvider(ProviderKind.deepseek), isNull);
@@ -273,7 +308,145 @@ void main() {
         androidPicker.items!.map((item) => item.value),
         contains(ProviderKind.codex),
       );
+      expect(
+        androidPicker.items!.map((item) => item.value),
+        isNot(contains(ProviderKind.opencode)),
+      );
+      expect(
+        androidPicker.items!.map((item) => item.value),
+        isNot(contains(ProviderKind.antigravity)),
+      );
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('Linux CLI models are explicit and keyless', (tester) async {
+    if (!Platform.isLinux) return;
+    SharedPreferences.setMockInitialValues({});
+    FlutterSecureStorage.setMockInitialValues({});
+    final library = Library(saver: MemorySaver());
+    await library.load();
+    addTearDown(library.dispose);
+    final credentials = Credentials();
+    await credentials.load();
+    ModelCatalog.credentials = credentials;
+    var queried = false;
+    ModelCatalog.runner = (_, _) async {
+      queried = true;
+      throw StateError('the CLI model list must not be queried');
+    };
+    addTearDown(credentials.dispose);
+    addTearDown(() {
+      ModelCatalog.credentials = null;
+      ModelCatalog.runner = null;
+      ModelCatalog.invalidate();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: OrgBotScreen(
+          library: library,
+          credentials: credentials,
+          desktopClis: true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Team').first);
+    await pumpUiTransition(tester);
+    await tester.tap(find.byTooltip('New bot'));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    for (final provider in [ProviderKind.opencode, ProviderKind.antigravity]) {
+      final savedBeforeBlankAttempt = library.bots.length;
+      final picker = find.byType(DropdownButtonFormField<ProviderKind>);
+      await tester.ensureVisible(picker);
+      await tester.pump();
+      await tester.tap(picker);
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.tap(
+        find.text(
+          provider == ProviderKind.opencode
+              ? 'OpenCode CLI'
+              : 'Antigravity CLI',
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('CLI default'), findsNothing);
+      expect(find.text('API key'), findsNothing);
+      if (provider == ProviderKind.opencode) {
+        expect(find.textContaining('sign-in not checked'), findsOneWidget);
+        expect(
+          find.text(
+            'Uses the selected OpenCode API credential. OAuth reuse is unavailable.',
+          ),
+          findsOneWidget,
+        );
+      } else {
+        expect(find.text('Unavailable'), findsOneWidget);
+        expect(
+          find.text('Isolated sign-in is not supported yet.'),
+          findsOneWidget,
+        );
+      }
+      expect(queried, isFalse);
+
+      final modelField = find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField && widget.decoration?.labelText == 'Model id',
+      );
+      await tester.ensureVisible(modelField);
+      await tester.pump();
+      expect(
+        tester.widget<TextField>(modelField).decoration?.hintText,
+        provider == ProviderKind.opencode ? 'provider/model' : 'model slug',
+      );
+      final nameField = find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField && widget.decoration?.labelText == 'Name',
+      );
+      await tester.ensureVisible(nameField);
+      await tester.enterText(nameField, provider.label);
+      expect(tester.widget<TextField>(modelField).controller!.text, isEmpty);
+      await tester.tap(find.text('Save'));
+      await tester.pump();
+      final botsAfterBlankSave = List<BotDef>.of(library.bots);
+      expect(
+        botsAfterBlankSave,
+        hasLength(savedBeforeBlankAttempt),
+        reason: botsAfterBlankSave
+            .map((bot) => '${bot.provider.key}:${bot.model}')
+            .join(', '),
+      );
+      expect(find.byType(SnackBar), findsOneWidget);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+      await tester.ensureVisible(modelField);
+      await tester.enterText(
+        modelField,
+        provider == ProviderKind.opencode
+            ? 'test-provider/test-model'
+            : 'test-model-slug',
+      );
+      await tester.ensureVisible(find.text('Save'));
+      await tester.tap(find.text('Save'));
+      await pumpUiTransition(tester);
+      final saved = library.bots.singleWhere(
+        (bot) => bot.name == provider.label,
+      );
+      expect(saved.provider, provider);
+      expect(
+        saved.model,
+        provider == ProviderKind.opencode
+            ? 'test-provider/test-model'
+            : 'test-model-slug',
+      );
+      expect(saved.apiKey, isEmpty);
+
+      if (provider == ProviderKind.opencode) {
+        await tester.tap(find.byTooltip('New bot'));
+        await tester.pump(const Duration(milliseconds: 400));
+      }
+    }
+  });
 }

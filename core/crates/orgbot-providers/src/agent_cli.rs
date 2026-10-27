@@ -1,22 +1,24 @@
 //! Backends that drive the machine's installed agent CLIs.
 //!
-//! An [AgentCliProvider] runs one model turn by spawning a real agent CLI —
-//! [CliKind::Codex] via `codex exec`, [CliKind::Claude] via `claude -p`, or
-//! [CliKind::Grok] via `grok -p` — in the bot's project folder. The CLI is the
-//! agent: it carries the machine's sign-in, memories, skills, MCP servers, and
-//! model configuration, and it runs its own tool loop inside the configured
-//! [AgentPolicy]. Nothing is reimplemented here.
+//! An [AgentCliProvider] starts one of five installed agent CLI identities:
+//! [CliKind::Codex], [CliKind::Claude], [CliKind::Grok], [CliKind::OpenCode], or
+//! [CliKind::Antigravity]. In the protected workspace, each identity gets a
+//! separate private profile and only the configured room MCP server is exposed.
+//! OpenCode receives only the selected API-key credential; OAuth sharing is
+//! rejected. Antigravity stays unavailable in the protected workspace until a
+//! verified isolated authentication source exists. Each available CLI runs its
+//! native tool loop inside the configured [AgentPolicy].
 //!
 //! Sessions make the bot's memory last. The first turn starts a fresh CLI
 //! session and records its id; later turns resume that session. When a room has
 //! a private state path, the session id is also recorded per bot and restored
 //! only while provider, model, workdir, policy, and MCP mode still match.
 //!
-//! The room board can be served as MCP tools. Text is what crosses the boundary;
-//! the rich event stream an agent produces
-//!   (file edits, shell runs, tool results) is summarised into the agent's final
-//!   message. Full action telemetry can stream later over the same pipe.
+//! The room board can be exposed as MCP tools when enabled. Text crosses the
+//! provider boundary; rich CLI events are summarized into stream events and the
+//! final message.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -94,7 +96,12 @@ const DEFAULT_TURN_TIMEOUT_SECS: u64 = 600;
 
 /// Extra places to look for a CLI beyond PATH: this machine installs its
 /// global CLIs under the user's home.
-const HOME_BIN_DIRS: [&str; 3] = [".local/bin", ".npm-global/bin", ".grok/bin"];
+const HOME_BIN_DIRS: [&str; 4] = [
+    ".local/bin",
+    ".npm-global/bin",
+    ".grok/bin",
+    ".opencode/bin",
+];
 
 /// A backend that runs one of the installed agent CLIs as a session.
 #[derive(Debug)]
@@ -122,8 +129,8 @@ pub struct AgentCliProvider {
     /// Optional owner-only record that lets one bot resume its native session
     /// after the room process is rebuilt.
     session_store: Mutex<Option<SessionStore>>,
-    /// Last cumulative usage reported by a Codex session.
-    codex_usage: Mutex<Option<Usage>>,
+    /// Last cumulative usage reported by native session CLIs.
+    native_usage: Mutex<Option<Usage>>,
     #[cfg(target_os = "linux")]
     guard: Option<crate::workspace_guard::WorkspaceGuard>,
 }
@@ -149,9 +156,10 @@ struct PersistedSession {
     /// Missing in older records; causes one brief refresh on resume.
     #[serde(default)]
     system_brief: Option<String>,
-    /// Codex reports session-cumulative usage; absent in records written before accounting.
+    /// Native session cumulative usage; `codex_usage` is retained for old records.
     #[serde(default)]
-    codex_usage: Option<Usage>,
+    #[serde(rename = "codex_usage", alias = "native_usage")]
+    native_usage: Option<Usage>,
 }
 
 impl AgentCliProvider {
@@ -166,14 +174,42 @@ impl AgentCliProvider {
         policy: AgentPolicy,
         mcp: bool,
     ) -> Result<Self> {
+        let model = model.into();
+        match cli {
+            CliKind::OpenCode => {
+                let valid = model.split_once('/').is_some_and(|(provider, model)| {
+                    !provider.is_empty()
+                        && !model.is_empty()
+                        && !provider.chars().any(char::is_whitespace)
+                        && !model.chars().any(char::is_whitespace)
+                });
+                if !valid {
+                    return Err(ProviderError::Unsupported(
+                        "OpenCode requires an explicit provider/model id".into(),
+                    ));
+                }
+            }
+            CliKind::Antigravity
+                if model.trim().is_empty() || model.chars().any(char::is_whitespace) =>
+            {
+                return Err(ProviderError::Unsupported(
+                    "Antigravity requires an explicit model slug".into(),
+                ));
+            }
+            CliKind::Antigravity => {
+                return Err(ProviderError::Unsupported(
+                    "Antigravity is unavailable in the protected workspace because no verified isolated authentication source is configured".into(),
+                ));
+            }
+            _ => {}
+        }
         let bin = locate(cli).ok_or_else(|| {
             ProviderError::Unsupported(format!(
                 "{} not found on PATH (looked in $PATH, ~/.local/bin, ~/.npm-global/bin, \
-                 ~/.grok/bin). Install it and sign in before seating a bot on it.",
+                 ~/.grok/bin, ~/.opencode/bin). Install it and sign in before seating a bot on it.",
                 cli.binary()
             ))
         })?;
-        let model = model.into();
         let workdir = workdir.into();
         let timeout = std::env::var("ORGBOT_CLI_TURN_TIMEOUT_SECS")
             .ok()
@@ -196,7 +232,7 @@ impl AgentCliProvider {
             last_socket: Mutex::new(None),
             timeout,
             session_store: Mutex::new(None),
-            codex_usage: Mutex::new(None),
+            native_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
         })
@@ -218,7 +254,7 @@ impl AgentCliProvider {
         if let Some(persisted) = read_session_record(&store) {
             *self.session.lock().unwrap() = Some(persisted.session_id);
             *self.session_system_brief.lock().unwrap() = persisted.system_brief;
-            *self.codex_usage.lock().unwrap() = persisted.codex_usage;
+            *self.native_usage.lock().unwrap() = persisted.native_usage;
         }
         *self.session_store.lock().unwrap() = Some(store);
         self
@@ -251,11 +287,11 @@ impl AgentCliProvider {
             store.workdir = canonical_project;
             *self.session.lock().unwrap() = None;
             *self.session_system_brief.lock().unwrap() = None;
-            *self.codex_usage.lock().unwrap() = None;
+            *self.native_usage.lock().unwrap() = None;
             if let Some(persisted) = read_session_record(&store) {
                 *self.session.lock().unwrap() = Some(persisted.session_id);
                 *self.session_system_brief.lock().unwrap() = persisted.system_brief;
-                *self.codex_usage.lock().unwrap() = persisted.codex_usage;
+                *self.native_usage.lock().unwrap() = persisted.native_usage;
             }
             *self.session_store.lock().unwrap() = Some(store);
         }
@@ -285,7 +321,6 @@ impl AgentCliProvider {
 
 /// Find a CLI binary on PATH and in this machine's usual home locations.
 pub fn locate(cli: CliKind) -> Option<String> {
-    let name = cli.binary();
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())
         .unwrap_or_default();
@@ -297,6 +332,11 @@ pub fn locate(cli: CliKind) -> Option<String> {
             }
         }
     }
+    locate_in(cli, dirs)
+}
+
+fn locate_in(cli: CliKind, dirs: impl IntoIterator<Item = PathBuf>) -> Option<String> {
+    let name = cli.binary();
     for dir in dirs {
         let candidate = dir.join(name);
         if is_executable(&candidate) {
@@ -343,7 +383,7 @@ fn write_session(
     store: &SessionStore,
     session_id: &str,
     system_brief: Option<&str>,
-    codex_usage: Option<Usage>,
+    native_usage: Option<Usage>,
 ) -> std::io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -361,7 +401,7 @@ fn write_session(
         mcp: store.mcp,
         session_id: session_id.to_owned(),
         system_brief: system_brief.map(str::to_owned),
-        codex_usage,
+        native_usage,
     };
     let bytes = serde_json::to_vec(&state)
         .map_err(|error| std::io::Error::other(format!("session serialization failed: {error}")))?;
@@ -429,10 +469,12 @@ fn policy_flags(cli: CliKind, policy: AgentPolicy) -> (&'static str, &'static st
         (CliKind::Grok, AgentPolicy::ReadOnly) => "default",
         (CliKind::Claude | CliKind::Grok, AgentPolicy::WorkspaceWrite) => "acceptEdits",
         (CliKind::Claude | CliKind::Grok, AgentPolicy::FullAccess) => "bypassPermissions",
+        (CliKind::OpenCode | CliKind::Antigravity, _) => "",
     };
     let flag = match cli {
         CliKind::Codex => "-s",
         CliKind::Claude | CliKind::Grok => "--permission-mode",
+        CliKind::OpenCode | CliKind::Antigravity => "",
     };
     (flag, value)
 }
@@ -449,6 +491,14 @@ struct Episode {
     /// A structured provider failure reported on stdout, preferred over
     /// incidental diagnostics from stderr.
     structured_error: Option<String>,
+    /// OpenCode emits usage per step and may repeat part updates on resume.
+    opencode_usage_parts: HashSet<String>,
+    opencode_text_parts: HashSet<String>,
+    opencode_tool_parts: HashSet<String>,
+    opencode_usage_seen: bool,
+    opencode_usage_complete: bool,
+    opencode_terminal_finish: bool,
+    antigravity_result_seen: bool,
 }
 
 #[async_trait]
@@ -500,6 +550,7 @@ impl Provider for AgentCliProvider {
                         .transpose()?;
                     (None, path)
                 }
+                CliKind::OpenCode | CliKind::Antigravity => (None, None),
             }
         } else {
             (None, None)
@@ -549,10 +600,10 @@ impl Provider for AgentCliProvider {
         }
         result?;
 
-        if self.cli == CliKind::Codex && episode.usage.reported {
-            let mut cumulative = self.codex_usage.lock().unwrap();
+        if matches!(self.cli, CliKind::Codex | CliKind::Antigravity) && episode.usage.reported {
+            let mut cumulative = self.native_usage.lock().unwrap();
             let reported = episode.usage;
-            episode.usage = codex_usage_delta(
+            episode.usage = native_usage_delta(
                 reported,
                 *cumulative,
                 resumed.as_deref(),
@@ -611,6 +662,21 @@ impl AgentCliProvider {
         codex_home: Option<&Path>,
     ) -> Result<()> {
         #[cfg(target_os = "linux")]
+        if self.guard.is_none()
+            && !cfg!(test)
+            && matches!(self.cli, CliKind::OpenCode | CliKind::Antigravity)
+        {
+            return Err(ProviderError::Unsupported(
+                "OpenCode and Antigravity require a protected Linux workspace".into(),
+            ));
+        }
+        #[cfg(not(target_os = "linux"))]
+        if matches!(self.cli, CliKind::OpenCode | CliKind::Antigravity) {
+            return Err(ProviderError::Unsupported(
+                "OpenCode and Antigravity require a protected Linux workspace".into(),
+            ));
+        }
+        #[cfg(target_os = "linux")]
         if self.guard.is_none() && !cfg!(test) {
             return Err(ProviderError::Unsupported(
                 "Linux native CLI requires a protected room workspace".into(),
@@ -628,6 +694,16 @@ impl AgentCliProvider {
         let private_home = prepared
             .as_ref()
             .map(|prepared| {
+                if matches!(self.cli, CliKind::OpenCode | CliKind::Antigravity) {
+                    let home_name = match self.cli {
+                        CliKind::OpenCode => "home-opencode",
+                        CliKind::Antigravity => "home-agy",
+                        _ => unreachable!(),
+                    };
+                    return crate::workspace_guard::private_home_for_new_cli(
+                        &prepared.profile_root.join(home_name),
+                    );
+                }
                 #[cfg(test)]
                 if let Some(source) = self
                     .guard
@@ -688,6 +764,20 @@ impl AgentCliProvider {
                 .map_err(ProviderError::Unsupported)?;
         }
         #[cfg(target_os = "linux")]
+        if matches!(self.cli, CliKind::OpenCode | CliKind::Antigravity) {
+            if let (Some(home), Some(prepared)) = (&private_home, &prepared) {
+                crate::workspace_guard::configure_new_cli_profile(
+                    home,
+                    &prepared.private_home_mount,
+                    self.cli,
+                    self.policy,
+                    &self.model,
+                    self.mcp.then_some(prepared.mcp_socket_mount.as_path()),
+                )
+                .map_err(ProviderError::Unsupported)?;
+            }
+        }
+        #[cfg(target_os = "linux")]
         if let (Some(home), Some(prepared), Some(_overlay)) = (&private_home, &prepared, codex_home)
         {
             crate::workspace_guard::update_private_agent_config(
@@ -732,6 +822,20 @@ impl AgentCliProvider {
             );
         }
         #[cfg(target_os = "linux")]
+        if let Some(prepared) = &prepared {
+            if matches!(self.cli, CliKind::OpenCode | CliKind::Antigravity) {
+                let private = &prepared.private_home_mount;
+                if self.cli == CliKind::OpenCode {
+                    cmd.env("OPENCODE_CONFIG", private.join("opencode.json"));
+                    cmd.env("OPENCODE_CONFIG_DIR", private.join(".config/opencode"));
+                    cmd.env("OPENCODE_DISABLE_PROJECT_CONFIG", "true");
+                    cmd.env("OPENCODE_PURE", "true");
+                }
+                cmd.env("XDG_CONFIG_HOME", private.join(".config"));
+                cmd.env("XDG_DATA_HOME", private.join(".local/share"));
+            }
+        }
+        #[cfg(target_os = "linux")]
         if let (Some(guard), Some(prepared)) = (&self.guard, &prepared) {
             let original = cmd.as_std();
             let mut protected =
@@ -742,6 +846,9 @@ impl AgentCliProvider {
             protected
                 .arg("--private-home")
                 .arg(private_home.as_ref().expect("prepared private home"));
+            if matches!(self.cli, CliKind::OpenCode | CliKind::Antigravity) {
+                protected.arg("--agent-cli").arg(self.cli.binary());
+            }
             if let Some(socket) = self.mcp_socket_debug() {
                 protected.arg("--mcp-socket").arg(socket);
             }
@@ -759,16 +866,19 @@ impl AgentCliProvider {
             protected.current_dir(&prepared.workspace);
             match self.cli {
                 CliKind::Codex => {
-                    protected.env("CODEX_HOME", prepared.private_home_mount.join(".codex"))
+                    protected.env("CODEX_HOME", prepared.private_home_mount.join(".codex"));
                 }
                 CliKind::Grok => {
-                    protected.env("GROK_HOME", prepared.private_home_mount.join(".grok"))
+                    protected.env("GROK_HOME", prepared.private_home_mount.join(".grok"));
                 }
-                CliKind::Claude => protected.env(
-                    "CLAUDE_CONFIG_DIR",
-                    prepared.private_home_mount.join(".claude"),
-                ),
-            };
+                CliKind::Claude => {
+                    protected.env(
+                        "CLAUDE_CONFIG_DIR",
+                        prepared.private_home_mount.join(".claude"),
+                    );
+                }
+                CliKind::OpenCode | CliKind::Antigravity => {}
+            }
             protected.env("HOME", &prepared.private_home_mount);
             cmd = protected;
         }
@@ -806,7 +916,7 @@ impl AgentCliProvider {
                     if let Some(session_id) = episode.session_id.as_deref() {
                         let mut active = provider.session.lock().unwrap();
                         if active.as_deref() != Some(session_id) {
-                            *provider.codex_usage.lock().unwrap() = None;
+                            *provider.native_usage.lock().unwrap() = None;
                         }
                         *active = Some(session_id.to_string());
                     }
@@ -815,12 +925,12 @@ impl AgentCliProvider {
                         episode.session_id.as_deref(),
                     ) {
                         let applied_brief = provider.session_system_brief.lock().unwrap().clone();
-                        let codex_usage = *provider.codex_usage.lock().unwrap();
-                        write_session(&store, session_id, applied_brief.as_deref(), codex_usage)
+                        let native_usage = *provider.native_usage.lock().unwrap();
+                        write_session(&store, session_id, applied_brief.as_deref(), native_usage)
                             .map_err(|error| ProviderError::Process {
-                                provider: provider.cli.label().to_string(),
-                                detail: format!("could not persist native session state: {error}"),
-                            })?;
+                            provider: provider.cli.label().to_string(),
+                            detail: format!("could not persist native session state: {error}"),
+                        })?;
                     }
                 }
             }
@@ -885,6 +995,28 @@ impl AgentCliProvider {
                         detail: format!("exited with {exit}: {tail}"),
                     });
                 }
+                if self.cli == CliKind::Antigravity && !episode.antigravity_result_seen {
+                    return Err(ProviderError::Process {
+                        provider: self.cli.label().to_string(),
+                        detail: "exited without a terminal result event".into(),
+                    });
+                }
+                if self.cli == CliKind::OpenCode {
+                    if !episode.opencode_terminal_finish {
+                        return Err(ProviderError::Process {
+                            provider: self.cli.label().to_string(),
+                            detail: "exited without a terminal step_finish event".into(),
+                        });
+                    }
+                    if episode.opencode_usage_seen {
+                        episode.usage.complete &= episode.opencode_usage_complete;
+                    } else {
+                        episode.usage = Usage::missing();
+                    }
+                }
+                if self.cli == CliKind::Antigravity && !episode.usage.reported {
+                    episode.usage = Usage::missing();
+                }
                 #[cfg(target_os = "linux")]
                 if let Some(guard) = &self.guard {
                     if !guard.read_only
@@ -922,7 +1054,7 @@ impl AgentCliProvider {
     fn forget_session(&self) {
         *self.session.lock().unwrap() = None;
         *self.session_system_brief.lock().unwrap() = None;
-        *self.codex_usage.lock().unwrap() = None;
+        *self.native_usage.lock().unwrap() = None;
         if let Some(store) = self.session_store.lock().unwrap().as_ref() {
             let _ = std::fs::remove_file(&store.path);
         }
@@ -938,7 +1070,7 @@ impl AgentCliProvider {
             &store,
             &session_id,
             Some(system_brief),
-            *self.codex_usage.lock().unwrap(),
+            *self.native_usage.lock().unwrap(),
         )
         .map_err(|error| ProviderError::Process {
             provider: self.cli.label().to_string(),
@@ -987,6 +1119,298 @@ fn ingest_line(
     match cli {
         CliKind::Codex => ingest_codex_line(&value, sink, episode),
         CliKind::Claude | CliKind::Grok => ingest_messages_line(&value, sink, episode),
+        CliKind::OpenCode => ingest_opencode_line(&value, sink, episode),
+        CliKind::Antigravity => ingest_antigravity_line(&value, sink, episode),
+    }
+}
+
+/// OpenCode v1.19 emits one JSON object per line. Usage lives on each distinct
+/// `step_finish` part, not on a cumulative session result. Only `stop` ends a
+/// complete turn; `tool-calls` is an intermediate finish reason.
+fn ingest_opencode_line(
+    value: &Value,
+    sink: &Option<mpsc::Sender<StreamEvent>>,
+    episode: &mut Episode,
+) {
+    let session_id = value.get("sessionID").and_then(Value::as_str);
+    if let Some(id) = session_id {
+        if episode
+            .session_id
+            .as_deref()
+            .is_some_and(|saved| saved != id)
+        {
+            return;
+        }
+        episode.session_id = Some(id.to_string());
+    }
+    let Some(kind) = value.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(part) = value.get("part") else {
+        if kind == "error" {
+            if let Some(message) = value
+                .get("error")
+                .and_then(|error| error.as_str().or_else(|| error.get("message")?.as_str()))
+                .or_else(|| value.get("message").and_then(Value::as_str))
+            {
+                episode.structured_error = bounded_error_message(message);
+            }
+        }
+        return;
+    };
+    let id = part.get("id").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "step_start" => {
+            episode.opencode_terminal_finish = false;
+        }
+        "text" => {
+            episode.opencode_terminal_finish = false;
+            if !id.is_empty() && episode.opencode_text_parts.insert(id.to_string()) {
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    if !episode.text.is_empty() {
+                        episode.text.push('\n');
+                    }
+                    episode.text.push_str(text);
+                }
+            }
+        }
+        "tool_use" => {
+            episode.opencode_terminal_finish = false;
+            let state = part.get("state");
+            if !id.is_empty() && episode.opencode_tool_parts.insert(id.to_string()) {
+                let name = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
+                send_activity(
+                    sink,
+                    StreamEvent::ToolUseStart {
+                        id: id.chars().take(96).collect(),
+                        name: safe_tool_label(name),
+                    },
+                );
+            }
+            if matches!(
+                state
+                    .and_then(|state| state.get("status"))
+                    .and_then(Value::as_str),
+                Some("completed" | "error")
+            ) {
+                send_activity(
+                    sink,
+                    StreamEvent::ToolUseEnd {
+                        id: id.chars().take(96).collect(),
+                        succeeded: state
+                            .and_then(|state| state.get("status"))
+                            .and_then(Value::as_str)
+                            == Some("completed"),
+                    },
+                );
+            }
+        }
+        "step_finish" => {
+            if id.is_empty() {
+                episode.opencode_terminal_finish = false;
+                return;
+            }
+            episode.opencode_terminal_finish =
+                part.get("reason").and_then(Value::as_str) == Some("stop");
+            if !episode.opencode_usage_parts.insert(id.to_string()) {
+                return;
+            }
+            let tokens = part.get("tokens");
+            let usage = tokens
+                .map(opencode_step_usage)
+                .unwrap_or_else(Usage::missing);
+            if episode.opencode_usage_seen {
+                episode.opencode_usage_complete &= usage.complete;
+            } else {
+                episode.opencode_usage_seen = true;
+                episode.opencode_usage_complete = usage.complete;
+            }
+            episode.usage.add(usage);
+        }
+        _ => {}
+    }
+}
+
+fn opencode_step_usage(tokens: &Value) -> Usage {
+    let number = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(u64::from(u32::MAX)) as u32
+    };
+    let required = ["input", "output", "reasoning"]
+        .iter()
+        .all(|key| tokens.get(*key).and_then(Value::as_u64).is_some())
+        && ["read", "write"].iter().all(|key| {
+            tokens
+                .get("cache")
+                .and_then(|cache| cache.get(*key))
+                .and_then(Value::as_u64)
+                .is_some()
+        });
+    Usage {
+        reported: ["input", "output", "reasoning"]
+            .iter()
+            .any(|key| tokens.get(*key).and_then(Value::as_u64).is_some()),
+        complete: required,
+        calls: 1,
+        input_tokens: number(tokens.get("input")),
+        output_tokens: number(tokens.get("output")),
+        cache_read_tokens: number(tokens.get("cache").and_then(|cache| cache.get("read"))),
+        cache_write_tokens: number(tokens.get("cache").and_then(|cache| cache.get("write"))),
+        ..Usage::default()
+    }
+}
+
+/// Antigravity `stream-json` reports the conversation id at init and a
+/// conversation-cumulative usage snapshot at the terminal result event.
+fn ingest_antigravity_line(
+    value: &Value,
+    sink: &Option<mpsc::Sender<StreamEvent>>,
+    episode: &mut Episode,
+) {
+    let kind = value
+        .get("event")
+        .or_else(|| value.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let result = value.get("result");
+    let update = value.get("step_update");
+    let conversation_id = value
+        .get("conversation_id")
+        .or_else(|| value.pointer("/init/conversation_id"))
+        .or_else(|| update.and_then(|item| item.get("conversation_id")))
+        .or_else(|| result.and_then(|item| item.get("conversation_id")))
+        .and_then(Value::as_str);
+    if let Some(id) = conversation_id {
+        if episode
+            .session_id
+            .as_deref()
+            .is_some_and(|saved| saved != id)
+        {
+            return;
+        }
+        episode.session_id = Some(id.to_string());
+    }
+    match kind {
+        "step_update" => {
+            if let Some(delta) = update
+                .and_then(|item| item.get("text_delta"))
+                .and_then(Value::as_str)
+            {
+                episode.text.push_str(delta);
+            }
+            let tool_name = update
+                .and_then(|item| item.get("tool_name"))
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    update
+                        .and_then(|item| item.pointer("/tool_activity/tool_name"))
+                        .and_then(Value::as_str)
+                });
+            if let Some(name) = tool_name {
+                let id = update
+                    .and_then(|item| item.get("tool_call_id"))
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        update
+                            .and_then(|item| item.get("id"))
+                            .and_then(Value::as_str)
+                    })
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        update
+                            .and_then(|item| item.get("step_index"))
+                            .and_then(Value::as_u64)
+                            .map(|index| {
+                                format!(
+                                    "{}:{index}",
+                                    episode.session_id.as_deref().unwrap_or("agy")
+                                )
+                            })
+                    })
+                    .unwrap_or_else(|| name.to_string());
+                if episode.opencode_tool_parts.insert(id.clone()) {
+                    send_activity(
+                        sink,
+                        StreamEvent::ToolUseStart {
+                            id: id.chars().take(96).collect(),
+                            name: safe_tool_label(name),
+                        },
+                    );
+                }
+                if update
+                    .and_then(|item| item.get("state"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|state| matches!(state, "DONE" | "ERROR" | "CANCELLED"))
+                {
+                    send_activity(
+                        sink,
+                        StreamEvent::ToolUseEnd {
+                            id: id.chars().take(96).collect(),
+                            succeeded: update
+                                .and_then(|item| item.get("state"))
+                                .and_then(Value::as_str)
+                                == Some("DONE"),
+                        },
+                    );
+                }
+            }
+        }
+        "result" => {
+            episode.antigravity_result_seen = true;
+            let payload = result.unwrap_or(value);
+            let status = payload.get("status").and_then(Value::as_str).unwrap_or("");
+            if status != "SUCCESS" {
+                let message = payload
+                    .get("error")
+                    .and_then(|error| error.as_str().or_else(|| error.get("message")?.as_str()))
+                    .or_else(|| payload.get("message").and_then(Value::as_str))
+                    .unwrap_or(if status.is_empty() {
+                        "Antigravity result has no terminal status"
+                    } else {
+                        status
+                    });
+                episode.structured_error = bounded_error_message(message);
+                return;
+            }
+            if let Some(response) = payload.get("response").and_then(Value::as_str) {
+                episode.text.clear();
+                episode.text.push_str(response);
+            }
+            let usage = payload.get("usage");
+            if let Some(usage) = usage {
+                episode.usage = antigravity_usage(usage);
+            }
+        }
+        "error" => {
+            let message = value
+                .get("error")
+                .and_then(|error| error.as_str().or_else(|| error.get("message")?.as_str()))
+                .or_else(|| value.get("message").and_then(Value::as_str));
+            if let Some(message) = message {
+                episode.structured_error = bounded_error_message(message);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn antigravity_usage(value: &Value) -> Usage {
+    let read = value.get("cache_read_tokens").and_then(Value::as_u64);
+    let input = value.get("input_tokens").and_then(Value::as_u64);
+    let output = value.get("output_tokens").and_then(Value::as_u64);
+    let narrow = |value: Option<u64>| value.unwrap_or(0).min(u64::from(u32::MAX)) as u32;
+    Usage {
+        reported: input.is_some() || output.is_some() || read.is_some(),
+        complete: input.is_some() && output.is_some() && read.is_some(),
+        calls: 1,
+        // AGY input_tokens are already uncached input on observed v1.4.8
+        // streams. Cache reads remain a separate counter.
+        input_tokens: narrow(input),
+        output_tokens: narrow(output),
+        cache_read_tokens: narrow(read),
+        ..Usage::default()
     }
 }
 
@@ -1318,7 +1742,7 @@ fn usage_delta(current: Usage, previous: Option<Usage>) -> Usage {
     }
 }
 
-fn codex_usage_delta(
+fn native_usage_delta(
     current: Usage,
     previous: Option<Usage>,
     resumed_session: Option<&str>,
@@ -1622,6 +2046,31 @@ fn build_args(
         }
     }
     match (cli, resumed) {
+        (CliKind::OpenCode, session) => {
+            cmd.arg("run").arg("--pure").arg("--format").arg("json");
+            if let Some(session) = session {
+                cmd.arg("--session").arg(session);
+            } else {
+                cmd.arg("--title").arg("OrgBots");
+            }
+            if !model.is_empty() {
+                cmd.arg("--model").arg(model);
+            }
+            // A prompt may begin with a dash; stop option parsing explicitly.
+            cmd.arg("--").arg(prompt);
+        }
+        (CliKind::Antigravity, session) => {
+            cmd.arg("-p")
+                .arg(prompt)
+                .arg("--output-format")
+                .arg("stream-json");
+            if let Some(session) = session {
+                cmd.arg("--conversationID").arg(session);
+            }
+            if !model.is_empty() {
+                cmd.arg("--model").arg(model);
+            }
+        }
         (CliKind::Codex, None) => {
             cmd.arg("exec")
                 .arg("--json")
@@ -1682,12 +2131,13 @@ fn build_args(
                 .arg(session);
         }
     }
-    if !model.is_empty() {
+    if !model.is_empty() && !matches!(cli, CliKind::OpenCode | CliKind::Antigravity) {
         // Claude Code spells this out; codex and grok take the short form.
         // Sending `-m` to claude is "unknown option '-m'" and kills the turn.
         match cli {
             CliKind::Claude => cmd.arg("--model").arg(model),
             CliKind::Codex | CliKind::Grok => cmd.arg("-m").arg(model),
+            CliKind::OpenCode | CliKind::Antigravity => unreachable!("model flags handled above"),
         };
     }
     if cli == CliKind::Codex && model == "gpt-6.1-sol" {
@@ -1718,7 +2168,7 @@ fn build_args(
                     .arg(ROOM_TOOL_WILDCARD);
             }
             // Codex's local room-server approval is set only in its overlay.
-            CliKind::Codex => {}
+            CliKind::Codex | CliKind::OpenCode | CliKind::Antigravity => {}
         }
     }
     if cli == CliKind::Codex {
@@ -1860,18 +2310,70 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         loop {
-            let path = std::env::temp_dir().join(format!(
-                "{name}-{}-{nonce}",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir().join(format!("{name}-{}-{nonce}", std::process::id()));
             match std::fs::create_dir(&path) {
                 Ok(()) => return path,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     nonce = nonce.wrapping_add(1);
                 }
-                Err(error) => panic!("could not create test directory {}: {error}", path.display()),
+                Err(error) => panic!(
+                    "could not create test directory {}: {error}",
+                    path.display()
+                ),
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn write_executable_fixture(path: &Path, contents: impl AsRef<str>) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "fixture has no parent")
+        })?;
+        let name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "fixture has no file name")
+        })?;
+        let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let replacement = parent.join(format!(
+            ".{}.fixture-{}-{id}",
+            name.to_string_lossy(),
+            std::process::id(),
+        ));
+        let mut writer = match std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("set -eu; umask 077; cat > \"$1\"; chmod 700 \"$1\"; mv -f \"$1\" \"$2\"")
+            .arg("orgbot-fixture-writer")
+            .arg(&replacement)
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => return Err(error),
+        };
+        let result = (|| {
+            writer
+                .stdin
+                .take()
+                .ok_or_else(|| std::io::Error::other("fixture writer has no stdin"))?
+                .write_all(contents.as_ref().as_bytes())?;
+            let output = writer.wait_with_output()?;
+            if !output.status.success() {
+                return Err(std::io::Error::other(
+                    "atomic executable fixture installation failed",
+                ));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&replacement);
+        }
+        result
     }
 
     #[cfg(unix)]
@@ -1882,8 +2384,6 @@ mod tests {
         args_log: &Path,
         fail_on_call: Option<usize>,
     ) {
-        use std::os::unix::fs::PermissionsExt;
-
         let mut script = r##"#!/bin/sh
 count=0
 if [ -f 'COUNTER_PATH' ]; then read count < 'COUNTER_PATH'; fi
@@ -1910,8 +2410,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             &fail_on_call.map_or(0, |call| call).to_string(),
         );
         script.push('\n');
-        std::fs::write(binary, script).unwrap();
-        std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_executable_fixture(binary, &script).unwrap();
     }
 
     #[cfg(unix)]
@@ -1938,7 +2437,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
-            codex_usage: Mutex::new(None),
+            native_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
         };
@@ -1947,6 +2446,22 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
         } else {
             provider
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locates_opencode_in_its_official_user_install_directory() {
+        let directory = test_directory("orgbot-opencode-locate");
+        let install = directory.join(".opencode/bin");
+        std::fs::create_dir_all(&install).unwrap();
+        let bin = install.join("opencode");
+        write_executable_fixture(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        let search_paths = HOME_BIN_DIRS.map(|sub| directory.join(sub));
+        assert_eq!(
+            locate_in(CliKind::OpenCode, search_paths),
+            Some(bin.to_string_lossy().into_owned())
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -2104,19 +2619,12 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
     #[cfg(unix)]
     #[tokio::test]
     async fn structured_error_overrides_exit_success_and_incidental_stderr() {
-        use std::os::unix::fs::PermissionsExt;
-
         let directory = test_directory("orgbot-cli-error-test");
         let binary = directory.join("fake-claude");
-        std::fs::write(
-            &binary,
-            r##"#!/bin/sh
+        write_executable_fixture(&binary, r##"#!/bin/sh
 printf '%s\n' 'MCP issuer warning: incidental stderr' >&2
 printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"weekly limit reached","usage":{"input_tokens":7,"output_tokens":2}}'
-"##,
-        )
-        .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+"##,).unwrap();
         let provider = AgentCliProvider {
             cli: CliKind::Claude,
             bin: binary.to_string_lossy().into_owned(),
@@ -2129,7 +2637,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
-            codex_usage: Mutex::new(None),
+            native_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
         };
@@ -2169,6 +2677,347 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
     }
 
     #[test]
+    fn opencode_step_usage_is_deduplicated_and_preserves_cache_categories() {
+        let mut episode = Episode::default();
+        ingest_line(
+            CliKind::OpenCode,
+            r#"{"type":"text","sessionID":"ses_a","part":{"id":"text_1","type":"text","text":"answer"}}"#,
+            &None,
+            &mut episode,
+        );
+        let first = r#"{"type":"step_finish","sessionID":"ses_a","part":{"id":"part_1","type":"step-finish","reason":"tool-calls","tokens":{"input":11,"output":4,"reasoning":1,"cache":{"read":7,"write":2}},"cost":0.0001}}"#;
+        ingest_line(CliKind::OpenCode, first, &None, &mut episode);
+        ingest_line(CliKind::OpenCode, first, &None, &mut episode);
+        let second = r#"{"type":"step_finish","sessionID":"ses_a","part":{"id":"part_2","type":"step-finish","reason":"stop","tokens":{"input":5,"output":2,"reasoning":0,"cache":{"read":3,"write":0}},"cost":0.0002}}"#;
+        ingest_line(CliKind::OpenCode, second, &None, &mut episode);
+        assert_eq!(episode.session_id.as_deref(), Some("ses_a"));
+        assert_eq!(episode.text, "answer");
+        assert_eq!(episode.usage.calls, 2);
+        assert_eq!(episode.usage.input_tokens, 16);
+        assert_eq!(episode.usage.output_tokens, 6);
+        assert_eq!(episode.usage.cache_read_tokens, 10);
+        assert_eq!(episode.usage.cache_write_tokens, 2);
+        assert!(episode.usage.reported && episode.opencode_usage_complete);
+        assert!(episode.opencode_terminal_finish);
+        assert_eq!(episode.usage.actual_api_cost_microusd, None);
+        assert_eq!(episode.usage.api_equivalent_cost_microusd, None);
+    }
+
+    #[test]
+    fn new_cli_usage_counters_saturate_instead_of_wrapping() {
+        let oversized = u64::from(u32::MAX) + 1;
+        let open = opencode_step_usage(&serde_json::json!({
+            "input": oversized,
+            "output": oversized,
+            "reasoning": 0,
+            "cache": {"read": oversized, "write": oversized}
+        }));
+        assert_eq!(open.input_tokens, u32::MAX);
+        assert_eq!(open.output_tokens, u32::MAX);
+        assert_eq!(open.cache_read_tokens, u32::MAX);
+        assert_eq!(open.cache_write_tokens, u32::MAX);
+
+        let agy = antigravity_usage(&serde_json::json!({
+            "input_tokens": oversized,
+            "output_tokens": oversized,
+            "cache_read_tokens": oversized
+        }));
+        assert_eq!(agy.input_tokens, u32::MAX);
+        assert_eq!(agy.output_tokens, u32::MAX);
+        assert_eq!(agy.cache_read_tokens, u32::MAX);
+    }
+
+    #[test]
+    fn antigravity_stream_uses_terminal_cumulative_usage_without_subtracting_cache() {
+        let mut episode = Episode::default();
+        for line in [
+            r#"{"event":"init","conversation_id":"conv_1","init":{"cwd":"/tmp","tools":[]}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"conv_1","step_index":0,"state":"DONE","step_type":"agent_response","text_delta":"partial text\n","usage":{"input_tokens":278,"output_tokens":4,"thinking_tokens":2,"cache_read_tokens":30214,"total_tokens":282}}}"#,
+            r#"{"event":"result","result":{"conversation_id":"conv_1","status":"SUCCESS","response":"answer\n","num_turns":1,"usage":{"input_tokens":30662,"output_tokens":8,"thinking_tokens":2,"cache_read_tokens":30214,"total_tokens":30670}}}"#,
+        ] {
+            ingest_line(CliKind::Antigravity, line, &None, &mut episode);
+        }
+        assert_eq!(episode.session_id.as_deref(), Some("conv_1"));
+        assert_eq!(episode.text, "answer\n");
+        assert!(episode.antigravity_result_seen);
+        assert_eq!(episode.usage.input_tokens, 30_662);
+        assert_eq!(episode.usage.output_tokens, 8);
+        assert_eq!(episode.usage.cache_read_tokens, 30_214);
+        let previous = antigravity_usage(&serde_json::json!({
+            "input_tokens": 278, "output_tokens": 4, "cache_read_tokens": 30_214
+        }));
+        let delta = native_usage_delta(
+            episode.usage,
+            Some(previous),
+            Some("conv_1"),
+            Some("conv_1"),
+        );
+        assert_eq!(delta.input_tokens, 30_384);
+        assert_eq!(delta.output_tokens, 4);
+        assert_eq!(delta.cache_read_tokens, 0);
+        assert!(delta.complete && delta.reported);
+        assert_eq!(delta.actual_api_cost_microusd, None);
+    }
+
+    #[test]
+    fn antigravity_non_success_result_is_a_structured_error() {
+        let mut episode = Episode::default();
+        ingest_line(
+            CliKind::Antigravity,
+            r#"{"event":"result","result":{"conversation_id":"conv_bad","status":"ERROR","error":"provider failure"}}"#,
+            &None,
+            &mut episode,
+        );
+        assert!(episode.antigravity_result_seen);
+        assert_eq!(
+            episode.structured_error.as_deref(),
+            Some("provider failure")
+        );
+    }
+
+    #[test]
+    fn new_cli_args_are_headless_resumable_and_never_auto_approve() {
+        for (cli, resumed, expected_model, prompt_arg) in [
+            (CliKind::OpenCode, Some("ses_1"), "--model", "--"),
+            (CliKind::Antigravity, Some("conv_1"), "--model", "-p"),
+        ] {
+            let mut command = Command::new(cli.binary());
+            build_args(
+                &mut command,
+                cli,
+                "--- prompt",
+                resumed,
+                "provider/model-id",
+                AgentPolicy::FullAccess,
+                None,
+                true,
+            );
+            let args: Vec<_> = command
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == [expected_model, "provider/model-id"]));
+            assert!(!args.iter().any(|arg| arg == "--auto"));
+            match cli {
+                CliKind::OpenCode => {
+                    assert!(args.windows(2).any(|pair| pair == ["--format", "json"]));
+                    assert!(args.iter().any(|arg| arg == "--pure"));
+                    assert!(args.windows(2).any(|pair| pair == ["--session", "ses_1"]));
+                    assert!(!args.iter().any(|arg| arg == "--title"));
+                    assert_eq!(args[args.len() - 2], prompt_arg);
+                    assert_eq!(args.last().map(String::as_str), Some("--- prompt"));
+                }
+                CliKind::Antigravity => {
+                    assert!(args
+                        .windows(2)
+                        .any(|pair| pair == ["--output-format", "stream-json"]));
+                    assert!(args
+                        .windows(2)
+                        .any(|pair| pair == ["--conversationID", "conv_1"]));
+                    assert!(args.windows(2).any(|pair| pair == ["-p", "--- prompt"]));
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let mut fresh = Command::new(CliKind::OpenCode.binary());
+        build_args(
+            &mut fresh,
+            CliKind::OpenCode,
+            "start here",
+            None,
+            "provider/model-id",
+            AgentPolicy::ReadOnly,
+            None,
+            false,
+        );
+        let fresh_args: Vec<_> = fresh
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(fresh_args
+            .windows(2)
+            .any(|pair| pair == ["--title", "OrgBots"]));
+        assert_eq!(fresh_args.last().map(String::as_str), Some("start here"));
+    }
+
+    #[test]
+    fn new_cli_models_are_explicit_before_binary_lookup() {
+        assert!(
+            AgentCliProvider::new(CliKind::OpenCode, "", "", AgentPolicy::ReadOnly, false,)
+                .unwrap_err()
+                .to_string()
+                .contains("provider/model")
+        );
+        assert!(AgentCliProvider::new(
+            CliKind::OpenCode,
+            "model-without-provider",
+            "",
+            AgentPolicy::ReadOnly,
+            false,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("provider/model"));
+        assert!(
+            AgentCliProvider::new(CliKind::Antigravity, "", "", AgentPolicy::ReadOnly, false,)
+                .unwrap_err()
+                .to_string()
+                .contains("model slug")
+        );
+        assert!(AgentCliProvider::new(
+            CliKind::Antigravity,
+            "gemini-model",
+            "",
+            AgentPolicy::ReadOnly,
+            false,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("no verified isolated authentication source"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_fake_process_returns_usage_and_marks_missing_usage_unknown() {
+        let directory = test_directory("orgbot-opencode-fake");
+        let binary = directory.join("opencode");
+        write_executable_fixture(&binary, "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"text\",\"sessionID\":\"ses_fixture\",\"part\":{\"id\":\"text_a\",\"text\":\"opencode answer\"}}'\nprintf '%s\\n' '{\"type\":\"step_finish\",\"sessionID\":\"ses_fixture\",\"part\":{\"id\":\"step_a\",\"reason\":\"tool-calls\",\"tokens\":{\"input\":13,\"output\":4,\"reasoning\":1,\"cache\":{\"read\":7,\"write\":0}},\"cost\":0.001}}'\nprintf '%s\\n' '{\"type\":\"step_finish\",\"sessionID\":\"ses_fixture\",\"part\":{\"id\":\"step_b\",\"reason\":\"stop\",\"tokens\":{\"input\":2,\"output\":1,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"cost\":0.001}}'\n",).unwrap();
+        let provider = AgentCliProvider {
+            cli: CliKind::OpenCode,
+            bin: binary.to_string_lossy().into_owned(),
+            model: "provider/model".into(),
+            workdir: directory.clone(),
+            policy: AgentPolicy::ReadOnly,
+            session: Mutex::new(None),
+            session_system_brief: Mutex::new(None),
+            last_socket: Mutex::new(None),
+            mcp: false,
+            timeout: Duration::from_secs(5),
+            session_store: Mutex::new(None),
+            native_usage: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            guard: None,
+        };
+        let request =
+            || CompletionRequest::new("provider/model", "role brief", vec![Turn::user("reply")]);
+        let complete = provider.complete(request(), None).await.unwrap();
+        assert_eq!(complete.text(), "opencode answer");
+        assert_eq!(provider.session_id().as_deref(), Some("ses_fixture"));
+        assert!(complete.usage.reported && complete.usage.complete);
+        assert_eq!(complete.usage.calls, 2);
+        assert_eq!(complete.usage.input_tokens, 15);
+        assert_eq!(complete.usage.output_tokens, 5);
+        assert_eq!(complete.usage.cache_read_tokens, 7);
+        assert_eq!(complete.usage.actual_api_cost_microusd, None);
+
+        write_executable_fixture(&binary, "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"text\",\"sessionID\":\"ses_fixture\",\"part\":{\"id\":\"text_b\",\"text\":\"final output without terminal finish\"}}'\n",).unwrap();
+        let missing_finish = provider.complete(request(), None).await.unwrap_err();
+        assert!(
+            missing_finish
+                .to_string()
+                .contains("terminal step_finish event"),
+            "{missing_finish}"
+        );
+
+        write_executable_fixture(&binary, "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"text\",\"sessionID\":\"ses_fixture\",\"part\":{\"id\":\"text_c\",\"text\":\"terminal output\"}}'\nprintf '%s\\n' '{\"type\":\"step_finish\",\"sessionID\":\"ses_fixture\",\"part\":{\"id\":\"step_missing_usage\",\"type\":\"step-finish\",\"reason\":\"stop\"}}'\n",).unwrap();
+        let missing_usage = provider.complete(request(), None).await.unwrap();
+        assert_eq!(missing_usage.usage, Usage::missing());
+
+        write_executable_fixture(&binary, "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"step_finish\",\"sessionID\":\"ses_fixture\",\"part\":{\"id\":\"step_intermediate_only\",\"type\":\"step-finish\",\"reason\":\"tool-calls\",\"tokens\":{\"input\":1,\"output\":1,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}'\n",).unwrap();
+        let intermediate_only = provider.complete(request(), None).await.unwrap_err();
+        assert!(
+            intermediate_only
+                .to_string()
+                .contains("terminal step_finish event"),
+            "{intermediate_only}"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn antigravity_fake_process_resumes_and_deltas_persisted_native_usage() {
+        let directory = test_directory("orgbot-antigravity-fake");
+        let binary = directory.join("agy");
+        let store_path = directory.join("session.json");
+        let script = r#"#!/bin/sh
+count_file="$(dirname "$0")/count"
+count=0
+if [ -f "$count_file" ]; then read count < "$count_file"; fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$count_file"
+if [ "$count" -gt 1 ]; then
+  case " $* " in *" --conversationID conv_fixture "*) ;; *) exit 21 ;; esac
+fi
+printf '%s\n' '{"event":"init","conversation_id":"conv_fixture","init":{"cwd":"/tmp","tools":[],"permission_mode":"request-review"}}'
+if [ "$count" -eq 1 ]; then
+  printf '%s\n' '{"event":"step_update","step_update":{"conversation_id":"conv_fixture","step_index":0,"state":"DONE","step_type":"agent_response","text_delta":"partial response text\n"}}'
+  printf '%s\n' '{"event":"result","result":{"conversation_id":"conv_fixture","status":"SUCCESS","response":"first answer\n","num_turns":1,"usage":{"input_tokens":100,"output_tokens":10,"thinking_tokens":2,"cache_read_tokens":5,"total_tokens":110}}}'
+else
+  printf '%s\n' '{"event":"step_update","step_update":{"conversation_id":"conv_fixture","step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"second answer\n"}}'
+  printf '%s\n' '{"event":"result","result":{"conversation_id":"conv_fixture","status":"SUCCESS","response":"second answer\n","num_turns":2,"usage":{"input_tokens":145,"output_tokens":15,"thinking_tokens":3,"cache_read_tokens":9,"total_tokens":160}}}'
+fi
+"#;
+        write_executable_fixture(&binary, script).unwrap();
+        let make_provider = || {
+            AgentCliProvider {
+                cli: CliKind::Antigravity,
+                bin: binary.to_string_lossy().into_owned(),
+                model: "gemini-model".into(),
+                workdir: directory.clone(),
+                policy: AgentPolicy::ReadOnly,
+                session: Mutex::new(None),
+                session_system_brief: Mutex::new(None),
+                last_socket: Mutex::new(None),
+                mcp: false,
+                timeout: Duration::from_secs(5),
+                session_store: Mutex::new(None),
+                native_usage: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                guard: None,
+            }
+            .with_session_store(store_path.clone())
+        };
+        let request =
+            || CompletionRequest::new("gemini-model", "role brief", vec![Turn::user("continue")]);
+        let first = make_provider().complete(request(), None).await.unwrap();
+        assert_eq!(first.text(), "first answer\n");
+        assert_eq!(first.usage.input_tokens, 100);
+        assert_eq!(first.usage.output_tokens, 10);
+        assert_eq!(first.usage.cache_read_tokens, 5);
+        let saved: Value = serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
+        assert_eq!(saved["codex_usage"]["input_tokens"].as_u64(), Some(100));
+
+        let second = make_provider().complete(request(), None).await.unwrap();
+        assert_eq!(second.text(), "second answer\n");
+        assert_eq!(second.usage.input_tokens, 45);
+        assert_eq!(second.usage.output_tokens, 5);
+        assert_eq!(second.usage.cache_read_tokens, 4);
+        assert!(second.usage.reported && second.usage.complete);
+
+        write_executable_fixture(&binary, "#!/bin/sh\nprintf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"conv_fixture\",\"status\":\"SUCCESS\",\"response\":\"no usage\",\"num_turns\":3}}'\n",).unwrap();
+        let missing_usage = make_provider().complete(request(), None).await.unwrap();
+        assert_eq!(missing_usage.usage, Usage::missing());
+
+        write_executable_fixture(&binary, "#!/bin/sh\nprintf '%s\\n' '{\"event\":\"init\",\"conversation_id\":\"conv_fixture\"}'\n",).unwrap();
+        let no_result = make_provider().complete(request(), None).await.unwrap_err();
+        assert!(
+            no_result.to_string().contains("terminal result event"),
+            "{no_result}"
+        );
+
+        write_executable_fixture(&binary, "#!/bin/sh\nprintf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"conv_fixture\",\"status\":\"ERROR\",\"error\":\"provider rejected the request\"}}'\n",).unwrap();
+        let failed = make_provider().complete(request(), None).await.unwrap_err();
+        assert!(failed.to_string().contains("provider rejected the request"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn codex_cumulative_usage_is_delta_and_missing_usage_stays_missing() {
         let previous = usage_from_json(&serde_json::json!({
             "input_tokens": 100, "cached_input_tokens": 40,
@@ -2188,34 +3037,33 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             complete: false,
             ..previous
         };
-        assert_eq!(usage_delta(current, Some(partial_previous)), Usage::missing());
+        assert_eq!(
+            usage_delta(current, Some(partial_previous)),
+            Usage::missing()
+        );
         let rollback = usage_delta(previous, Some(current));
         assert_eq!(rollback, Usage::missing());
 
         let missing = usage_delta(Usage::default(), Some(current));
         assert!(!missing.reported);
         assert_eq!(usage_delta(current, None), current);
-        assert!(!codex_usage_delta(current, None, Some("same"), Some("same")).reported);
+        assert!(!native_usage_delta(current, None, Some("same"), Some("same")).reported);
         assert_eq!(
-            codex_usage_delta(current, None, Some("old"), Some("new")),
+            native_usage_delta(current, None, Some("old"), Some("new")),
             current
         );
-        assert_eq!(codex_usage_delta(current, None, None, Some("new")), current);
+        assert_eq!(
+            native_usage_delta(current, None, None, Some("new")),
+            current
+        );
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn new_codex_session_discards_the_previous_usage_baseline() {
-        use std::os::unix::fs::PermissionsExt;
-
         let directory = test_directory("orgbot-codex-new-session");
         let binary = directory.join("fake-codex");
-        std::fs::write(
-            &binary,
-            "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"new-session\"}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_executable_fixture(&binary, "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"new-session\"}'\n",).unwrap();
         let provider = AgentCliProvider {
             cli: CliKind::Codex,
             bin: binary.to_string_lossy().into_owned(),
@@ -2228,7 +3076,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
-            codex_usage: Mutex::new(Some(usage_from_json(&serde_json::json!({
+            native_usage: Mutex::new(Some(usage_from_json(&serde_json::json!({
                 "input_tokens": 100, "output_tokens": 10
             })))),
             #[cfg(target_os = "linux")]
@@ -2240,19 +3088,17 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             .await
             .unwrap();
         assert_eq!(provider.session_id().as_deref(), Some("new-session"));
-        assert_eq!(*provider.codex_usage.lock().unwrap(), None);
+        assert_eq!(*provider.native_usage.lock().unwrap(), None);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn codex_complete_deltas_cumulative_usage_after_provider_restarts() {
-        use std::os::unix::fs::PermissionsExt;
-
         let directory = test_directory("orgbot-codex-usage-resume");
         let binary = directory.join("fake-codex");
         let store_path = directory.join("session.json");
-        std::fs::write(
+        write_executable_fixture(
             &binary,
             r##"#!/bin/sh
 count_file="$(dirname "$0")/count"
@@ -2273,7 +3119,6 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
 "##,
         )
         .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         let store = SessionStore {
             path: store_path.clone(),
             cli: CliKind::Codex,
@@ -2295,19 +3140,14 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
                 mcp: false,
                 timeout: Duration::from_secs(5),
                 session_store: Mutex::new(None),
-                codex_usage: Mutex::new(None),
+                native_usage: Mutex::new(None),
                 #[cfg(target_os = "linux")]
                 guard: None,
             }
             .with_session_store(store_path.clone())
         };
-        let request = || {
-            CompletionRequest::new(
-                "gpt-6.1-sol",
-                "role brief",
-                vec![Turn::user("continue")],
-            )
-        };
+        let request =
+            || CompletionRequest::new("gpt-6.1-sol", "role brief", vec![Turn::user("continue")]);
 
         let first = make_provider().complete(request(), None).await.unwrap();
         assert_eq!(first.usage.input_tokens, 60);
@@ -2469,7 +3309,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
         write_session(&store, "session-id", None, Some(codex_usage)).unwrap();
         assert_eq!(read_session(&store).as_deref(), Some("session-id"));
         assert_eq!(
-            read_session_record(&store).unwrap().codex_usage,
+            read_session_record(&store).unwrap().native_usage,
             Some(codex_usage)
         );
         assert_eq!(
@@ -2492,12 +3332,12 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             mcp: store.mcp,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
-            codex_usage: Mutex::new(None),
+            native_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
         }
         .with_session_store(path.clone());
-        assert_eq!(*restored.codex_usage.lock().unwrap(), Some(codex_usage));
+        assert_eq!(*restored.native_usage.lock().unwrap(), Some(codex_usage));
         let mut mismatched = store.clone();
         mismatched.model = "gpt-6.1".into();
         assert!(read_session(&mismatched).is_none());
@@ -2531,20 +3371,25 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             mcp: legacy_store.mcp,
             session_id: "legacy-session".into(),
             system_brief: None,
-            codex_usage: None,
+            native_usage: Some(codex_usage),
         })
         .unwrap();
         legacy_record
             .as_object_mut()
             .unwrap()
             .remove("system_brief");
-        legacy_record.as_object_mut().unwrap().remove("codex_usage");
+        let object = legacy_record.as_object_mut().unwrap();
+        object.remove("native_usage");
+        object.insert(
+            "codex_usage".into(),
+            serde_json::to_value(codex_usage).unwrap(),
+        );
         std::fs::write(&legacy_path, serde_json::to_vec(&legacy_record).unwrap()).unwrap();
         std::fs::set_permissions(&legacy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let restored = fake_claude_provider(Path::new("/fake/claude"), Some(legacy_path));
         assert_eq!(restored.session_id().as_deref(), Some("legacy-session"));
         assert_eq!(*restored.session_system_brief.lock().unwrap(), None);
-        assert_eq!(*restored.codex_usage.lock().unwrap(), None);
+        assert_eq!(*restored.native_usage.lock().unwrap(), Some(codex_usage));
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2598,8 +3443,6 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
     #[cfg(unix)]
     #[tokio::test]
     async fn first_session_id_is_saved_before_an_interrupted_episode() {
-        use std::os::unix::fs::PermissionsExt;
-
         let directory = std::env::temp_dir().join(format!(
             "orgbot-interrupted-session-{}-{}",
             std::process::id(),
@@ -2610,12 +3453,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
         ));
         std::fs::create_dir_all(&directory).unwrap();
         let binary = directory.join("fake-codex");
-        std::fs::write(
-            &binary,
-            "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"session-before-timeout\"}'\nexec sleep 2\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_executable_fixture(&binary, "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"session-before-timeout\"}'\nexec sleep 2\n",).unwrap();
         let state_path = directory.join("bot.json");
         let store = SessionStore {
             path: state_path.clone(),
@@ -2637,7 +3475,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             mcp: store.mcp,
             timeout: Duration::from_millis(50),
             session_store: Mutex::new(Some(store.clone())),
-            codex_usage: Mutex::new(None),
+            native_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
         };
@@ -2709,8 +3547,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$HOME|$CODEX_HOME\" > \"$CODEX_HOME/env-record.txt\"\nif [ ! -f \"$CODEX_HOME/auth.json\" ] || [ ! -f \"$CODEX_HOME/skills/local/SKILL.md\" ]; then exit 41; fi\nif grep -q 'remote\\|mcp_servers' \"$CODEX_HOME/config.toml\"; then exit 43; fi\ncase \"$*\" in *stable-session*) [ -f \"$CODEX_HOME/sessions/stable-session.jsonl\" ] || exit 42 ;; *) mkdir -p \"$CODEX_HOME/sessions\"; printf 'resume state\\n' > \"$CODEX_HOME/sessions/stable-session.jsonl\" ;; esac\nprintf 'modified-private-auth' > \"$CODEX_HOME/auth.json\"\nprintf 'generated-by-cli' > /tmp/orgbot-workspace/generated.txt\nprintf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"stable-session\"}}'\nprintf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"protected-ok\"}}}}'\n"
         );
-        std::fs::write(&binary, script).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_executable_fixture(&binary, script.as_str()).unwrap();
 
         let session_path = root.join("state/cli-session.json");
         let mut provider = AgentCliProvider::new(
@@ -2824,7 +3661,6 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
     #[cfg(unix)]
     #[tokio::test]
     async fn a_session_the_cli_no_longer_has_is_dropped_and_the_turn_runs_fresh() {
-        use std::os::unix::fs::PermissionsExt;
         let directory = std::env::temp_dir().join(format!(
             "orgbot-cli-missing-session-{}-{}",
             std::process::id(),
@@ -2836,7 +3672,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
         std::fs::create_dir_all(&directory).unwrap();
         let binary = directory.join("fake-claude");
         // Resuming fails the way the real CLIs do once a session is gone.
-        std::fs::write(
+        write_executable_fixture(
             &binary,
             r##"#!/bin/sh
 for arg in "$@"; do
@@ -2850,7 +3686,6 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 "##,
         )
         .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         let store = directory.join("sessions").join("bot.json");
         let provider = fake_claude_provider(&binary, Some(store.clone()));
         *provider.session.lock().unwrap() = Some("gone-session".into());

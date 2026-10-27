@@ -27,7 +27,8 @@ MAX_ENTRIES = 150_000
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TREE_BYTES = 20 * 1024 * 1024 * 1024
 AGENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
-PROFILE_RE = re.compile(r"(?:codex|claude|grok)\Z")
+PROFILE_RE = re.compile(r"(?:codex|claude|grok|opencode|agy)\Z")
+AGENT_CLI_RE = re.compile(r"(?:opencode|agy)\Z")
 # These directories contain reproducible caches, build output, or per-agent Git
 # metadata. Git is copied into each workspace once, but is not diffed/applied.
 EXCLUDED_DIRS = {
@@ -796,10 +797,14 @@ def _verify_sandbox_args(workspace: Path, program: list[str]) -> list[str]:
     return args
 
 
-def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool, profiles: list[str], private_home_arg: str | None, mcp_socket: str | None, verify: bool = False) -> int:
+def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool, profiles: list[str], private_home_arg: str | None, mcp_socket: str | None, agent_cli: str | None = None, verify: bool = False) -> int:
     agent = _safe_agent(agent_arg)
     if not program:
         _fail("run requires a program after --")
+    if agent_cli is not None and not AGENT_CLI_RE.fullmatch(agent_cli):
+        _fail("Agent CLI must be opencode or agy")
+    if agent_cli == "agy":
+        _fail("Antigravity is unavailable in the protected workspace because no verified isolated authentication source is configured")
     state = _canonical_directory(state_arg, "state")
     _check_private_dir(state)
     manifest_paths = _manifest_candidates(state, agent)
@@ -823,7 +828,7 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
         if verify:
             if not read_only or not data["read_only"]:
                 _fail("Verification requires a read-only prepared workspace")
-            if profiles or private_home_arg is not None or mcp_socket is not None:
+            if profiles or private_home_arg is not None or mcp_socket is not None or agent_cli is not None:
                 _fail("Verification cannot mount CLI profiles, private homes, or MCP sockets")
             args = _verify_sandbox_args(workspace, program)
             os.close(lock_fd)
@@ -834,12 +839,13 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
                 _fail(f"bubblewrap failed to start: {exc}")
             return result.returncode
         profile_root = workspace.parent / "profiles"
-        private_home = profile_root / "home"
-        _safe_state_child(state, f"agents/{_project_id(project)}/{agent}/profiles/home")
+        private_home_name = f"home-{agent_cli}" if agent_cli in ("opencode", "agy") else "home"
+        private_home = profile_root / private_home_name
+        _safe_state_child(state, f"agents/{_project_id(project)}/{agent}/profiles/{private_home_name}")
         if private_home_arg is not None:
             supplied_home = _canonical_directory(private_home_arg, "private CLI home")
             if supplied_home != private_home.resolve(strict=True):
-                _fail("Writable CLI home must be this agent's private profile_root/home directory")
+                _fail("Writable CLI home must be this agent's private CLI profile directory")
         else:
             supplied_home = private_home.resolve(strict=True)
         _check_private_dir(supplied_home)
@@ -870,7 +876,19 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
             socket_info = socket_path.lstat()
             if not stat.S_ISSOCK(socket_info.st_mode) or socket_info.st_uid != os.getuid():
                 _fail("Room MCP endpoint must be a Unix socket")
-        args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--size", "1073741824", "--tmpfs", "/tmp", "--dir", "/tmp/orgbot-workspace", "--tmpfs", "/run", "--dir", "/run/user", "--dir", f"/run/user/{os.getuid()}", "--dir", private_home_mount, "--bind", os.fspath(supplied_home), private_home_mount]
+        private_cli_overlays: list[tuple[Path, str]] = []
+        private_home_bind = "--ro-bind" if agent_cli == "opencode" else "--bind"
+        args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--size", "1073741824", "--tmpfs", "/tmp", "--dir", "/tmp/orgbot-workspace", "--tmpfs", "/run", "--dir", "/run/user", "--dir", f"/run/user/{os.getuid()}", "--dir", private_home_mount, private_home_bind, os.fspath(supplied_home), private_home_mount]
+        if agent_cli == "opencode":
+            for relative in (".local/share", ".local/state", ".cache"):
+                directory = supplied_home / relative
+                try:
+                    info = directory.lstat()
+                except OSError as exc:
+                    _fail(f"OpenCode writable data directory is unavailable: {exc}")
+                if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                    _fail("OpenCode writable data directory is unsafe")
+                args.extend(["--bind", os.fspath(directory), f"{private_home_mount}/{relative}"])
         if not Path("/var/run").is_symlink():
             args.extend(["--tmpfs", "/var/run"])
         resolver = Path("/etc/resolv.conf")
@@ -894,6 +912,80 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
             args.extend(["--bind", os.fspath(workspace), "/tmp/orgbot-workspace"])
         else:
             args.extend(["--ro-bind", os.fspath(workspace), "/tmp/orgbot-workspace"])
+        if agent_cli == "opencode":
+            opencode_config = supplied_home / "opencode.json"
+            opencode_config_dir = supplied_home / ".config/opencode"
+            empty_system_config = supplied_home / ".orgbot-empty-opencode-system"
+            try:
+                config_info = opencode_config.lstat()
+                config_dir_info = opencode_config_dir.lstat()
+            except OSError as exc:
+                _fail(f"OpenCode private profile is unavailable: {exc}")
+            if not stat.S_ISREG(config_info.st_mode) or config_info.st_uid != os.getuid() or config_info.st_mode & 0o077:
+                _fail("OpenCode private profile is unsafe")
+            if not stat.S_ISDIR(config_dir_info.st_mode) or stat.S_ISLNK(config_dir_info.st_mode) or config_dir_info.st_uid != os.getuid() or config_dir_info.st_mode & 0o077:
+                _fail("OpenCode private config directory is unsafe")
+            config_marker = opencode_config_dir / ".gitignore"
+            try:
+                marker_info = config_marker.lstat()
+            except OSError as exc:
+                _fail(f"OpenCode private config marker is unavailable: {exc}")
+            expected_marker = b"node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore"
+            try:
+                marker_bytes = config_marker.read_bytes()
+            except OSError as exc:
+                _fail(f"OpenCode private config marker cannot be read: {exc}")
+            if (
+                not stat.S_ISREG(marker_info.st_mode)
+                or stat.S_ISLNK(marker_info.st_mode)
+                or marker_info.st_uid != os.getuid()
+                or marker_info.st_mode & 0o077
+                or marker_bytes != expected_marker
+                or {entry.name for entry in opencode_config_dir.iterdir()} != {".gitignore"}
+            ):
+                _fail("OpenCode private config directory contains unmanaged files")
+            legacy_config_dir = supplied_home / ".opencode"
+            try:
+                legacy_info = legacy_config_dir.lstat()
+            except OSError as exc:
+                _fail(f"OpenCode legacy config mask is unavailable: {exc}")
+            legacy_marker = legacy_config_dir / ".gitignore"
+            try:
+                legacy_marker_info = legacy_marker.lstat()
+                legacy_marker_bytes = legacy_marker.read_bytes()
+            except OSError as exc:
+                _fail(f"OpenCode legacy config marker is unavailable: {exc}")
+            if (
+                not stat.S_ISDIR(legacy_info.st_mode)
+                or stat.S_ISLNK(legacy_info.st_mode)
+                or legacy_info.st_uid != os.getuid()
+                or legacy_info.st_mode & 0o077
+                or not stat.S_ISREG(legacy_marker_info.st_mode)
+                or stat.S_ISLNK(legacy_marker_info.st_mode)
+                or legacy_marker_info.st_uid != os.getuid()
+                or legacy_marker_info.st_mode & 0o077
+                or legacy_marker_bytes != expected_marker
+                or {entry.name for entry in legacy_config_dir.iterdir()} != {".gitignore"}
+            ):
+                _fail("OpenCode legacy config directory is unsafe")
+            private_cli_overlays.append((opencode_config, f"{private_home_mount}/opencode.json"))
+            args.extend(["--ro-bind", os.fspath(opencode_config_dir), f"{private_home_mount}/.config/opencode"])
+            try:
+                system_config_info = Path("/etc/opencode").lstat()
+            except FileNotFoundError:
+                system_config_info = None
+            if system_config_info is not None:
+                if not stat.S_ISDIR(system_config_info.st_mode) or stat.S_ISLNK(system_config_info.st_mode):
+                    _fail("System OpenCode configuration path is unsafe")
+                try:
+                    empty_info = empty_system_config.lstat()
+                    if not stat.S_ISDIR(empty_info.st_mode) or stat.S_ISLNK(empty_info.st_mode) or empty_info.st_uid != os.getuid() or empty_info.st_mode & 0o077 or any(empty_system_config.iterdir()):
+                        _fail("Private OpenCode system-config mask is unsafe")
+                except OSError as exc:
+                    _fail(f"Private OpenCode system-config mask is unavailable: {exc}")
+                args.extend(["--ro-bind", os.fspath(empty_system_config), "/etc/opencode"])
+        for source, destination in private_cli_overlays:
+            args.extend(["--ro-bind", os.fspath(source), destination])
         safe_path = []
         for entry in os.environ.get("PATH", "").split(os.pathsep):
             candidate = Path(entry)
@@ -908,6 +1000,27 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
             if Path(standard).is_dir() and standard not in safe_path:
                 safe_path.append(standard)
         env_args = ["--clearenv", "--setenv", "PATH", os.pathsep.join(safe_path), "--setenv", "HOME", private_home_mount, "--setenv", "CODEX_HOME", f"{private_home_mount}/.codex", "--setenv", "CLAUDE_CONFIG_DIR", f"{private_home_mount}/.claude", "--setenv", "GROK_HOME", f"{private_home_mount}/.grok", "--setenv", "TMPDIR", "/tmp", "--setenv", "ORGBOT_WORKSPACE", "/tmp/orgbot-workspace", "--setenv", "LANG", "C.UTF-8"]
+        if agent_cli is not None:
+            xdg_config = f"{private_home_mount}/.config"
+            xdg_data = f"{private_home_mount}/.local/share"
+            xdg_state = f"{private_home_mount}/.local/state"
+            env_args.extend([
+                "--setenv", "XDG_CONFIG_HOME", xdg_config,
+                "--setenv", "XDG_DATA_HOME", xdg_data,
+                "--setenv", "XDG_STATE_HOME", xdg_state,
+                "--setenv", "XDG_CACHE_HOME", f"{private_home_mount}/.cache",
+            ])
+            if agent_cli == "opencode":
+                env_args.extend([
+                    "--setenv", "OPENCODE_CONFIG", f"{private_home_mount}/opencode.json",
+                    "--setenv", "OPENCODE_CONFIG_DIR", f"{xdg_config}/opencode",
+                    "--setenv", "OPENCODE_DISABLE_PROJECT_CONFIG", "true",
+                    "--setenv", "OPENCODE_DISABLE_EXTERNAL_SKILLS", "true",
+                    "--setenv", "OPENCODE_DISABLE_CLAUDE_CODE", "true",
+                    "--setenv", "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT", "true",
+                    "--setenv", "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS", "true",
+                    "--setenv", "OPENCODE_PURE", "true",
+                ])
         if "TERM" in os.environ and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", os.environ["TERM"]):
             env_args.extend(["--setenv", "TERM", os.environ["TERM"]])
         if socket_path:
@@ -1123,6 +1236,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--profile", action="append", default=[])
     run.add_argument("--private-home")
     run.add_argument("--mcp-socket")
+    run.add_argument("--agent-cli", choices=("opencode", "agy"))
     run.add_argument("program", nargs=argparse.REMAINDER)
     apply = sub.add_parser("apply")
     apply.add_argument("--state", required=True)
@@ -1142,7 +1256,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "run":
             program = args.program[1:] if args.program and args.program[0] == "--" else args.program
-            return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket, verify=args.verify)
+            return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket, agent_cli=args.agent_cli, verify=args.verify)
         result = _apply(args.state, args.agent, args.review_token)
         _json(result)
         return 0 if result.get("ok") else 1

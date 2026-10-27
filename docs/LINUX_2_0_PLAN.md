@@ -203,3 +203,45 @@ skill/MCP lifecycle and pause/restart; pass package/signature/upgrade checks.
 
 Keep private logs/profiles/credentials outside Git. Do not infer subscription
 quota savings from token counts or claim general savings from one pilot pair.
+
+## OpenCode and Antigravity CLI integration, 2026-10-27
+
+Add desktop provider choices through the existing protected room runtime.
+OpenCode uses the released 1.19.4 interface, not the separate v2 documentation;
+Antigravity uses `agy` 1.4.8 rather than the IDE launcher. Preserve saved provider
+identities, explicit session resume, per-agent usage, private profiles and the
+room's external-tool approvals. Published 2.0.2 artifacts remain unchanged.
+
+- [x] Inspect installed CLI/help and pinned upstream contracts; verify the
+  isolated OpenCode binary against its official release digest.
+- [x] Implement provider serialization, desktop selection and explicit model entry.
+- [x] Implement OpenCode isolated execution, MCP configuration and session parsing.
+  Real OpenCode 1.19.4 passed fresh/resumed local mock-provider execution and an
+  allowed MCP tool call through the production Python workspace helper.
+  Only an already configured, selected API credential is supported.
+- [ ] Resolve Antigravity authentication without exposing host D-Bus.
+  Blocked: no verified isolated credential transfer. Constructor and launcher
+  reject execution; UI says unavailable. Parser/configuration tests do not
+  establish a working Antigravity integration.
+- [ ] Verify safe OpenCode OAuth reuse.
+  Blocked: copied refresh credentials may invalidate the owner's native session.
+  OAuth is rejected; no automatic API billing fallback is used.
+- [x] Inspect rendered Flutter UI fixtures at 375px and 1280px.
+  Full Flutter suite: 345 passed, five platform/integration checks skipped.
+  Analyzer retains one pre-existing warning at `desktop_files.dart:192`.
+  Fifteen host rule/configuration files retain their pre-task SHA-256 hashes.
+- [x] Finish regression checks: Rust workspace 869 passed, three ignored;
+  Python workspace guard 29 passed. Live-provider tests remained opt-in;
+  no external model calls were made. The real OpenCode mock proof also caught
+  an unreported title-generation call, removed with a fixed fresh-session title.
+- [x] Obtain final Astra review of the scoped milestone and evidence.
+  Approved after configuration isolation, credential validation, terminal-event
+  handling and proof-harness attribution corrections. This does not approve
+  Antigravity execution, OpenCode OAuth, live-account access or a release.
+- [x] Commit the verified source milestone with explicit runtime/release limits.
+  Staged secret scan and formatting/diff checks passed; no credentials, raw
+  prompts, session IDs or private profiles are included in the proof artifact.
+
+See [native CLI integration status](NATIVE_CLI_INTEGRATIONS.md) and its sanitized
+conformance record. No real-provider inference, subscription proof, package
+rebuild/install, push, publication or deployment is included in this milestone.

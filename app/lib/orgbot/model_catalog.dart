@@ -3,16 +3,18 @@
 //
 // A hardcoded list goes stale and is wrong the day it ships — the previous one
 // offered "gpt-5.2" while the Codex CLI on this machine actually serves
-// gpt-5.6-sol and friends. So each provider is asked what it has:
+// gpt-5.6-sol and friends. Catalogs use each provider's supported source:
 //
 //   Codex   ~/.codex/models_cache.json, which the CLI keeps current
 //   Grok    `grok models`
 //   Claude  the CLI's aliases, which resolve to whatever the subscription
 //           currently provides — more durable than pinning an id
 //   DeepSeek / Ollama Cloud GET /v1/models with the key
+//   OpenCode / Antigravity require a model id; their model/auth interfaces are
+//           not queried here, so no provider default is inferred.
 //
-// Every lookup falls back to a small built-in list, so the picker still works
-// offline, before a key is entered, or if a CLI changes its output.
+// If a live catalog is unavailable, the picker uses a provider-specific
+// fallback or an empty list when guessing would be misleading.
 //
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
@@ -58,6 +60,9 @@ enum ModelSource {
 
   /// The stored subscription credential was rejected after renewal.
   needsSignIn,
+
+  /// Requires an explicit model; the CLI was not queried for one.
+  requiresExplicitModel,
 }
 
 /// A resolved model list plus how it was obtained.
@@ -199,6 +204,15 @@ class ModelCatalog {
             : _fromGrokApi(token);
       case ProviderKind.anthropic:
         return ModelList(claudeModels(viaCli: canRunClis), ModelSource.live);
+      case ProviderKind.opencode:
+      case ProviderKind.antigravity:
+        return canRunClis && Platform.isLinux
+            ? ModelList(const [], ModelSource.requiresExplicitModel)
+            : ModelList(
+                const [],
+                ModelSource.fallback,
+                '${kind.label} requires the protected Linux runtime.',
+              );
       case ProviderKind.deepseek:
       case ProviderKind.ollama:
         return _fromApi(kind, apiKey);
@@ -526,7 +540,10 @@ class ModelCatalog {
 
   /// The built-in list used when a live lookup is not possible.
   static List<ModelOption> fallbackFor(ProviderKind kind, {bool? canRunClis}) {
-    final useClis = canRunClis ?? canRunAgentClis;
+    final cli = kind.cli;
+    final useClis =
+        (canRunClis ?? canRunAgentClis) &&
+        (!(cli?.requiresProtectedRuntime ?? false) || Platform.isLinux);
     switch (kind) {
       case ProviderKind.anthropic:
         return claudeModels(viaCli: useClis);
@@ -538,6 +555,9 @@ class ModelCatalog {
       case ProviderKind.ollama:
         // Deliberately empty: the list comes from its API, and a guess
         // presented as a list is worse than saying a key is needed.
+        return const [];
+      case ProviderKind.opencode:
+      case ProviderKind.antigravity:
         return const [];
       case ProviderKind.scripted:
         return const [];

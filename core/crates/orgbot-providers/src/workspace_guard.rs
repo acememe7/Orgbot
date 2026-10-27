@@ -5,6 +5,9 @@ use std::process::Command;
 const PROFILE_MAX_ENTRIES: usize = 50_000;
 const PROFILE_MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const PROFILE_MAX_TREE_BYTES: u64 = 1024 * 1024 * 1024;
+const OPENCODE_AUTH_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const OPENCODE_CONFIG_GITIGNORE: &[u8] =
+    b"node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore";
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceGuard {
@@ -97,7 +100,9 @@ pub fn update_private_agent_config(
     let (profile, env_key) = match cli {
         orgbot_proto::agent::CliKind::Codex => (".codex", "mcp_servers"),
         orgbot_proto::agent::CliKind::Grok => (".grok", "mcp_servers"),
-        orgbot_proto::agent::CliKind::Claude => return Ok(()),
+        orgbot_proto::agent::CliKind::Claude
+        | orgbot_proto::agent::CliKind::OpenCode
+        | orgbot_proto::agent::CliKind::Antigravity => return Ok(()),
     };
     let config = home.join(profile).join("config.toml");
     let mut contents = match std::fs::symlink_metadata(&config) {
@@ -162,7 +167,9 @@ pub fn clear_private_agent_config(
     let profile = match cli {
         orgbot_proto::agent::CliKind::Codex => ".codex",
         orgbot_proto::agent::CliKind::Grok => ".grok",
-        orgbot_proto::agent::CliKind::Claude => return Ok(()),
+        orgbot_proto::agent::CliKind::Claude
+        | orgbot_proto::agent::CliKind::OpenCode
+        | orgbot_proto::agent::CliKind::Antigravity => return Ok(()),
     };
     let config = home.join(profile).join("config.toml");
     let meta = match std::fs::symlink_metadata(&config) {
@@ -204,7 +211,9 @@ pub fn strip_private_agent_mcp_config(
     let profile = match cli {
         orgbot_proto::agent::CliKind::Codex => ".codex",
         orgbot_proto::agent::CliKind::Grok => ".grok",
-        orgbot_proto::agent::CliKind::Claude => return Ok(()),
+        orgbot_proto::agent::CliKind::Claude
+        | orgbot_proto::agent::CliKind::OpenCode
+        | orgbot_proto::agent::CliKind::Antigravity => return Ok(()),
     };
     let config = home.join(profile).join("config.toml");
     let contents = match std::fs::symlink_metadata(&config) {
@@ -237,6 +246,303 @@ pub fn remove_private_file(path: &Path) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("inspect private CLI file: {error}")),
     }
+}
+
+/// Generate isolated, deny-by-default profiles for CLIs whose native auth
+/// boundaries have not been approved for exposure to the guarded process.
+pub fn configure_new_cli_profile(
+    home: &Path,
+    mount: &Path,
+    cli: orgbot_proto::agent::CliKind,
+    _policy: orgbot_proto::agent::AgentPolicy,
+    model: &str,
+    room_socket: Option<&Path>,
+) -> Result<(), String> {
+    configure_new_cli_profile_inner(home, mount, cli, model, room_socket, None)
+}
+
+fn configure_new_cli_profile_inner(
+    home: &Path,
+    mount: &Path,
+    cli: orgbot_proto::agent::CliKind,
+    model: &str,
+    room_socket: Option<&Path>,
+    opencode_auth_source: Option<&Path>,
+) -> Result<(), String> {
+    use orgbot_proto::agent::CliKind;
+
+    if cli == CliKind::Antigravity {
+        return Err("Antigravity is unavailable in the protected workspace because no verified isolated authentication source is configured".into());
+    }
+
+    if !mount.is_absolute() {
+        return Err("isolated CLI home mount must be absolute".into());
+    }
+    ensure_private_path(home)?;
+    for directory in [".config", ".local", ".local/share", ".cache"] {
+        ensure_private_directory(&home.join(directory))?;
+    }
+
+    let relay_command = room_socket
+        .map(|socket| {
+            let relay = crate::agent_cli::resolve_mcp_relay_binary()?;
+            Ok::<_, String>((
+                relay.to_string_lossy().into_owned(),
+                socket.to_string_lossy().into_owned(),
+            ))
+        })
+        .transpose()?;
+    match cli {
+        CliKind::OpenCode => {
+            let provider = opencode_provider(model)?;
+            if let Some(source) = opencode_auth_source {
+                copy_opencode_auth_from(source, home, &provider)?;
+            } else {
+                copy_opencode_auth(home, &provider)?;
+            }
+            let opencode_config_dir = home.join(".config/opencode");
+            ensure_opencode_config_dir(&opencode_config_dir)?;
+            let legacy_config_dir = home.join(".opencode");
+            ensure_opencode_config_dir(&legacy_config_dir)?;
+            ensure_private_directory(&home.join(".local/state"))?;
+            ensure_private_directory(&home.join(".cache"))?;
+            ensure_private_directory(&home.join(".orgbot-empty-opencode-system"))?;
+            let mut mcp = serde_json::Map::new();
+            if let Some((relay, socket)) = &relay_command {
+                mcp.insert(
+                    "orgbot_room".into(),
+                    serde_json::json!({
+                        "type": "local",
+                        "command": [relay, "room-mcp", "--socket", socket],
+                        "enabled": true
+                    }),
+                );
+            }
+            let mut permission = serde_json::Map::new();
+            permission.insert("*".into(), serde_json::json!("deny"));
+            if room_socket.is_some() {
+                permission.insert("orgbot_room_*".into(), serde_json::json!("allow"));
+            }
+            let config = serde_json::json!({
+                "$schema": "https://opencode.ai/config.json",
+                "mcp": mcp,
+                "permission": permission,
+                "plugin": []
+            });
+            write_private_file(
+                &home.join("opencode.json"),
+                &serde_json::to_vec(&config)
+                    .map_err(|e| format!("encode OpenCode profile: {e}"))?,
+            )
+        }
+        CliKind::Antigravity => unreachable!("Antigravity is rejected before profile generation"),
+        _ => {
+            Err("isolated profile generation is only available for OpenCode and Antigravity".into())
+        }
+    }
+}
+
+fn opencode_provider(model: &str) -> Result<String, String> {
+    let (provider, model_name) = model
+        .split_once('/')
+        .ok_or("OpenCode model must include a provider prefix")?;
+    if provider.is_empty()
+        || model_name.is_empty()
+        || !provider
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("OpenCode model has an invalid provider prefix".into());
+    }
+    Ok(provider.to_owned())
+}
+
+fn ensure_opencode_config_dir(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    ensure_private_directory(path)?;
+    let entries = std::fs::read_dir(path)
+        .map_err(|e| format!("read private OpenCode config directory: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read private OpenCode config entry: {e}"))?;
+    match entries.as_slice() {
+        [] => write_private_file(&path.join(".gitignore"), OPENCODE_CONFIG_GITIGNORE),
+        [entry] if entry.file_name() == ".gitignore" => {
+            let marker = entry.path();
+            let meta = std::fs::symlink_metadata(&marker)
+                .map_err(|e| format!("inspect OpenCode config marker: {e}"))?;
+            if !meta.is_file()
+                || meta.file_type().is_symlink()
+                || meta.uid() != current_uid()
+                || meta.nlink() != 1
+                || meta.mode() & 0o077 != 0
+                || std::fs::read(&marker)
+                    .map_err(|e| format!("read OpenCode config marker: {e}"))?
+                    != OPENCODE_CONFIG_GITIGNORE
+            {
+                return Err("private OpenCode config directory has an unsafe marker".into());
+            }
+            Ok(())
+        }
+        _ => Err("private OpenCode config directory contains unmanaged files".into()),
+    }
+}
+
+fn clear_private_opencode_auth(destination: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(destination) {
+        Ok(meta)
+            if !meta.is_file()
+                || meta.file_type().is_symlink()
+                || meta.uid() != current_uid()
+                || meta.nlink() != 1 =>
+        {
+            Err("unsafe private OpenCode auth file".into())
+        }
+        Ok(_) => std::fs::remove_file(destination)
+            .map_err(|e| format!("remove stale private OpenCode auth: {e}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("inspect private OpenCode auth file: {error}")),
+    }
+}
+
+fn copy_opencode_auth(home: &Path, provider: &str) -> Result<(), String> {
+    let source_home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
+    let source_data = match std::env::var_os("XDG_DATA_HOME") {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(source_home).join(".local/share"),
+    };
+    if !source_data.is_absolute() {
+        return Err("OpenCode XDG data directory must be absolute".into());
+    }
+    copy_opencode_auth_from(&source_data.join("opencode/auth.json"), home, provider)
+}
+
+fn copy_opencode_auth_from(source: &Path, home: &Path, provider: &str) -> Result<(), String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let destination = home.join(".local/share/opencode/auth.json");
+    ensure_private_directory(&home.join(".local"))?;
+    ensure_private_directory(&home.join(".local/share"))?;
+    ensure_private_directory(&home.join(".local/share/opencode"))?;
+    match std::fs::symlink_metadata(&destination) {
+        Ok(meta)
+            if !meta.is_file()
+                || meta.file_type().is_symlink()
+                || meta.uid() != current_uid()
+                || meta.nlink() != 1
+                || meta.mode() & 0o077 != 0 =>
+        {
+            return Err("unsafe private OpenCode auth file".into());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("inspect private OpenCode auth file: {error}")),
+    }
+    let parent = source
+        .parent()
+        .ok_or("OpenCode auth file has no parent directory")?;
+    if !source.is_absolute()
+        || parent
+            .canonicalize()
+            .map_err(|e| format!("verify OpenCode auth directory: {e}"))?
+            != parent
+    {
+        return Err("OpenCode auth file path contains symlink or relative components".into());
+    }
+    let meta = match std::fs::symlink_metadata(source) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::symlink_metadata(&destination).is_ok() {
+                std::fs::remove_file(&destination)
+                    .map_err(|e| format!("remove stale private OpenCode auth: {e}"))?;
+            }
+            return Err(
+                "OpenCode auth.json was not found; sign in to OpenCode on this host first".into(),
+            );
+        }
+        Err(error) => return Err(format!("inspect OpenCode auth file: {error}")),
+    };
+    if !meta.is_file()
+        || meta.file_type().is_symlink()
+        || meta.uid() != current_uid()
+        || meta.nlink() != 1
+        || meta.len() > OPENCODE_AUTH_MAX_BYTES
+    {
+        return Err("OpenCode auth file is unsafe or exceeds the 4 MiB limit".into());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).custom_flags(0x20000); // O_NOFOLLOW
+    let input = options
+        .open(source)
+        .map_err(|e| format!("open OpenCode auth file: {e}"))?;
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    input
+        .take(OPENCODE_AUTH_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read OpenCode auth file: {e}"))?;
+    if bytes.len() as u64 != meta.len() || bytes.len() as u64 > OPENCODE_AUTH_MAX_BYTES {
+        return Err("OpenCode auth file changed or exceeds the 4 MiB limit".into());
+    }
+    let auth: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(auth) => auth,
+        Err(_) => {
+            clear_private_opencode_auth(&destination)?;
+            return Err("OpenCode auth.json is not valid JSON".into());
+        }
+    };
+    let providers = auth
+        .as_object()
+        .ok_or("OpenCode auth.json has an unsupported format")?;
+    let Some(selected) = providers.get(provider) else {
+        clear_private_opencode_auth(&destination)?;
+        return Err(format!(
+            "OpenCode auth.json has no credential for provider {provider}"
+        ));
+    };
+    let selected = selected
+        .as_object()
+        .ok_or("OpenCode provider credential has an unsupported format")?;
+    let kind = selected
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("OpenCode provider credential has no supported type")?;
+    if kind == "oauth" {
+        clear_private_opencode_auth(&destination)?;
+        return Err("OpenCode OAuth credential sharing is not verified; use the CLI directly. OrgBots will not change authentication or billing.".into());
+    }
+    if kind != "api" {
+        clear_private_opencode_auth(&destination)?;
+        return Err(format!(
+            "OpenCode provider credential type {kind} is not allowed in the protected workspace"
+        ));
+    }
+    let Some(key) = selected
+        .get("key")
+        .and_then(serde_json::Value::as_str)
+        .filter(|key| !key.trim().is_empty())
+    else {
+        clear_private_opencode_auth(&destination)?;
+        return Err(format!(
+            "OpenCode API credential for provider {provider} has no non-empty key"
+        ));
+    };
+    let scoped = serde_json::json!({provider: {"type": "api", "key": key}});
+    let scoped_bytes = serde_json::to_vec(&scoped)
+        .map_err(|e| format!("encode selected OpenCode credential: {e}"))?;
+    write_private_file(&destination, &scoped_bytes)?;
+    let copied = std::fs::symlink_metadata(&destination)
+        .map_err(|e| format!("inspect copied OpenCode auth file: {e}"))?;
+    if !copied.is_file()
+        || copied.file_type().is_symlink()
+        || copied.uid() != current_uid()
+        || copied.nlink() != 1
+        || copied.mode() & 0o077 != 0
+        || copied.len() != scoped_bytes.len() as u64
+    {
+        return Err("copied OpenCode auth file failed private-profile validation".into());
+    }
+    Ok(())
 }
 
 pub fn helper() -> Result<PathBuf, String> {
@@ -373,6 +679,38 @@ pub fn private_home(
         return Err("workspace helper returned an unexpected CLI home".into());
     }
     private_home_from(profile_root, Path::new(&original), resume_id)
+}
+
+/// Create an empty private HOME for CLIs that must not inherit any other
+/// provider's credentials, extensions, or settings.
+pub fn private_home_for_new_cli(home: &Path) -> Result<PathBuf, String> {
+    let profile_root = home
+        .parent()
+        .ok_or("private CLI home has no profile root")?;
+    ensure_private_path(profile_root)?;
+    ensure_private_directory(profile_root)?;
+    ensure_private_directory(home)?;
+    Ok(home.to_path_buf())
+}
+
+fn ensure_private_path(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("private CLI home path must be absolute".into());
+    }
+    let mut current = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir => continue,
+            std::path::Component::Normal(part) => current.push(part),
+            _ => return Err("private CLI home contains an unsafe path component".into()),
+        }
+        let metadata = std::fs::symlink_metadata(&current)
+            .map_err(|e| format!("inspect private CLI home path: {e}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err("private CLI home path contains a symlink".into());
+        }
+    }
+    Ok(())
 }
 
 fn private_home_from(
@@ -648,6 +986,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn new_cli_private_home_does_not_seed_other_provider_profiles() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp();
+        let source = root.join("source");
+        let profile_root = root.join("profile");
+        let home = profile_root.join("home-opencode");
+        std::fs::create_dir_all(source.join(".codex")).unwrap();
+        std::fs::write(source.join(".codex/auth.json"), "other-provider-secret").unwrap();
+        std::fs::create_dir_all(&profile_root).unwrap();
+        private_home_for_new_cli(&home).unwrap();
+        assert!(!home.join(".codex/auth.json").exists());
+        assert!(!home.join(".claude").exists());
+        assert!(!home.join(".grok").exists());
+        let linked_root = root.join("linked-profile");
+        symlink(&profile_root, &linked_root).unwrap();
+        assert!(private_home_for_new_cli(&linked_root.join("home-opencode")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn profile_copy_preserves_session_files_privately_and_refuses_second_turn_symlink() {
         use std::os::unix::fs::symlink;
         let root = temp();
@@ -785,6 +1145,280 @@ mod tests {
         let clean = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
         assert!(!clean.contains("orgbot_room"));
         assert!(clean.contains("model = \"gpt-6.1-sol\""));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_cli_profiles_contain_only_private_room_mcp_and_deny_direct_tools() {
+        use orgbot_proto::agent::CliKind;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp();
+        let home = root.join("home");
+        let mount = Path::new("/run/user/1000/orgbot-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let auth_source = root.join("host-data/opencode/auth.json");
+        std::fs::create_dir_all(auth_source.parent().unwrap()).unwrap();
+        std::fs::write(
+            &auth_source,
+            serde_json::to_vec(&serde_json::json!({
+                "openai": {"type": "api", "key": "test-only-auth-sentinel", "refresh": "drop-this", "expires": 123},
+                "anthropic": {"type": "api", "key": "must-not-copy"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&auth_source, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        configure_new_cli_profile_inner(
+            &home,
+            mount,
+            CliKind::OpenCode,
+            "openai/gpt-6.1-sol",
+            Some(Path::new("/run/user/1000/orgbot-room-mcp.sock")),
+            Some(&auth_source),
+        )
+        .unwrap();
+        let opencode: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("opencode.json")).unwrap()).unwrap();
+        assert_eq!(opencode["permission"]["*"], "deny");
+        assert_eq!(opencode["permission"]["orgbot_room_*"], "allow");
+        assert_eq!(opencode["mcp"]["orgbot_room"]["command"][1], "room-mcp");
+        assert_eq!(
+            opencode["mcp"]["orgbot_room"]["command"][3],
+            "/run/user/1000/orgbot-room-mcp.sock"
+        );
+        assert_eq!(opencode["plugin"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            std::fs::read(home.join(".config/opencode/.gitignore")).unwrap(),
+            OPENCODE_CONFIG_GITIGNORE
+        );
+        assert_eq!(
+            std::fs::read(home.join(".opencode/.gitignore")).unwrap(),
+            OPENCODE_CONFIG_GITIGNORE
+        );
+        for path in [".local/share", ".local/state", ".cache"] {
+            assert!(home.join(path).is_dir());
+        }
+        let private_auth = home.join(".local/share/opencode/auth.json");
+        let copied_auth: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&private_auth).unwrap()).unwrap();
+        assert_eq!(copied_auth.as_object().unwrap().len(), 1);
+        assert_eq!(copied_auth["openai"]["key"], "test-only-auth-sentinel");
+        assert_eq!(copied_auth["openai"].as_object().unwrap().len(), 2);
+        assert!(copied_auth["openai"].get("refresh").is_none());
+        assert!(copied_auth.get("anthropic").is_none());
+        assert_eq!(
+            std::fs::metadata(&private_auth)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        std::fs::write(
+            &private_auth,
+            serde_json::to_vec(&serde_json::json!({
+                "openai": {"type": "api", "key": "private-modification"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        configure_new_cli_profile_inner(
+            &home,
+            mount,
+            CliKind::OpenCode,
+            "openai/gpt-6.1-sol",
+            Some(Path::new("/run/user/1000/orgbot-room-mcp.sock")),
+            Some(&auth_source),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&private_auth).unwrap())
+                .unwrap()["openai"]["key"],
+            "test-only-auth-sentinel"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&auth_source).unwrap())
+                .unwrap()["anthropic"]["key"],
+            "must-not-copy"
+        );
+        std::fs::write(
+            &auth_source,
+            serde_json::to_vec(&serde_json::json!({
+                "openai": {"type": "oauth", "access": "test-only-oauth"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(configure_new_cli_profile_inner(
+            &home,
+            mount,
+            CliKind::OpenCode,
+            "openai/gpt-6.1-sol",
+            None,
+            Some(&auth_source),
+        )
+        .unwrap_err()
+        .contains("OAuth credential sharing is not verified"));
+        assert!(
+            !private_auth.exists(),
+            "unsupported OAuth must clear the prior API clone"
+        );
+        std::fs::write(
+            &auth_source,
+            serde_json::to_vec(&serde_json::json!({
+                "openai": {"type": "wellknown", "key": "must-not-copy"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(configure_new_cli_profile_inner(
+            &home,
+            mount,
+            CliKind::OpenCode,
+            "openai/gpt-6.1-sol",
+            None,
+            Some(&auth_source),
+        )
+        .unwrap_err()
+        .contains("type wellknown is not allowed"));
+        std::fs::write(
+            &auth_source,
+            serde_json::to_vec(&serde_json::json!({
+                "openai": {"type": "api", "key": "refreshed-test-only-auth"},
+                "anthropic": {"type": "api", "key": "must-not-copy"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        configure_new_cli_profile_inner(
+            &home,
+            mount,
+            CliKind::OpenCode,
+            "openai/gpt-6.1-sol",
+            Some(Path::new("/run/user/1000/orgbot-room-mcp.sock")),
+            Some(&auth_source),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&private_auth).unwrap())
+                .unwrap()["openai"]["key"],
+            "refreshed-test-only-auth"
+        );
+        std::fs::remove_file(&auth_source).unwrap();
+        assert!(configure_new_cli_profile_inner(
+            &home,
+            mount,
+            CliKind::OpenCode,
+            "openai/gpt-6.1-sol",
+            None,
+            Some(&auth_source),
+        )
+        .is_err());
+        assert!(!private_auth.exists(), "stale auth copy must be removed");
+
+        assert!(configure_new_cli_profile_inner(
+            &home,
+            mount,
+            CliKind::Antigravity,
+            "gemini-3.5-pro",
+            Some(Path::new("/run/user/1000/orgbot-room-mcp.sock")),
+            Some(&auth_source),
+        )
+        .unwrap_err()
+        .contains("no verified isolated authentication source"));
+        assert!(!home.join(".gemini").exists());
+        strip_private_agent_mcp_config(&home, CliKind::OpenCode).unwrap();
+        clear_private_agent_config(&home, CliKind::Antigravity).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_api_auth_requires_a_nonempty_string_key() {
+        use orgbot_proto::agent::CliKind;
+
+        let root = temp();
+        let source = root.join("auth.json");
+        let invalid_credentials = [
+            serde_json::json!({"type": "api"}),
+            serde_json::json!({"type": "api", "key": null}),
+            serde_json::json!({"type": "api", "key": ""}),
+            serde_json::json!({"type": "api", "key": "   "}),
+        ];
+        for (index, credential) in invalid_credentials.into_iter().enumerate() {
+            let home = root.join(format!("home-{index}"));
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(
+                &source,
+                serde_json::to_vec(&serde_json::json!({"openai": credential})).unwrap(),
+            )
+            .unwrap();
+            assert!(configure_new_cli_profile_inner(
+                &home,
+                Path::new("/run/user/1000/orgbot-home"),
+                CliKind::OpenCode,
+                "openai/gpt-6.1-sol",
+                None,
+                Some(&source),
+            )
+            .unwrap_err()
+            .contains("no non-empty key"));
+            assert!(!home.join(".local/share/opencode/auth.json").exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_cli_profile_without_room_socket_keeps_only_scoped_opencode_auth() {
+        use orgbot_proto::agent::CliKind;
+
+        let root = temp();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let auth_source = root.join("host-data/opencode/auth.json");
+        std::fs::create_dir_all(auth_source.parent().unwrap()).unwrap();
+        std::fs::write(
+            &auth_source,
+            serde_json::to_vec(&serde_json::json!({
+                "openai": {"type": "api", "key": "test-only-auth-sentinel"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        configure_new_cli_profile_inner(
+            &home,
+            Path::new("/run/user/1000/orgbot-home"),
+            CliKind::OpenCode,
+            "openai/gpt-6.1-sol",
+            None,
+            Some(&auth_source),
+        )
+        .unwrap();
+        assert!(configure_new_cli_profile_inner(
+            &home,
+            Path::new("/run/user/1000/orgbot-home"),
+            CliKind::Antigravity,
+            "gemini-3.5-pro",
+            None,
+            Some(&auth_source),
+        )
+        .unwrap_err()
+        .contains("no verified isolated authentication source"));
+        let opencode: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("opencode.json")).unwrap()).unwrap();
+        assert!(opencode["mcp"].as_object().unwrap().is_empty());
+        assert_eq!(opencode["permission"]["*"], "deny");
+        assert!(opencode["permission"].get("orgbot_room_*").is_none());
+        assert!(!home.join(".gemini").exists());
+        let auth: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(home.join(".local/share/opencode/auth.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(auth["openai"]["key"], "test-only-auth-sentinel");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -272,19 +272,22 @@ pub enum ProviderConfig {
         #[serde(default = "default_openai_profile")]
         profile: String,
     },
-    /// Drive an installed agent CLI (codex, claude, or grok) as a real,
+    /// Drive an installed agent CLI as a real,
     /// resumable session in a project folder.
     #[serde(
         alias = "cli",
         alias = "agent",
         alias = "codex_cli",
         alias = "claude_cli",
-        alias = "grok_cli"
+        alias = "grok_cli",
+        alias = "opencode_cli",
+        alias = "antigravity_cli"
     )]
     CliAgent {
-        /// Which CLI: `codex`, `claude`, or `grok`.
+        /// Which CLI: `codex`, `claude`, `grok`, `opencode`, or `antigravity`.
         cli: CliKind,
-        /// Model id, or empty for the CLI's default.
+        /// Model id; OpenCode and Antigravity require an explicit selection.
+        /// Other CLIs accept empty to use their default.
         #[serde(default)]
         model: String,
         /// Project folder the agent works in. Empty inherits the process directory.
@@ -932,6 +935,35 @@ mod tests {
         let resolved = config.resolve().unwrap();
         assert_eq!(resolved.bots[0].spec.autonomy.max_turns_per_task, 8);
         assert!(resolved.bots[0].spec.autonomy.may_inspect);
+    }
+
+    #[test]
+    fn opencode_and_antigravity_room_configs_preserve_provider_identity() {
+        for (name, cli, backend) in [
+            ("opencode", CliKind::OpenCode, "cli:opencode"),
+            ("antigravity", CliKind::Antigravity, "cli:agy"),
+            ("agy", CliKind::Antigravity, "cli:agy"),
+        ] {
+            let config = RoomConfig::parse(
+                &format!(
+                    r#"
+                    [room]
+                    name = "CLI fixture"
+                    goal = "Check provider routing"
+                    [[bots]]
+                    handle = "worker"
+                    provider = {{ kind = "cli_agent", cli = "{name}", model = "", workdir = ".", mcp = true, policy = "workspace_write" }}
+                    "#
+                ),
+                "cli-fixture.toml",
+            )
+            .unwrap();
+            let reference = config.bots[0].provider.to_ref();
+            assert_eq!(reference.backend(), backend);
+            assert!(matches!(reference, ProviderRef::CliAgent {
+                cli: parsed, mcp: true, policy: AgentPolicy::WorkspaceWrite, ..
+            } if parsed == cli));
+        }
     }
 
     #[test]

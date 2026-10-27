@@ -1,10 +1,7 @@
-// Bots backed by the agent CLIs already signed in on this machine.
+// Legacy Dart bot execution for Claude, Codex, and Grok CLIs.
 //
-// This is the answer to "I have subscriptions, stop asking me for API keys".
-// A bot backed by `claude`, `codex` or `grok` spawns that CLI, which brings its
-// own sign-in — so a Claude Pro/Max, ChatGPT/Codex or Grok subscription is used
-// directly and no key is ever entered or stored. Only a raw API endpoint such
-// as DeepSeek still needs one.
+// OpenCode and Antigravity are deliberately rejected by this unprotected
+// runner. They are available only through the protected Linux runtime.
 //
 // The invocations here mirror orgbot-providers::agent_cli in the Rust core,
 // which is the proven version; the difference is what comes back. The Rust
@@ -28,7 +25,9 @@ import 'runner.dart';
 enum CliKind {
   claude('claude', 'Anthropic', 'Claude Pro/Max sign-in'),
   codex('codex', 'Codex / ChatGPT', 'ChatGPT sign-in'),
-  grok('grok', 'Grok', 'grok.com sign-in');
+  grok('grok', 'Grok', 'grok.com sign-in'),
+  opencode('opencode', 'OpenCode', 'OpenCode CLI configuration'),
+  antigravity('agy', 'Antigravity', 'Antigravity CLI configuration');
 
   /// The binary name on PATH.
   final String binary;
@@ -40,6 +39,9 @@ enum CliKind {
   final String signInNote;
 
   const CliKind(this.binary, this.label, this.signInNote);
+
+  bool get requiresProtectedRuntime =>
+      this == CliKind.opencode || this == CliKind.antigravity;
 
   static CliKind? fromBinary(String name) {
     for (final k in values) {
@@ -69,14 +71,23 @@ class CliStatus {
 /// carry. Keep this order aligned with the Rust core's `locate` implementation.
 CliStatus findCli(CliKind cli, {String? path, String? home}) {
   if (!canRunAgentClis) {
-    return const CliStatus(null,
-        'Agent CLIs run on desktop only — this platform cannot start one.');
+    return const CliStatus(
+      null,
+      'Agent CLIs run on desktop only — this platform cannot start one.',
+    );
+  }
+  if (cli.requiresProtectedRuntime && !Platform.isLinux) {
+    return const CliStatus(
+      null,
+      'This CLI requires the protected Linux runtime.',
+    );
   }
   final searchHome = home ?? Platform.environment['HOME'] ?? '';
   final candidates = <String>[
     for (final dir in (path ?? Platform.environment['PATH'] ?? '').split(':'))
       if (dir.isNotEmpty) '$dir/${cli.binary}',
     if (searchHome.isNotEmpty) ...[
+      if (cli == CliKind.opencode) '$searchHome/.opencode/bin/${cli.binary}',
       '$searchHome/.local/bin/${cli.binary}',
       '$searchHome/.npm-global/bin/${cli.binary}',
       '$searchHome/.grok/bin/${cli.binary}',
@@ -86,7 +97,9 @@ CliStatus findCli(CliKind cli, {String? path, String? home}) {
     if (_isExecutable(candidate)) return CliStatus(candidate, null);
   }
   return CliStatus(
-      null, '${cli.binary} is not installed, or not on this app\'s PATH.');
+    null,
+    '${cli.binary} is not installed, or not on this app\'s PATH.',
+  );
 }
 
 bool _isExecutable(String path) {
@@ -176,6 +189,11 @@ class AgentCliBot implements BotProvider {
 
   @override
   Future<BotTurn> act({required String situation}) async {
+    if (cli.requiresProtectedRuntime) {
+      throw UnsupportedError(
+        '${cli.label} requires the protected Linux runtime.',
+      );
+    }
     // A fresh session needs the standing brief and the protocol; a resumed one
     // already has both and only needs what changed, which keeps each turn's
     // prompt small.
@@ -200,7 +218,8 @@ class AgentCliBot implements BotProvider {
       final complaint = result.stderr.trim();
       if (result.exitCode != 0 && complaint.isNotEmpty) {
         throw EngineError(
-            '${cli.binary} exited ${result.exitCode}: ${_firstLines(complaint, 3)}');
+          '${cli.binary} exited ${result.exitCode}: ${_firstLines(complaint, 3)}',
+        );
       }
       return const BotTurn();
     }
@@ -230,7 +249,8 @@ class AgentCliBot implements BotProvider {
     } catch (_) {
       process.kill(ProcessSignal.sigkill);
       throw EngineError(
-          '${cli.binary} did not finish within ${timeoutSeconds}s; the turn was abandoned.');
+        '${cli.binary} did not finish within ${timeoutSeconds}s; the turn was abandoned.',
+      );
     }
     return CliResult(code, out.toString(), err.toString());
   }
@@ -238,8 +258,12 @@ class AgentCliBot implements BotProvider {
   /// The standing explanation of how to act on the board, sent once per session.
   String _protocol() {
     final buffer = StringBuffer()
-      ..writeln('You are @$handle, one bot in a room of bots sharing a task board.')
-      ..writeln('You act by replying with a single JSON object and nothing else.')
+      ..writeln(
+        'You are @$handle, one bot in a room of bots sharing a task board.',
+      )
+      ..writeln(
+        'You act by replying with a single JSON object and nothing else.',
+      )
       ..writeln('')
       ..writeln('Shape:')
       ..writeln('  {"say": "<optional message to the room>",')
@@ -247,14 +271,17 @@ class AgentCliBot implements BotProvider {
       ..writeln('')
       ..writeln('Tools you may call:');
     for (final tool in engineTools()) {
-      final props = (tool.inputSchema['properties'] as Map?)?.keys.join(', ') ?? '';
+      final props =
+          (tool.inputSchema['properties'] as Map?)?.keys.join(', ') ?? '';
       buffer.writeln('  ${tool.name}($props) — ${tool.description}');
     }
     buffer
       ..writeln('')
-      ..writeln('Rules: claim a task before working it; record your work with '
-          'add_artifact then submit_for_review; you may not inspect your own '
-          'work. Return {"actions": []} when there is nothing useful to do.')
+      ..writeln(
+        'Rules: claim a task before working it; record your work with '
+        'add_artifact then submit_for_review; you may not inspect your own '
+        'work. Return {"actions": []} when there is nothing useful to do.',
+      )
       ..writeln(_replyContract());
     return buffer.toString();
   }
@@ -301,15 +328,32 @@ List<String> buildArgs({
         args.addAll(['exec', '--json', '--skip-git-repo-check', prompt]);
       } else {
         // A resumed session keeps the sandbox it started with, so no -s here.
-        args.addAll(
-            ['exec', 'resume', '--json', '--skip-git-repo-check', resumed, prompt]);
+        args.addAll([
+          'exec',
+          'resume',
+          '--json',
+          '--skip-git-repo-check',
+          resumed,
+          prompt,
+        ]);
       }
     case CliKind.claude:
-      args.addAll(['-p', prompt, '--output-format', 'stream-json', '--verbose']);
+      args.addAll([
+        '-p',
+        prompt,
+        '--output-format',
+        'stream-json',
+        '--verbose',
+      ]);
       if (resumed != null) args.addAll(['--resume', resumed]);
     case CliKind.grok:
       args.addAll(['-p', prompt, '--output-format', 'streaming-messages-json']);
       if (resumed != null) args.addAll(['-r', resumed]);
+    case CliKind.opencode:
+    case CliKind.antigravity:
+      throw UnsupportedError(
+        '${cli.label} requires the protected Linux runtime.',
+      );
   }
   if (model.isNotEmpty) args.addAll(['-m', model]);
   return args;
@@ -321,6 +365,11 @@ List<String> buildArgs({
 /// Anthropic wire shape as NDJSON. Lines that are not JSON are banners or
 /// warnings and are skipped rather than failing the turn.
 Episode parseEpisode(CliKind cli, String stdout) {
+  if (cli.requiresProtectedRuntime) {
+    throw UnsupportedError(
+      '${cli.label} requires the protected Linux runtime.',
+    );
+  }
   final episode = Episode();
   for (final line in const LineSplitter().convert(stdout)) {
     final trimmed = line.trim();
@@ -374,7 +423,9 @@ void _absorbAnthropicStyle(Map<String, Object?> event, Episode episode) {
       final content = message['content'];
       if (content is List) {
         for (final block in content) {
-          if (block is Map && block['type'] == 'text' && block['text'] is String) {
+          if (block is Map &&
+              block['type'] == 'text' &&
+              block['text'] is String) {
             episode.write(block['text'] as String);
           }
         }
@@ -414,10 +465,12 @@ BotTurn parseAgentReply(String reply) {
       final name = action['tool'] ?? action['name'];
       if (name is! String || name.isEmpty) continue;
       final rawArgs = action['args'] ?? action['arguments'] ?? const {};
-      calls.add(ToolCall(
-        name,
-        rawArgs is Map ? rawArgs.cast<String, Object?>() : const {},
-      ));
+      calls.add(
+        ToolCall(
+          name,
+          rawArgs is Map ? rawArgs.cast<String, Object?>() : const {},
+        ),
+      );
     }
   }
   final said = decoded['say'] ?? decoded['text'] ?? decoded['message'];

@@ -4,6 +4,7 @@
 //
 // ignore_for_file: prefer_interpolation_to_compose_strings
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -67,15 +68,17 @@ void main() {
     );
   });
 
-  test('a room saved before the setting existed picks up the safer default',
-      () {
-    final restored = RoomDef.fromJson({
-      'id': 'room_old',
-      'name': 'Existing',
-      'goal': 'carry on',
-    });
-    expect(restored.parallelTurns, defaultParallelTurns);
-  });
+  test(
+    'a room saved before the setting existed picks up the safer default',
+    () {
+      final restored = RoomDef.fromJson({
+        'id': 'room_old',
+        'name': 'Existing',
+        'goal': 'carry on',
+      });
+      expect(restored.parallelTurns, defaultParallelTurns);
+    },
+  );
 
   // ---------------------------------------------------------- Claude on a phone
   //
@@ -84,17 +87,20 @@ void main() {
   // credential is carried across and the engine calls the Messages API directly.
   // The list of models offered has to match the route taken, and it did not.
 
-  test('a device with no CLI is offered model ids, not Claude Code aliases', () {
-    final onPhone = ModelCatalog.claudeModels(viaCli: false);
-    expect(onPhone, isNotEmpty);
-    for (final option in onPhone) {
-      expect(
-        option.id,
-        startsWith('claude-'),
-        reason: '`${option.id}` is an alias the Messages API will not accept',
-      );
-    }
-  });
+  test(
+    'a device with no CLI is offered model ids, not Claude Code aliases',
+    () {
+      final onPhone = ModelCatalog.claudeModels(viaCli: false);
+      expect(onPhone, isNotEmpty);
+      for (final option in onPhone) {
+        expect(
+          option.id,
+          startsWith('claude-'),
+          reason: '`${option.id}` is an alias the Messages API will not accept',
+        );
+      }
+    },
+  );
 
   test('a computer with the CLI keeps the aliases, which follow the plan', () {
     final ids = ModelCatalog.claudeModels(
@@ -195,17 +201,37 @@ void main() {
     expect(file.skipped, isEmpty);
   });
 
-  test('each CLI maps to its own binary', () {
+  test('each CLI maps to its canonical runtime name without auth env', () {
+    if (!Platform.isLinux) return;
     for (final pair in [
       (ProviderKind.anthropic, 'claude'),
       (ProviderKind.codex, 'codex'),
       (ProviderKind.grok, 'grok'),
+      (ProviderKind.opencode, 'opencode'),
+      (ProviderKind.antigravity, 'antigravity'),
     ]) {
       final file = buildRoomFile(room(), [
         BotDef(name: 'b', handle: 'b', provider: pair.$1),
-      ]);
+      ], canRunClis: true);
       expect(file.toml, contains('cli = "${pair.$2}"'));
+      expect(file.environment, isEmpty);
+      expect(file.skipped, isEmpty);
     }
+  });
+
+  test('protected CLI providers are skipped outside the Linux runtime', () {
+    final file = buildRoomFile(room(), [
+      BotDef(name: 'OpenCode', handle: 'open', provider: ProviderKind.opencode),
+      BotDef(
+        name: 'Antigravity',
+        handle: 'agy',
+        provider: ProviderKind.antigravity,
+      ),
+    ], canRunClis: false);
+    expect(file.toml, isNot(contains('kind = "cli_agent"')));
+    expect(file.environment, isEmpty);
+    expect(file.skipped, hasLength(2));
+    expect(file.skipped.join(' '), contains('protected Linux runtime'));
   });
 
   test('desktop CLI rooms ignore saved phone OAuth credentials', () async {
@@ -514,14 +540,22 @@ void _roleTableTests() {
     /// The widest substitution in the catalogue, and a deliberate one.
     test('security can be covered by a reviewer or an architect', () {
       final file = buildRoomFile(room(), [
-        BotDef(name: 'alice', provider: ProviderKind.scripted, role: 'security'),
+        BotDef(
+          name: 'alice',
+          provider: ProviderKind.scripted,
+          role: 'security',
+        ),
         BotDef(name: 'bob', provider: ProviderKind.scripted, role: 'reviewer'),
-        BotDef(name: 'carol', provider: ProviderKind.scripted, role: 'architect'),
+        BotDef(
+          name: 'carol',
+          provider: ProviderKind.scripted,
+          role: 'architect',
+        ),
       ]);
 
-      final section = file.toml.split('[[roles]]').firstWhere(
-            (part) => part.contains('name = "security"'),
-          );
+      final section = file.toml
+          .split('[[roles]]')
+          .firstWhere((part) => part.contains('name = "security"'));
       expect(section, contains('capabilities = ["audit", "review"]'));
       expect(
         section,
@@ -534,13 +568,17 @@ void _roleTableTests() {
     /// holder rather than naming stand-ins that are not there.
     test('security stand-ins are only named when the room has them', () {
       final file = buildRoomFile(room(), [
-        BotDef(name: 'alice', provider: ProviderKind.scripted, role: 'security'),
+        BotDef(
+          name: 'alice',
+          provider: ProviderKind.scripted,
+          role: 'security',
+        ),
         BotDef(name: 'bob', provider: ProviderKind.scripted, role: 'engineer'),
       ]);
 
-      final section = file.toml.split('[[roles]]').firstWhere(
-            (part) => part.contains('name = "security"'),
-          );
+      final section = file.toml
+          .split('[[roles]]')
+          .firstWhere((part) => part.contains('name = "security"'));
       expect(section, isNot(contains('fallbacks')));
     });
   });

@@ -432,6 +432,72 @@ Path('/tmp/private.txt').write_text('temporary')
         self.assertEqual((work / "cwd-check").read_text(encoding="utf-8"), "yes")
         self.assertFalse((self.project / "cwd-check").exists())
 
+    def test_antigravity_fails_before_spawn_without_verified_isolated_auth(self):
+        (self.project / ".agents").mkdir()
+        hook_source = self.project / ".agents/hooks.json"
+        hook_source.write_text('{"hooks":{"startup":"must-remain-inert"}}', encoding="utf-8")
+        work = self.prepare("agy")
+        hook_copy = work / ".agents/hooks.json"
+        marker = self.root / "agy-was-spawned"
+        command = [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()"]
+        with self.assertRaisesRegex(workspace.WorkspaceError, "no verified isolated authentication source"):
+            workspace._run(
+                os.fspath(self.state), "agy", command,
+                read_only=False, profiles=[], private_home_arg=None,
+                mcp_socket=None, agent_cli="agy",
+            )
+        self.assertFalse(marker.exists())
+        self.assertEqual(hook_source.read_text(encoding="utf-8"), '{"hooks":{"startup":"must-remain-inert"}}')
+        self.assertEqual(hook_copy.read_text(encoding="utf-8"), hook_source.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
+                         "Linux bubblewrap is required")
+    def test_opencode_uses_only_fixed_private_profile_environment(self):
+        self.prepare("opencode")
+        private_home = self.state / "agents" / workspace._project_id(self.project) / "opencode" / "profiles" / "home-opencode"
+        private_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        (private_home / ".config/opencode").mkdir(mode=0o700, parents=True, exist_ok=True)
+        (private_home / ".opencode").mkdir(mode=0o700, exist_ok=True)
+        for relative in (".local/share", ".local/state", ".cache"):
+            (private_home / relative).mkdir(mode=0o700, parents=True, exist_ok=True)
+        marker = b"node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore"
+        (private_home / ".config/opencode/.gitignore").write_bytes(marker)
+        os.chmod(private_home / ".config/opencode/.gitignore", 0o600)
+        (private_home / ".opencode/.gitignore").write_bytes(marker)
+        os.chmod(private_home / ".opencode/.gitignore", 0o600)
+        config = private_home / "opencode.json"
+        config.write_text('{"permission":{"*":"deny"},"mcp":{}}', encoding="utf-8")
+        os.chmod(config, 0o600)
+        code = f"""import os
+from pathlib import Path
+assert os.environ['HOME'] == '/run/user/{os.getuid()}/orgbot-home'
+assert os.environ['OPENCODE_CONFIG'] == os.environ['HOME'] + '/opencode.json'
+assert os.environ['OPENCODE_DISABLE_PROJECT_CONFIG'] == 'true'
+assert 'OPENCODE_DISABLE_DEFAULT_PLUGINS' not in os.environ
+assert os.environ['OPENCODE_PURE'] == 'true'
+assert 'DBUS_SESSION_BUS_ADDRESS' not in os.environ
+assert os.environ['XDG_STATE_HOME'] == os.environ['HOME'] + '/.local/state'
+assert Path(os.environ['OPENCODE_CONFIG']).read_text() == '{{"permission":{{"*":"deny"}},"mcp":{{}}}}'
+Path(os.environ['XDG_DATA_HOME'], 'writable.json').write_text('ok')
+Path(os.environ['XDG_STATE_HOME'], 'writable.json').write_text('ok')
+Path(os.environ['XDG_CACHE_HOME'], 'writable.json').write_text('ok')
+for path in (Path(os.environ['OPENCODE_CONFIG_DIR']), Path(os.environ['HOME']) / '.opencode'):
+    assert (path / '.gitignore').read_bytes() == b'node_modules\\npackage.json\\npackage-lock.json\\nbun.lock\\n.gitignore'
+    try:
+        (path / 'foreign.json').write_text('{{}}')
+    except OSError:
+        pass
+    else:
+        raise AssertionError(f'OpenCode config directory was writable: {{path}}')
+"""
+        with patch.dict(os.environ, {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/host-bus"}):
+            result = workspace._run(
+                os.fspath(self.state), "opencode", [sys.executable, "-c", code],
+                read_only=False, profiles=[], private_home_arg=os.fspath(private_home),
+                mcp_socket=None, agent_cli="opencode",
+            )
+        self.assertEqual(result, 0)
+
     def test_project_lock_is_released_while_child_runs(self):
         self.prepare()
         lock_path = f"/run/user/{os.getuid()}/orgbot-workspace-locks/{workspace._project_id(self.project)}.lock"

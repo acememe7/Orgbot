@@ -1740,7 +1740,9 @@ class _CliSetupState extends State<_CliSetup> {
       children: [
         Text('Agent CLIs', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
-        for (final cli in CliKind.values)
+        for (final cli in CliKind.values.where(
+          (cli) => !cli.requiresProtectedRuntime || Platform.isLinux,
+        ))
           _CliStatusTile(key: ValueKey('cli-${cli.name}'), cli: cli),
         Align(
           alignment: Alignment.centerLeft,
@@ -1832,17 +1834,49 @@ class _CliStatusTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
         child: ListTile(
           title: Text(_cliLabel(cli)),
-          subtitle: Text(
-            status.path ?? status.problem ?? 'Unavailable',
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
-          ),
+          subtitle: cli == CliKind.antigravity
+              ? const Text('Isolated sign-in is not supported yet.')
+              : cli == CliKind.opencode && status.available
+              ? const Text(
+                  'Uses the selected OpenCode API credential. OAuth reuse is unavailable.',
+                )
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      status.path ?? status.problem ?? 'Unavailable',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                    if (cli.requiresProtectedRuntime && status.available)
+                      Text(
+                        'Account status is not checked here.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                  ],
+                ),
           trailing: Text(
-            status.available ? 'Installed' : 'Missing',
+            cli == CliKind.antigravity
+                ? 'Unavailable'
+                : status.available
+                ? cli.requiresProtectedRuntime
+                      ? 'Found'
+                      : 'Installed'
+                : 'Missing',
             style: TextStyle(
               fontSize: 12,
-              color: status.available ? scheme.primary : scheme.error,
+              color: cli == CliKind.antigravity
+                  ? scheme.error
+                  : status.available
+                  ? scheme.primary
+                  : scheme.error,
             ),
           ),
         ),
@@ -1855,6 +1889,8 @@ String _cliLabel(CliKind cli) => switch (cli) {
   CliKind.codex => 'Codex CLI',
   CliKind.claude => 'Claude Code',
   CliKind.grok => 'Grok CLI',
+  CliKind.opencode => 'OpenCode CLI',
+  CliKind.antigravity => 'Antigravity CLI',
 };
 
 /// The bot editor.
@@ -1941,6 +1977,9 @@ class _BotEditorState extends State<_BotEditor> {
     setState(() {
       _models = list;
       _loadingModels = false;
+      if (provider.requiresExplicitModel && _model.isEmpty) {
+        _custom = true;
+      }
       if (!_custom &&
           _model.isEmpty &&
           list.options.isNotEmpty &&
@@ -1957,11 +1996,7 @@ class _BotEditorState extends State<_BotEditor> {
   }
 
   bool get _isSupportedDesktopProvider =>
-      _provider == ProviderKind.anthropic ||
-      _provider == ProviderKind.codex ||
-      _provider == ProviderKind.grok ||
-      _provider == ProviderKind.deepseek ||
-      _provider == ProviderKind.ollama;
+      _isSupportedDesktopProviderFor(_provider);
 
   void _changeProvider(ProviderKind next) {
     setState(() {
@@ -2073,6 +2108,10 @@ class _BotEditorState extends State<_BotEditor> {
                                     ProviderKind.codex,
                                     ProviderKind.anthropic,
                                     ProviderKind.grok,
+                                    if (Platform.isLinux) ...[
+                                      ProviderKind.opencode,
+                                      ProviderKind.antigravity,
+                                    ],
                                     ProviderKind.deepseek,
                                     ProviderKind.ollama,
                                     if (!_isSupportedDesktopProvider) _provider,
@@ -2091,6 +2130,7 @@ class _BotEditorState extends State<_BotEditor> {
                                         k.cli == null ||
                                         widget.desktopClis ||
                                         k.signsInOnDevice ||
+                                        k == _provider ||
                                         ModelCatalog.credentials?.isSignedIn(
                                               k,
                                             ) ==
@@ -2105,6 +2145,11 @@ class _BotEditorState extends State<_BotEditor> {
                                       ? '${k.label} (unavailable here)'
                                       : widget.desktopClis && k.cli != null
                                       ? _cliLabel(k.cli!)
+                                      : !widget.desktopClis &&
+                                            k == _provider &&
+                                            k.cli != null &&
+                                            !k.signsInOnDevice
+                                      ? '${k.label} (desktop only)'
                                       : widget.desktopClis && k.needsApiKey
                                       ? '${k.label} API'
                                       : k.label,
@@ -2167,6 +2212,9 @@ class _BotEditorState extends State<_BotEditor> {
       kind == ProviderKind.anthropic ||
       kind == ProviderKind.codex ||
       kind == ProviderKind.grok ||
+      (Platform.isLinux &&
+          (kind == ProviderKind.opencode ||
+              kind == ProviderKind.antigravity)) ||
       kind == ProviderKind.deepseek ||
       kind == ProviderKind.ollama;
 
@@ -2350,9 +2398,49 @@ class _BotEditorState extends State<_BotEditor> {
         onEditingComplete: () => _loadModels(refresh: true),
       );
     }
-    if (widget.desktopClis && _provider.cli != null) {
+    if (_provider == ProviderKind.antigravity) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          StatusPill(
+            color: scheme.error,
+            label: 'Unavailable',
+            icon: Icons.error_outline,
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Isolated sign-in is not supported yet.',
+            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+          ),
+        ],
+      );
+    }
+    if (widget.desktopClis &&
+        _provider.cli != null &&
+        _isSupportedDesktopProvider) {
       final cli = _provider.cli!;
       final status = findCli(cli);
+      if (cli.requiresProtectedRuntime) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            StatusPill(
+              color: status.available ? scheme.tertiary : Colors.orange,
+              label: status.available
+                  ? '${cli.binary} found · sign-in not checked'
+                  : '${cli.binary} not found',
+              icon: status.available ? Icons.terminal : Icons.error_outline,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              cli == CliKind.opencode
+                  ? 'Uses the selected OpenCode API credential. OAuth reuse is unavailable.'
+                  : 'OrgBots checks only that the executable was found. Account status and any provider charges are not checked here.',
+              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+            ),
+          ],
+        );
+      }
       return StatusPill(
         color: status.available ? scheme.tertiary : Colors.orange,
         label: status.available
@@ -2405,7 +2493,9 @@ class _BotEditorState extends State<_BotEditor> {
         ),
         const SizedBox(height: 6),
         Text(
-          _provider.signsInOnDevice
+          cli.requiresProtectedRuntime
+              ? '${_provider.label} requires the protected Linux desktop runtime; this app cannot use it here.'
+              : _provider.signsInOnDevice
               ? 'Open Sign in and approve ${_provider.label} with the account '
                     'you already pay for. No API key, and nothing to install.'
               : '${cli.binary} runs on Linux only. Install it and sign in, or bring a '
@@ -2488,14 +2578,16 @@ class _BotEditorState extends State<_BotEditor> {
           ],
           decoration: InputDecoration(
             labelText: 'Model',
-            suffixIcon: IconButton(
-              tooltip: 'Reload from the provider',
-              icon: const Icon(Icons.refresh, size: 18),
-              onPressed: () {
-                ModelCatalog.invalidate();
-                _loadModels(refresh: true);
-              },
-            ),
+            suffixIcon: list.source == ModelSource.requiresExplicitModel
+                ? null
+                : IconButton(
+                    tooltip: 'Reload from the provider',
+                    icon: const Icon(Icons.refresh, size: 18),
+                    onPressed: () {
+                      ModelCatalog.invalidate();
+                      _loadModels(refresh: true);
+                    },
+                  ),
           ),
           items: [
             for (final option in list.options)
@@ -2532,15 +2624,23 @@ class _BotEditorState extends State<_BotEditor> {
           const SizedBox(height: 10),
           TextField(
             controller: _customModel,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               labelText: 'Model id',
-              hintText: 'exact id from your provider',
+              hintText: switch (_provider) {
+                ProviderKind.opencode => 'provider/model',
+                ProviderKind.antigravity => 'model slug',
+                _ => 'exact id from your provider',
+              },
             ),
           ),
         ],
         const SizedBox(height: 6),
         Text(
-          widget.desktopClis && _provider.cli != null
+          list.source == ModelSource.requiresExplicitModel
+              ? (_provider == ProviderKind.opencode
+                    ? 'Enter the exact provider/model configured for OpenCode.'
+                    : 'Enter the exact model slug configured for Antigravity.')
+              : widget.desktopClis && _provider.cli != null
               ? (findCli(_provider.cli!).available
                     ? 'Models via ${_provider.cli!.binary} CLI.'
                     : '${_provider.cli!.binary} CLI not found.')
@@ -2549,7 +2649,9 @@ class _BotEditorState extends State<_BotEditor> {
               : list.problem ?? 'Could not load the model list. Try again.',
           style: TextStyle(
             fontSize: 11,
-            color: list.source == ModelSource.live
+            color:
+                list.source == ModelSource.live ||
+                    list.source == ModelSource.requiresExplicitModel
                 ? scheme.onSurfaceVariant
                 : Colors.orange,
           ),
@@ -2593,10 +2695,19 @@ class _BotEditorState extends State<_BotEditor> {
     if (!keepingUnavailable &&
         (_custom ||
             _provider == ProviderKind.ollama ||
+            _provider.requiresExplicitModel ||
             (!widget.desktopClis && _provider != ProviderKind.scripted)) &&
         _resolvedModel.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter a model id, or pick one above')),
+        SnackBar(
+          content: Text(
+            _provider == ProviderKind.opencode
+                ? 'Enter the OpenCode model as provider/model.'
+                : _provider == ProviderKind.antigravity
+                ? 'Enter the Antigravity model slug.'
+                : 'Enter a model id, or pick one above',
+          ),
+        ),
       );
       return;
     }

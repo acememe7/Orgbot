@@ -108,5 +108,13 @@ void main() {
     await tester.pumpAndSettle();
     expect(manager.values['cli:codex']!.requests, 12);
     expect(find.text('12 requests per week'), findsOneWidget);
+    expect(find.text('OpenCode CLI'), findsOneWidget);
+    expect(find.text('Antigravity CLI'), findsOneWidget);
+    await tester.tap(find.text('Antigravity CLI'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField).first, '8');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(manager.values['cli:agy']!.requests, 8);
   });
 }

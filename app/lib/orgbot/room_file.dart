@@ -13,6 +13,8 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
+import 'dart:io';
+
 import '../engine/agent_cli.dart';
 import 'credentials.dart';
 import 'models.dart';
@@ -155,7 +157,15 @@ RoomFile buildRoomFile(
 
     final paired = credentials?.forProvider(bot.provider);
     final cli = bot.provider.cli;
-    if (cli != null && !runsClis && !bot.provider.signsInOnDevice) {
+    if (cli != null &&
+        cli.requiresProtectedRuntime &&
+        (!runsClis || !Platform.isLinux)) {
+      skipped.add(
+        '@$handle: ${bot.provider.label} requires the protected Linux runtime',
+      );
+      _rollbackLastBot(buffer);
+      continue;
+    } else if (cli != null && !runsClis && !bot.provider.signsInOnDevice) {
       skipped.add(
         '@' +
             handle +
@@ -201,7 +211,7 @@ RoomFile buildRoomFile(
       buffer
         ..writeln('[bots.provider]')
         ..writeln('kind = "cli_agent"')
-        ..writeln('cli = ' + _s(cli.binary))
+        ..writeln('cli = ' + _s(cli.name))
         ..writeln('model = ' + _s(bot.model))
         ..writeln('workdir = ' + _s(expandHome(room.path)))
         // The board as MCP tools, on top of the CLI's own memories, skills
@@ -315,6 +325,9 @@ String credentialEnvVar(ProviderKind provider) {
       return 'CODEX_AUTH_TOKEN';
     case ProviderKind.grok:
       return 'GROK_AUTH_TOKEN';
+    case ProviderKind.opencode:
+    case ProviderKind.antigravity:
+      throw StateError('${provider.label} uses its local CLI authentication.');
     case ProviderKind.deepseek:
       return 'DEEPSEEK_API_KEY';
     case ProviderKind.ollama:
