@@ -749,7 +749,54 @@ def _status(state_arg: str, agent_arg: str) -> dict[str, Any]:
         os.close(lock_fd)
 
 
-def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool, profiles: list[str], private_home_arg: str | None, mcp_socket: str | None) -> int:
+def _verify_sandbox_args(workspace: Path, program: list[str]) -> list[str]:
+    """Build a minimal, networkless root for reviewer test commands."""
+    args = [
+        "bwrap", "--die-with-parent", "--new-session", "--unshare-pid",
+        "--unshare-ipc", "--unshare-uts", "--unshare-net",
+        "--size", "1073741824", "--tmpfs", "/",
+        "--dev", "/dev", "--proc", "/proc",
+        "--size", "268435456", "--tmpfs", "/tmp", "--dir", "/tmp/orgbot-workspace",
+        "--size", "67108864", "--tmpfs", "/home", "--dir", "/home/orgbot",
+        "--size", "67108864", "--tmpfs", "/root",
+        "--size", "16777216", "--tmpfs", "/run", "--dir", "/etc",
+    ]
+    # These are runtime files only; the root filesystem starts empty and no
+    # host configuration, user data, state, or profiles are mounted.
+    for source in ("/usr", "/usr/local", "/bin", "/sbin", "/lib", "/lib64"):
+        path = Path(source)
+        if path.exists():
+            args.extend(["--dir", source, "--ro-bind", source, source])
+    cache = Path("/etc/ld.so.cache")
+    if cache.is_file() and not cache.is_symlink():
+        args.extend(["--ro-bind", os.fspath(cache), "/etc/ld.so.cache"])
+    args.extend(["--ro-bind", os.fspath(workspace), "/tmp/orgbot-workspace"])
+
+    safe_path = "/usr/local/bin:/usr/bin:/bin"
+    launch = list(program)
+    first = Path(launch[0])
+    if first.is_absolute():
+        try:
+            relative = first.relative_to(workspace)
+        except ValueError:
+            pass
+        else:
+            launch[0] = f"/tmp/orgbot-workspace/{relative.as_posix()}"
+    elif "/" not in launch[0]:
+        resolved = shutil.which(launch[0], path=safe_path)
+        if resolved is None:
+            _fail(f"Program is not available in the verification PATH: {launch[0]}")
+        launch[0] = os.path.realpath(resolved)
+    args.extend([
+        "--clearenv", "--setenv", "PATH", safe_path,
+        "--setenv", "HOME", "/home/orgbot", "--setenv", "TMPDIR", "/tmp",
+        "--setenv", "LANG", "C.UTF-8", "--setenv", "ORGBOT_WORKSPACE", "/tmp/orgbot-workspace",
+        "--chdir", "/tmp/orgbot-workspace", "--", *launch,
+    ])
+    return args
+
+
+def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool, profiles: list[str], private_home_arg: str | None, mcp_socket: str | None, verify: bool = False) -> int:
     agent = _safe_agent(agent_arg)
     if not program:
         _fail("run requires a program after --")
@@ -773,6 +820,19 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
         _check_private_dir(workspace)
         if not shutil.which("bwrap"):
             _fail("bubblewrap is required; refusing to run without filesystem isolation")
+        if verify:
+            if not read_only or not data["read_only"]:
+                _fail("Verification requires a read-only prepared workspace")
+            if profiles or private_home_arg is not None or mcp_socket is not None:
+                _fail("Verification cannot mount CLI profiles, private homes, or MCP sockets")
+            args = _verify_sandbox_args(workspace, program)
+            os.close(lock_fd)
+            lock_fd = None
+            try:
+                result = subprocess.run(args, check=False, preexec_fn=_set_process_limits)
+            except OSError as exc:
+                _fail(f"bubblewrap failed to start: {exc}")
+            return result.returncode
         profile_root = workspace.parent / "profiles"
         private_home = profile_root / "home"
         _safe_state_child(state, f"agents/{_project_id(project)}/{agent}/profiles/home")
@@ -1059,6 +1119,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--state", required=True)
     run.add_argument("--agent", required=True)
     run.add_argument("--read-only", action="store_true")
+    run.add_argument("--verify", action="store_true", help="Run with a minimal read-only, networkless runtime sandbox")
     run.add_argument("--profile", action="append", default=[])
     run.add_argument("--private-home")
     run.add_argument("--mcp-socket")
@@ -1081,7 +1142,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "run":
             program = args.program[1:] if args.program and args.program[0] == "--" else args.program
-            return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket)
+            return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket, verify=args.verify)
         result = _apply(args.state, args.agent, args.review_token)
         _json(result)
         return 0 if result.get("ok") else 1

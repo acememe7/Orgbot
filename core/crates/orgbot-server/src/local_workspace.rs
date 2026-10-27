@@ -85,10 +85,12 @@ impl LocalWorkspaceHost {
         .map_err(|e| anyhow::anyhow!("local workspace setup failed: {e}"))??;
         host.guard_state = guard_state;
         host.commands = spec.commands && spec.writable;
+        let verification = spec.commands && host.guard_state.is_some();
         let root = host.root.clone();
         let capabilities = WorkspaceCapabilities {
             attachment_import: spec.writable && host.attachment_parent_fd.is_some(),
             git_read: true,
+            verification,
         };
         let mut runtime_spec = spec;
         runtime_spec.root = root.display().to_string();
@@ -160,8 +162,8 @@ impl LocalWorkspaceHost {
                 continue;
             }
             let host = Arc::clone(&self);
-            if call.name == "workspace_run" {
-                let outcome = self.run(call.agent, &call.arguments).await;
+            if matches!(call.name.as_str(), "workspace_run" | "workspace_verify") {
+                let outcome = self.run(call.agent, &call.name, &call.arguments).await;
                 let _ = call.reply.send(outcome);
                 continue;
             }
@@ -283,9 +285,15 @@ impl LocalWorkspaceHost {
     }
 
     #[cfg(target_os = "linux")]
-    async fn run(&self, agent: orgbot_proto::AgentId, args: &Value) -> ToolOutcome {
+    async fn run(&self, agent: orgbot_proto::AgentId, name: &str, args: &Value) -> ToolOutcome {
         let execute = async {
-            if !self.commands {
+            let verify = name == "workspace_verify";
+            if verify && self.guard_state.is_none() {
+                return Err(
+                    "Read-only verification requires a protected local workspace".to_owned(),
+                );
+            }
+            if !verify && !self.commands {
                 return Err("Command execution is disabled for this workspace".to_owned());
             }
             let script = arg_string(args, "command")?;
@@ -301,12 +309,19 @@ impl LocalWorkspaceHost {
                 })
                 .transpose()?
                 .unwrap_or(300);
-            let guard = self.guard(agent)?;
+            let mut guard = self.guard(agent)?;
+            if verify {
+                guard.agent.push_str("-verify");
+                guard.read_only = true;
+            }
             let setup_guard = guard.clone();
             tokio::task::spawn_blocking(move || setup_guard.prepare())
                 .await
                 .map_err(|e| e.to_string())??;
             let mut command = tokio::process::Command::from(guard.command("run")?);
+            if verify {
+                command.args(["--verify", "--read-only"]);
+            }
             command
                 .args(["--", "/bin/sh", "-c", script])
                 .stdin(Stdio::null())
@@ -336,7 +351,7 @@ impl LocalWorkspaceHost {
             let output = out.await.map_err(|e| e.to_string())??;
             let error = err.await.map_err(|e| e.to_string())??;
             let success = matches!(status, Ok(Ok(code)) if code.success());
-            let integration = if success {
+            let integration = if success && !verify {
                 Some(
                     tokio::task::spawn_blocking(move || guard.apply())
                         .await
@@ -373,7 +388,9 @@ impl LocalWorkspaceHost {
                 self.import_attachment(arg_string(args, "id"))
             }
             "workspace_import_attachment" => Err("This workspace is read-only.".into()),
-            "workspace_run" => Err("Local workspace commands are unavailable.".into()),
+            "workspace_run" | "workspace_verify" => {
+                Err("Local workspace commands are unavailable.".into())
+            }
             _ => Err("Unsupported local workspace operation.".into()),
         };
         match result {
@@ -1121,7 +1138,9 @@ mod tests {
             "printf added > added.txt; rm keep.txt; if rm '{}'; then exit 9; fi; printf done",
             root.join("keep.txt").display()
         );
-        let result = host.run(agent, &json!({"command":command})).await;
+        let result = host
+            .run(agent, "workspace_run", &json!({"command":command}))
+            .await;
         assert!(!result.is_error, "{}", result.content);
         assert_eq!(
             fs::read_to_string(root.join("keep.txt")).unwrap(),
@@ -1131,7 +1150,11 @@ mod tests {
         let result: Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(result["integration"]["pending_delete"], json!(["keep.txt"]));
         let timeout = host
-            .run(agent, &json!({"command":"sleep 20", "timeout_seconds":1}))
+            .run(
+                agent,
+                "workspace_run",
+                &json!({"command":"sleep 20", "timeout_seconds":1}),
+            )
             .await;
         assert!(timeout.is_error);
         assert_eq!(
@@ -1141,12 +1164,49 @@ mod tests {
         let output = host
             .run(
                 agent,
+                "workspace_run",
                 &json!({"command":"head -c 100000 /dev/zero | tr '\\0' x"}),
             )
             .await;
         assert!(!output.is_error, "{}", output.content);
         let output: Value = serde_json::from_str(&output.content).unwrap();
         assert_eq!(output["stdout"].as_str().unwrap().len(), 32768);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[tokio::test]
+    async fn protected_verification_is_read_only_and_never_integrates() {
+        let root = temp_dir();
+        let state = temp_dir();
+        fs::write(root.join("check.txt"), "original\n").unwrap();
+        let host = protected_host(&root, &state, true);
+        let agent = AgentId::new();
+        let command = "if printf changed > check.txt; then exit 9; fi; printf verified";
+        let outcome = host
+            .run(agent, "workspace_verify", &json!({"command":command}))
+            .await;
+        assert!(!outcome.is_error, "{}", outcome.content);
+        let value: Value = serde_json::from_str(&outcome.content).unwrap();
+        assert_eq!(value["success"], true);
+        assert_eq!(value["integration"], Value::Null);
+        assert_eq!(
+            fs::read_to_string(root.join("check.txt")).unwrap(),
+            "original\n"
+        );
+        let status = orgbot_providers::workspace_guard::WorkspaceGuard {
+            project: root.clone(),
+            state: state.clone(),
+            agent: format!("{agent}-verify"),
+            read_only: true,
+        }
+        .command("status")
+        .unwrap()
+        .output()
+        .unwrap();
+        assert!(status.status.success());
+        let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(status["changed"], json!([]));
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(state).unwrap();
     }
@@ -1189,7 +1249,11 @@ mod tests {
             fs::read_to_string(root.join("fresh.txt")).unwrap(),
             "new file"
         );
-        assert!(host.run(agent, &json!({"command":"true"})).await.is_error);
+        assert!(
+            host.run(agent, "workspace_run", &json!({"command":"true"}))
+                .await
+                .is_error
+        );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(state).unwrap();
     }
@@ -1438,6 +1502,7 @@ mod tests {
             WorkspaceCapabilities {
                 git_read: true,
                 attachment_import: false,
+                verification: false,
             },
         )
         .await;
@@ -1518,6 +1583,7 @@ mod tests {
             WorkspaceCapabilities {
                 attachment_import: true,
                 git_read: true,
+                verification: false,
             },
         );
         let host_task = tokio::spawn(serve_files(host, rx));

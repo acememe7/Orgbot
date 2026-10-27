@@ -122,6 +122,8 @@ pub struct AgentCliProvider {
     /// Optional owner-only record that lets one bot resume its native session
     /// after the room process is rebuilt.
     session_store: Mutex<Option<SessionStore>>,
+    /// Last cumulative usage reported by a Codex session.
+    codex_usage: Mutex<Option<Usage>>,
     #[cfg(target_os = "linux")]
     guard: Option<crate::workspace_guard::WorkspaceGuard>,
 }
@@ -147,6 +149,9 @@ struct PersistedSession {
     /// Missing in older records; causes one brief refresh on resume.
     #[serde(default)]
     system_brief: Option<String>,
+    /// Codex reports session-cumulative usage; absent in records written before accounting.
+    #[serde(default)]
+    codex_usage: Option<Usage>,
 }
 
 impl AgentCliProvider {
@@ -191,6 +196,7 @@ impl AgentCliProvider {
             last_socket: Mutex::new(None),
             timeout,
             session_store: Mutex::new(None),
+            codex_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
         })
@@ -212,6 +218,7 @@ impl AgentCliProvider {
         if let Some(persisted) = read_session_record(&store) {
             *self.session.lock().unwrap() = Some(persisted.session_id);
             *self.session_system_brief.lock().unwrap() = persisted.system_brief;
+            *self.codex_usage.lock().unwrap() = persisted.codex_usage;
         }
         *self.session_store.lock().unwrap() = Some(store);
         self
@@ -244,9 +251,11 @@ impl AgentCliProvider {
             store.workdir = canonical_project;
             *self.session.lock().unwrap() = None;
             *self.session_system_brief.lock().unwrap() = None;
+            *self.codex_usage.lock().unwrap() = None;
             if let Some(persisted) = read_session_record(&store) {
                 *self.session.lock().unwrap() = Some(persisted.session_id);
                 *self.session_system_brief.lock().unwrap() = persisted.system_brief;
+                *self.codex_usage.lock().unwrap() = persisted.codex_usage;
             }
             *self.session_store.lock().unwrap() = Some(store);
         }
@@ -334,6 +343,7 @@ fn write_session(
     store: &SessionStore,
     session_id: &str,
     system_brief: Option<&str>,
+    codex_usage: Option<Usage>,
 ) -> std::io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -351,6 +361,7 @@ fn write_session(
         mcp: store.mcp,
         session_id: session_id.to_owned(),
         system_brief: system_brief.map(str::to_owned),
+        codex_usage,
     };
     let bytes = serde_json::to_vec(&state)
         .map_err(|error| std::io::Error::other(format!("session serialization failed: {error}")))?;
@@ -537,6 +548,20 @@ impl Provider for AgentCliProvider {
             let _ = std::fs::remove_dir_all(dir);
         }
         result?;
+
+        if self.cli == CliKind::Codex && episode.usage.reported {
+            let mut cumulative = self.codex_usage.lock().unwrap();
+            let reported = episode.usage;
+            episode.usage = codex_usage_delta(
+                reported,
+                *cumulative,
+                resumed.as_deref(),
+                episode.session_id.as_deref().or(resumed.as_deref()),
+            );
+            if reported.complete {
+                *cumulative = Some(reported);
+            }
+        }
 
         // Remember the session for the next turn. A resumed session reports
         // its id again on init; either way the freshest id wins.
@@ -779,19 +804,23 @@ impl AgentCliProvider {
                 ingest_line(provider.cli, &line, sink, episode);
                 if previous_session != episode.session_id {
                     if let Some(session_id) = episode.session_id.as_deref() {
-                        *provider.session.lock().unwrap() = Some(session_id.to_string());
+                        let mut active = provider.session.lock().unwrap();
+                        if active.as_deref() != Some(session_id) {
+                            *provider.codex_usage.lock().unwrap() = None;
+                        }
+                        *active = Some(session_id.to_string());
                     }
                     if let (Some(store), Some(session_id)) = (
                         provider.session_store.lock().unwrap().clone(),
                         episode.session_id.as_deref(),
                     ) {
                         let applied_brief = provider.session_system_brief.lock().unwrap().clone();
-                        write_session(&store, session_id, applied_brief.as_deref()).map_err(
-                            |error| ProviderError::Process {
+                        let codex_usage = *provider.codex_usage.lock().unwrap();
+                        write_session(&store, session_id, applied_brief.as_deref(), codex_usage)
+                            .map_err(|error| ProviderError::Process {
                                 provider: provider.cli.label().to_string(),
                                 detail: format!("could not persist native session state: {error}"),
-                            },
-                        )?;
+                            })?;
                     }
                 }
             }
@@ -893,6 +922,7 @@ impl AgentCliProvider {
     fn forget_session(&self) {
         *self.session.lock().unwrap() = None;
         *self.session_system_brief.lock().unwrap() = None;
+        *self.codex_usage.lock().unwrap() = None;
         if let Some(store) = self.session_store.lock().unwrap().as_ref() {
             let _ = std::fs::remove_file(&store.path);
         }
@@ -904,11 +934,15 @@ impl AgentCliProvider {
         let (Some(store), Some(session_id)) = (store, session_id) else {
             return Ok(());
         };
-        write_session(&store, &session_id, Some(system_brief)).map_err(|error| {
-            ProviderError::Process {
-                provider: self.cli.label().to_string(),
-                detail: format!("could not persist native session brief: {error}"),
-            }
+        write_session(
+            &store,
+            &session_id,
+            Some(system_brief),
+            *self.codex_usage.lock().unwrap(),
+        )
+        .map_err(|error| ProviderError::Process {
+            provider: self.cli.label().to_string(),
+            detail: format!("could not persist native session brief: {error}"),
         })
     }
 }
@@ -1252,6 +1286,53 @@ fn usage_from_json(value: &Value) -> Usage {
     }
 }
 
+fn usage_delta(current: Usage, previous: Option<Usage>) -> Usage {
+    if !current.reported {
+        return current;
+    }
+    if !current.complete {
+        return Usage::missing();
+    }
+    let Some(previous) = previous else {
+        return current;
+    };
+    let counters_rolled_back = current.input_tokens < previous.input_tokens
+        || current.output_tokens < previous.output_tokens
+        || current.cache_read_tokens < previous.cache_read_tokens
+        || current.cache_write_tokens < previous.cache_write_tokens;
+    if !previous.complete || counters_rolled_back {
+        return Usage::missing();
+    }
+    Usage {
+        complete: current.complete && previous.complete,
+        calls: current.calls,
+        input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
+        output_tokens: current.output_tokens.saturating_sub(previous.output_tokens),
+        cache_read_tokens: current
+            .cache_read_tokens
+            .saturating_sub(previous.cache_read_tokens),
+        cache_write_tokens: current
+            .cache_write_tokens
+            .saturating_sub(previous.cache_write_tokens),
+        ..current
+    }
+}
+
+fn codex_usage_delta(
+    current: Usage,
+    previous: Option<Usage>,
+    resumed_session: Option<&str>,
+    current_session: Option<&str>,
+) -> Usage {
+    if !current.complete {
+        return Usage::missing();
+    }
+    if previous.is_none() && resumed_session.is_some() && current_session == resumed_session {
+        return Usage::missing();
+    }
+    usage_delta(current, previous)
+}
+
 /// Write the --mcp-config file that points an agent CLI at the room bridge.
 ///
 /// The CLI spawns the server named in the config as a child process; that
@@ -1264,12 +1345,40 @@ fn usage_from_json(value: &Value) -> Usage {
 /// `orgbot` binary via ORGBOT_MCP_RELAY_BIN, since the test runner itself
 /// has no `room-mcp` subcommand.
 fn relay_binary() -> Result<std::path::PathBuf> {
+    resolve_mcp_relay_binary().map_err(ProviderError::Unsupported)
+}
+
+pub(crate) fn resolve_mcp_relay_binary() -> std::result::Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("ORGBOT_MCP_RELAY_BIN") {
-        return Ok(std::path::PathBuf::from(path));
+        return Ok(PathBuf::from(path));
     }
-    std::env::current_exe().map_err(|error| {
-        ProviderError::Unsupported(format!("cannot locate own binary for MCP relay: {error}"))
-    })
+    let running = std::env::current_exe()
+        .map_err(|error| format!("cannot locate own binary for MCP relay: {error}; set ORGBOT_MCP_RELAY_BIN or restart OrgBots"))?;
+    resolve_running_relay_binary(running)
+}
+
+fn resolve_running_relay_binary(running: PathBuf) -> std::result::Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    if !running.exists() {
+        // Linux marks an unlinked executable with this suffix after atomic replacement.
+        if let Some(name) = running.file_name().and_then(|name| name.to_str()) {
+            if let Some(original) = name.strip_suffix(" (deleted)") {
+                let candidate = running.with_file_name(original);
+                use std::os::unix::fs::PermissionsExt;
+                let executable = std::fs::metadata(&candidate).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                });
+                if executable {
+                    return Ok(candidate);
+                }
+                return Err(format!(
+                    "the running OrgBots binary was replaced or removed and {} is not executable; restart OrgBots or set ORGBOT_MCP_RELAY_BIN to a trusted room-mcp binary",
+                    candidate.display()
+                ));
+            }
+        }
+    }
+    Ok(running)
 }
 
 /// A per-run overlay of the user's codex home.
@@ -1523,18 +1632,16 @@ fn build_args(
                 .arg("-c")
                 .arg("approval_policy=\"never\"");
         }
-        (CliKind::Codex, Some(session)) => {
+        (CliKind::Codex, Some(_session)) => {
             // `codex exec resume` does not take a sandbox flag (the resumed
             // session keeps the one it started with), and its trailing prompt
-            // means options must precede the positionals.
+            // is appended after all options below.
             cmd.arg("exec")
                 .arg("resume")
                 .arg("--json")
                 .arg("--skip-git-repo-check")
                 .arg("-c")
-                .arg("approval_policy=\"never\"")
-                .arg(session)
-                .arg(prompt);
+                .arg("approval_policy=\"never\"");
         }
         (CliKind::Claude, None) => {
             cmd.arg("-p")
@@ -1614,6 +1721,13 @@ fn build_args(
             CliKind::Codex => {}
         }
     }
+    if cli == CliKind::Codex {
+        if let Some(session) = resumed {
+            // A resumed prompt can begin with `-`; stop option parsing before
+            // passing the session id and prompt as positional arguments.
+            cmd.arg("--").arg(session).arg(prompt);
+        }
+    }
 }
 
 /// The name every CLI registers the room's MCP server under.
@@ -1635,6 +1749,42 @@ const ROOM_TOOL_WILDCARD: &str = concat!("mcp__", room_server_name!(), "__*");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deleted_current_executable_resolves_only_to_an_executable_at_its_original_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("orgbot-relay-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let original = root.join("orgbot");
+        std::fs::write(&original, b"binary replacement fixture").unwrap();
+        std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(
+            resolve_running_relay_binary(root.join("orgbot (deleted)")).unwrap(),
+            original
+        );
+        let missing = root.join("missing (deleted)");
+        let error = resolve_running_relay_binary(missing).unwrap_err();
+        assert!(error.contains("ORGBOT_MCP_RELAY_BIN"), "{error}");
+        let existing_deleted_suffix = root.join("literal (deleted)");
+        std::fs::write(&existing_deleted_suffix, b"still the current executable").unwrap();
+        std::fs::set_permissions(
+            &existing_deleted_suffix,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_running_relay_binary(existing_deleted_suffix.clone()).unwrap(),
+            existing_deleted_suffix
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// A full codex run as captured from a live probe.
     const CODEX_RUN: &str = r#"{"type":"thread.started","thread_id":"01a067db-ea53-7973-b9ae-4b63f2af5026"}
@@ -1704,6 +1854,27 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn test_directory(name: &str) -> PathBuf {
+        let mut nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "{name}-{}-{nonce}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return path,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    nonce = nonce.wrapping_add(1);
+                }
+                Err(error) => panic!("could not create test directory {}: {error}", path.display()),
+            }
+        }
+    }
+
+    #[cfg(unix)]
     fn fake_claude_script(
         binary: &Path,
         counter: &Path,
@@ -1767,6 +1938,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
+            codex_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
         };
@@ -1934,15 +2106,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
     async fn structured_error_overrides_exit_success_and_incidental_stderr() {
         use std::os::unix::fs::PermissionsExt;
 
-        let directory = std::env::temp_dir().join(format!(
-            "orgbot-cli-error-test-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
+        let directory = test_directory("orgbot-cli-error-test");
         let binary = directory.join("fake-claude");
         std::fs::write(
             &binary,
@@ -1965,6 +2129,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
+            codex_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
         };
@@ -2001,6 +2166,169 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
         assert_eq!(episode.usage.input_tokens, 10);
         assert_eq!(episode.usage.output_tokens, 2);
         assert_eq!(episode.usage.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn codex_cumulative_usage_is_delta_and_missing_usage_stays_missing() {
+        let previous = usage_from_json(&serde_json::json!({
+            "input_tokens": 100, "cached_input_tokens": 40,
+            "output_tokens": 10, "cache_write_input_tokens": 3
+        }));
+        let current = usage_from_json(&serde_json::json!({
+            "input_tokens": 160, "cached_input_tokens": 55,
+            "output_tokens": 18, "cache_write_input_tokens": 5
+        }));
+        let delta = usage_delta(current, Some(previous));
+        assert_eq!(delta.input_tokens, 45);
+        assert_eq!(delta.cache_read_tokens, 15);
+        assert_eq!(delta.output_tokens, 8);
+        assert_eq!(delta.cache_write_tokens, 2);
+        assert!(delta.reported && delta.complete);
+        let partial_previous = Usage {
+            complete: false,
+            ..previous
+        };
+        assert_eq!(usage_delta(current, Some(partial_previous)), Usage::missing());
+        let rollback = usage_delta(previous, Some(current));
+        assert_eq!(rollback, Usage::missing());
+
+        let missing = usage_delta(Usage::default(), Some(current));
+        assert!(!missing.reported);
+        assert_eq!(usage_delta(current, None), current);
+        assert!(!codex_usage_delta(current, None, Some("same"), Some("same")).reported);
+        assert_eq!(
+            codex_usage_delta(current, None, Some("old"), Some("new")),
+            current
+        );
+        assert_eq!(codex_usage_delta(current, None, None, Some("new")), current);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_codex_session_discards_the_previous_usage_baseline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = test_directory("orgbot-codex-new-session");
+        let binary = directory.join("fake-codex");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"new-session\"}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let provider = AgentCliProvider {
+            cli: CliKind::Codex,
+            bin: binary.to_string_lossy().into_owned(),
+            model: "gpt-6.1-sol".into(),
+            workdir: PathBuf::new(),
+            policy: AgentPolicy::ReadOnly,
+            session: Mutex::new(Some("old-session".into())),
+            session_system_brief: Mutex::new(None),
+            last_socket: Mutex::new(None),
+            mcp: false,
+            timeout: Duration::from_secs(5),
+            session_store: Mutex::new(None),
+            codex_usage: Mutex::new(Some(usage_from_json(&serde_json::json!({
+                "input_tokens": 100, "output_tokens": 10
+            })))),
+            #[cfg(target_os = "linux")]
+            guard: None,
+        };
+        let mut episode = Episode::default();
+        provider
+            .run_episode("prompt", None, &None, &mut episode, None, None)
+            .await
+            .unwrap();
+        assert_eq!(provider.session_id().as_deref(), Some("new-session"));
+        assert_eq!(*provider.codex_usage.lock().unwrap(), None);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_complete_deltas_cumulative_usage_after_provider_restarts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = test_directory("orgbot-codex-usage-resume");
+        let binary = directory.join("fake-codex");
+        let store_path = directory.join("session.json");
+        std::fs::write(
+            &binary,
+            r##"#!/bin/sh
+count_file="$(dirname "$0")/count"
+count=0
+if [ -f "$count_file" ]; then read count < "$count_file"; fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$count_file"
+printf '%s\n' '{"type":"thread.started","thread_id":"persistent-session"}'
+case "$count" in
+  1) usage='"usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10}' ;;
+  2) usage='"usage":{"input_tokens":160,"cached_input_tokens":50,"output_tokens":16}' ;;
+  3) usage='"usage":{"output_tokens":20}' ;;
+  4) usage='"usage":{"input_tokens":210,"cached_input_tokens":65,"output_tokens":24}' ;;
+  5) usage='' ;;
+  6) usage='"usage":{"input_tokens":230,"cached_input_tokens":70,"output_tokens":28}' ;;
+esac
+printf '{"type":"turn.completed",%s}\n' "$usage"
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = SessionStore {
+            path: store_path.clone(),
+            cli: CliKind::Codex,
+            model: "gpt-6.1-sol".into(),
+            workdir: canonical_workdir(&directory),
+            policy: AgentPolicy::ReadOnly,
+            mcp: false,
+        };
+        let make_provider = || {
+            AgentCliProvider {
+                cli: CliKind::Codex,
+                bin: binary.to_string_lossy().into_owned(),
+                model: store.model.clone(),
+                workdir: directory.clone(),
+                policy: store.policy,
+                session: Mutex::new(None),
+                session_system_brief: Mutex::new(None),
+                last_socket: Mutex::new(None),
+                mcp: false,
+                timeout: Duration::from_secs(5),
+                session_store: Mutex::new(None),
+                codex_usage: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                guard: None,
+            }
+            .with_session_store(store_path.clone())
+        };
+        let request = || {
+            CompletionRequest::new(
+                "gpt-6.1-sol",
+                "role brief",
+                vec![Turn::user("continue")],
+            )
+        };
+
+        let first = make_provider().complete(request(), None).await.unwrap();
+        assert_eq!(first.usage.input_tokens, 60);
+        assert_eq!(first.usage.cache_read_tokens, 40);
+        let second = make_provider().complete(request(), None).await.unwrap();
+        assert_eq!(second.usage.input_tokens, 50);
+        assert_eq!(second.usage.cache_read_tokens, 10);
+        assert_eq!(second.usage.output_tokens, 6);
+        let missing = make_provider().complete(request(), None).await.unwrap();
+        assert_eq!(missing.usage, Usage::missing());
+        let after_partial = make_provider().complete(request(), None).await.unwrap();
+        assert_eq!(after_partial.usage.input_tokens, 35);
+        assert_eq!(after_partial.usage.cache_read_tokens, 15);
+        assert_eq!(after_partial.usage.output_tokens, 8);
+        let absent = make_provider().complete(request(), None).await.unwrap();
+        assert!(!absent.usage.reported);
+        let after_absent = make_provider().complete(request(), None).await.unwrap();
+        assert_eq!(after_absent.usage.input_tokens, 15);
+        assert_eq!(after_absent.usage.cache_read_tokens, 5);
+        assert_eq!(after_absent.usage.output_tokens, 4);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -2045,9 +2373,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             build_args(
                 &mut cmd,
                 CliKind::Codex,
-                "test",
+                "--- the board, as it stands now ---\nstate follows",
                 Some("prior-session"),
-                "",
+                "gpt-6.1-sol",
                 policy,
                 None,
                 true,
@@ -2063,10 +2391,19 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             assert!(!args.iter().any(|arg| arg == "-s"));
             assert!(!args.iter().any(|arg| arg == "--approve-for-me"));
             assert!(!args.iter().any(|arg| arg == "--full-auto"));
+            let prompt = "--- the board, as it stands now ---\nstate follows";
             let override_index = args.iter().position(|arg| arg == "-c").unwrap();
             let session_index = args.iter().position(|arg| arg == "prior-session").unwrap();
-            let prompt_index = args.iter().position(|arg| arg == "test").unwrap();
+            let prompt_index = args.iter().position(|arg| arg == prompt).unwrap();
+            let model_index = args.iter().position(|arg| arg == "-m").unwrap();
+            let effort_index = args
+                .windows(2)
+                .position(|pair| pair == ["-c", "model_reasoning_effort=\"xhigh\""])
+                .unwrap();
             assert!(override_index < session_index && session_index < prompt_index);
+            assert!(model_index < session_index && effort_index < session_index);
+            assert_eq!(args[session_index - 1], "--");
+            assert_eq!(prompt_index, args.len() - 1);
         }
     }
 
@@ -2126,8 +2463,15 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             policy: AgentPolicy::WorkspaceWrite,
             mcp: true,
         };
-        write_session(&store, "session-id", None).unwrap();
+        let codex_usage = usage_from_json(&serde_json::json!({
+            "input_tokens": 100, "output_tokens": 10
+        }));
+        write_session(&store, "session-id", None, Some(codex_usage)).unwrap();
         assert_eq!(read_session(&store).as_deref(), Some("session-id"));
+        assert_eq!(
+            read_session_record(&store).unwrap().codex_usage,
+            Some(codex_usage)
+        );
         assert_eq!(
             std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
             0o700
@@ -2136,6 +2480,24 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        let restored = AgentCliProvider {
+            cli: store.cli,
+            bin: "/fake/codex".into(),
+            model: store.model.clone(),
+            workdir: PathBuf::from("/tmp/project"),
+            policy: store.policy,
+            session: Mutex::new(None),
+            session_system_brief: Mutex::new(None),
+            last_socket: Mutex::new(None),
+            mcp: store.mcp,
+            timeout: Duration::from_secs(5),
+            session_store: Mutex::new(None),
+            codex_usage: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            guard: None,
+        }
+        .with_session_store(path.clone());
+        assert_eq!(*restored.codex_usage.lock().unwrap(), Some(codex_usage));
         let mut mismatched = store.clone();
         mismatched.model = "gpt-6.1".into();
         assert!(read_session(&mismatched).is_none());
@@ -2169,17 +2531,20 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             mcp: legacy_store.mcp,
             session_id: "legacy-session".into(),
             system_brief: None,
+            codex_usage: None,
         })
         .unwrap();
         legacy_record
             .as_object_mut()
             .unwrap()
             .remove("system_brief");
+        legacy_record.as_object_mut().unwrap().remove("codex_usage");
         std::fs::write(&legacy_path, serde_json::to_vec(&legacy_record).unwrap()).unwrap();
         std::fs::set_permissions(&legacy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let restored = fake_claude_provider(Path::new("/fake/claude"), Some(legacy_path));
         assert_eq!(restored.session_id().as_deref(), Some("legacy-session"));
         assert_eq!(*restored.session_system_brief.lock().unwrap(), None);
+        assert_eq!(*restored.codex_usage.lock().unwrap(), None);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2272,6 +2637,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             mcp: store.mcp,
             timeout: Duration::from_millis(50),
             session_store: Mutex::new(Some(store.clone())),
+            codex_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
         };
@@ -2839,6 +3205,10 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
         let _ = std::fs::remove_file(&path);
         let servers = config["mcpServers"].as_object().unwrap();
         assert_eq!(servers.len(), 1);
+        assert_eq!(
+            servers["orgbot_room"]["command"].as_str(),
+            relay_binary().unwrap().to_str()
+        );
         let name = servers.keys().next().unwrap();
         assert_eq!(ROOM_TOOL_PATTERN, format!("mcp__{name}"));
         assert_eq!(ROOM_TOOL_WILDCARD, format!("mcp__{name}__*"));

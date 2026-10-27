@@ -217,6 +217,69 @@ class WorkspaceTests(unittest.TestCase):
                 ])
         self.assertEqual(caught.exception.code, 2)
 
+    def test_verify_builds_minimal_networkless_readonly_sandbox(self):
+        work = self.prepare("reviewer", read_only=True)
+        with patch.object(workspace.shutil, "which", return_value="/usr/bin/bwrap"), patch.object(
+            workspace.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+        ) as run:
+            result = workspace._run(
+                os.fspath(self.state), "reviewer", ["/usr/bin/python3", "-B", "-m", "unittest"],
+                read_only=True, profiles=[], private_home_arg=None, mcp_socket=None, verify=True,
+            )
+        self.assertEqual(result, 0)
+        args = run.call_args.args[0]
+        self.assertIn("--unshare-net", args)
+        self.assertIn("--clearenv", args)
+        self.assertIn("--tmpfs", args)
+        for index, value in enumerate(args):
+            if value == "--tmpfs":
+                self.assertEqual(args[index - 2], "--size")
+        self.assertIn("/", args)
+        self.assertIn("--ro-bind", args)
+        self.assertNotIn("--bind", args)
+        self.assertNotIn("--mcp-socket", args)
+        self.assertNotIn(os.fspath(self.state), args)
+        self.assertNotIn(os.fspath(Path.home()), args)
+        self.assertNotIn("/", [args[i + 1] for i, value in enumerate(args[:-1]) if value == "--ro-bind"])
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
+                         "requires Linux bubblewrap user namespaces")
+    def test_verify_runs_python_tests_without_exposing_host_or_applying_changes(self):
+        (self.project / "test_verify.py").write_text(
+            "import os, pathlib, tempfile, unittest\n"
+            "class VerifyTests(unittest.TestCase):\n"
+            " def test_workspace_and_private_tmp(self):\n"
+            "  self.assertEqual(os.getcwd(), os.environ['ORGBOT_WORKSPACE'])\n"
+            "  with tempfile.NamedTemporaryFile() as f: self.assertTrue(pathlib.Path(f.name).exists())\n",
+            encoding="utf-8",
+        )
+        work = self.prepare("reviewer", read_only=True)
+        secret = self.root / "host-secret.txt"
+        secret.write_text("must stay hidden", encoding="utf-8")
+        original = self.project / "src/main.py"
+        original_bytes = original.read_bytes()
+        probe = (
+            "import pathlib,socket,sys; "
+            "assert pathlib.Path('/tmp/orgbot-workspace/src/main.py').exists(); "
+            "p=pathlib.Path('/tmp/orgbot-workspace/src/main.py'); "
+            "exec(\"try: p.write_text('changed')\\nexcept OSError: pass\\nelse: raise AssertionError('workspace writable')\"); "
+            f"assert not pathlib.Path({str(secret)!r}).exists(); "
+            "s=socket.socket(); s.settimeout(.5); "
+            "exec(\"try: s.connect(('1.1.1.1',80))\\nexcept OSError: pass\\nelse: raise AssertionError('network available')\")"
+        )
+        result = workspace._run(
+            os.fspath(self.state), "reviewer", ["/usr/bin/python3", "-B", "-m", "unittest", "-v"],
+            read_only=True, profiles=[], private_home_arg=None, mcp_socket=None, verify=True,
+        )
+        self.assertEqual(result, 0)
+        result = workspace._run(
+            os.fspath(self.state), "reviewer", ["/usr/bin/python3", "-B", "-c", probe],
+            read_only=True, profiles=[], private_home_arg=None, mcp_socket=None, verify=True,
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(original.read_bytes(), original_bytes)
+        self.assertEqual(workspace._status(os.fspath(self.state), "reviewer")["changed"], [])
+
     def test_stale_deletion_approval_refuses_all_mutation(self):
         work = self.prepare()
         (work / "README.md").unlink()

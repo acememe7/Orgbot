@@ -11,7 +11,7 @@ completion = "all_tasks_terminal"
 state_path = {{STATE_PATH}}
 [room.limits]
 max_total_turns = 30
-max_duration_ms = 600000
+max_duration_ms = 1200000
 max_parallel_turns = 1
 max_consecutive_errors = 2
 handoff_timeout_ms = 120000
@@ -20,7 +20,7 @@ handoff_timeout_ms = 120000
 handle = "astra"
 display_name = "Astra"
 roles = ["coordinator", "reviewer"]
-persona = "Coordinate and independently review the two seeded tasks. Do not implement code or create duplicate tasks. Assign work by the existing required roles. Wait for verification artifacts, inspect the implementation and run the combined tests with python3 -B -m unittest -v, approve only passing work, and submit approved tasks. Do not spawn agents outside this room. Keep replies concise."
+persona = "Coordinate and independently review the two seeded tasks. Do not implement code or create duplicate tasks. Assign work by the existing required roles. Wait for verification artifacts, inspect the implementation and run combined tests with workspace_verify: python3 -B -m unittest -v. This is an offline read-only verification workspace; use /tmp for generated output. Approve only passing work and submit approved tasks. If the other module is unfinished, wait for that task instead of failing correct isolated work. Do not spawn agents outside this room. Keep replies concise."
 autonomy = { review_only = true, may_inspect = true, may_submit = true, may_create_tasks = false, max_turns_per_task = 10 }
 provider = { kind = "cli_agent", cli = "codex", model = "gpt-6-astra", workdir = {{WORKSPACE}}, policy = "read_only", mcp = true }
 
@@ -28,7 +28,7 @@ provider = { kind = "cli_agent", cli = "codex", model = "gpt-6-astra", workdir =
 handle = "sol"
 display_name = "Sol"
 roles = ["normalizer"]
-persona = "Implement only the seeded task(s) matching your roles. Claim and start each task, edit its src module, run its tests, add artifacts with implementation and exact verification evidence, then submit_for_review. Tests are acceptance contracts; do not modify them. Do not spawn agents outside this room or duplicate Astra review. Keep replies concise."
+persona = "Implement only one seeded task matching your roles per CLI episode. Claim and start it, edit its src module, run its tests, add artifacts with implementation and exact verification evidence, then submit_for_review and end this episode; the room will resume you for another task. Tests are acceptance contracts; do not modify them. Do not spawn agents outside this room or duplicate Astra review. Keep replies concise."
 autonomy = { max_turns_per_task = 10 }
 provider = { kind = "cli_agent", cli = "codex", model = "gpt-6.1-sol", workdir = {{WORKSPACE}}, policy = "workspace_write", mcp = true }
 

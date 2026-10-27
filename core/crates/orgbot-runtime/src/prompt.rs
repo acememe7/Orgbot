@@ -227,6 +227,14 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
         }
     }
 
+    if spec.autonomy.review_only {
+        out.push_str(
+            "\nFor independent tests, use workspace_verify when available. It runs \
+             offline in a read-only project copy; direct generated files to /tmp. \
+             It cannot install dependencies or use host credentials. If a required \
+             check cannot run there, report the limit instead of claiming it passed.\n",
+        );
+    }
     if !spec.autonomy.may_inspect {
         out.push_str("\nYou do not inspect work. That is the inspector's job.\n");
     }

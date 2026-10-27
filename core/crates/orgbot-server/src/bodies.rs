@@ -264,12 +264,9 @@ mod tests {
     fn dir() -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
             "orgbot-bodies-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            orgbot_proto::ArtifactId::new()
         ));
-        std::fs::create_dir_all(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
         path
     }
 
@@ -328,7 +325,7 @@ mod tests {
     fn a_body_that_cannot_be_read_is_reported_not_silently_empty() {
         let mut board = board_with(json!({"kind": "text", "text": "y".repeat(5_000)}));
         let dir = dir();
-        spill(&mut board, &dir).unwrap();
+        assert_eq!(spill(&mut board, &dir).unwrap(), 1);
         std::fs::remove_file(dir.join("art_1.body")).unwrap();
 
         let damaged = restore(&mut board, &dir);
@@ -348,7 +345,7 @@ mod tests {
     fn a_body_that_does_not_match_its_digest_is_refused() {
         let mut board = board_with(json!({"kind": "text", "text": "z".repeat(5_000)}));
         let dir = dir();
-        spill(&mut board, &dir).unwrap();
+        assert_eq!(spill(&mut board, &dir).unwrap(), 1);
         std::fs::write(dir.join("art_1.body"), "something else entirely").unwrap();
 
         let damaged = restore(&mut board, &dir);

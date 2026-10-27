@@ -52,6 +52,8 @@ pub struct Workspace {
 pub struct WorkspaceCapabilities {
     pub attachment_import: bool,
     pub git_read: bool,
+    /// Run isolated, read-only checks in a protected Linux local workspace.
+    pub verification: bool,
 }
 
 impl Workspace {
@@ -64,6 +66,7 @@ impl Workspace {
             capabilities: WorkspaceCapabilities {
                 attachment_import: true,
                 git_read: false,
+                verification: false,
             },
         }
     }
@@ -122,6 +125,9 @@ impl Workspace {
                 tools.push(tool("workspace_run", "Run a POSIX shell command in the selected workspace. Linux local commands use an isolated working copy: original project files are read-only, non-conflicting edits integrate after success, and removals await owner approval. SSH commands retain the SSH account's permissions. Output is bounded to 64 KiB. Timeout defaults to 300 seconds (1–1800 allowed). Inspect partial effects after interruption; do not start background processes.", json!({"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":1800}}), json!(["command"])));
             }
         }
+        if self.capabilities.verification {
+            tools.push(tool("workspace_verify", "Run a test or verification command in a read-only, network-isolated Linux workspace copy. No results are applied to the original workspace. Output is bounded to 64 KiB. Timeout defaults to 300 seconds (1–1800 allowed).", json!({"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":1800}}), json!(["command"])));
+        }
         if self.capabilities.git_read {
             tools.push(tool(
                 "workspace_git",
@@ -147,7 +153,7 @@ impl Workspace {
         if !self.definitions().iter().any(|tool| tool.name == name) {
             return failure("This workspace does not permit that tool.");
         }
-        let command_seconds = if name == "workspace_run" {
+        let command_seconds = if matches!(name, "workspace_run" | "workspace_verify") {
             match command_timeout_seconds(arguments) {
                 Ok(seconds) => seconds,
                 Err(message) => return failure(message),
@@ -249,6 +255,7 @@ mod tests {
             WorkspaceCapabilities {
                 attachment_import: true,
                 git_read: true,
+                verification: false,
             },
         );
         let names: Vec<_> = workspace
@@ -279,6 +286,33 @@ mod tests {
             .collect();
         assert!(!names.contains(&"workspace_git".into()));
         assert!(!names.contains(&"workspace_import_attachment".into()));
+    }
+
+    #[tokio::test]
+    async fn verification_tool_is_independent_of_write_and_command_capabilities() {
+        let (tx, _rx) = mpsc::channel(1);
+        let workspace = Workspace::with_capabilities(
+            WorkspaceSpec {
+                label: "review workspace".into(),
+                root: "/tmp/project".into(),
+                writable: false,
+                commands: false,
+            },
+            tx,
+            WorkspaceCapabilities {
+                attachment_import: false,
+                git_read: false,
+                verification: true,
+            },
+        );
+        let names: Vec<_> = workspace
+            .definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(names.contains(&"workspace_verify".into()));
+        assert!(!names.contains(&"workspace_run".into()));
+        assert!(!names.contains(&"workspace_write".into()));
     }
     use super::*;
     use crate::Orchestrator;

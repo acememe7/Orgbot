@@ -173,3 +173,29 @@ restrictions. Configurations, source skills and host profiles remain untouched.
   warnings remain in runtime restart tests. No paid model calls were made.
   The optimized server build passed; installed packages and public distribution
   remain unchanged.
+
+## 2.0.2 acceptance and publication — 2026-10-27
+
+Owner authorized repeated testing and corrective work, then packaging and
+publication. Release gates: preserve saved rooms and approvals; prove native
+session resume with the installed CLI; let an independent reviewer run combined
+checks without project writes or network access; finish a baseline/split-team
+fixture with unchanged acceptance tests and complete usage accounting; exercise
+skill/MCP lifecycle and pause/restart; pass package/signature/upgrade checks.
+
+- [x] Correct and verify native resume and safe reviewer testing.
+- [x] Capture accepted bounded live runs and retain failures separately.
+  One pair passed unchanged tests; lifecycle probe 6 passed all 16 gates.
+  Three native accounting episodes reconcile across resume/restart. Probe 7
+  remains incomplete, with the shared allowance ledger reporting insufficient
+  reservation. See [release verification](RELEASE_2_0_2_VERIFICATION.md).
+- [x] Complete source, desktop, package and signed archive acceptance.
+  Final Rust: 854 passed, three ignored; patched dependency audit clean;
+  staged/package secret scans clean; final rootless fixture upgrade and local
+  signed APT selection/download verified. Public verification follows publication.
+- [x] Obtain Astra review of the final implementation and evidence.
+  Scoped prepublication approval covers exact signed artifacts and recorded limits.
+- [ ] Publish 2.0.2 and independently verify the public signed archive/download.
+
+Keep private logs/profiles/credentials outside Git. Do not infer subscription
+quota savings from token counts or claim general savings from one pilot pair.

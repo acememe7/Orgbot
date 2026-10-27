@@ -1436,19 +1436,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_only_bots_cannot_write_or_run_workspace_tools() {
-        use crate::workspace::{Workspace, WorkspaceSpec};
+    async fn review_only_bots_can_verify_but_cannot_write_or_run_workspace_tools() {
+        use crate::workspace::{Workspace, WorkspaceCapabilities, WorkspaceSpec};
         use orgbot_engine::Engine;
         use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
 
         let provider = Arc::new(ScriptedProvider::new(vec![
             orgbot_providers::types::CompletionResponse {
                 model: "test".into(),
-                content: vec![ContentBlock::ToolUse {
-                    id: "write1".into(),
-                    name: "workspace_write".into(),
-                    input: json!({"path":"report.md", "content":"changed"}),
-                }],
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "write1".into(),
+                        name: "workspace_write".into(),
+                        input: json!({"path":"report.md", "content":"changed"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "verify1".into(),
+                        name: "workspace_verify".into(),
+                        input: json!({"command":"python3 -B -m unittest -v"}),
+                    },
+                ],
                 stop_reason: StopReason::ToolUse,
                 usage: Usage::default(),
             },
@@ -1476,7 +1483,7 @@ mod tests {
         let engine = SharedEngine::new(room);
         let mut bot = Bot::new(spec, provider);
         let (tx, mut calls) = mpsc::channel(2);
-        bot.attach_workspace(Workspace::new(
+        bot.attach_workspace(Workspace::with_capabilities(
             WorkspaceSpec {
                 label: "test".into(),
                 root: "/work".into(),
@@ -1484,15 +1491,28 @@ mod tests {
                 commands: true,
             },
             tx,
+            WorkspaceCapabilities {
+                verification: true,
+                ..WorkspaceCapabilities::default()
+            },
         ));
 
         let listed: Vec<_> = bot.tools.iter().map(|tool| tool.name.as_str()).collect();
         assert!(listed.contains(&"workspace_read"));
+        assert!(listed.contains(&"workspace_verify"));
         for blocked in ["workspace_write", "workspace_mkdir", "workspace_run"] {
             assert!(!listed.contains(&blocked));
         }
 
-        let report = bot.take_turn(&engine, None).await.unwrap();
+        let host = async {
+            let call = calls.recv().await.unwrap();
+            assert_eq!(call.name, "workspace_verify");
+            call.reply
+                .send(orgbot_tools::ToolOutcome::ok("tests passed"))
+                .unwrap();
+        };
+        let (report, ()) = tokio::join!(bot.take_turn(&engine, None), host);
+        let report = report.unwrap();
         assert_eq!(report.tool_errors, 1);
         assert!(
             calls.try_recv().is_err(),

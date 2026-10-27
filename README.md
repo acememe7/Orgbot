@@ -61,8 +61,9 @@ For community listings, use the [prepared sharing blurb](docs/SHARING.md).
 
 ## Install on Ubuntu
 
-The desktop package targets **Ubuntu 24.04 amd64**. Version 2.0.1 adds a
-configurable recovery folder; see the [release record](docs/apt-distribution.md).
+The desktop package targets **Ubuntu 24.04 amd64**. Version 2.0.2 adds scoped
+rule/skill/MCP loading, fixes Codex session resume, and lets reviewers run
+isolated checks; see the [release record](docs/RELEASE_2_0_2_VERIFICATION.md).
 Set up the signed third-party APT repository once on each computer:
 
 ```bash

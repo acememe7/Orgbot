@@ -58,6 +58,36 @@ def rust_case(name: str, package: str, test_filter: str, purpose: str, *, target
 def acceptance_cases(flutter: str | None, dbus: str | None) -> list[Case]:
     cases = [
         rust_case(
+            "codex_resume_preserves_policy_and_prompt",
+            "orgbot-providers",
+            "codex_resume_does_not_enable_automatic_review_for_any_policy",
+            "Resume arguments retain the policy and delimit a board prompt beginning with hyphens.",
+        ),
+        rust_case(
+            "reviewer_can_verify_without_write_access",
+            "orgbot-runtime",
+            "review_only_bots_can_verify_but_cannot_write_or_run_workspace_tools",
+            "A reviewer can request isolated verification while ordinary mutation tools remain blocked.",
+        ),
+        rust_case(
+            "verification_never_integrates",
+            "orgbot-server",
+            "protected_verification_is_read_only_and_never_integrates",
+            "Run a real Linux sandbox check and verify no changes reach the project.",
+        ),
+        rust_case(
+            "once_skill_released_after_consumption",
+            "orgbot-runtime",
+            "once_skill_waits_until_consumed_then_redacts_without_orphaning_pair",
+            "One-use skill instructions remain available for one response then leave API history.",
+        ),
+        rust_case(
+            "task_capability_expires_before_next_tool",
+            "orgbot-runtime",
+            "dispatch_refreshes_task_scope_before_executing_a_tool",
+            "A released assignment cannot keep using a task-scoped capability in the same response.",
+        ),
+        rust_case(
             "checkpoint_reopens_claimed_work",
             "orgbot-runtime",
             "a_room_killed_mid_turn_reopens_with_its_work_intact",

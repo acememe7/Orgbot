@@ -136,10 +136,7 @@ pub fn update_private_agent_config(
     } else if contents.contains("[mcp_servers.orgbot_room]") {
         return Err("private CLI config already defines mcp_servers.orgbot_room".into());
     }
-    let relay = std::env::var_os("ORGBOT_MCP_RELAY_BIN")
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_exe().ok())
-        .ok_or("cannot locate OrgBots room relay")?;
+    let relay = crate::agent_cli::resolve_mcp_relay_binary()?;
     contents.push_str(&format!(
         "\n{BEGIN}\n[{env_key}.orgbot_room]\ncommand = {}\nargs = [\"room-mcp\", \"--socket\", {}]\n",
         serde_json::to_string(&relay.to_string_lossy()).unwrap(),
@@ -766,6 +763,11 @@ mod tests {
         )
         .unwrap();
         let first = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+        let relay = crate::agent_cli::resolve_mcp_relay_binary().unwrap();
+        assert!(first.contains(&format!(
+            "command = {}",
+            serde_json::to_string(&relay.to_string_lossy()).unwrap()
+        )));
         assert!(first.contains("/run/user/1000/orgbot-room-mcp.sock"));
         assert!(first.contains("model = \"gpt-6.1-sol\""));
         assert!(!first.contains("outside-server"));

@@ -6,6 +6,9 @@ prints a JSON report. The harness includes checkpoint recovery, paused restart,
 fake CLI session persistence and stale-session recovery, a real local MCP room
 bridge, owner questions with choices, provider cooldown/allowance rollover,
 and server interruption/checkpoint behavior.
+It also checks Codex resume argument boundaries, reviewer verification without
+write access, a real verification sandbox that never integrates changes, and
+one-use/task-scoped capability expiry.
 
 When Flutter and `dbus-run-session` are available, it also runs the existing
 Linux notification smoke test under a private D-Bus daemon. That fixture hosts

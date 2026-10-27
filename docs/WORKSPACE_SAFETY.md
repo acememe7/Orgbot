@@ -13,7 +13,7 @@ the child process remains the child’s standard error.
 ```text
 orgbot-workspace.py prepare --project ABS --state ABS --agent ID [--read-only]
 orgbot-workspace.py status --state ABS --agent ID
-orgbot-workspace.py run --state ABS --agent ID [--read-only] [--private-home ABS] [--profile codex=ABS] [--profile claude=ABS] [--profile grok=ABS] [--mcp-socket ABS] -- PROGRAM ARG...
+orgbot-workspace.py run --state ABS --agent ID [--read-only] [--verify] [--private-home ABS] [--profile codex=ABS] [--profile claude=ABS] [--profile grok=ABS] [--mcp-socket ABS] -- PROGRAM ARG...
 orgbot-workspace.py apply --state ABS --agent ID [--review-token SHA256]
 ```
 
@@ -56,6 +56,25 @@ writable for provider session state. Host CLI binaries and their installation
 files are readable through the read-only host root. Since the host home is also
 readable, a CLI or process can still access files there; the launcher’s copied
 profiles provide writable session isolation, not complete credential secrecy.
+
+## Independent reviewer tests
+
+Protected local rooms with command execution enabled expose `workspace_verify`
+to reviewers as well as workers. This uses a separate read-only project copy
+and never integrates changes. `workspace_run` remains unavailable to review-only
+agents. The verifier starts with an empty filesystem root, read-only system
+runtimes, private bounded temporary/home directories, a cleared environment and
+networking disabled. Host homes, CLI profiles, room state and MCP sockets are
+not mounted. The helper's `--verify` mode rejects profile and socket options.
+
+Tests must use installed system runtimes and direct generated output to `/tmp`.
+Python checks can use `python3 -B -m unittest -v`. Tools installed only in a
+user's home, dependency downloads and ordinary in-tree build output are not
+available in this mode. A check that needs them must be reported as unavailable;
+passing the Python fixture does not establish that every project's build can
+run in the sandbox. Android and SSH workspaces do not advertise this Linux tool.
+
+## Integration and recovery
 
 `status` returns `changed` records (`path`, `kind`), `added`, `deleted`, and
 `conflicts` path lists, plus a `review_token`. The token is a SHA-256 digest of
