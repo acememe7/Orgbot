@@ -1,37 +1,38 @@
 Package: orgbot
-Version: 2.0.2
+Version: 2.0.3
 Architecture: all
 Maintainer: OrgBot <theaeceme@gmail.com>
-Depends: orgbots (= 2.0.2)
-Filename: pool/main/o/orgbot/orgbot_2.0.2_all.deb
-Size: 4532
-MD5sum: db51314922264500fbed1615590ad91d
-SHA1: 63403bb3e9f7ba1daf175a0578e557e0a73c21a6
-SHA256: 9985b991f93cde50c3479bd5b09b197963d738321a8dd517aad0dcbcd4cdd007
+Depends: orgbots (= 2.0.3)
+Filename: pool/main/o/orgbot/orgbot_2.0.3_all.deb
+Size: 4534
+MD5sum: 00df62ff7b1d76650ad0ea426c8e5cf6
+SHA1: 72f32ff58fe7f73ec704a15c81f0e3c7e9e0fe5e
+SHA256: 370e171b0aa523102a8a85c0b58ceaa01ff6817f9edf2d7c16f777d458db22b5
 Section: oldlibs
 Priority: optional
 Description: transitional package for OrgBots
  This package upgrades installations of the former orgbot package to orgbots.
 
 Package: orgbots
-Version: 2.0.2
+Version: 2.0.3
 Architecture: amd64
 Maintainer: OrgBot <theaeceme@gmail.com>
-Installed-Size: 44428
-Depends: libatk1.0-0t64 (>= 2.7.91), libc6 (>= 2.39), libcairo-gobject2 (>= 1.10.0), libcairo2 (>= 1.14.0), libepoxy0 (>= 1.0), libfontconfig1 (>= 2.12.6), libgcc-s1 (>= 4.2), libgdk-pixbuf-2.0-0 (>= 2.22.0), libglib2.0-0t64 (>= 2.79.0), libgtk-3-0t64 (>= 3.21.4), libharfbuzz0b (>= 0.6.0), libjavascriptcoregtk-4.1-0, libpango-1.0-0 (>= 1.29.4), libpangocairo-1.0-0 (>= 1.14.0), libsecret-1-0 (>= 0.7), libsoup-3.0-0 (>= 2.4.0), libstdc++6 (>= 11), libvte-2.91-0 (>= 0.47.90), libwebkit2gtk-4.1-0 (>= 2.15.4), zlib1g (>= 1:1.1.4), python3, bubblewrap, libnotify-bin, libsecret-tools, ffmpeg, gstreamer1.0-libav, gstreamer1.0-plugins-good
-Breaks: orgbot (<< 2.0.2)
-Replaces: orgbot (<< 2.0.2)
-Filename: pool/main/o/orgbots/orgbots_2.0.2_amd64.deb
-Size: 15589894
-MD5sum: 7c988625eb349ba180c7fffd77c0349c
-SHA1: b801cc27bf3791a7d96bfc655abcdb2d7880bad2
-SHA256: 1e06aaca19a903f06022a21ccc39d319179753dbb8f68bbee8f82bb1c68dc610
+Installed-Size: 43304
+Depends: libatk1.0-0t64 (>= 2.7.91), libc6 (>= 2.39), libcairo-gobject2 (>= 1.10.0), libcairo2 (>= 1.14.0), libepoxy0 (>= 1.0), libfontconfig1 (>= 2.12.6), libgcc-s1 (>= 4.2), libgdk-pixbuf-2.0-0 (>= 2.22.0), libglib2.0-0t64 (>= 2.79.0), libgtk-3-0t64 (>= 3.21.4), libharfbuzz0b (>= 0.6.0), libjavascriptcoregtk-4.1-0, libpango-1.0-0 (>= 1.29.4), libpangocairo-1.0-0 (>= 1.14.0), libsecret-1-0 (>= 0.7), libsoup-3.0-0 (>= 2.4.0), libstdc++6 (>= 11), libvte-2.91-0 (>= 0.47.90), libwebkit2gtk-4.1-0 (>= 2.15.4), zlib1g (>= 1:1.1.4), python3, bubblewrap, dbus-daemon, gnome-keyring, libnotify-bin, libsecret-tools, ffmpeg, gstreamer1.0-libav, gstreamer1.0-plugins-good
+Breaks: orgbot (<< 2.0.3)
+Replaces: orgbot (<< 2.0.3)
+Filename: pool/main/o/orgbots/orgbots_2.0.3_amd64.deb
+Size: 15271696
+MD5sum: 984eb29e7ff042e3604d7f4b84b7e05a
+SHA1: fa3b2bd70d706a898c32e29d16a97deb5fb2187d
+SHA256: 98093f0a573b3a245b6a4a554073aa36ff8043a1cb7b11f9877de05654f69c76
 Section: devel
 Priority: optional
 Description: CLI and API agents working together in shared rooms
  Bots hold different roles, pick up tasks, hand work off to one another, wait
  on those handoffs, get their work inspected, and submit it - in one room you
- can watch and talk to. Codex, Claude, and Grok CLIs use their existing local
- sessions. DeepSeek and Ollama Cloud use securely saved API keys. Agents
+ can watch and talk to. Codex, Claude, and Grok use their existing CLI sessions.
+ OpenCode uses a selected provider API credential; Antigravity uses a separate
+ private sign-in. DeepSeek and Ollama Cloud use securely saved API keys. Agents
  work together in the room's shared project folder with role permissions.
 
