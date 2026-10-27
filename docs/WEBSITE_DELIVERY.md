@@ -24,9 +24,11 @@ HTTPS responses, headers and public installer after publication.
 
 ## Updating the evidence
 
-`website/results/index.html` is the public evidence page. Its current figures
-come from `docs/LINUX_2_0_PLAN.md`, not a live provider comparison. Preserve this
-distinction when editing it. The screenshots use synthetic fixture data.
+`website/results/index.html` is the public evidence page. Its current release figures
+come from `docs/RELEASE_2_0_2_VERIFICATION.md`; the bounded live comparison and
+usage reconciliation are in `docs/benchmarks/2026-10-27-release-validation.md`.
+Keep those live records distinct from the screenshots, which use synthetic
+fixture data.
 
 For real comparisons, use `scripts/benchmarks/README.md` and its existing
 baseline/team harness. Record the exact source revision, model identifiers,
@@ -69,8 +71,8 @@ Verified on 26 October 2026:
   was extracted into an isolated local folder and all 19 checksums matched.
   This is a static-content restore check, not a full host recovery exercise.
 
-Paid provider comparisons, physical suspend/reboot and real multi-day runs
-remain unperformed. This task changed installation/distribution and the website,
+At that 26 October checkpoint, paid provider comparisons, physical suspend/reboot
+and real multi-day runs remained unperformed. This task changed installation/distribution and the website,
 not application code. The following record updates the earlier setup gates.
 
 ## Follow-up on 26 October 2026
@@ -144,3 +146,31 @@ Google Drive, downloaded and restored into a new isolated folder: 20 files,
 `165c7fac6dce6733e6247e7856df2e2ac40e4eff3081eb51948b183d1e197a6c`.
 The earlier release backup remains retained. Automatic Drive scheduling is not
 configured; the server has no authorized uploader identity or failure channel.
+
+
+## 2.0.2 proof update, 27 October 2026
+
+The evidence page now publishes the accepted trial-3 baseline/team comparison,
+with each model's input, cache and output counts. Codex subscription usage is
+separate from DeepSeek API estimates. Codex totals come from the final native
+session records; DeepSeek totals come from API usage records. The all-model
+team total and higher combined output are explicit. One pair does not establish
+general savings or a subscription quota reduction.
+
+Release counts are 854 Rust tests passed (3 ignored), 337 Flutter tests passed
+(5 skipped), and 17 Linux acceptance checks passed. The page records the separate
+three-episode native accounting reconciliation, lifecycle probe 6's 16 passed
+gates, failed earlier trials/probes, and incomplete final-binary probe 7.
+The source evidence links are pinned to `b48566d3d6ef5c7ac7b5143cbb5e37723933378b`.
+
+All public version references now identify 2.0.2; inline structured-data CSP
+hashes and asset URL versions match the updated source. Gallery images remain
+labeled synthetic. No analytics, forms, provider calls or new data processing
+were added. Static page, installer, consent-fixture, Bash and JavaScript checks
+pass. Browser checks at measured CSS widths 375, 768 and 1440 found no document
+overflow. The narrow table scrolls horizontally and accepts keyboard focus and
+arrow-key scrolling; desktop columns fit without scrolling. Mobile menu/Escape,
+gallery switching, privacy close/reopen with focus return, and command-copy
+feedback passed. Only browser-extension warnings were captured. Astra cleared
+the corrected source and desktop rendering for scoped deployment. Publication
+and final backup evidence are recorded below after verification.

@@ -88,6 +88,16 @@ main{overflow:hidden}
 .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem;margin:2.5rem 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:1.3rem 0}
 .metric strong{display:block;font:400 clamp(2rem,4vw,3.4rem)/1 var(--serif);color:var(--green-dark)}
 .metric span{display:block;margin-top:.45rem;color:var(--muted);font-size:.9rem}
+.results-heading{font:400 clamp(2.3rem,4.5vw,4rem)/1.05 var(--serif);letter-spacing:-.045em;margin:0}
+.table-scroll{max-width:100%;overflow-x:auto;margin:2rem 0 1rem;border-block:1px solid var(--line)}
+.table-scroll table{width:100%;min-width:40rem;border-collapse:collapse;font-variant-numeric:tabular-nums}
+.table-scroll caption{text-align:left;padding:.8rem 0;color:var(--muted);font-size:.9rem}
+.table-scroll th,.table-scroll td{text-align:right;padding:.65rem .8rem;border-bottom:1px solid var(--line);white-space:nowrap}
+.table-scroll th:first-child,.table-scroll thead th:nth-child(2),.table-scroll .model-cell,.table-scroll .label-cell{text-align:left}
+.table-scroll thead th{font-size:.88rem;color:var(--muted);font-weight:600}
+.table-scroll tbody th{font-weight:600}
+.table-scroll .total-row{font-weight:650;background:var(--paper-deep)}
+.table-scroll:focus-visible{outline:3px solid #a15a35;outline-offset:4px}
 .install-note{background:var(--paper-deep);padding:1.3rem 1.5rem;margin:1.5rem 0}
 .install-note p{margin:.2rem 0}
 .copy-row{display:flex;justify-content:space-between;gap:1rem;align-items:center;margin:.4rem 0}
