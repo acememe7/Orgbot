@@ -208,3 +208,36 @@ passed the secret scan with no findings.
 Final Astra review approved the deployed page, responsive evidence, public
 responses, backup verification and this documentation record. No blocking
 findings remain within the scoped website proof update.
+
+
+## 2.0.3 Gemini proof publication, 27 October 2026
+
+Committed source `f1931cfb810176bb4262995737526ed5c37c4a2e` is on `main`
+and `master`; immutable website release `f1931cf` is active. Version copy,
+installation link and JSON-LD now identify 2.0.3. The results page includes
+Gemini context sharing, resumed usage deltas, fresh-room isolation, separate
+native write-denial and authorized MCP write probes. Astra is identified as
+the context sender in that fixture. Historical 2.0.2 comparisons remain
+explicitly historical; no general quota or billing savings are claimed.
+
+Static checks, consent/focus tests and 375/768/1440 local renders passed.
+Public checks matched all 19 file responses to source, including the genuine
+404. The active vhost matches the reviewed CSP hashes; HTTP redirect,
+security headers and direct-origin HTTPS denial passed. Nginx validation and
+reload succeeded with four pre-existing shared-vhost protocol warnings.
+Live Chrome checks at 375/1440 for home/results/install reported no document
+overflow, console errors, exceptions, loading failures or CSP violations.
+Keyboard focus was visible. A new Lighthouse or field-performance audit was
+not run for this content update.
+
+The new deployed snapshot passed private Drive upload, owner-only metadata
+readback, independent download and isolated restore of all 20 entries.
+See [recovery evidence](orgbots-recovery.md) and the
+[2.0.3 release record](RELEASE_2_0_3_VERIFICATION.md). The previous release,
+vhost and backups remain available. Analytics remains disabled; no accounts,
+forms or new tracking were added. Recurring backups and full host recovery
+remain outside this publication.
+
+Final scoped Astra review approved the live site, release documentation and
+backup evidence. GitHub website/installer checks passed for the published
+source in runs 40532204564 and 40532203553.

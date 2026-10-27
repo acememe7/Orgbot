@@ -461,5 +461,25 @@ single-linked and not group- or world-writable; a Cargo hardlink at mode `0775` 
 rejected and the run used a private checksum-identical copy without install.
 AGY log compatibility allows only `cli.log` to point to relative
 `log/cli-YYYYMMDD_HHMMSS.log`, resolving to a private owner-owned regular file
-with one link; other symlinks and path escapes are rejected. No package
-installation, publication, push or website update is included.
+with one link; other symlinks and path escapes are rejected. That source
+milestone preceded package publication; the release record below covers the
+subsequent publication. No host installation was performed.
+
+
+## OrgBots 2.0.3 publication, 27 October 2026
+
+- [x] Rebuild the release engine, Flutter bundle and both Debian packages.
+- [x] Pass Rust 879 tests, Flutter 351 tests (5 skipped) and all 17 Linux
+  acceptance checks. Record the pre-existing full-analysis warning separately.
+- [x] Pass the isolated 2.0.2 upgrade; retain eight data sentinels and trash policy.
+- [x] Complete dependency, secret, signature, package identity and APT solver checks.
+- [x] Obtain Astra prepublication approval; push source and the signed archive.
+- [x] Publish through Pages run 40532408637; independently verify public
+  signatures, 2.0.3 selection and both downloaded package hashes.
+- [x] Activate website release f1931cf with Gemini proof; verify public bytes,
+  security headers, responsive renders and keyboard focus.
+- [x] Upload the deployed snapshot to the existing owner-only Drive folder;
+  independently download, checksum-match and restore all 20 manifest entries.
+
+See [the complete release record](RELEASE_2_0_3_VERIFICATION.md). The owner's
+installed app remains 2.0.2 until they run the supplied update command.

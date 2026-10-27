@@ -88,6 +88,23 @@ scoped key, and the package hashes are covered by that signed metadata.
 
 ## Published release and maintenance
 
+OrgBots **2.0.3** was published on 2026-10-27 with
+[GitHub Actions run 40532408637](https://github.com/acememe7/Orgbot/actions/runs/40532408637).
+Both public signatures, a fresh isolated APT refresh, the 2.0.2-to-2.0.3
+upgrade solver with no removals, and downloaded package hashes passed.
+The main package SHA-256 is:
+
+```text
+98093f0a573b3a245b6a4a554073aa36ff8043a1cb7b11f9877de05654f69c76
+```
+
+This release adds OpenCode and protected Antigravity CLI support. Gemini
+context sharing, session restart/isolation and independent per-provider usage
+reconciliation passed; billing classification remains unknown. All six older
+package files remain unchanged. See the
+[2.0.3 verification record](RELEASE_2_0_3_VERIFICATION.md) for exact scope,
+checks and limits. Publishing did not upgrade the owner's installed app.
+
 OrgBots **2.0.2** was published on 2026-10-27 with
 [GitHub Actions run 40480618565](https://github.com/acememe7/Orgbot/actions/runs/40480618565).
 A fresh isolated public APT refresh, signature check, upgrade simulation and

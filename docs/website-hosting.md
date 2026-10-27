@@ -57,9 +57,11 @@ complete security or legal audit.
 
 The website has no account database, forms, active analytics or provider
 credentials. Cloudflare may process security cookies and network error reports.
-Search Console ownership is verified and its sitemap reports five discovered
-pages. A private Google Drive snapshot has passed a download and isolated
-restore check; the owner explicitly selected Drive instead of Cloud Storage.
+Search Console ownership was verified during initial deployment, when its
+sitemap reported five discovered pages. The current five-URL sitemap passes
+local and public checks; Search Console indexing was not refreshed for this
+content release. A private Google Drive snapshot has passed a download and
+isolated restore check; the owner explicitly selected Drive instead of Cloud Storage.
 See `orgbots-recovery.md` for its scope and the pending recurring-upload setup.
 See `WEBSITE_PRIVACY_ASSESSMENT.md` for the legal assessment and analytics gate.
 
@@ -81,3 +83,10 @@ notices, CSP, and real consent checks described in `WEBSITE_DELIVERY.md`.
 
 The shared SSH exposure and TLS 1.2 support remain pre-existing open items;
 this scoped change is not a complete shared-server security certification.
+
+
+Current release: `f1931cf`, activated on 27 October 2026 for OrgBots 2.0.3
+and Gemini runtime proof. The previous `06153e4` release and matching vhost
+are retained. Public file/configuration identity, responsive browser checks
+and the new independent backup restore passed; see
+[the release record](RELEASE_2_0_3_VERIFICATION.md).

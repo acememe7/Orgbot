@@ -1,7 +1,7 @@
 # OrgBots 2.0.3 verification
 
 Date: 2026-10-27. Target: Ubuntu 24.04 amd64.
-Publication status: local package verification complete; public publication pending.
+Publication status: published and independently verified.
 
 ## Changes and live proof
 
@@ -80,11 +80,39 @@ Final engine SHA-256:
 | orgbots_2.0.3_amd64.deb | `98093f0a573b3a245b6a4a554073aa36ff8043a1cb7b11f9877de05654f69c76` |
 | orgbot_2.0.3_all.deb | `370e171b0aa523102a8a85c0b58ceaa01ff6817f9edf2d7c16f777d458db22b5` |
 
-## Publication gates
+## Publication
 
-Astra approved the exact reviewed packages and site changes for publication.
-Public archive verification, website activation and the new backup readback
-remain pending; they will be recorded after execution.
+Astra approved the exact reviewed packages and site changes before publication.
+Source revision `f1931cfb810176bb4262995737526ed5c37c4a2e` was pushed to
+`main` and `master`. Signed archive revision
+`b71957bd068b8373e1636f4b52fd0e0f1ebf08e0` was pushed and verified before
+[Pages run 40532408637](https://github.com/acememe7/Orgbot/actions/runs/40532408637)
+was dispatched; its log confirms both exact revisions. Publication succeeded.
+
+A fresh isolated APT refresh against the public HTTPS archive verified both
+signatures, selected 2.0.3, solved the upgrade from installed 2.0.2 with no
+removals, and downloaded both packages. Their hashes exactly match the table.
+
+Website release `f1931cf` was activated only after public package verification.
+All 19 public files and the active vhost match source. HTTP redirect, HTTPS
+routes, genuine custom 404, security headers and direct-origin denial passed.
+Live Chrome checks at 375 and 1440 pixels found no document overflow or
+console, exception, loading or CSP errors. Keyboard focus was visible. The
+previous `06153e4` release and vhost are retained for rollback.
+
+The deployed site and vhost were uploaded to the existing private owner-only
+Drive folder, independently downloaded and checksum-matched. All 20 manifest
+entries restored into a fresh isolated directory. The 330,706-byte archive has
+SHA-256 `62bd3e18d1739a0bb7bff70bd6ccede6061ef700d1c5322b77e7687697f6fcf6`.
+Private folder/file identifiers and raw runtime evidence remain outside Git.
+
+The staged release diff passed secret scanning with no findings. The earlier
+source-history digest false positive is documented above. The owner's installed
+`orgbots` and `orgbot` packages remain at 2.0.2; publishing did not install them.
+
+Final scoped Astra review approved the public package, website, recovery
+evidence and documentation. GitHub website/installer checks passed in runs
+40532204564 and 40532203553 for the published source revision.
 
 ## Operational scope and limits
 
@@ -95,9 +123,9 @@ and separate token accounting do not establish billing or subscription quotas.
 
 | Gate | Current verification scope |
 | --- | --- |
-| Live protections | Private CLI boundaries and permission tests passed. Public archive signatures, package identity and website activation await this release's publication checks. Shared host SSH exposure, TLS 1.2 availability and provider-managed WAF settings are pre-existing limitations. |
-| Backups | Older package files, site releases and private evidence will be retained. The site uses the existing owner-selected Drive recovery folder; a new snapshot/readback/isolated restore is required for this publication. No new backup schedule or signing-key disaster-recovery claim. |
-| Restore tests | Candidate upgrade/data-preservation and the predeployment site snapshot restore checks passed. The new deployed site snapshot check follows publication. They do not establish full-machine recovery. |
+| Live protections | Private CLI boundaries and permission tests passed. Public archive signatures, package hashes, upgrade selection and website activation were independently verified. Shared host SSH exposure, TLS 1.2 availability and provider-managed WAF settings are pre-existing limitations. |
+| Backups | Older package files, site releases and private evidence were retained. The new site snapshot passed owner-only Drive readback, hash comparison and isolated restore. No new backup schedule or signing-key disaster-recovery claim. |
+| Restore tests | Candidate upgrade/data-preservation and the predeployment site snapshot restore checks passed. The new deployed snapshot passed independent download and isolated restore. They do not establish full-machine recovery. |
 | Legal/privacy | Static proof content introduces no website accounts, forms, tracking or data processor. Existing website privacy/transfer assessments and unresolved legal-review items remain unchanged. No broad compliance certification is claimed. |
 
 Publishing the package does not upgrade the owner's running application or

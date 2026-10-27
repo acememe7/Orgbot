@@ -5,7 +5,7 @@ release and the OrgBots Nginx virtual-host file. The TLS certificate can be
 reissued with Certbot; private keys, host logs, other sites, databases, and
 whole-host state are deliberately excluded.
 
-## Current recovery evidence
+## Initial recovery evidence
 
 On 2026-10-26, Hermes pointed `/var/www/orgbots/current` to release
 `releases/414104c`. Three release directories were present. The active vhost is
@@ -171,7 +171,7 @@ point; recurring backup scheduling and a full production disaster-recovery test
 remain unconfigured/unperformed.
 
 
-## Current proof-page release backup
+## Previous 2.0.2 proof-page release backup
 
 On 27 October 2026, release `06153e4` was activated with the OrgBots 2.0.2
 proof and usage table. All 19 public site files match the committed source,
@@ -187,3 +187,20 @@ Its bytes match the local archive, and all 20 manifest entries restored into
 a new isolated directory. The operator was the owner's Codex session.
 Earlier snapshots remain retained. Recurring uploads, failure alerts and a
 full host disaster-recovery exercise remain unconfigured/unperformed.
+
+
+## Current 2.0.3 Gemini-proof release backup
+
+On 27 October 2026, release `f1931cf` replaced `06153e4` after the signed
+2.0.3 packages passed independent public verification. All 19 public files
+and the active vhost match committed source. The previous release and its
+vhost remain retained. HTTP redirect, custom 404, security headers and
+HTTPS direct-origin denial passed.
+
+The exact deployed files and vhost were uploaded to the existing owner-only
+Drive folder. Metadata readback confirms no sharing and one owner. The
+independently downloaded archive is 330,706 bytes with SHA-256
+`62bd3e18d1739a0bb7bff70bd6ccede6061ef700d1c5322b77e7687697f6fcf6`.
+It matches the local archive, and all 20 manifest entries restored into a new
+isolated directory. Earlier recovery points remain. Recurring uploads and
+failure alerts remain unconfigured; no full-machine recovery is claimed.
