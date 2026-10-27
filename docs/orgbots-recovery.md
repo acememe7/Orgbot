@@ -151,7 +151,7 @@ All 20 files passed manifest checks and restored into
 restriction; the older `414104c` archive is retained for historical rollback.
 No recurring upload, automatic retention deletion, or failure-alert job was enabled.
 
-## Current release backup
+## Previous 2.0.1 website backup
 
 Website release `13622b2` was activated on 26 October 2026 after the signed
 OrgBots 2.0.1 archive became available. Every immutable release file was checked
@@ -169,3 +169,21 @@ The downloaded hash matches the local archive, and all 20 files restored into
 Earlier recovery points were retained. This is a verified publish-time recovery
 point; recurring backup scheduling and a full production disaster-recovery test
 remain unconfigured/unperformed.
+
+
+## Current proof-page release backup
+
+On 27 October 2026, release `06153e4` was activated with the OrgBots 2.0.2
+proof and usage table. All 19 public site files match the committed source,
+and the active vhost matches the reviewed CSP update. Previous release
+`13622b2` and its matching vhost remain available for rollback. HTTP redirect,
+HTTPS routes, custom 404 and direct-origin denial were verified.
+
+The exact deployed release and active vhost were snapshotted and uploaded to
+the existing owner-only Google Drive folder. Readback confirms no sharing
+and one owner. The independently downloaded archive is 329,433 bytes, with
+SHA-256 `e684673b7b0992e917d49d9b7b35f8177588463d90456ab0b3bc2afe727d9f30`.
+Its bytes match the local archive, and all 20 manifest entries restored into
+a new isolated directory. The operator was the owner's Codex session.
+Earlier snapshots remain retained. Recurring uploads, failure alerts and a
+full host disaster-recovery exercise remain unconfigured/unperformed.

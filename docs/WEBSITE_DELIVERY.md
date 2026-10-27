@@ -169,8 +169,42 @@ labeled synthetic. No analytics, forms, provider calls or new data processing
 were added. Static page, installer, consent-fixture, Bash and JavaScript checks
 pass. Browser checks at measured CSS widths 375, 768 and 1440 found no document
 overflow. The narrow table scrolls horizontally and accepts keyboard focus and
-arrow-key scrolling; desktop columns fit without scrolling. Mobile menu/Escape,
+scrollbar dragging; desktop columns fit without scrolling. Native arrow-key
+horizontal scrolling was not confirmed in the connected browser. Mobile menu/Escape,
 gallery switching, privacy close/reopen with focus return, and command-copy
 feedback passed. Only browser-extension warnings were captured. Astra cleared
 the corrected source and desktop rendering for scoped deployment. Publication
 and final backup evidence are recorded below after verification.
+
+
+Published website source `06153e46f6598c389d349b4c95b179b21c72dc76` to
+`main` and `master`, then activated release `06153e4` on the existing static
+host. The previous `13622b2` release and vhost are retained. Nginx validation
+and reload passed with the same four pre-existing shared-vhost warnings.
+All 19 deployed files and the active vhost match the reviewed source. All
+19 public responses match their source bytes, including the custom missing-URL
+404; the other 18 return 200. HTTP redirects to HTTPS. Security headers and
+`no-transform` are present, and direct HTTP/HTTPS origin requests remain 403.
+
+Live browser checks measured 375, 768 and 1440 CSS pixels without document
+overflow; narrow tables scroll to reveal the numeric columns. Mobile
+menu/Escape and focus return passed. No site-origin warnings/errors or external
+site scripts were observed; installed extension messages were excluded. The
+analytics flag remains false. Full network tracing and a new Lighthouse or
+field-performance run were not performed for this static content update.
+
+The deployed site and matching active vhost were uploaded to the existing
+owner-only Google Drive folder. Metadata confirms no sharing and one owner.
+The downloaded archive matches the local SHA-256, and all 20 files restored
+into a fresh isolated directory. Archive size: 329,433 bytes; SHA-256:
+`e684673b7b0992e917d49d9b7b35f8177588463d90456ab0b3bc2afe727d9f30`.
+Previous recovery points remain retained. This is a publish-time recovery
+point, not recurring backup automation or a full host disaster-recovery test.
+
+Both GitHub Actions website/installer checks passed for `06153e4`:
+`40482523240` and `40482523258`. Staged website and documentation source
+passed the secret scan with no findings.
+
+Final Astra review approved the deployed page, responsive evidence, public
+responses, backup verification and this documentation record. No blocking
+findings remain within the scoped website proof update.
