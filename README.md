@@ -3,6 +3,7 @@
 [Product website](https://orgbots.theaecestudio.com/) ·
 [Install on Ubuntu](docs/installation.md) ·
 [Installer script](scripts/install-orgbots.sh) ·
+[Test results and usage split](#verified-results) ·
 [Verification and benchmark status](https://orgbots.theaecestudio.com/results/)
 
 A group chat of AI bots that work a shared task board together. Bots hold
@@ -189,8 +190,60 @@ API cost estimates and subscription API equivalents are separate. A subscription
 equivalent is not an extra bill or a measurement of your remaining subscription
 quota. Splitting work can spread consumption across services; planning, handoffs
 and review can also add tokens. Real subscription savings have not been measured.
-See the [benchmark procedure](scripts/benchmarks/README.md) and
-[release verification record](docs/LINUX_2_0_PLAN.md).
+See the [verified results](#verified-results) below and the
+[benchmark procedure](scripts/benchmarks/README.md).
+
+## Verified results
+
+Recorded **27 October 2026** for **OrgBots 2.0.2 on Ubuntu 24.04 amd64**:
+
+- **854 Rust tests passed**, zero failed, three ignored. The native usage test
+  was explicitly run separately; optional tests that exit without credentials
+  are not live-provider evidence.
+- **337 Flutter tests passed**, five skipped; Flutter analysis found no issues.
+- **17/17 Linux acceptance checks passed**, including private D-Bus checks.
+- **Lifecycle probe 6 passed all 16 checks**, including exact tool approval,
+  pause/restart with a pending decision, one actual external call, and release
+  of loaded skill and tool-schema content. The fixture stopped awaiting review.
+- **Three real Codex episodes**, including resume and provider reconstruction,
+  reconciled exactly with native records: 35,083 uncached input, 59,904 cached
+  input and 250 output tokens. This separately verifies the accounting fix.
+
+One baseline/team comparison completed the same two tasks in both runs. Both
+passed the same **six original tests unchanged** and independent acceptance
+review. The accepted trial recorded this usage:
+
+| Run | Model | Uncached input | Cached input | Output |
+| --- | --- | ---: | ---: | ---: |
+| Baseline | GPT-6.1 Sol | 60,388 | 921,600 | 10,975 |
+| Baseline | GPT-6 Astra | 61,933 | 1,107,840 | 6,749 |
+| **Baseline** | **Codex total** | **122,321** | **2,029,440** | **17,724** |
+| Team | GPT-6.1 Sol | 32,223 | 420,608 | 4,744 |
+| Team | GPT-6 Astra | 56,932 | 909,824 | 9,257 |
+| **Team** | **Codex total** | **89,155** | **1,330,432** | **14,001** |
+| Team | DeepSeek Flash | 20,205 | 279,040 | 13,164 |
+
+The comparison preceded the accounting fix. Codex figures above use each
+session's final native total, correcting repeated cumulative snapshots in the
+historical room report. DeepSeek figures use API usage records. Token categories
+are disjoint; cache writes were zero.
+
+Codex used a subscription; its token counts do not establish a dollar charge
+or quota percentage. DeepSeek made **22 API requests**, with a separate
+**$0.023542 estimated API cost**, not an invoice. Across all team models, totals
+were **109,360 uncached input, 1,609,472 cached input and 27,165 output** tokens.
+Codex usage was lower in this trial; combined output was higher after including
+DeepSeek. One accepted pair does not establish general cost, quota or speed
+savings.
+
+Earlier failed trials and lifecycle probes remain in the report. Probe 7 on
+the final dependency-patched binary timed out after restart, and its allowance
+ledger could not reserve another request under the existing $0.25 ceiling.
+A complete final-binary lifecycle rerun is not claimed.
+
+Read the pinned [release verification record](https://github.com/acememe7/Orgbot/blob/b48566d3d6ef5c7ac7b5143cbb5e37723933378b/docs/RELEASE_2_0_2_VERIFICATION.md)
+and [usage reconciliation, failed attempts and test limits](https://github.com/acememe7/Orgbot/blob/b48566d3d6ef5c7ac7b5143cbb5e37723933378b/docs/benchmarks/2026-10-27-release-validation.md),
+or view the [website evidence page](https://orgbots.theaecestudio.com/results/).
 
 ## Why it holds together
 
