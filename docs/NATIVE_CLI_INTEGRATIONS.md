@@ -84,7 +84,11 @@ records the exact tested binary and scope.
 Run `orgbot agy login` in an owner terminal, or choose **Sign in** beside
 Antigravity in **Connections & tools**. From this checkout, the equivalent is
 `python3 app/packaging/orgbot-workspace.py agy-auth login`. Complete Google's
-sign-in inside the terminal and exit AGY without submitting a model prompt.
+sign-in inside the terminal without submitting a model prompt. The helper stops
+AGY when private credential items appear, closes the keyring and verifies that
+the items remain visible after a locked restart. If credentials are already
+stored, it returns immediately without launching AGY or reading the desktop
+wrapping key.
 `orgbot agy status` and **Check sign-in** report only whether the private keyring
 contains credential items; they do not certify authentication or enable bots.
 
@@ -114,7 +118,21 @@ submit a model prompt. Status uses locked private-keyring metadata and does not
 query the desktop keyring. The package declares its D-Bus and GNOME Keyring
 dependencies, but no updated package has been installed or published.
 
-Owner sign-in, credential refresh, subscription/overage behavior, actual native
+The first owner sign-in saved private credentials, then showed **Settings
+Error**: AGY's interactive startup tried to normalize and atomically replace
+the read-only settings file. The earlier networkless test reached OAuth only
+and did not exercise that authenticated startup. The helper now ends at
+credential storage instead of continuing into the full interactive session;
+the protected settings remain read-only. Neither continuing with defaults nor
+overwriting the controlled policy is part of this flow.
+
+The owner's stored-credential path now returns successfully. Separately,
+`agy -p /changelog --output-format json` completed inside the empty-root sandbox
+using the existing private keyring with networking disabled and settings
+unchanged. This proves that the saved credentials can be loaded for that
+built-in command; it does not establish model execution or token refresh.
+
+Credential refresh, subscription/overage behavior, actual native
 tool permissions, room MCP, and live context/usage checks remain required
 before removing the three execution gates. The
 [enrollment verification record](benchmarks/2026-10-27-antigravity-enrollment.json)

@@ -354,3 +354,23 @@ Credential presence is enrollment metadata, not proof of usable authentication.
 The three runtime execution gates stay in place until the remaining real-CLI
 checks pass. No installation, publication or deployment is part of this change.
 See the [sanitized enrollment proof](benchmarks/2026-10-27-antigravity-enrollment.json).
+
+### Enrollment follow-up: post-login settings error
+
+The owner completed the browser step, then AGY tried to normalize and atomically
+replace the protected settings file. The earlier offline probe reached OAuth
+only; it did not cover this authenticated startup path. Private credential
+metadata is now present and must be preserved.
+
+- [x] Make enrollment stop after credentials are stored, with a locked-keyring
+  restart check; avoid starting the full AGY session.
+- [x] Return existing stored credentials without launching AGY or reading the
+  desktop wrapping key. Keep all filesystem/configuration restrictions.
+- [x] Cover process-exit, credential-arrival and cancellation races; 49 helper
+  tests pass. The owner profile returns stored/pending verification, and the
+  cached-credential changelog command works with networking disabled and
+  settings unchanged. Astra approved the source correction.
+- [x] Complete final documentation/evidence review; Astra approved the
+  enrollment correction. Commit it as a separate verified milestone.
+- [ ] Resolve authenticated model-runtime settings compatibility and the
+  existing live permission/context/usage gates before enabling AGY execution.

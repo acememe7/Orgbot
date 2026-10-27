@@ -14,10 +14,10 @@
     "owner_sign_in_completed": false,
     "oauth_url_and_code_prompt_observed": true,
     "terminal_supported": true,
-    "read_only_settings_did_not_block_startup": true,
     "stopped_after_seconds": 15,
     "exit_code": -15,
-    "raw_terminal_output_persisted": false
+    "raw_terminal_output_persisted": false,
+    "read_only_settings_did_not_block_pre_auth_prompt": true
   },
   "isolation_checks": {
     "host_home_absent": true,
@@ -80,7 +80,6 @@
     "automatic_status_queries": false
   },
   "pending": [
-    "Owner-completed Google sign-in in separate profile",
     "Native token refresh and restart with real AGY credentials",
     "Actual native tool and room-MCP conformance after authentication",
     "Subscription and credit-overage behavior",
@@ -94,7 +93,8 @@
   "review": {
     "reviewer": "gpt-6-astra",
     "enrollment": "approved",
-    "model_execution": "blocked pending real account and permission verification"
+    "model_execution": "blocked pending real account and permission verification",
+    "scope_correction": "Earlier approval covered pre-auth enrollment evidence; the owner-reported post-auth settings failure requires a fix."
   },
   "checks": {
     "targeted_flutter_analyzer": "passed, 7 files",
@@ -103,5 +103,37 @@
     "diff_whitespace": "passed",
     "source_rust_binary_build": "passed"
   },
-  "owner_terminal_opened": true
+  "owner_terminal_opened": true,
+  "owner_followup": {
+    "private_credential_metadata_present": true,
+    "post_auth_settings_normalization_error_reported": true,
+    "error": "atomic rename of read-only settings.json",
+    "native_post_auth_runtime_verified": false,
+    "existing_credentials_preserved": true,
+    "workspace_helper_sha256": "ae9eb029623500b08c956e1125e97d3447cbee66ded7981b8a2178bb2ff160ed",
+    "helper_tests_passed": 49,
+    "stored_login_command_exit_code": 0,
+    "stored_login_state": "pending_preflight",
+    "stored_login_launches_agy": false,
+    "stored_login_reads_desktop_wrapping_key": false,
+    "cached_changelog": {
+      "exit_code": 0,
+      "network_disabled": true,
+      "auth_prompt": false,
+      "settings_error": false,
+      "settings_unchanged": true,
+      "scope": "Built-in changelog command only; no model quota consumed"
+    },
+    "available_model_verified": "gemini-3.8-flash-medium",
+    "headless_response_attempt": {
+      "exit_code": 1,
+      "model_completion": false,
+      "reported_usage": false,
+      "error": "Cannot create /home/orgbot/.gemini/config/projects in read-only configuration",
+      "settings_unchanged": true,
+      "api_credentials_supplied": false,
+      "useG1Credits": false
+    }
+  },
+  "source_commit": "055642a"
 }

@@ -1021,7 +1021,9 @@ def _secret_item_paths(bus_address: str, attributes: dict[str, str], *, timeout:
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             timeout=timeout, env=env,
         )
-    except (OSError, subprocess.TimeoutExpired, _AgyAuthCancelled):
+    except _AgyAuthCancelled:
+        raise
+    except (OSError, subprocess.TimeoutExpired):
         _fail("Antigravity Secret Service metadata query failed")
     if result.returncode != 0 or len(result.stdout) > 1024 * 1024:
         _fail("Antigravity Secret Service metadata query failed")
@@ -1070,7 +1072,9 @@ def _host_wrapping_passphrase(profile: dict[str, Path]) -> bytearray:
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 timeout=8, env=host_env,
             )
-        except (OSError, subprocess.TimeoutExpired, _AgyAuthCancelled):
+        except _AgyAuthCancelled:
+            raise
+        except (OSError, subprocess.TimeoutExpired):
             _fail("OrgBots Antigravity wrapping-key item is locked or unavailable")
         lines = result.stdout.splitlines()
         if result.returncode != 0 or len(lines) != 1 or not re.fullmatch(rb"[A-Za-z0-9_-]{40,64}", lines[0]):
@@ -1085,7 +1089,9 @@ def _host_wrapping_passphrase(profile: dict[str, Path]) -> bytearray:
                 input=bytes(passphrase) + b"\n", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=10, env=host_env,
             )
-        except (OSError, subprocess.TimeoutExpired, _AgyAuthCancelled):
+        except _AgyAuthCancelled:
+            raise
+        except (OSError, subprocess.TimeoutExpired):
             _fail("Could not store OrgBots Antigravity wrapping key in Secret Service")
         if result.returncode != 0 or len(_secret_item_paths_for_host(AGY_WRAP_ATTRIBUTES)) != 1:
             _fail("OrgBots Antigravity wrapping key was not stored uniquely")
@@ -1403,6 +1409,24 @@ def _agy_auth_lock(root: Path) -> int:
     return fd
 
 
+def _agy_watch_credentials(process: subprocess.Popen[bytes], bus_address: str) -> tuple[bool, int | None, bool]:
+    while True:
+        # Keep a pre-query poll for process reaping, then re-poll after the DBus wait.
+        process.poll()
+        paths = _secret_item_paths(bus_address, {})
+        exit_code = process.poll()
+        if paths:
+            stopped_by_helper = False
+            if exit_code is None:
+                _stop_owned_process(process)
+                exit_code = process.returncode
+                stopped_by_helper = exit_code == -signal.SIGTERM
+            return True, exit_code, stopped_by_helper
+        if exit_code is not None:
+            return False, exit_code, False
+        time.sleep(0.05)
+
+
 def _agy_auth_login() -> dict[str, Any]:
     previous_umask = os.umask(0o077)
     try:
@@ -1424,33 +1448,72 @@ def _agy_auth_login_inner() -> dict[str, Any]:
     _set_process_limits()
     if not (os.isatty(0) and os.isatty(1) and os.isatty(2)):
         _fail("Antigravity sign-in must run from an interactive terminal")
-    binary = _agy_binary()
-    _agy_auth_preflight()
-    profile = _agy_profile_paths(create=True)
-    assert profile is not None
+    profile = _agy_profile_paths(create=False)
+    binary: Path | None = None
+    if profile is None:
+        binary = _agy_binary()
+        _agy_auth_preflight()
+        profile = _agy_profile_paths(create=True)
+        assert profile is not None
     lock_fd = _agy_auth_lock(profile["root"])
     passphrase = None
     try:
+        existing_store = _agy_keyring_has_data(profile)
+        if existing_store:
+            with _agy_private_secret_service(profile, None) as (locked_env, _runtime):
+                locked_paths = _secret_item_paths(locked_env["DBUS_SESSION_BUS_ADDRESS"], {})
+            if locked_paths:
+                return {"ok": True, "credentials_present": True, "state": "pending_preflight"}
+        if binary is None:
+            binary = _agy_binary()
+            _agy_auth_preflight()
         passphrase = _host_wrapping_passphrase(profile)
+        detected_credentials = False
+        native_exit_code: int | None = None
+        stopped_by_helper = False
         with _agy_private_secret_service(profile, passphrase) as (_private_env, runtime):
-            args = _agy_sandbox_args(profile, binary, runtime)
-            process = _agy_owned_popen(
-                args, env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
-            )
-            try:
-                status = process.wait()
-            except BaseException:
-                _stop_owned_process(process)
-                raise
-            finally:
-                _AGY_CHILDREN.discard(process)
-            paths = _secret_item_paths(_private_env["DBUS_SESSION_BUS_ADDRESS"], {})
+            bus_address = _private_env["DBUS_SESSION_BUS_ADDRESS"]
+            existing_paths = _secret_item_paths(bus_address, {})
+            if existing_paths:
+                detected_credentials = True
+            else:
+                assert binary is not None
+                args = _agy_sandbox_args(profile, binary, runtime)
+                process = _agy_owned_popen(
+                    args, env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
+                )
+                try:
+                    detected_credentials, native_exit_code, stopped_by_helper = _agy_watch_credentials(process, bus_address)
+                except BaseException:
+                    _stop_owned_process(process)
+                    raise
+                finally:
+                    _AGY_CHILDREN.discard(process)
+        if not detected_credentials:
+            return {
+                "ok": False,
+                "credentials_present": False,
+                "state": "pending_login",
+                "agy_exit_code": native_exit_code,
+                "error": (f"Antigravity sign-in exited with code {native_exit_code} before saving credentials"
+                          if native_exit_code is not None else "Antigravity sign-in ended before saving credentials"),
+            }
+        with _agy_private_secret_service(profile, None) as (locked_env, _runtime):
+            persisted_paths = _secret_item_paths(locked_env["DBUS_SESSION_BUS_ADDRESS"], {})
+        if not persisted_paths:
+            _fail("Antigravity credentials did not persist after the private keyring relocked")
+        if not stopped_by_helper and native_exit_code not in (None, 0):
+            return {
+                "ok": False,
+                "credentials_present": True,
+                "state": "pending_preflight",
+                "agy_exit_code": native_exit_code,
+                "error": f"Antigravity exited with code {native_exit_code} after storing credentials",
+            }
         return {
-            "ok": status == 0,
-            "credentials_present": bool(paths),
-            "state": "pending_preflight" if paths else "pending_login",
-            "agy_exit_code": status,
-            **({} if status == 0 else {"error": f"Antigravity sign-in exited with code {status}"}),
+            "ok": True,
+            "credentials_present": True,
+            "state": "pending_preflight",
         }
     finally:
         if passphrase is not None:

@@ -567,6 +567,128 @@ for path in (Path(os.environ['OPENCODE_CONFIG_DIR']), Path(os.environ['HOME']) /
             with self.assertRaisesRegex(workspace.WorkspaceError, "interactive terminal"):
                 workspace._agy_auth_login()
 
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("dbus-daemon") and
+                         workspace.shutil.which("gnome-keyring-daemon") and workspace.shutil.which("secret-tool") and
+                         workspace.shutil.which("dbus-send"), "Linux Secret Service tools are required")
+    def test_agy_login_with_existing_private_credentials_skips_host_secret_and_cli(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        passphrase = bytearray(b"synthetic-existing-private-keyring-passphrase")
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            try:
+                with workspace._agy_private_secret_service(profile, passphrase) as (env, _runtime):
+                    stored = workspace._agy_run(
+                        ["/usr/bin/secret-tool", "store", "--label=synthetic existing auth",
+                         "service", "orgbots", "purpose", "synthetic-auth", "version", "1"],
+                        input=b"synthetic-only\n", stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        env=env, timeout=5,
+                    )
+                    self.assertEqual(stored.returncode, 0, stored.stderr.decode(errors="replace"))
+                with patch.object(workspace.os, "isatty", return_value=True), \
+                     patch.object(workspace, "_set_process_limits"), \
+                     patch.object(workspace, "_agy_binary", side_effect=AssertionError("stored credentials should skip CLI binary")), \
+                     patch.object(workspace, "_agy_auth_preflight", side_effect=AssertionError("stored credentials should skip CLI preflight")), \
+                     patch.object(workspace, "_host_wrapping_passphrase", side_effect=AssertionError("stored credentials must not query host Secret Service")):
+                    result = workspace._agy_auth_login()
+                self.assertEqual(result, {"ok": True, "credentials_present": True, "state": "pending_preflight"})
+            finally:
+                workspace._zero_bytes(passphrase)
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap") and
+                         workspace.shutil.which("dbus-daemon") and workspace.shutil.which("gnome-keyring-daemon") and
+                         workspace.shutil.which("secret-tool") and workspace.shutil.which("dbus-send"),
+                         "Linux Antigravity enrollment tools are required")
+    def test_agy_fresh_login_stops_after_private_credentials_persist(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            fake_agy = self.root / "synthetic-agy"
+            fake_agy.write_text(
+                "#!/bin/sh\n"
+                "printf 'synthetic-only\\n' | /usr/bin/secret-tool store --label=synthetic-auth "
+                "service orgbots purpose synthetic-auth version 1 >/dev/null 2>&1 || exit 8\n"
+                "exec /bin/sleep 30\n",
+                encoding="utf-8",
+            )
+            os.chmod(fake_agy, 0o700)
+            passphrase = bytearray(b"synthetic-fresh-private-keyring-passphrase")
+            original_builder = workspace._agy_sandbox_args
+
+            def offline_builder(current_profile, binary, runtime):
+                args = original_builder(current_profile, binary, runtime)
+                args.insert(1, "--unshare-net")
+                return args
+
+            try:
+                with patch.object(workspace.os, "isatty", return_value=True), \
+                     patch.object(workspace, "_set_process_limits"), \
+                     patch.object(workspace, "_agy_binary", return_value=fake_agy), \
+                     patch.object(workspace, "_agy_auth_preflight"), \
+                     patch.object(workspace, "_host_wrapping_passphrase", return_value=passphrase), \
+                     patch.object(workspace, "_agy_sandbox_args", side_effect=offline_builder):
+                    result = workspace._agy_auth_login()
+            finally:
+                workspace._zero_bytes(passphrase)
+            self.assertEqual(result, {"ok": True, "credentials_present": True, "state": "pending_preflight"})
+            self.assertTrue(workspace._agy_keyring_has_data(profile))
+            expected_settings = workspace._canonical_json_bytes({
+                "useG1Credits": False,
+                "permissions": {
+                    "allow": [], "ask": [],
+                    "deny": ["command(*)", "unsandboxed(*)", "read_file(*)", "write_file(*)",
+                             "read_url(*)", "execute_url(*)", "mcp(*)"],
+                },
+            })
+            self.assertEqual(profile["settings"].read_bytes(), expected_settings)
+
+    def test_agy_metadata_arrival_after_process_exit_is_preserved_as_failure(self):
+        class FinishedProcess:
+            def __init__(self):
+                self.poll_results = iter((None, 7))
+
+            def poll(self):
+                return next(self.poll_results)
+
+        process = FinishedProcess()
+        with patch.object(workspace, "_secret_item_paths", return_value=["/org/freedesktop/secrets/item/1"]), \
+             patch.object(workspace, "_stop_owned_process") as stop:
+            detected, exit_code, stopped_by_helper = workspace._agy_watch_credentials(process, "unix:path=/synthetic-bus")
+        self.assertTrue(detected)
+        self.assertEqual(exit_code, 7)
+        self.assertFalse(stopped_by_helper)
+        stop.assert_not_called()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("dbus-daemon") and
+                         workspace.shutil.which("gnome-keyring-daemon") and workspace.shutil.which("secret-tool") and
+                         workspace.shutil.which("dbus-send"), "Linux Secret Service tools are required")
+    def test_agy_login_cancellation_preserves_private_credentials_state(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        passphrase = bytearray(b"synthetic-cancelled-private-keyring-passphrase")
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            try:
+                with workspace._agy_private_secret_service(profile, passphrase) as (env, _runtime):
+                    stored = workspace._agy_run(
+                        ["/usr/bin/secret-tool", "store", "--label=synthetic retained auth",
+                         "service", "orgbots", "purpose", "synthetic-retained-auth", "version", "1"],
+                        input=b"synthetic-only\n", stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        env=env, timeout=5,
+                    )
+                    self.assertEqual(stored.returncode, 0, stored.stderr.decode(errors="replace"))
+                with patch.object(workspace, "_agy_auth_login_inner", side_effect=workspace._AgyAuthCancelled):
+                    result = workspace._agy_auth_login()
+            finally:
+                workspace._zero_bytes(passphrase)
+        self.assertEqual(result, {
+            "ok": False,
+            "credentials_present": True,
+            "state": "pending_preflight",
+            "error": "Antigravity sign-in cancelled",
+        })
+
     def test_agy_profile_uses_exact_deny_settings_and_rejects_mutation(self):
         xdg_data = self.root / "xdg-data"
         xdg_data.mkdir(mode=0o700)
