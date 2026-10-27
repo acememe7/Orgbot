@@ -337,7 +337,7 @@ The owner authorized a separate AGY sign-in while keeping access to the host
 keyring blocked. The source change reaches the workspace helper, Linux CLI,
 desktop Connections & tools, packaging dependencies and their focused tests.
 
-- [x] Add owner-initiated `orgbot agy login` and metadata-only `agy status`.
+- [x] Add owner-initiated `orgbot-engine agy login` and metadata-only `agy status`.
 - [x] Provision a separate encrypted keyring, protected by one exactly scoped
   OrgBots secret-store item; never copy the existing AGY login or reset an
   existing encrypted store when its wrapping key is unavailable.

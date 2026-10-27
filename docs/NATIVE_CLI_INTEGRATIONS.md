@@ -1,8 +1,9 @@
 # OpenCode and Antigravity integration
 
-This describes the development source after 2.0.2. It does not change the
-published package, installed desktop application, website results or earlier
-benchmark claims.
+This describes the OpenCode and Antigravity integration included in Linux
+2.0.3. Earlier benchmark reports retain their original scope and results.
+See the [2.0.3 release verification](RELEASE_2_0_3_VERIFICATION.md) for package
+identity and publication checks.
 
 The later [live-test report](benchmarks/2026-10-27-subscription-free-validation.md)
 records an attempted protected OpenCode V4.1 Flash Free call. The provider
@@ -83,7 +84,7 @@ records the exact tested binary and scope.
 
 ### Separate private sign-in in the development source
 
-Run `orgbot agy login` in an owner terminal, or choose **Sign in** beside
+Run `orgbot-engine agy login` in an owner terminal, or choose **Sign in** beside
 Antigravity in **Connections & tools**. From this checkout, the equivalent is
 `python3 app/packaging/orgbot-workspace.py agy-auth login`. Complete Google's
 sign-in inside the terminal without submitting a model prompt. The helper stops
@@ -91,7 +92,7 @@ AGY when private credential items appear, closes the keyring and verifies that
 the items remain visible after a locked restart. If credentials are already
 stored, it returns immediately without launching AGY or reading the desktop
 wrapping key.
-`orgbot agy status` and **Check sign-in** report only whether the private keyring
+`orgbot-engine agy status` and **Check sign-in** report only whether the private keyring
 contains credential items. They do not certify account access or runtime
 readiness; account access is checked when the selected bot runs.
 

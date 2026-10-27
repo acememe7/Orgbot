@@ -62,9 +62,9 @@ For community listings, use the [prepared sharing blurb](docs/SHARING.md).
 
 ## Install on Ubuntu
 
-The desktop package targets **Ubuntu 24.04 amd64**. Version 2.0.2 adds scoped
-rule/skill/MCP loading, fixes Codex session resume, and lets reviewers run
-isolated checks; see the [release record](docs/RELEASE_2_0_2_VERIFICATION.md).
+The desktop package targets **Ubuntu 24.04 amd64**. Version 2.0.3 adds
+OpenCode and protected Antigravity CLI support, including Gemini context and
+usage verification; see the [release record](docs/RELEASE_2_0_3_VERIFICATION.md).
 Set up the signed third-party APT repository once on each computer:
 
 ```bash
@@ -115,8 +115,8 @@ Finding a CLI does not verify its account access; the CLI checks that when it
 runs. API keys are kept in encrypted platform storage. Available models and
 usage limits depend on each account.
 
-The development source also includes OpenCode and Antigravity provider
-configuration. OpenCode requires an explicit `provider/model` and the selected
+Version 2.0.3 includes OpenCode and Antigravity provider configuration. OpenCode
+requires an explicit `provider/model` and the selected
 provider's existing OpenCode API credential; OAuth reuse is unavailable.
 Antigravity uses a separate private sign-in. A protected Linux server smoke
 completed on `gemini-3.8-flash-medium` through the room MCP bridge. A separate
@@ -124,15 +124,14 @@ completed on `gemini-3.8-flash-medium` through the room MCP bridge. A separate
 recall after restart, and a distinct isolated room that returned `UNKNOWN`.
 An authorized room-MCP file write and readback also passed while direct native
 file tools remained denied. Provider billing classification is unknown. These
-additions are not in the published 2.0.2 package. See the
+additions are included in the 2.0.3 package. See the
 [integration status and verification](docs/NATIVE_CLI_INTEGRATIONS.md)
 and [Antigravity runtime evidence](docs/benchmarks/2026-10-27-antigravity-runtime.json).
 
 The [development live-test report](docs/benchmarks/2026-10-27-subscription-free-validation.md)
 records the Astra/DeepSeek coding test, separate provider usage, and the
-OpenCode free-allowance result. The later Antigravity runtime smoke is recorded
-separately. Neither report changes the published release or establishes general
-subscription savings.
+OpenCode free-allowance result. The Antigravity runtime proof is recorded
+separately and is included with 2.0.3. These reports do not establish general subscription savings.
 
 Rooms have a shared conversation, task board, artifacts and editable memory.
 Reply to a message or use `@handle` to direct work to an agent; an untagged
@@ -480,16 +479,16 @@ provider = { kind = "cli", cli = "codex", workdir = "/path/to/project", policy =
 # claim tasks, hand work off, and ask for review mid-episode.
 ```
 
-In the development source, OpenCode uses `cli = "opencode"` with an explicit
+From version 2.0.3, OpenCode uses `cli = "opencode"` with an explicit
 `model = "provider/model"`. Antigravity's saved identifier is
 `cli = "antigravity"` (`agy` is also accepted); its executable is `agy`, and
 the explicit model slug `gemini-3.8-flash-medium` passed a guarded Linux room
 MCP smoke, an 11-check context/restart test, and an authorized MCP file
 write/readback with direct native file tools denied. Billing treatment remains
 unknown; credential refresh and live external-MCP approvals remain unverified.
-On Linux, `orgbot agy login` opens the separate private sign-in in your terminal;
-`orgbot agy status` reports stored-credential presence only. Connections & tools
-also exposes these actions in a source build. Neither new provider
+On Linux, `orgbot-engine agy login` opens the separate private sign-in in your terminal;
+`orgbot-engine agy status` reports stored-credential presence only. Connections & tools
+also exposes these actions in the Linux app. Neither new provider
 uses the unprotected Dart runner or the Android engine.
 
 Each turn starts a CLI process and resumes that bot's saved native session when

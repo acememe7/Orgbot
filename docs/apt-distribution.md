@@ -24,8 +24,8 @@ scripts/build-apt-repo.sh \
   --output /tmp/orgbots-apt \
   --gnupghome /secure/path/orgbots-archive-key \
   --key FULL_40_OR_64_CHARACTER_FINGERPRINT \
-  app/orgbots_2.0.2_amd64.deb \
-  app/orgbot_2.0.2_all.deb
+  app/orgbots_2.0.3_amd64.deb \
+  app/orgbot_2.0.3_all.deb
 ```
 
 The output path must not already exist. The script emits both packages under

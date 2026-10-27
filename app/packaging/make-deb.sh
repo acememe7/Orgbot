@@ -128,8 +128,9 @@ Maintainer: OrgBot <theaeceme@gmail.com>
 Description: CLI and API agents working together in shared rooms
  Bots hold different roles, pick up tasks, hand work off to one another, wait
  on those handoffs, get their work inspected, and submit it - in one room you
- can watch and talk to. Codex, Claude, and Grok CLIs use their existing local
- sessions. DeepSeek and Ollama Cloud use securely saved API keys. Agents
+ can watch and talk to. Codex, Claude, and Grok use their existing CLI sessions.
+ OpenCode uses a selected provider API credential; Antigravity uses a separate
+ private sign-in. DeepSeek and Ollama Cloud use securely saved API keys. Agents
  work together in the room's shared project folder with role permissions.
 CONTROL
 
