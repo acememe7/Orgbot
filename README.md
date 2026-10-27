@@ -123,6 +123,11 @@ until its sign-in can be used without exposing the host keyring. These additions
 are not in the published 2.0.2 package. See the
 [integration status and verification](docs/NATIVE_CLI_INTEGRATIONS.md).
 
+The [development live-test report](docs/benchmarks/2026-10-27-subscription-free-validation.md)
+records the Astra/DeepSeek coding test, separate provider usage, and the
+OpenCode free-allowance and Antigravity authentication blockers. It does not
+change the published release or establish subscription savings.
+
 Rooms have a shared conversation, task board, artifacts and editable memory.
 Reply to a message or use `@handle` to direct work to an agent; an untagged
 message goes to one available bot, preferring a coordinator. `@all` wakes the

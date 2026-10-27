@@ -1,0 +1,617 @@
+{
+  "schema": 1,
+  "date": "2026-10-27",
+  "scope": "development source; synthetic live tests; no installation or publication",
+  "engine": {
+    "source_commit": "2e3eaab",
+    "binary_sha256": "29aaf3eada732fb5640ac9e843ad4ebef648e1da31b92e7f8a2f06107f3358e8"
+  },
+  "routes": {
+    "astra": {
+      "cli": "codex",
+      "model": "gpt-6-astra",
+      "private_auth_mode": "chatgpt",
+      "openai_api_key_present": false
+    },
+    "deepseek": {
+      "model": "deepseek-flash",
+      "route": "explicit paid API; peak rate budget cap"
+    },
+    "opencode": {
+      "model": "opencode/deepseek-v4.1-flash-free",
+      "status": "blocked_free_usage_limit",
+      "fallback_attempted": false
+    },
+    "gemini": {
+      "model": "gemini-3.8-flash",
+      "status": "pending_antigravity_authentication",
+      "calls_attempted": 0,
+      "api_fallback_attempted": false
+    }
+  },
+  "opencode_preflight": {
+    "attempts": 1,
+    "model": "opencode/deepseek-v4.1-flash-free",
+    "runner": "Rust AgentCliProvider with WorkspaceGuard",
+    "policy": "read_only",
+    "mcp_enabled": false,
+    "binary_version": "1.19.4",
+    "binary_sha256": "538fcb1b6408c8d4608822acee19f7ff5b3a3eb3383c0633c4f06170857312a7",
+    "selected_private_api_auth_record_present": true,
+    "selected_private_auth_only": true,
+    "result": {
+      "response_correct": null,
+      "usage_reported": null,
+      "usage_complete": null,
+      "calls": null,
+      "input_tokens": null,
+      "cache_read_tokens": null,
+      "output_tokens": null,
+      "cache_write_tokens": null,
+      "actual_api_cost_microusd": null,
+      "api_equivalent_cost_microusd": null,
+      "latency_ms": 180000,
+      "failure_classification": "opencode_free_usage_limit_reached_then_adapter_turn_timeout_180s"
+    },
+    "private_native_session_metadata": {
+      "session_created": true,
+      "assistant_records": 1,
+      "selected_model_id": "deepseek-v4.1-flash-free",
+      "recorded_cost": 0,
+      "token_counts": {
+        "input": 0,
+        "cache_read": 0,
+        "output": 0,
+        "cache_write": 0
+      },
+      "provider_error_observed_in_private_cli_log": "free_usage_limit_reached",
+      "provider_error_summary": "OpenCode reported the free-model allowance was exhausted; no completion or token usage was recorded."
+    },
+    "provider_completion_confirmed": false,
+    "fallback_attempted": false,
+    "remaining_matching_cli_processes": 0,
+    "raw_cli_output_saved_or_emitted": false
+  },
+  "runs": [
+    {
+      "attempt": "lifecycle-1",
+      "status": "failed",
+      "reason": "skill marker not recorded; MCP retried before schema reload",
+      "checkpoints": {
+        "state.json": {
+          "checkpoint_sha256": "b9fef265ec633d00109a10a3339d7283bd3babcab84ff7839f18a2f1d22cafd7",
+          "recorded_usage_events_complete": true,
+          "recorded_usage": {
+            "input_tokens": 5130,
+            "output_tokens": 2495,
+            "cache_read_tokens": 79104,
+            "cache_write_tokens": 0
+          },
+          "agents": [
+            {
+              "handle": "deepseek_probe",
+              "provider": "deep_seek",
+              "cli": null,
+              "model": "deepseek-flash",
+              "billing_kind": "api",
+              "calls": 13,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 5130,
+                "output_tokens": 2495,
+                "cache_read_tokens": 79104,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": 5015
+            }
+          ]
+        }
+      }
+    },
+    {
+      "attempt": "lifecycle-2",
+      "status": "passed",
+      "reason": "all 16 strict lifecycle gates passed",
+      "checkpoints": {
+        "state.json": {
+          "checkpoint_sha256": "2f2153fa09f0fd43903c9d489e88f5f399f1c02e115ace32e17b8146c7beb2f6",
+          "recorded_usage_events_complete": true,
+          "recorded_usage": {
+            "input_tokens": 10714,
+            "output_tokens": 2490,
+            "cache_read_tokens": 80896,
+            "cache_write_tokens": 0
+          },
+          "agents": [
+            {
+              "handle": "deepseek_probe",
+              "provider": "deep_seek",
+              "cli": null,
+              "model": "deepseek-flash",
+              "billing_kind": "api",
+              "calls": 14,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 10714,
+                "output_tokens": 2490,
+                "cache_read_tokens": 80896,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": 6694
+            }
+          ]
+        }
+      },
+      "checks": {
+        "approval_exact": true,
+        "handed_to_review": true,
+        "lifecycle_sequence_exact": true,
+        "mcp_invoked_once": true,
+        "pending_persisted_before_restart": true,
+        "pending_survived_restart": true,
+        "schema_loaded_once": true,
+        "schema_released": true,
+        "skill_nonce_seen": true,
+        "skill_once": true,
+        "source_hash_unchanged": true,
+        "successful_tool_result": true,
+        "tool_arguments_exact": true,
+        "tool_history_present": true,
+        "tool_nonce_seen": true,
+        "usage_positive": true
+      }
+    },
+    {
+      "attempt": "context-1",
+      "status": "failed_harness",
+      "reason": "owner prompt mentioned both participants",
+      "checkpoints": {
+        "primary/state.json": {
+          "checkpoint_sha256": "997b769a3fbc2fdf39c1970f7000807caf1242d5551c8ecba1f4fef3ee01e653",
+          "recorded_usage_events_complete": true,
+          "recorded_usage": {
+            "input_tokens": 17446,
+            "output_tokens": 715,
+            "cache_read_tokens": 124288,
+            "cache_write_tokens": 0
+          },
+          "agents": [
+            {
+              "handle": "astra",
+              "provider": "cli_agent",
+              "cli": "codex",
+              "model": "gpt-6-astra",
+              "billing_kind": "subscription",
+              "calls": 2,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 10929,
+                "output_tokens": 393,
+                "cache_read_tokens": 106368,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": null
+            },
+            {
+              "handle": "deepseek",
+              "provider": "deep_seek",
+              "cli": null,
+              "model": "deepseek-flash",
+              "billing_kind": "api",
+              "calls": 4,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 6517,
+                "output_tokens": 322,
+                "cache_read_tokens": 17920,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": 2451
+            }
+          ]
+        }
+      }
+    },
+    {
+      "attempt": "context-2",
+      "status": "partial",
+      "reason": "SIGTERM before final proof; newline in isolated CLI response left exact-text wait pending",
+      "checkpoints": {
+        "primary/state.json": {
+          "checkpoint_sha256": "68616db2d5cfbf3f30c2999b3aabed2976370f950d8b8ce02ecf5bffd2dcddcf",
+          "recorded_usage_events_complete": true,
+          "recorded_usage": {
+            "input_tokens": 17370,
+            "output_tokens": 697,
+            "cache_read_tokens": 144512,
+            "cache_write_tokens": 0
+          },
+          "agents": [
+            {
+              "handle": "deepseek",
+              "provider": "deep_seek",
+              "cli": null,
+              "model": "deepseek-flash",
+              "billing_kind": "api",
+              "calls": 4,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 5060,
+                "output_tokens": 272,
+                "cache_read_tokens": 19200,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": 1962
+            },
+            {
+              "handle": "astra",
+              "provider": "cli_agent",
+              "cli": "codex",
+              "model": "gpt-6-astra",
+              "billing_kind": "subscription",
+              "calls": 2,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 12310,
+                "output_tokens": 425,
+                "cache_read_tokens": 125312,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": null
+            }
+          ]
+        },
+        "isolated/state.json": {
+          "checkpoint_sha256": "cbdd5a632bf8640ba8c1f82b2a3959b764ff9219c812145025163f35ae994de5",
+          "recorded_usage_events_complete": true,
+          "recorded_usage": {
+            "input_tokens": 9434,
+            "output_tokens": 318,
+            "cache_read_tokens": 12160,
+            "cache_write_tokens": 0
+          },
+          "agents": [
+            {
+              "handle": "astra",
+              "provider": "cli_agent",
+              "cli": "codex",
+              "model": "gpt-6-astra",
+              "billing_kind": "subscription",
+              "calls": 1,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 9434,
+                "output_tokens": 318,
+                "cache_read_tokens": 12160,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "attempt": "context-3",
+      "status": "partial",
+      "reason": "stopped after diagnosing native UNKNOWN newline framing in exact-text wait",
+      "checkpoints": {
+        "primary/state.json": {
+          "checkpoint_sha256": "22bc7601de0d6a591caf0ba20d4f2212b06b19c1ac5272e6c40f4c75cafe8042",
+          "recorded_usage_events_complete": true,
+          "recorded_usage": {
+            "input_tokens": 25441,
+            "output_tokens": 913,
+            "cache_read_tokens": 169472,
+            "cache_write_tokens": 0
+          },
+          "agents": [
+            {
+              "handle": "deepseek",
+              "provider": "deep_seek",
+              "cli": null,
+              "model": "deepseek-flash",
+              "billing_kind": "api",
+              "calls": 4,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 5092,
+                "output_tokens": 272,
+                "cache_read_tokens": 19200,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": 1972
+            },
+            {
+              "handle": "astra",
+              "provider": "cli_agent",
+              "cli": "codex",
+              "model": "gpt-6-astra",
+              "billing_kind": "subscription",
+              "calls": 2,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 20349,
+                "output_tokens": 641,
+                "cache_read_tokens": 150272,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": null
+            }
+          ]
+        },
+        "isolated/state.json": {
+          "checkpoint_sha256": "e062251545cdd1cf8ab7328ac0f058de3ee5f126d4b43b35b076cb13c1200229",
+          "recorded_usage_events_complete": true,
+          "recorded_usage": {
+            "input_tokens": 9434,
+            "output_tokens": 217,
+            "cache_read_tokens": 12160,
+            "cache_write_tokens": 0
+          },
+          "agents": [
+            {
+              "handle": "astra",
+              "provider": "cli_agent",
+              "cli": "codex",
+              "model": "gpt-6-astra",
+              "billing_kind": "subscription",
+              "calls": 1,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 9434,
+                "output_tokens": 217,
+                "cache_read_tokens": 12160,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "attempt": "context-4",
+      "status": "passed",
+      "reason": "nine applicable context/resume/isolation gates passed; OpenCode not run",
+      "checkpoints": {
+        "primary/state.json": {
+          "checkpoint_sha256": "6520400a8ec218577e4ed8a1820dd853b78a26796d8cdf4a666c1b608653e8b9",
+          "recorded_usage_events_complete": true,
+          "recorded_usage": {
+            "input_tokens": 19413,
+            "output_tokens": 785,
+            "cache_read_tokens": 131584,
+            "cache_write_tokens": 0
+          },
+          "agents": [
+            {
+              "handle": "deepseek",
+              "provider": "deep_seek",
+              "cli": null,
+              "model": "deepseek-flash",
+              "billing_kind": "api",
+              "calls": 4,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 5010,
+                "output_tokens": 333,
+                "cache_read_tokens": 19456,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": 2020
+            },
+            {
+              "handle": "astra",
+              "provider": "cli_agent",
+              "cli": "codex",
+              "model": "gpt-6-astra",
+              "billing_kind": "subscription",
+              "calls": 2,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 14403,
+                "output_tokens": 452,
+                "cache_read_tokens": 112128,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": null
+            }
+          ]
+        },
+        "isolated/state.json": {
+          "checkpoint_sha256": "dced3853f1d260ef551b86ad59198e6195ebcbab6064e2c67e8ee5fc2df1eccb",
+          "recorded_usage_events_complete": true,
+          "recorded_usage": {
+            "input_tokens": 21594,
+            "output_tokens": 137,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "agents": [
+            {
+              "handle": "astra",
+              "provider": "cli_agent",
+              "cli": "codex",
+              "model": "gpt-6-astra",
+              "billing_kind": "subscription",
+              "calls": 1,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 21594,
+                "output_tokens": 137,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": null
+            }
+          ]
+        }
+      },
+      "checks": {
+        "isolated_checkpoint_excludes_primary_nonce": true,
+        "isolated_native_session_is_distinct": true,
+        "isolated_room_reported_unknown": true,
+        "native_cli_sessions_retained": true,
+        "one_time_skill_released": true,
+        "opencode_route": "not_run",
+        "primary_message_sequence_and_recipients": true,
+        "primary_participants_complete_positive_usage": true,
+        "resume_message_sequence": true,
+        "usage_increased_without_regression": true
+      },
+      "participants": [
+        "deepseek",
+        "astra"
+      ],
+      "excluded": {
+        "opencode": "not run: free-model quota is exhausted; no retry or fallback"
+      },
+      "native_session_sha256": {
+        "astra": "89f4e7b7855e4fc60f829664961b862c9dc8b00afa54cdc97e08d7ee09b56344",
+        "isolated_astra": "176fff2b451a723465ec4501fb38a71a90a0ab680381baea1b6411fcc5e2c758"
+      },
+      "restart_baseline_sha256": "7fd5ee5d763b1a2cb7fca049344e731599eda160c5088efb88b69532e859e3d8"
+    },
+    {
+      "attempt": "code-1",
+      "status": "passed",
+      "reason": "both tasks reviewed by Astra and submitted; six unchanged tests passed independently",
+      "checkpoints": {
+        "room-state.json": {
+          "checkpoint_sha256": "27209701c1ca97647937bcbb935bf2695583ce2870e39ee644fb9488a8c1250e",
+          "recorded_usage_events_complete": true,
+          "recorded_usage": {
+            "input_tokens": 73877,
+            "output_tokens": 12155,
+            "cache_read_tokens": 587520,
+            "cache_write_tokens": 0
+          },
+          "agents": [
+            {
+              "handle": "devon",
+              "provider": "deep_seek",
+              "cli": null,
+              "model": "deepseek-flash",
+              "billing_kind": "api",
+              "calls": 17,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 25319,
+                "output_tokens": 7354,
+                "cache_read_tokens": 171264,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": 17458
+            },
+            {
+              "handle": "astra",
+              "provider": "cli_agent",
+              "cli": "codex",
+              "model": "gpt-6-astra",
+              "billing_kind": "subscription",
+              "calls": 1,
+              "usage_reported": true,
+              "usage_complete": true,
+              "usage": {
+                "input_tokens": 48558,
+                "output_tokens": 4801,
+                "cache_read_tokens": 416256,
+                "cache_write_tokens": 0
+              },
+              "configured_peak_api_cost_estimate_microusd": null
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "code_acceptance": {
+    "accepted": true,
+    "room_phase": "completed",
+    "latency_ms": 239341.315,
+    "independent_verifier_exit_code": 0,
+    "tests_passed": 6,
+    "original_test_files_unchanged": {
+      "test_usage_normalizer.py": true,
+      "test_task_store.py": true
+    },
+    "astra_review_approvals": 2,
+    "fixture_sha256": "c53777a1d9ee0ec2fb676c30c9d73aa13a4ed49ad7aae5f8ca9f0e2e87bc6c68",
+    "team_template_sha256": "1d80c00b9730989540f24f08406e221bafee96bbc127b4b8428b648aefc6e9a8"
+  },
+  "all_attempts_reported_usage": {
+    "deep_seek": {
+      "recorded_calls": 60,
+      "usage": {
+        "input_tokens": 62842,
+        "output_tokens": 13538,
+        "cache_read_tokens": 407040,
+        "cache_write_tokens": 0
+      },
+      "configured_peak_api_cost_estimate_microusd": 37572
+    },
+    "codex": {
+      "recorded_calls": 12,
+      "usage": {
+        "input_tokens": 147011,
+        "output_tokens": 7384,
+        "cache_read_tokens": 934656,
+        "cache_write_tokens": 0
+      },
+      "configured_peak_api_cost_estimate_microusd": null
+    }
+  },
+  "budget_reconciliation": {
+    "deepseek_request_ceiling": 80,
+    "deepseek_cost_ceiling_microusd": 250000,
+    "codex_episode_ceiling": 12,
+    "deepseek_reserved_request_count": 62,
+    "deepseek_recorded_completed_calls": 60,
+    "deepseek_budget_commitment_microusd": 62635,
+    "deepseek_reported_cost_estimate_microusd": 37572,
+    "deepseek_retained_unsettled_commitment_microusd": 25063,
+    "deepseek_request_count_difference": 2,
+    "codex_reserved_episodes": 12,
+    "codex_recorded_episodes": 12,
+    "codex_tokens_equal_ledger": true,
+    "ledger_reset": false,
+    "invoice_reconciled": false,
+    "limitation": "Two additional DeepSeek reservations remain in the conservative budget. Their individual identity and actual usage are unknown. unreported_requests does not count dropped futures."
+  },
+  "verification": {
+    "benchmark_unit_tests_passed": 48,
+    "allowance_widget_tests_passed": 4,
+    "targeted_flutter_analysis": "no issues",
+    "rendered_allowance_widths": [
+      375,
+      1280
+    ],
+    "host_config_files_checked": 16,
+    "host_config_files_unchanged": true,
+    "runtime_rust_source_changed": false,
+    "install_push_publish_deploy_performed": false
+  },
+  "limitations": [
+    "OpenCode has no successful live completion or usage proof in this run.",
+    "OpenCode OAuth and Antigravity isolated authentication remain blocked.",
+    "Two-model context checks do not prove the unrun three-model route.",
+    "Room context isolation is not OS-level credential secrecy.",
+    "One accepted coding run is not a savings comparison.",
+    "Costs are local configured-rate estimates, not invoices; interrupted usage can remain unknown."
+  ]
+}

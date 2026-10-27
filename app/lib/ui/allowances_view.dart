@@ -267,10 +267,12 @@ class _AllowanceDialogState extends State<_AllowanceDialog> {
                     : 'API requests (0 = unlimited)',
                 _requests,
               ),
-              if (widget.cli)
+              if (widget.cli) ...[
                 const Text(
-                  'The CLI subscription does not provide a metered API bill. Prices below show only its API-equivalent estimate.',
-                )
+                  'CLI caps count episodes only. Charges depend on the selected CLI provider and account. API-equivalent prices are estimates; OrgBots does not enforce CLI dollar or token caps.',
+                ),
+                const SizedBox(height: 14),
+              ]
               else ...[
                 _number('Tokens (0 = unlimited)', _tokens),
                 _number('USD (0 = unlimited)', _cost, money: true),

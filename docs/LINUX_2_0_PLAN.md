@@ -245,3 +245,59 @@ room's external-tool approvals. Published 2.0.2 artifacts remain unchanged.
 See [native CLI integration status](NATIVE_CLI_INTEGRATIONS.md) and its sanitized
 conformance record. No real-provider inference, subscription proof, package
 rebuild/install, push, publication or deployment is included in this milestone.
+
+## Subscription and free-model live validation, 2026-10-27
+
+Owner requested context sharing, split usage and broader runtime checks before
+any installation or publication. The selected team is Astra through the existing
+Codex subscription, direct DeepSeek `deepseek-flash`, and OpenCode
+`opencode/deepseek-v4.1-flash-free`. The owner confirmed V4.1 after the current
+catalog did not list V4.2, and explicitly kept Gemini 3.8 Flash pending until
+Antigravity can authenticate safely. No paid Gemini fallback is authorized.
+
+Use synthetic fixtures, a current source-built engine and the checksum-verified
+OpenCode audit binary outside the installed CLI paths. Reuse existing credentials
+in memory and provider-specific private profiles. The test has its own allowance
+ledger: direct DeepSeek is bounded to $0.25 at conservative peak rates; native
+CLI episodes are bounded by request count and timeout. Free-model pricing is a
+provider catalog claim, not a measured subscription saving or invoice.
+
+- [ ] Verify one protected OpenCode free-model inference without fallback.
+  Blocked: the selected V4.1 Flash Free route reported its free-usage limit
+  reached; the one protected attempt timed out at 180 seconds with unknown usage.
+- [x] Repeat the 16-check DeepSeek skill/MCP lifecycle proof on the current engine,
+  including pending approval across pause/restart and context release.
+  Second attempt passed; the first model instruction-following failure remains
+  recorded with its usage. The strict validator was retained.
+- [ ] Prove DeepSeek-to-OpenCode-to-Astra context relay, native resume across
+  restart, independent room context, and per-agent/provider usage reconciliation.
+  The three-model route remains blocked by OpenCode's allowance.
+- [x] Run the available DeepSeek/Astra context, restart and room-isolation path.
+  Final attempt passed nine applicable checks. Earlier harness failures and an
+  interrupted attempt remain separate. Native Astra session identity survived
+  restart; the isolated room used a different session and returned `UNKNOWN`.
+- [ ] Run the existing code-work fixture with independent Astra review and
+  unchanged acceptance tests using the selected three-provider team.
+  OpenCode is unavailable; the three-provider variant was not run.
+- [x] Run the same code-work fixture with available DeepSeek and Astra.
+  Both tasks reviewed by Astra and submitted; all six original tests passed
+  independently without changes. Usage: DeepSeek 17 API calls, Astra one CLI
+  episode, with separate token/cache totals.
+- [x] Record successful, failed and blocked checks separately; review and commit
+  the sanitized evidence. Installation and publication remain gated.
+  Final Astra review approved the scoped source/evidence milestone, including
+  checkpoint hashes, usage sums, restart baseline and both allowance renders.
+
+The [live validation report](benchmarks/2026-10-27-subscription-free-validation.md)
+includes all attempt usage, provider blockers and accounting limits. Across the
+retained attempts, Codex's 12 episodes and recorded tokens reconcile with its
+ledger. DeepSeek has 60 completed calls plus two retained reservations whose
+actual usage remains unknown: $0.037572 reported peak-rate estimates versus
+$0.062635 conservative budget commitment, within the unchanged $0.25 cap.
+The aggregate ledger cannot identify dropped requests; durable reservation
+status remains a telemetry follow-up, not a completed accounting claim.
+
+Focused verification: 48 benchmark/probe tests, four allowance widget tests,
+targeted Flutter analysis clean, rendered allowance dialog at 375/1280 px,
+and 16 host configuration/rule/auth hashes unchanged. No runtime Rust changes,
+package installation, push, website deployment or publication were performed.

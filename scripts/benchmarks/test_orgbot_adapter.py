@@ -93,6 +93,22 @@ class OrgBotAdapterTests(unittest.TestCase):
         })
         self.assertEqual(len(result["provider_usage"]), 2)
 
+    def test_new_cli_billing_is_unknown_and_same_model_keeps_cli_identity(self):
+        result = orgbot_adapter.read_engine_usage({"engine": {"log": [
+            joined("opencode", "opencode", {"provider": "cli_agent", "cli": "opencode", "model": "shared-test-model"}),
+            joined("agy", "agy", {"provider": "cli_agent", "cli": "antigravity", "model": "shared-test-model"}),
+            usage("opencode", actual=None, equivalent=0, inputs=10),
+            usage("agy", actual=None, equivalent=0, inputs=20),
+        ]}})
+        by_cli = {row["cli"]: row for row in result["agent_usage"]}
+        self.assertEqual(by_cli["opencode"]["billing_kind"], "unknown")
+        self.assertEqual(by_cli["antigravity"]["billing_kind"], "unknown")
+        self.assertIsNone(result["actual_api_cost_microusd"])
+        self.assertEqual(result["usage"]["input_tokens"], 30)
+        self.assertEqual(len(result["provider_usage"]), 2)
+        self.assertEqual({row["cli"] for row in result["provider_usage"]}, {"opencode", "antigravity"})
+        self.assertEqual({row["usage"]["input_tokens"] for row in result["agent_usage"]}, {10, 20})
+
     def test_unclassified_provider_makes_actual_room_spend_unknown(self):
         result = orgbot_adapter.read_engine_usage({"engine": {"log": [
             joined("api", "api", {"provider": "deep_seek", "model": "m"}),
@@ -110,6 +126,9 @@ class OrgBotAdapterTests(unittest.TestCase):
         orgbot_adapter.enforce_paid_gate(config, "paid", "1")
         with self.assertRaisesRegex(ValueError, "require benchmark"):
             orgbot_adapter.enforce_paid_gate({"bots": [{"provider": {"kind": "deepseek"}}]}, "recorded", "0")
+        for alias in ("opencode_cli", "antigravity_cli"):
+            with self.subTest(alias=alias), self.assertRaisesRegex(ValueError, "require benchmark"):
+                orgbot_adapter.enforce_paid_gate({"bots": [{"provider": {"kind": alias}}]}, "recorded", "0")
 
     def test_template_serializes_paths_once_and_supports_custom_team_values(self):
         template = 'workdir={{WORKSPACE}}\nstate={{STATE_PATH}}\nprovider={{PROVIDER_CONFIG}}\nname={{TASK_TITLE}}\ngoal={{TASK}}\nbackend={{BACKEND}}'

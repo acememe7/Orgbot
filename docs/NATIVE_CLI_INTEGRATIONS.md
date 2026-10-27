@@ -4,6 +4,12 @@ This describes the development source after 2.0.2. It does not change the
 published package, installed desktop application, website results or earlier
 benchmark claims.
 
+The later [live-test report](benchmarks/2026-10-27-subscription-free-validation.md)
+records an attempted protected OpenCode V4.1 Flash Free call. The provider
+reported its free-usage limit reached; the CLI timed out without completed
+usage. No paid fallback was attempted. The local mock results below remain
+separate from that blocked live attempt.
+
 | Provider | Executable | Model selection | Status |
 | --- | --- | --- | --- |
 | OpenCode | `opencode` | Explicit `provider/model` | Protected Linux adapter using an existing API credential; OAuth reuse blocked |

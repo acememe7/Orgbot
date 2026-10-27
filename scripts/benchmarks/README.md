@@ -76,3 +76,13 @@ synthetic runs or from unaccepted outputs.
 The [Astra/Sol/DeepSeek live pilot](../../docs/benchmarks/2026-10-26-astra-sol-deepseek.md)
 records actual usage and workflow failures. It did not produce a completed
 comparison and provides no savings claim.
+
+The [subscription/free-model validation](../../docs/benchmarks/2026-10-27-subscription-free-validation.md)
+retains live successes, failed attempts, and blocked providers separately.
+`context_probe.py` checks a directed synthetic marker exchange, native restart
+continuity and a separate room. Its default participants are DeepSeek Flash,
+OpenCode V4.1 Flash Free and Codex Astra. `--skip-opencode` explicitly tests
+only DeepSeek and Astra when the free route is unavailable; its proof lists
+the excluded provider. Both modes require `--allow-paid`, a selected DeepSeek
+key, absolute allowance config/ledger paths and a fresh private output folder.
+This is an opt-in test harness, not an automatic fallback or release check.

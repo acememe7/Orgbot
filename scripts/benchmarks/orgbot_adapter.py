@@ -37,7 +37,13 @@ def provider_billing(provider: dict[str, Any]) -> str:
             return "local"
         return "api"
     if kind in ("cli_agent", "cli"):
-        return "subscription"
+        cli = provider.get("cli")
+        if cli in ("codex", "claude", "grok"):
+            return "subscription"
+        # CLI labels do not establish who bills the request. In particular,
+        # OpenCode may route to API or free-tier models, and Antigravity's
+        # billing is not determined here.
+        return "unknown"
     if kind == "scripted":
         return "local"
     return "unknown"
@@ -64,6 +70,7 @@ def read_engine_usage(checkpoint: dict[str, Any]) -> dict[str, Any]:
                 providers[spec["id"]] = {
                     "handle": spec.get("handle") if isinstance(spec.get("handle"), str) else spec["id"],
                     "provider": provider.get("provider") or provider.get("kind") or "unknown",
+                    "cli": provider.get("cli") if isinstance(provider.get("cli"), str) else None,
                     "model": provider.get("model") if isinstance(provider.get("model"), str) and provider.get("model") else None,
                     "billing_kind": provider_billing(provider),
                 }
@@ -102,7 +109,7 @@ def read_engine_usage(checkpoint: dict[str, Any]) -> dict[str, Any]:
     agent_rows: list[dict[str, Any]] = []
     for agent_id, items in reports.items():
         provider = providers.get(agent_id, {
-            "handle": agent_id, "provider": "unknown", "model": None, "billing_kind": "unknown",
+            "handle": agent_id, "provider": "unknown", "cli": None, "model": None, "billing_kind": "unknown",
         })
         reported = any(item.get("reported") is True for item in items)
         complete = bool(items) and all(item.get("reported") is True and item.get("complete") is True for item in items)
@@ -141,14 +148,14 @@ def read_engine_usage(checkpoint: dict[str, Any]) -> dict[str, Any]:
         api_equivalent_cost = sum(row["api_equivalent_cost_microusd"] for row in agent_rows)
 
     billing_kind = next(iter(called_kinds)) if len(called_kinds) == 1 else "mixed" if called_kinds else "unknown"
-    provider_totals: dict[tuple[str, str | None, str], list[dict[str, Any]]] = {}
+    provider_totals: dict[tuple[str, str | None, str | None, str], list[dict[str, Any]]] = {}
     for row in agent_rows:
-        provider_totals.setdefault((row["provider"], row["model"], row["billing_kind"]), []).append(row)
+        provider_totals.setdefault((row["provider"], row["cli"], row["model"], row["billing_kind"]), []).append(row)
     providers_summary = []
-    for (kind, model, billing), rows in sorted(provider_totals.items(), key=lambda item: (item[0][0], item[0][1] or "", item[0][2])):
+    for (kind, cli, model, billing), rows in sorted(provider_totals.items(), key=lambda item: (item[0][0], item[0][1] or "", item[0][2] or "", item[0][3])):
         summary = {field: sum(row["usage"][field] for row in rows) for field in USAGE_FIELDS}
         summary["calls"] = sum(row["calls"] for row in rows)
-        summary.update({"provider": kind, "model": model, "billing_kind": billing, "agents": [row["handle"] for row in rows]})
+        summary.update({"provider": kind, "cli": cli, "model": model, "billing_kind": billing, "agents": [row["handle"] for row in rows]})
         providers_summary.append(summary)
 
     room_state = engine.get("room")
@@ -211,7 +218,12 @@ def render_template(
 
 
 def enforce_paid_gate(config: dict[str, Any], mode: str, allow_paid: str) -> None:
-    remote_kinds = {"anthropic", "deep_seek", "deepseek", "open_ai_compatible", "openai", "openai_compatible", "cli_agent", "cli", "codex", "claude", "grok"}
+    remote_kinds = {
+        "anthropic", "claude", "deep_seek", "deepseek", "open_ai_compatible",
+        "openai", "openai_compatible", "cli_agent", "cli", "agent", "codex", "grok",
+        "codex_cli", "claude_cli", "grok_cli",
+        "opencode_cli", "antigravity_cli",
+    }
     bots = config.get("bots", [])
     kinds = {
         (provider.get("provider") or provider.get("kind"))

@@ -1,6 +1,8 @@
 import json
 import sys
 import time
+import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -84,6 +86,23 @@ class LifecycleProbeTests(unittest.TestCase):
             changed = {**decision, "because": decision["because"].removesuffix("; approval_sequence=0") + suffix}
             self.assertFalse(lifecycle_probe.approval_matches(changed, "agent-id", "lifecycle_fixture", "lifecycle_fixture__read_nonce", {"nonce": "n"}))
 
+    def test_generated_goal_requires_skill_record_and_schema_reload_before_retry(self):
+        with tempfile.TemporaryDirectory(prefix="orgbot-lifecycle-goal-test-") as temp:
+            root = Path(temp)
+            raw = lifecycle_probe._toml(root, "skill-marker", "tool-marker", root / "fixture.py", root / "calls.jsonl")
+            goal = tomllib.loads(raw)["room"]["goal"]
+
+        self.assertIn("Immediately after use_skill returns, call post_message", goal)
+        self.assertIn("wait for the successful post_message result before any find_capabilities(kind=mcp)", goal)
+        self.assertIn("After the room resumes with approval, reload the same tool schema", goal)
+        self.assertIn("wait for the successful schema result before retrying", goal)
+
+    def test_candidate_diagnostics_name_failed_gates_and_preserve_usage(self):
+        usage = {"input_tokens": 120, "output_tokens": 24}
+        result = lifecycle_probe._candidate_diagnostics({"skill_nonce_seen": False, "usage_positive": True}, usage)
+        self.assertEqual(result["failed_checks"], ["skill_nonce_seen"])
+        self.assertEqual(result["usage"], usage)
+
     def test_proof_validator_rejects_missing_any_gate_and_accepts_complete_proof(self):
         keys = ("source_hash_unchanged", "skill_nonce_seen", "tool_nonce_seen", "mcp_invoked_once",
                 "tool_arguments_exact", "pending_survived_restart", "pending_persisted_before_restart", "approval_exact", "usage_positive", "tool_history_present",
@@ -118,6 +137,7 @@ class LifecycleProbeTests(unittest.TestCase):
             {**proof, "source_sha256_after": "changed"},
             {**proof, "final_agent_message": "initial goal contains a nonce"},
             {**proof, "capability_call_history": history[:5]},
+            {**proof, "capability_call_history": history[:6] + [history[5], *history[6:]]},
             {**proof, "schema_result_history": []},
             {**proof, "pending_decision": {**proof["pending_decision"], "because": proof["pending_decision"]["because"].replace("tool-secret", "wrong")}},
         ):

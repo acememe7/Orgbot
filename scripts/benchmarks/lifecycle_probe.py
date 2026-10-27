@@ -86,6 +86,14 @@ def validate_proof(proof: dict[str, Any]) -> None:
         raise ValueError("engine checkpoint contains no positive usage")
 
 
+def _candidate_diagnostics(checks: dict[str, Any], usage: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if passed is not True],
+        "usage": usage,
+    }
+
+
 def capability_history(checkpoint: dict[str, Any], agent_id: str) -> list[dict[str, Any]]:
     history = checkpoint.get("bots", {}).get(agent_id, {}).get("history", [])
     calls = []
@@ -158,8 +166,12 @@ def _toml(output: Path, skill_nonce: str, tool_nonce: str, fixture: Path, args_l
     skill.write_text(f"---\nname: lifecycle-proof\ndescription: lifecycle nonce proof\n---\n\nImmediately record this one-use skill's result with post_message before continuing MCP discovery: SKILL_NONCE:{skill_nonce}. Preserve that result for your final report.\n", encoding="utf-8")
     os.chmod(skill, 0o600)
     goal = ("Use find_capabilities(kind=skill, query=lifecycle) then use_skill(skill=lifecycle-proof, lifetime=once). "
-            "Use find_capabilities(kind=mcp) to list servers, then find_capabilities(kind=mcp, server=lifecycle_fixture) to discover tools. "
+            "Immediately after use_skill returns, call post_message with body containing the exact SKILL_NONCE from its released instructions; "
+            "wait for the successful post_message result before any find_capabilities(kind=mcp) call. "
+            "Then use find_capabilities(kind=mcp) to list servers, followed by find_capabilities(kind=mcp, server=lifecycle_fixture) to discover tools. "
             "Load lifecycle_fixture__read_nonce with load_mcp_tool lifetime=once, inspect its schema, then call it with the nonce value shown in its schema. "
+            "The first call will wait for owner approval. After the room resumes with approval, reload the same tool schema with lifetime=once "
+            "and wait for the successful schema result before retrying the exact same arguments once. Do not retry before reloading. "
             "After receiving the fixture result, add_artifact with both nonce values and exact tool evidence, then submit_for_review on your task. "
             "Report both nonce values in your final reply and stop. This one-worker fixture ends awaiting independent review; do not inspect, final-submit, delegate, or repeat the MCP call.")
     # The engine owns all execution, MCP approval, and checkpoint semantics.
@@ -264,6 +276,7 @@ def main() -> int:
     proof_path = output / "proof.json"
     deadline = time.monotonic() + a.timeout
     pending = None; restarted = False; pending_persisted = False; reloaded_pending = False; approved = False; snapshot = None
+    candidate_diagnostics = None
     try:
         proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=log, start_new_session=True)
         ws = _connect(f"ws://127.0.0.1:{port}/ws", token, deadline)
@@ -401,6 +414,8 @@ def main() -> int:
                      "schema_loaded_once":len(schema_calls)==2 and all(call["arguments"].get("lifetime") == "once" for call in schema_calls),
                      "schema_released":schema_result_history == ["[MCP tool schema released]", "[MCP tool schema released]"],
                      "successful_tool_result":successful_result,"handed_to_review":task_states == ["in_review"]}}
+            candidate_diagnostics = _candidate_diagnostics(proof["checks"], proof["usage"])
+            _atomic_json(output / "candidate-validation.json", candidate_diagnostics)
             validate_proof(proof); _atomic_json(proof_path, proof)
             print(f"Proof written: {proof_path}")
             return 0
@@ -409,6 +424,7 @@ def main() -> int:
     except Exception as error:
         _atomic_json(output / "failure.json", {"error":str(error),"pending_decision":pending,"restarted":restarted,"approved":approved,
                                                "skill_nonce":skill_nonce,"tool_nonce":tool_nonce,"source_sha256":source_hash,
+                                               "candidate_diagnostics":candidate_diagnostics,
                                                "mcp_calls":args_log.read_text(encoding="utf-8") if args_log.exists() else ""})
         raise
     finally:

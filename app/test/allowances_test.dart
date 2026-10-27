@@ -103,6 +103,12 @@ void main() {
     await tester.tap(find.text('Codex CLI'));
     await tester.pumpAndSettle();
     expect(find.text('Tokens (0 = unlimited)'), findsNothing);
+    expect(
+      find.text(
+        'CLI caps count episodes only. Charges depend on the selected CLI provider and account. API-equivalent prices are estimates; OrgBots does not enforce CLI dollar or token caps.',
+      ),
+      findsOneWidget,
+    );
     await tester.enterText(find.byType(TextFormField).first, '12');
     await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
