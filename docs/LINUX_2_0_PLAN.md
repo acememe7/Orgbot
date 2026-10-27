@@ -301,3 +301,24 @@ Focused verification: 48 benchmark/probe tests, four allowance widget tests,
 targeted Flutter analysis clean, rendered allowance dialog at 375/1280 px,
 and 16 host configuration/rule/auth hashes unchanged. No runtime Rust changes,
 package installation, push, website deployment or publication were performed.
+
+## Antigravity authentication diagnosis, 2026-10-27
+
+- [x] Confirm installed AGY 1.4.8 and trace the three deliberate execution gates.
+  The blocker is access to its saved subscription sign-in from a protected
+  profile, not executable discovery.
+- [x] Check current official auth/headless contracts and installed help.
+  No supported personal-account token import/export route was established;
+  Gemini API and Cloud ADC were not used as fallbacks.
+- [x] Prove a private Secret Service with synthetic data only: store, retrieve,
+  restart the test keyring daemon and retrieve again. Host keyring untouched.
+- [x] Run installed AGY in a network-disabled protected empty profile.
+  It waited for an OAuth code until the 20-second timeout; no sign-in or live
+  inference completed. This differs from the documented fail-fast behavior.
+- [ ] Implement the private AGY sign-in/keyring lifecycle in the application;
+  complete owner sign-in and verify refresh, restart, subscription/overage
+  policy, configuration isolation, live context and usage before enabling it.
+
+See the [diagnosis and evidence](NATIVE_CLI_INTEGRATIONS.md#antigravity-authentication-diagnosis-27-october-2026).
+This milestone diagnoses and prototypes the missing authentication boundary;
+it does not enable AGY or change installed applications, accounts or billing.

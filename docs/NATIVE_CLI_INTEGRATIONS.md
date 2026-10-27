@@ -49,6 +49,36 @@ switching to Gemini API billing. No Antigravity process, project hook or plugin
 is started by the adapter. Isolated authentication and executable configuration
 boundaries remain integration requirements, not a working subscription connection.
 
+### Antigravity authentication diagnosis, 27 October 2026
+
+The installed `agy` 1.4.8 is present. OrgBots deliberately rejects it in the
+provider constructor, private-profile builder and workspace launcher because
+its saved desktop sign-in is not available inside that protected profile.
+Current official authentication/help documentation provides no verified
+personal-account token import/export interface. Gemini API-key and Cloud ADC
+authentication are separate routes and were not substituted.
+
+A separate D-Bus session and private Secret Service were tested with a synthetic
+sentinel only. Storage, retrieval and retrieval after restarting the test
+keyring daemon passed. A short private runtime directory was necessary because
+the initial control-socket path was too long. No host keyring was queried or
+copied.
+
+The real installed CLI was then started headlessly in bubblewrap with network
+disabled, `/run` masked, a cleared environment and that empty private profile.
+It emitted an OAuth authorization-code prompt and waited until the 20-second
+timeout. Current headless documentation describes an authentication-required
+exit without a terminal; the installed binary behaved differently here.
+No browser sign-in, provider completion or API/ADC fallback occurred.
+
+This establishes a possible private-keyring foundation, not working AGY
+authentication. Application integration and an owner-completed sign-in into
+that isolated profile are still required, followed by restart/refresh,
+subscription/overage, configuration-boundary and live context/usage checks.
+The production execution gates remain enabled. The
+[sanitized diagnosis](benchmarks/2026-10-27-antigravity-auth-diagnosis.json)
+records the exact tested binary and scope.
+
 These measures preserve the existing [workspace boundary](WORKSPACE_SAFETY.md).
 The normal CLI sandbox still exposes the host filesystem read-only, including
 readable files in the host home; it is not complete credential secrecy from a

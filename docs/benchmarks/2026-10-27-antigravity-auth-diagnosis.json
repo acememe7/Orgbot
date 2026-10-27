@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "date": "2026-10-27",
+  "scope": "Antigravity isolated-authentication diagnosis, synthetic credentials only",
+  "installed_cli": {
+    "path": "~/.local/bin/agy",
+    "version": "1.4.8",
+    "sha256": "70b1d27f1812f5ebccc8f13daf2209112447413437dd1ab6d87c58b8a04fe35b"
+  },
+  "production_execution_enabled": false,
+  "current_blocker": "OrgBots deliberately rejects AGY until isolated subscription authentication is verified. Desktop Secret Service/D-Bus is not forwarded to the protected CLI.",
+  "documented_personal_authentication": "Operating-system secure keyring; cached credentials for headless mode",
+  "documented_personal_token_import_or_export_found": false,
+  "private_keyring_prototype": {
+    "separate_dbus_session": true,
+    "private_home_and_xdg": true,
+    "synthetic_sentinel_store_and_read": "passed",
+    "synthetic_sentinel_after_keyring_daemon_restart": "passed",
+    "initial_control_socket_path_issue": "long Unix socket path; resolved with a fresh short private runtime directory"
+  },
+  "installed_cli_empty_profile_check": {
+    "network": "disabled with bubblewrap network namespace",
+    "host_run": "masked with tmpfs",
+    "environment": "cleared; private HOME/XDG and private D-Bus only",
+    "api_key_and_adc_variables_present": false,
+    "headless": true,
+    "stdin": "closed",
+    "observed": "OAuth authorization-code prompt, then wait",
+    "terminated_after_seconds": 20,
+    "exit_code": 124,
+    "authentication_completed": false,
+    "live_model_completion": false,
+    "raw_oauth_prompt_retained": false
+  },
+  "documentation_difference": "Current headless docs describe an authentication-required exit without a terminal. Installed 1.4.8 waited for a code in this isolated test instead.",
+  "host_keyring_queried_by_test": false,
+  "host_credentials_copied": false,
+  "host_login_or_logout_performed": false,
+  "api_or_adc_fallback_attempted": false,
+  "pending": [
+    "Application integration for a private AGY keyring and its lifecycle",
+    "Owner-completed sign-in into the isolated profile",
+    "Authenticated restart and token refresh",
+    "Verified subscription route with credit overages disabled",
+    "Protected settings, hooks, plugins and MCP boundaries",
+    "Live model selection, context sharing and usage reconciliation"
+  ],
+  "limitations": [
+    "Synthetic Secret Service success is not working AGY authentication.",
+    "Network-disabled startup cannot establish provider access, billing or refresh.",
+    "Private bus testing is not a complete filesystem-secrecy claim."
+  ],
+  "sources": [
+    "https://www.antigravity.google/docs/install?tab=cli",
+    "https://www.antigravity.google/docs/cli/headless/",
+    "https://www.antigravity.google/docs/settings?tab=cli"
+  ]
+}
