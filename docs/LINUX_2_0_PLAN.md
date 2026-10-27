@@ -322,3 +322,35 @@ package installation, push, website deployment or publication were performed.
 See the [diagnosis and evidence](NATIVE_CLI_INTEGRATIONS.md#antigravity-authentication-diagnosis-27-october-2026).
 This milestone diagnoses and prototypes the missing authentication boundary;
 it does not enable AGY or change installed applications, accounts or billing.
+
+## Private Antigravity sign-in, 27 October 2026
+
+The owner authorized a separate AGY sign-in while keeping access to the host
+keyring blocked. The source change reaches the workspace helper, Linux CLI,
+desktop Connections & tools, packaging dependencies and their focused tests.
+
+- [x] Add owner-initiated `orgbot agy login` and metadata-only `agy status`.
+- [x] Provision a separate encrypted keyring, protected by one exactly scoped
+  OrgBots secret-store item; never copy the existing AGY login or reset an
+  existing encrypted store when its wrapping key is unavailable.
+- [x] Start a private filesystem D-Bus socket and Secret Service with no service
+  activation. Serialize operations and stop only the processes they started.
+- [x] Run enrollment in an empty filesystem sandbox with a private home,
+  controlled configuration and empty project. Exclude host credentials, desktop
+  bus, plugins/hooks, API/ADC variables and paid-credit fallback.
+- [x] Verify lifecycle, cancellation, unsafe paths, missing/locked credentials,
+  filesystem/environment boundaries and desktop interaction; obtain final Astra
+  review before offering the owner the sign-in flow.
+- [x] Pass 45 workspace-helper tests, 13 Flutter tests, focused Rust CLI/profile/
+  usage tests, analyzer and package metadata checks. Review full Setup renders
+  at 375/1280 px. The real AGY binary reaches OAuth in the isolated networkless
+  fixture; no model prompt or completed authentication was part of that test.
+- [x] Resolve Astra's helper-discovery, passphrase-pipe and configuration-parent
+  findings; final enrollment review approved. Open the owner sign-in terminal.
+- [ ] Complete owner sign-in, then prove refresh/restart, permission enforcement,
+  room MCP, subscription/overage behavior, context sharing and usage reporting.
+
+Credential presence is enrollment metadata, not proof of usable authentication.
+The three runtime execution gates stay in place until the remaining real-CLI
+checks pass. No installation, publication or deployment is part of this change.
+See the [sanitized enrollment proof](benchmarks/2026-10-27-antigravity-enrollment.json).

@@ -118,8 +118,9 @@ usage limits depend on each account.
 The development source also includes OpenCode and Antigravity provider
 configuration. OpenCode requires an explicit `provider/model` and the selected
 provider's existing OpenCode API credential; OAuth reuse is unavailable.
-Antigravity execution remains blocked
-until its sign-in can be used without exposing the host keyring. These additions
+Antigravity has a separate private sign-in flow in the development source;
+model execution remains blocked until authentication and runtime permissions
+pass live verification. These additions
 are not in the published 2.0.2 package. See the
 [integration status and verification](docs/NATIVE_CLI_INTEGRATIONS.md).
 
@@ -477,7 +478,10 @@ provider = { kind = "cli", cli = "codex", workdir = "/path/to/project", policy =
 In the development source, OpenCode uses `cli = "opencode"` with an explicit
 `model = "provider/model"`. Antigravity's saved identifier is
 `cli = "antigravity"` (`agy` is also accepted); its executable is `agy`, and
-execution is blocked pending isolated authentication. Neither new provider
+execution is blocked pending isolated authentication and permission checks.
+On Linux, `orgbot agy login` opens the separate private sign-in in your terminal;
+`orgbot agy status` reports stored-credential presence only. Connections & tools
+also exposes these actions in a source build. Neither new provider
 uses the unprotected Dart runner or the Android engine.
 
 Each turn starts a CLI process and resumes that bot's saved native session when

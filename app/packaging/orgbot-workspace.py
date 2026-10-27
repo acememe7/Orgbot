@@ -4,15 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import errno
 import fcntl
 import hashlib
 import json
 import os
+import pwd
 import re
 import resource
+import secrets
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -23,6 +27,12 @@ from typing import Any
 
 
 FORMAT_VERSION = 1
+AGY_WRAP_ATTRIBUTES = {
+    "service": "orgbots",
+    "purpose": "antigravity-private-keyring-passphrase",
+    "version": "1",
+}
+_AGY_CHILDREN: set[subprocess.Popen[bytes]] = set()
 MAX_ENTRIES = 150_000
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TREE_BYTES = 20 * 1024 * 1024 * 1024
@@ -797,6 +807,657 @@ def _verify_sandbox_args(workspace: Path, program: list[str]) -> list[str]:
     return args
 
 
+def _agy_profile_paths(*, create: bool) -> dict[str, Path] | None:
+    raw_xdg = os.environ.get("XDG_DATA_HOME")
+    xdg_data = Path(raw_xdg) if raw_xdg else Path.home() / ".local/share"
+    if not xdg_data.is_absolute():
+        _fail("XDG_DATA_HOME must be an absolute path for Antigravity auth")
+    root = xdg_data / "orgbot" / "agy"
+    if create:
+        _mkdir_chain_no_symlinks(root)
+    else:
+        current = Path(root.anchor)
+        for part in root.parts[1:]:
+            current /= part
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                _fail(f"Cannot inspect private Antigravity auth path: {exc}")
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                _fail("Private Antigravity auth path contains an unsafe component")
+    if not root.exists():
+        return None
+    _ensure_private_dir(root)
+    initialize_store = not any(root.iterdir())
+    managed_root = {
+        "home", "keyring-data", "keyring-service-home", "keyring-service-config",
+        "keyring-service-state", "keyring-service-cache", "empty-project", "auth.lock",
+    }
+    if {entry.name for entry in root.iterdir()} - managed_root:
+        _fail("Private Antigravity auth store contains unmanaged files")
+    home = root / "home"
+    keyring_data = root / "keyring-data"
+    service_home = root / "keyring-service-home"
+    service_config = root / "keyring-service-config"
+    service_state = root / "keyring-service-state"
+    service_cache = root / "keyring-service-cache"
+    project = root / "empty-project"
+    for path in (home, keyring_data, service_home, service_config, service_state, service_cache, project):
+        if create:
+            if not initialize_store and not path.exists():
+                _fail("Private Antigravity auth profile is incomplete; refusing reset")
+            _ensure_private_dir(path)
+        elif not path.exists():
+            if any(root.iterdir()):
+                _fail("Private Antigravity auth profile is incomplete; refusing reset")
+            return None
+        else:
+            _check_private_dir(path)
+    config = home / ".config"
+    data = home / ".local/share"
+    state = home / ".local/state"
+    cache = home / ".cache"
+    for path in (config, data, state, cache):
+        if create:
+            if not initialize_store and not path.exists():
+                _fail("Private Antigravity auth profile is incomplete; refusing reset")
+            _mkdir_chain_no_symlinks(path)
+        elif not path.exists():
+            if any(root.iterdir()):
+                _fail("Private Antigravity auth profile is incomplete; refusing reset")
+            return None
+        _check_private_dir(path)
+    gemini = home / ".gemini"
+    cli_config = gemini / "antigravity-cli"
+    global_config = gemini / "config"
+    plugins = global_config / "plugins"
+    for path in (gemini, cli_config, global_config, plugins):
+        if create:
+            if not initialize_store and not path.exists():
+                _fail("Private Antigravity auth profile is incomplete; refusing reset")
+            _mkdir_chain_no_symlinks(path)
+        elif not path.exists():
+            if any(root.iterdir()):
+                _fail("Private Antigravity auth profile is incomplete; refusing reset")
+            return None
+        _check_private_dir(path)
+    settings = cli_config / "settings.json"
+    mcp_config = global_config / "mcp_config.json"
+    if create:
+        if not initialize_store and (not settings.exists() or not mcp_config.exists()):
+            _fail("Private Antigravity auth profile is incomplete; refusing reset")
+        settings_value = {
+            "useG1Credits": False,
+            "permissions": {
+                "allow": [],
+                "ask": [],
+                "deny": [
+                    "command(*)",
+                    "unsandboxed(*)",
+                    "read_file(*)",
+                    "write_file(*)",
+                    "read_url(*)",
+                    "execute_url(*)",
+                    "mcp(*)",
+                ],
+            },
+        }
+        _write_private_json(settings, settings_value)
+        _write_private_json(mcp_config, {"mcpServers": {}})
+    for path in (settings, mcp_config):
+        _check_private_file(path)
+    if settings.read_bytes() != _canonical_json_bytes({
+        "useG1Credits": False,
+        "permissions": {
+            "allow": [],
+            "ask": [],
+            "deny": [
+                "command(*)", "unsandboxed(*)", "read_file(*)", "write_file(*)",
+                "read_url(*)", "execute_url(*)", "mcp(*)",
+            ],
+        },
+    }) or mcp_config.read_bytes() != _canonical_json_bytes({"mcpServers": {}}):
+        _fail("Private Antigravity settings differ from the controlled deny profile")
+    if {entry.name for entry in plugins.iterdir()}:
+        _fail("Private Antigravity plugin directory must remain empty")
+    if {entry.name for entry in global_config.iterdir()} != {"mcp_config.json", "plugins"}:
+        _fail("Private Antigravity global configuration contains unmanaged files")
+    agents = project / ".agents"
+    if create:
+        if not initialize_store and not agents.exists():
+            _fail("Private Antigravity auth profile is incomplete; refusing reset")
+        _ensure_private_dir(agents)
+    elif not agents.exists():
+        if any(root.iterdir()):
+            _fail("Private Antigravity auth profile is incomplete; refusing reset")
+        return None
+    _check_private_dir(agents)
+    if any(agents.iterdir()):
+        _fail("Private Antigravity workspace .agents mask must be empty")
+    if {entry.name for entry in project.iterdir()} != {".agents"}:
+        _fail("Private Antigravity sign-in workspace must remain empty")
+    return {
+        "root": root, "home": home, "project": project, "config": config,
+        "data": data, "state": state, "cache": cache, "keyring_data": keyring_data,
+        "service_home": service_home, "service_config": service_config,
+        "service_state": service_state, "service_cache": service_cache,
+        "settings": settings, "cli_config": cli_config, "global_config": global_config,
+        "mcp_config": mcp_config, "plugins": plugins,
+    }
+
+
+def _canonical_json_bytes(value: dict[str, Any]) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _check_private_file(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        _fail(f"Private Antigravity file is unavailable: {exc}")
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+        _fail("Private Antigravity file is unsafe")
+
+
+def _write_private_json(path: Path, value: dict[str, Any]) -> None:
+    payload = _canonical_json_bytes(value)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except FileExistsError:
+        _check_private_file(path)
+        if path.read_bytes() != payload:
+            _fail("Existing private Antigravity configuration is unmanaged")
+        return
+    except OSError as exc:
+        _fail(f"Cannot create private Antigravity configuration: {exc}")
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _agy_keyring_has_data(profile: dict[str, Path]) -> bool:
+    keyrings = profile["keyring_data"] / "keyrings"
+    try:
+        info = keyrings.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        _fail("Private Antigravity keyring directory is unsafe")
+    found = False
+    for parent, directories, files in os.walk(keyrings, followlinks=False):
+        parent_path = Path(parent)
+        _check_private_dir(parent_path)
+        for name in directories:
+            child = parent_path / name
+            child_info = child.lstat()
+            if stat.S_ISLNK(child_info.st_mode) or not stat.S_ISDIR(child_info.st_mode) or child_info.st_uid != os.getuid() or child_info.st_mode & 0o077:
+                _fail("Private Antigravity keyring contains an unsafe directory")
+            found = True
+        for name in files:
+            child = parent_path / name
+            _check_private_file(child)
+            found = True
+    return found
+
+
+def _secret_item_paths(bus_address: str, attributes: dict[str, str], *, timeout: float = 5.0) -> list[str]:
+    executable = shutil.which("dbus-send", path="/usr/bin:/bin")
+    if executable is None:
+        _fail("dbus-send is required for Antigravity keyring metadata checks")
+    flat_attributes = [part for pair in attributes.items() for part in pair]
+    dictionary = "dict:string:string:" + ",".join(flat_attributes)
+    env = {"PATH": "/usr/bin:/bin", "DBUS_SESSION_BUS_ADDRESS": bus_address}
+    try:
+        result = _agy_run(
+            [executable, "--session", "--print-reply", "--dest=org.freedesktop.secrets",
+             "/org/freedesktop/secrets", "org.freedesktop.Secret.Service.SearchItems", dictionary],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=timeout, env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired, _AgyAuthCancelled):
+        _fail("Antigravity Secret Service metadata query failed")
+    if result.returncode != 0 or len(result.stdout) > 1024 * 1024:
+        _fail("Antigravity Secret Service metadata query failed")
+    path_line = rb'\s*object path "(/org/freedesktop/secrets/[A-Za-z0-9_/]+)"\n'
+    reply = re.fullmatch(
+        rb'method return [^\n]*\n\s*array \[\n(?P<unlocked>(?:' + path_line + rb')*)\s*\]\n'
+        rb'\s*array \[\n(?P<locked>(?:' + path_line + rb')*)\s*\]\s*',
+        result.stdout,
+    )
+    if reply is None:
+        _fail("Antigravity Secret Service returned malformed metadata")
+    return [path.decode("ascii") for path in re.findall(
+        rb'object path "(/org/freedesktop/secrets/[A-Za-z0-9_/]+)"',
+        reply.group("unlocked") + reply.group("locked"),
+    )]
+
+
+def _secret_item_paths_for_host(attributes: dict[str, str]) -> list[str]:
+    bus_address = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+    if not bus_address.startswith("unix:"):
+        _fail("A desktop Secret Service session is required for Antigravity sign-in")
+    return _secret_item_paths(bus_address, attributes)
+
+
+def _secret_tool() -> str:
+    executable = shutil.which("secret-tool", path="/usr/bin:/bin")
+    if executable is None:
+        _fail("libsecret-tools is required for Antigravity sign-in")
+    return executable
+
+
+def _host_wrapping_passphrase(profile: dict[str, Path]) -> bytearray:
+    matches = _secret_item_paths_for_host(AGY_WRAP_ATTRIBUTES)
+    existing_store = _agy_keyring_has_data(profile)
+    if len(matches) > 1:
+        _fail("Multiple OrgBots Antigravity wrapping-key items exist; refusing ambiguous auth state")
+    if not matches and existing_store:
+        _fail("Private Antigravity keyring exists without its wrapping key; refusing reset")
+    tool = _secret_tool()
+    host_bus = os.environ["DBUS_SESSION_BUS_ADDRESS"]
+    host_env = {"PATH": "/usr/bin:/bin", "DBUS_SESSION_BUS_ADDRESS": host_bus}
+    if matches:
+        try:
+            result = _agy_run(
+                [tool, "lookup", *[part for pair in AGY_WRAP_ATTRIBUTES.items() for part in pair]],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=8, env=host_env,
+            )
+        except (OSError, subprocess.TimeoutExpired, _AgyAuthCancelled):
+            _fail("OrgBots Antigravity wrapping-key item is locked or unavailable")
+        lines = result.stdout.splitlines()
+        if result.returncode != 0 or len(lines) != 1 or not re.fullmatch(rb"[A-Za-z0-9_-]{40,64}", lines[0]):
+            _fail("OrgBots Antigravity wrapping-key item is locked or invalid")
+        return bytearray(lines[0])
+    passphrase = bytearray(secrets.token_urlsafe(32).encode("ascii"))
+    try:
+        try:
+            result = _agy_run(
+                [tool, "store", "--label=OrgBots Antigravity private keyring",
+                 *[part for pair in AGY_WRAP_ATTRIBUTES.items() for part in pair]],
+                input=bytes(passphrase) + b"\n", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=10, env=host_env,
+            )
+        except (OSError, subprocess.TimeoutExpired, _AgyAuthCancelled):
+            _fail("Could not store OrgBots Antigravity wrapping key in Secret Service")
+        if result.returncode != 0 or len(_secret_item_paths_for_host(AGY_WRAP_ATTRIBUTES)) != 1:
+            _fail("OrgBots Antigravity wrapping key was not stored uniquely")
+        return passphrase
+    except Exception:
+        _zero_bytes(passphrase)
+        raise
+
+
+def _zero_bytes(value: bytearray) -> None:
+    for index in range(len(value)):
+        value[index] = 0
+
+
+class _AgyAuthCancelled(Exception):
+    pass
+
+
+def _agy_process_preexec(parent_pid: int) -> None:
+    _set_process_limits()
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
+    if os.getppid() != parent_pid:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _agy_owned_popen(args: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+    parent_pid = os.getpid()
+    process = subprocess.Popen(args, preexec_fn=lambda: _agy_process_preexec(parent_pid), **kwargs)
+    _AGY_CHILDREN.add(process)
+    return process
+
+
+def _agy_run(args: list[str], *, timeout: float, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+    input_bytes = kwargs.pop("input", None)
+    if input_bytes is not None:
+        if "stdin" in kwargs:
+            raise ValueError("stdin and input arguments may not both be used")
+        kwargs["stdin"] = subprocess.PIPE
+    process = _agy_owned_popen(args, **kwargs)
+    try:
+        stdout, stderr = process.communicate(input_bytes, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _stop_owned_process(process)
+        raise
+    except BaseException:
+        _stop_owned_process(process)
+        raise
+    finally:
+        _AGY_CHILDREN.discard(process)
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+
+def _agy_signal_handler(_signum: int, _frame: Any) -> None:
+    for process in tuple(_AGY_CHILDREN):
+        if process.poll() is None:
+            process.terminate()
+    raise _AgyAuthCancelled()
+
+
+@contextlib.contextmanager
+def _agy_signal_scope():
+    old_int = signal.signal(signal.SIGINT, _agy_signal_handler)
+    old_term = signal.signal(signal.SIGTERM, _agy_signal_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, old_int)
+        signal.signal(signal.SIGTERM, old_term)
+
+
+def _private_dbus_config(path: Path, runtime: Path) -> None:
+    body = f'''<busconfig>
+  <type>session</type>
+  <listen>unix:path={runtime / "bus.sock"}</listen>
+  <policy context="default">
+    <deny send_destination="*"/>
+    <allow send_destination="org.freedesktop.DBus"/>
+    <allow send_destination="org.freedesktop.secrets"/>
+    <allow send_type="method_return" send_requested_reply="true"/>
+    <allow send_type="error" send_requested_reply="true"/>
+    <allow receive_sender="*"/>
+    <allow own="org.freedesktop.secrets"/>
+  </policy>
+</busconfig>
+'''
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.write(fd, body.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _stop_owned_process(process: subprocess.Popen[bytes] | None) -> None:
+    if process is None:
+        return
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+    _AGY_CHILDREN.discard(process)
+
+
+@contextlib.contextmanager
+def _agy_private_secret_service(profile: dict[str, Path], passphrase: bytearray | None):
+    with tempfile.TemporaryDirectory(prefix="orgbots-agy-", dir="/tmp") as temporary:
+        runtime = Path(temporary)
+        os.chmod(runtime, 0o700)
+        config = runtime / "dbus.conf"
+        _private_dbus_config(config, runtime)
+        bus_address = f"unix:path={runtime / 'bus.sock'}"
+        private_env = {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "HOME": os.fspath(profile["service_home"]),
+            "XDG_CONFIG_HOME": os.fspath(profile["service_config"]),
+            "XDG_DATA_HOME": os.fspath(profile["keyring_data"]),
+            "XDG_STATE_HOME": os.fspath(profile["service_state"]),
+            "XDG_CACHE_HOME": os.fspath(profile["service_cache"]),
+            "XDG_RUNTIME_DIR": os.fspath(runtime),
+            "DBUS_SESSION_BUS_ADDRESS": bus_address,
+            "LANG": "C.UTF-8",
+        }
+        dbus = shutil.which("dbus-daemon", path="/usr/bin:/bin")
+        keyring = shutil.which("gnome-keyring-daemon", path="/usr/bin:/bin")
+        if dbus is None or keyring is None:
+            _fail("dbus-daemon and gnome-keyring-daemon are required for Antigravity auth")
+        bus_process = None
+        keyring_process = None
+        try:
+            bus_process = _agy_owned_popen(
+                [dbus, f"--config-file={config}", "--nofork", "--nopidfile"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env={"PATH": private_env["PATH"], "HOME": private_env["HOME"], "XDG_RUNTIME_DIR": private_env["XDG_RUNTIME_DIR"]},
+            )
+            socket_path = runtime / "bus.sock"
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not socket_path.exists():
+                if bus_process.poll() is not None:
+                    _fail("Private Antigravity D-Bus did not start")
+                time.sleep(0.05)
+            if not socket_path.exists() or not stat.S_ISSOCK(socket_path.lstat().st_mode):
+                _fail("Private Antigravity D-Bus socket is unavailable")
+            key_args = [keyring, "--foreground", "--components=secrets"]
+            if passphrase is not None:
+                key_args.append("--unlock")
+            keyring_process = _agy_owned_popen(
+                key_args, stdin=subprocess.PIPE if passphrase is not None else subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=private_env,
+            )
+            if passphrase is not None:
+                assert keyring_process.stdin is not None
+                keyring_process.stdin.write(bytes(passphrase) + b"\n")
+                keyring_process.stdin.flush()
+                keyring_process.stdin.close()
+            deadline = time.monotonic() + 5
+            owner = False
+            while time.monotonic() < deadline:
+                if keyring_process.poll() is not None:
+                    _fail("Private Antigravity Secret Service did not start")
+                try:
+                    result = _agy_run(
+                        [shutil.which("dbus-send", path="/usr/bin:/bin") or "dbus-send", "--session", "--print-reply",
+                         "--dest=org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus.NameHasOwner",
+                         "string:org.freedesktop.secrets"],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                        timeout=0.5, env={"PATH": private_env["PATH"], "DBUS_SESSION_BUS_ADDRESS": bus_address},
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    result = None
+                if result is not None and result.returncode == 0 and b"boolean true" in result.stdout:
+                    owner = True
+                    break
+                time.sleep(0.05)
+            if not owner:
+                _fail("Private Antigravity Secret Service did not acquire its bus name")
+            yield private_env, runtime
+        finally:
+            _stop_owned_process(keyring_process)
+            _stop_owned_process(bus_process)
+
+
+def _agy_sandbox_args(profile: dict[str, Path], binary: Path, runtime: Path) -> list[str]:
+    uid = os.getuid()
+    runtime_mount = f"/run/user/{uid}/orgbots-agy-runtime"
+    args = [
+        "bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+        "--size", "1073741824", "--tmpfs", "/", "--dev", "/dev", "--proc", "/proc",
+        "--size", "268435456", "--tmpfs", "/tmp", "--dir", "/tmp/orgbot-workspace",
+        "--dir", "/opt", "--dir", "/opt/orgbots",
+        "--size", "67108864", "--tmpfs", "/home", "--dir", "/home/orgbot",
+        "--size", "67108864", "--tmpfs", "/root", "--size", "16777216", "--tmpfs", "/run",
+        "--dir", "/run/user", "--dir", f"/run/user/{uid}", "--dir", runtime_mount,
+    ]
+    for source in ("/usr", "/usr/local", "/bin", "/sbin", "/lib", "/lib64"):
+        if Path(source).exists():
+            args.extend(["--dir", source, "--ro-bind", source, source])
+    args.extend(["--dir", "/etc"])
+    for source in ("/etc/ld.so.cache", "/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/etc/hosts", "/etc/ssl/certs/ca-certificates.crt"):
+        path = Path(source)
+        if path.is_file() and not path.is_symlink():
+            args.extend(["--ro-bind", source, source])
+    resolver = Path("/etc/resolv.conf")
+    if resolver.is_file():
+        resolver_bytes = resolver.read_bytes()
+        resolver_copy = runtime / "resolv.conf"
+        fd = os.open(resolver_copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.write(fd, resolver_bytes)
+        finally:
+            os.close(fd)
+        args.extend(["--ro-bind", os.fspath(resolver_copy), "/etc/resolv.conf"])
+    args.extend([
+        "--dir", "/home/orgbot/.config", "--dir", "/home/orgbot/.local", "--dir", "/home/orgbot/.local/share",
+        "--dir", "/home/orgbot/.local/state", "--dir", "/home/orgbot/.cache",
+        "--ro-bind", os.fspath(profile["home"]), "/home/orgbot",
+        "--bind", os.fspath(profile["config"]), "/home/orgbot/.config",
+        "--bind", os.fspath(profile["data"]), "/home/orgbot/.local/share",
+        "--bind", os.fspath(profile["state"]), "/home/orgbot/.local/state",
+        "--bind", os.fspath(profile["cache"]), "/home/orgbot/.cache",
+        "--bind", os.fspath(profile["cli_config"]), "/home/orgbot/.gemini/antigravity-cli",
+    ])
+    args.extend([
+        "--dir", runtime_mount,
+        "--ro-bind", os.fspath(runtime / "bus.sock"), f"{runtime_mount}/bus.sock",
+        "--ro-bind", os.fspath(binary), "/opt/orgbots/agy",
+        "--dir", "/tmp/orgbot-workspace/.agents",
+        "--ro-bind", os.fspath(profile["project"]), "/tmp/orgbot-workspace",
+        "--ro-bind", os.fspath(profile["settings"]), "/home/orgbot/.gemini/antigravity-cli/settings.json",
+        "--ro-bind", os.fspath(profile["global_config"]), "/home/orgbot/.gemini/config",
+    ])
+    private_bus = f"unix:path={runtime_mount}/bus.sock"
+    args.extend([
+        "--clearenv", "--setenv", "PATH", "/opt/orgbots:/usr/local/bin:/usr/bin:/bin",
+        "--setenv", "HOME", "/home/orgbot", "--setenv", "XDG_CONFIG_HOME", "/home/orgbot/.config",
+        "--setenv", "XDG_DATA_HOME", "/home/orgbot/.local/share",
+        "--setenv", "XDG_STATE_HOME", "/home/orgbot/.local/state",
+        "--setenv", "XDG_CACHE_HOME", "/home/orgbot/.cache",
+        "--setenv", "XDG_RUNTIME_DIR", runtime_mount,
+        "--setenv", "DBUS_SESSION_BUS_ADDRESS", private_bus,
+        "--setenv", "BROWSER", "/bin/false", "--setenv", "LANG", "C.UTF-8",
+        "--setenv", "TERM", "xterm-256color", "--chdir", "/tmp/orgbot-workspace",
+        "--", "/opt/orgbots/agy",
+    ])
+    return args
+
+
+def _agy_binary() -> Path:
+    owner_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    if not owner_home.is_absolute():
+        _fail("The current owner home directory is invalid")
+    raw = shutil.which("agy", path=os.pathsep.join((os.fspath(owner_home / ".local/bin"), "/usr/local/bin", "/usr/bin", "/bin")))
+    if raw is None:
+        _fail("Antigravity CLI `agy` is not installed")
+    path = Path(raw).resolve(strict=True)
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or not os.access(path, os.X_OK) or info.st_nlink != 1 or info.st_mode & 0o022:
+        _fail("Installed Antigravity CLI binary is unsafe")
+    if info.st_uid not in (os.getuid(), 0):
+        _fail("Installed Antigravity CLI has an unexpected owner")
+    return path
+
+
+def _agy_auth_preflight() -> None:
+    for executable in ("bwrap", "dbus-daemon", "dbus-send", "gnome-keyring-daemon", "secret-tool"):
+        if shutil.which(executable, path="/usr/local/bin:/usr/bin:/bin") is None:
+            _fail(f"{executable} is required for isolated Antigravity sign-in")
+
+
+def _agy_auth_status() -> dict[str, Any]:
+    previous_umask = os.umask(0o077)
+    try:
+        return _agy_auth_status_inner()
+    finally:
+        os.umask(previous_umask)
+
+
+def _agy_auth_status_inner() -> dict[str, Any]:
+    _set_process_limits()
+    profile = _agy_profile_paths(create=False)
+    if profile is None:
+        return {"ok": True, "credentials_present": False, "state": "pending_login"}
+    lock_fd = _agy_auth_lock(profile["root"])
+    try:
+        if not _agy_keyring_has_data(profile):
+            return {"ok": True, "credentials_present": False, "state": "pending_login"}
+        with _agy_private_secret_service(profile, None) as (private_env, _runtime):
+            paths = _secret_item_paths(private_env["DBUS_SESSION_BUS_ADDRESS"], {})
+        return {
+            "ok": True,
+            "credentials_present": bool(paths),
+            "state": "pending_preflight" if paths else "pending_login",
+        }
+    finally:
+        os.close(lock_fd)
+
+
+def _agy_auth_lock(root: Path) -> int:
+    lock_path = root / "auth.lock"
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+        os.close(fd)
+        _fail("Private Antigravity auth lock is unsafe")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        _fail("Another Antigravity authentication operation is already running")
+    return fd
+
+
+def _agy_auth_login() -> dict[str, Any]:
+    previous_umask = os.umask(0o077)
+    try:
+        with _agy_signal_scope():
+            return _agy_auth_login_inner()
+    except _AgyAuthCancelled:
+        state = _agy_auth_status()
+        return {
+            "ok": False,
+            "credentials_present": state["credentials_present"],
+            "state": state["state"],
+            "error": "Antigravity sign-in cancelled",
+        }
+    finally:
+        os.umask(previous_umask)
+
+
+def _agy_auth_login_inner() -> dict[str, Any]:
+    _set_process_limits()
+    if not (os.isatty(0) and os.isatty(1) and os.isatty(2)):
+        _fail("Antigravity sign-in must run from an interactive terminal")
+    binary = _agy_binary()
+    _agy_auth_preflight()
+    profile = _agy_profile_paths(create=True)
+    assert profile is not None
+    lock_fd = _agy_auth_lock(profile["root"])
+    passphrase = None
+    try:
+        passphrase = _host_wrapping_passphrase(profile)
+        with _agy_private_secret_service(profile, passphrase) as (_private_env, runtime):
+            args = _agy_sandbox_args(profile, binary, runtime)
+            process = _agy_owned_popen(
+                args, env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
+            )
+            try:
+                status = process.wait()
+            except BaseException:
+                _stop_owned_process(process)
+                raise
+            finally:
+                _AGY_CHILDREN.discard(process)
+            paths = _secret_item_paths(_private_env["DBUS_SESSION_BUS_ADDRESS"], {})
+        return {
+            "ok": status == 0,
+            "credentials_present": bool(paths),
+            "state": "pending_preflight" if paths else "pending_login",
+            "agy_exit_code": status,
+            **({} if status == 0 else {"error": f"Antigravity sign-in exited with code {status}"}),
+        }
+    finally:
+        if passphrase is not None:
+            _zero_bytes(passphrase)
+        os.close(lock_fd)
+
+
 def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool, profiles: list[str], private_home_arg: str | None, mcp_socket: str | None, agent_cli: str | None = None, verify: bool = False) -> int:
     agent = _safe_agent(agent_arg)
     if not program:
@@ -1242,6 +1903,8 @@ def _parser() -> argparse.ArgumentParser:
     apply.add_argument("--state", required=True)
     apply.add_argument("--agent", required=True)
     apply.add_argument("--review-token")
+    agy_auth = sub.add_parser("agy-auth")
+    agy_auth.add_argument("action", choices=("login", "status"))
     return parser
 
 
@@ -1257,6 +1920,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             program = args.program[1:] if args.program and args.program[0] == "--" else args.program
             return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket, agent_cli=args.agent_cli, verify=args.verify)
+        if args.command == "agy-auth":
+            result = _agy_auth_login() if args.action == "login" else _agy_auth_status()
+            _json(result)
+            return 0 if result.get("ok") else 2
         result = _apply(args.state, args.agent, args.review_token)
         _json(result)
         return 0 if result.get("ok") else 1

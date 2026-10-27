@@ -123,7 +123,7 @@ Architecture: amd64
 Breaks: orgbot (<< $VERSION)
 Replaces: orgbot (<< $VERSION)
 Installed-Size: $INSTALLED_KB
-Depends: $DEPENDS, python3, bubblewrap, libnotify-bin, libsecret-tools, ffmpeg, gstreamer1.0-libav, gstreamer1.0-plugins-good
+Depends: $DEPENDS, python3, bubblewrap, dbus-daemon, gnome-keyring, libnotify-bin, libsecret-tools, ffmpeg, gstreamer1.0-libav, gstreamer1.0-plugins-good
 Maintainer: OrgBot <theaeceme@gmail.com>
 Description: CLI and API agents working together in shared rooms
  Bots hold different roles, pick up tasks, hand work off to one another, wait

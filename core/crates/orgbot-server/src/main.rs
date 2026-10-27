@@ -2,6 +2,8 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::process::Command;
 
 use clap::{Parser, Subcommand};
 use orgbot_server::config::RoomConfig;
@@ -82,6 +84,12 @@ enum CliCommand {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
+    /// Manage Antigravity's separate private sign-in profile.
+    #[cfg(target_os = "linux")]
+    Agy {
+        #[command(subcommand)]
+        action: AgyAction,
+    },
     RoomMcp {
         /// The room MCP unix socket to connect to.
         #[arg(long)]
@@ -129,6 +137,15 @@ enum RoomServiceAction {
     },
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Subcommand, Clone, Copy, PartialEq, Eq)]
+enum AgyAction {
+    /// Sign in to a private Antigravity profile.
+    Login,
+    /// Show whether the private Antigravity profile has credentials.
+    Status,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -156,6 +173,8 @@ async fn main() -> anyhow::Result<()> {
         CliCommand::Check { config } => check(config),
         CliCommand::Init { path } => init(path),
         CliCommand::Pair { out } => pair(out),
+        #[cfg(target_os = "linux")]
+        CliCommand::Agy { action } => agy_auth(action),
         CliCommand::RoomMcp { socket } => {
             orgbot_runtime::relay::run(&socket)
                 .await
@@ -190,6 +209,78 @@ async fn main() -> anyhow::Result<()> {
             orgbot_server::supervisor::supervise(&directory)
         }
     }
+}
+
+/// Run the trusted workspace helper's private Antigravity auth operation.
+#[cfg(target_os = "linux")]
+fn agy_auth(action: AgyAction) -> anyhow::Result<()> {
+    let helper = orgbot_providers::workspace_guard::helper().map_err(anyhow::Error::msg)?;
+    agy_auth_with_helper(action, &helper)
+}
+
+#[cfg(target_os = "linux")]
+fn agy_auth_with_helper(action: AgyAction, helper: &std::path::Path) -> anyhow::Result<()> {
+    use std::process::Stdio;
+
+    let mut command = Command::new("/usr/bin/python3");
+    command.arg(helper).arg("agy-auth").arg(match action {
+        AgyAction::Login => "login",
+        AgyAction::Status => "status",
+    });
+
+    match action {
+        AgyAction::Login => {
+            // The helper requires an owner TTY for the interactive auth flow.
+            // Inherit it directly; do not capture auth output or credentials.
+            let status = command
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()?;
+            if !status.success() {
+                anyhow::bail!("private Antigravity sign-in failed (helper exit status {status})");
+            }
+            Ok(())
+        }
+        AgyAction::Status => {
+            let status = agy_auth_status_with_helper(helper)?;
+            println!("{}", serde_json::to_string(&status)?);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn agy_auth_status_with_helper(helper: &std::path::Path) -> anyhow::Result<AgyAuthStatus> {
+    let output = Command::new("/usr/bin/python3")
+        .arg(helper)
+        .arg("agy-auth")
+        .arg("status")
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "could not read private Antigravity sign-in status (helper exit status {})",
+            output.status
+        );
+    }
+    parse_agy_auth_status(&output.stdout)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(serde::Deserialize, serde::Serialize)]
+struct AgyAuthStatus {
+    ok: bool,
+    credentials_present: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_agy_auth_status(bytes: &[u8]) -> anyhow::Result<AgyAuthStatus> {
+    let status: AgyAuthStatus = serde_json::from_slice(bytes)
+        .map_err(|_| anyhow::anyhow!("private Antigravity helper returned invalid status JSON"))?;
+    if !status.ok {
+        anyhow::bail!("private Antigravity helper did not complete the status check");
+    }
+    Ok(status)
 }
 
 /// Host a room over WebSocket.
@@ -543,4 +634,87 @@ fn pair(out: Option<std::path::PathBuf>) -> anyhow::Result<()> {
         None => println!("{json}"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agy_auth_commands_parse_as_nested_subcommands() {
+        assert!(matches!(
+            Cli::try_parse_from(["orgbot", "agy", "login"])
+                .unwrap()
+                .command,
+            CliCommand::Agy {
+                action: AgyAction::Login
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["orgbot", "agy", "status"])
+                .unwrap()
+                .command,
+            CliCommand::Agy {
+                action: AgyAction::Status
+            }
+        ));
+        assert!(Cli::try_parse_from(["orgbot", "agy", "run"]).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agy_auth_status_allowlists_only_safe_metadata() {
+        let status = parse_agy_auth_status(
+            br#"{"ok":true,"credentials_present":true,"token":"must-not-escape"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!({"ok": true, "credentials_present": true})
+        );
+        assert!(parse_agy_auth_status(br#"{"ok":false,"credentials_present":true}"#).is_err());
+        assert!(parse_agy_auth_status(br#"{"ok":true,"credentials_present":"yes"}"#).is_err());
+        assert!(parse_agy_auth_status(b"not json").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agy_auth_status_dispatch_reads_safe_fake_helper_response() {
+        let root = std::env::temp_dir().join(format!("orgbot-agy-status-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let helper = root.join("helper.py");
+        std::fs::write(
+            &helper,
+            "print('{\"ok\":true,\"credentials_present\":false,\"token\":\"private\"}')\n",
+        )
+        .unwrap();
+
+        let status = agy_auth_status_with_helper(&helper).unwrap();
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!({"ok": true, "credentials_present": false})
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agy_auth_helper_failures_return_errors_without_forwarding_helper_output() {
+        let root = std::env::temp_dir().join(format!("orgbot-agy-auth-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let helper = root.join("helper.py");
+        std::fs::write(
+            &helper,
+            "import sys\nprint('private helper diagnostic')\nsys.exit(7)\n",
+        )
+        .unwrap();
+        let failure = agy_auth_with_helper(AgyAction::Status, &helper).unwrap_err();
+        assert!(failure.to_string().contains("exit status"));
+
+        let missing =
+            agy_auth_with_helper(AgyAction::Status, &root.join("missing.py")).unwrap_err();
+        assert!(missing.to_string().contains("exit status"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

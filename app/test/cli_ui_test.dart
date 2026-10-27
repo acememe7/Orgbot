@@ -131,7 +131,6 @@ void main() {
         expect(find.text('OpenCode CLI'), findsOneWidget);
         expect(find.text('Antigravity CLI'), findsOneWidget);
       }
-      expect(find.text('API access'), findsOneWidget);
       // Scroll to the rows rather than by a fixed distance, so sections
       // added further down the page do not carry them out of view.
       final setup = find
@@ -140,6 +139,13 @@ void main() {
             matching: find.byType(Scrollable),
           )
           .first;
+      await tester.scrollUntilVisible(
+        find.text('API access'),
+        100,
+        scrollable: setup,
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.text('API access'), findsOneWidget);
       for (final row in ['DeepSeek API', 'Ollama Cloud API']) {
         await tester.scrollUntilVisible(find.text(row), 100, scrollable: setup);
         await tester.pump(const Duration(milliseconds: 200));
@@ -234,27 +240,27 @@ void main() {
       await pumpUiTransition(tester);
       final setupAfterEditor = find.byKey(const ValueKey('cli-setup'));
       final setupScroller = find
-          .descendant(
-            of: setupAfterEditor,
-            matching: find.byType(Scrollable),
-          )
+          .descendant(of: setupAfterEditor, matching: find.byType(Scrollable))
           .first;
       if (Platform.isLinux) {
         expect(find.byKey(const ValueKey('cli-setup')), findsOneWidget);
         await tester.drag(setupAfterEditor, const Offset(0, 1000));
         await tester.pump(const Duration(milliseconds: 200));
         expect(find.text('Antigravity CLI'), findsOneWidget);
-        expect(find.text('Unavailable'), findsOneWidget);
         expect(
-          find.text('Isolated sign-in is not supported yet.'),
+          find.text('Sign-in status has not been checked.'),
           findsOneWidget,
         );
+        expect(find.text('Sign in'), findsOneWidget);
       }
       await tester.scrollUntilVisible(
         find.byTooltip('Remove DeepSeek API key'),
         100,
         scrollable: setupScroller,
       );
+      await tester.ensureVisible(find.byTooltip('Remove DeepSeek API key'));
+      await tester.drag(setupAfterEditor, const Offset(0, -12));
+      await tester.pump(const Duration(milliseconds: 200));
       await tester.tap(find.byTooltip('Remove DeepSeek API key'));
       await pumpUiTransition(tester);
       expect(credentials.forProvider(ProviderKind.deepseek), isNull);
@@ -383,9 +389,9 @@ void main() {
           findsOneWidget,
         );
       } else {
-        expect(find.text('Unavailable'), findsOneWidget);
+        expect(find.text('Execution unavailable'), findsOneWidget);
         expect(
-          find.text('Isolated sign-in is not supported yet.'),
+          find.textContaining('Account access and protected execution'),
           findsOneWidget,
         );
       }

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'workspace_helper.dart';
 
 typedef WorkspaceProcessRunner =
     Future<ProcessResult> Function(String executable, List<String> arguments);
@@ -47,18 +48,7 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
   }
 
   Future<String?> _helper() async {
-    if (widget.helperPath != null) return widget.helperPath;
-    const installed = '/usr/lib/orgbot/orgbot-workspace.py';
-    if (await File(installed).exists()) return installed;
-    final candidates = [
-      '${Directory.current.path}/app/packaging/orgbot-workspace.py',
-      '${Directory.current.path}/packaging/orgbot-workspace.py',
-      '${File(Platform.resolvedExecutable).parent.path}/orgbot-workspace.py',
-    ];
-    for (final candidate in candidates) {
-      if (await File(candidate).exists()) return candidate;
-    }
-    return null;
+    return locateWorkspaceHelper(override: widget.helperPath);
   }
 
   Future<Map<String, dynamic>> _invoke(

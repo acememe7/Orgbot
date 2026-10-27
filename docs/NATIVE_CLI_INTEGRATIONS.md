@@ -13,12 +13,12 @@ separate from that blocked live attempt.
 | Provider | Executable | Model selection | Status |
 | --- | --- | --- | --- |
 | OpenCode | `opencode` | Explicit `provider/model` | Protected Linux adapter using an existing API credential; OAuth reuse blocked |
-| Antigravity | `agy` | Explicit model slug | Configuration and stream adapter implemented; execution blocked pending isolated authentication |
+| Antigravity | `agy` | Explicit model slug | Separate private sign-in implemented in source; execution blocked pending live authentication and permission checks |
 
 `antigravity` on this machine launches the IDE and is not the CLI adapter.
-Finding either executable does not establish account access. The app does not
-start a login, connect another account, or substitute an API key for a CLI
-subscription.
+Finding either executable does not establish account access. Sign-in starts
+only through an explicit owner action. OrgBots does not substitute an API key
+for a CLI subscription.
 
 ## Profile and tool boundaries
 
@@ -79,10 +79,52 @@ The production execution gates remain enabled. The
 [sanitized diagnosis](benchmarks/2026-10-27-antigravity-auth-diagnosis.json)
 records the exact tested binary and scope.
 
+### Separate private sign-in in the development source
+
+Run `orgbot agy login` in an owner terminal, or choose **Sign in** beside
+Antigravity in **Connections & tools**. From this checkout, the equivalent is
+`python3 app/packaging/orgbot-workspace.py agy-auth login`. Complete Google's
+sign-in inside the terminal and exit AGY without submitting a model prompt.
+`orgbot agy status` and **Check sign-in** report only whether the private keyring
+contains credential items; they do not certify authentication or enable bots.
+
+The helper creates a dedicated encrypted keyring under
+`$XDG_DATA_HOME/orgbot/agy` (normally `~/.local/share/orgbot/agy`). A generated
+wrapping passphrase is kept in one exactly scoped OrgBots item in the desktop
+Secret Service. Only the trusted helper reads that item. It passes the
+passphrase to the private keyring daemon through stdin, never through command
+arguments, environment variables or a plaintext file. Missing, ambiguous or
+unavailable wrapping keys fail closed; an existing encrypted store is not reset.
+The existing host AGY login is neither read nor copied.
+
+The private bus has no service activation and permits Secret Service traffic
+and requested replies. AGY receives only its private socket. Its filesystem
+starts empty, with read-only system runtime files and a private home/project.
+The host home, desktop bus, encrypted keyring files and wrapping passphrase are
+absent. The keyring daemon has its own separate home and data directories.
+Controlled settings and their ancestor paths cannot be replaced; only CLI
+data directories are writable. Global/project hooks, plugins and MCP servers
+are excluded during sign-in. API/ADC variables are not inherited and
+`useG1Credits` is explicitly false. That setting is not account-billing proof.
+
+Only one AGY authentication operation may run at a time; a concurrent request
+returns a busy error. Owned child processes stop on cancellation or parent
+death. The helper requires an interactive terminal for login and does not
+submit a model prompt. Status uses locked private-keyring metadata and does not
+query the desktop keyring. The package declares its D-Bus and GNOME Keyring
+dependencies, but no updated package has been installed or published.
+
+Owner sign-in, credential refresh, subscription/overage behavior, actual native
+tool permissions, room MCP, and live context/usage checks remain required
+before removing the three execution gates. The
+[enrollment verification record](benchmarks/2026-10-27-antigravity-enrollment.json)
+separates synthetic/offline proof from those remaining account tests.
+
 These measures preserve the existing [workspace boundary](WORKSPACE_SAFETY.md).
-The normal CLI sandbox still exposes the host filesystem read-only, including
+The normal room CLI sandbox still exposes the host filesystem read-only, including
 readable files in the host home; it is not complete credential secrecy from a
-malicious CLI. Private profile copies isolate writable state.
+malicious CLI. Private profile copies isolate writable state. The separate AGY
+enrollment sandbox described above uses an empty filesystem instead.
 
 ## Sessions and usage
 

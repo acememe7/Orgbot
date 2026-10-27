@@ -272,7 +272,7 @@ fn configure_new_cli_profile_inner(
     use orgbot_proto::agent::CliKind;
 
     if cli == CliKind::Antigravity {
-        return Err("Antigravity is unavailable in the protected workspace because no verified isolated authentication source is configured".into());
+        return Err("Antigravity execution remains disabled until isolated authentication and runtime permissions are verified; use `orgbot agy login` only to initialize its private sign-in profile".into());
     }
 
     if !mount.is_absolute() {
@@ -1328,7 +1328,7 @@ mod tests {
             Some(&auth_source),
         )
         .unwrap_err()
-        .contains("no verified isolated authentication source"));
+        .contains("execution remains disabled until isolated authentication"));
         assert!(!home.join(".gemini").exists());
         strip_private_agent_mcp_config(&home, CliKind::OpenCode).unwrap();
         clear_private_agent_config(&home, CliKind::Antigravity).unwrap();
@@ -1407,7 +1407,7 @@ mod tests {
             Some(&auth_source),
         )
         .unwrap_err()
-        .contains("no verified isolated authentication source"));
+        .contains("execution remains disabled until isolated authentication"));
         let opencode: serde_json::Value =
             serde_json::from_slice(&std::fs::read(home.join("opencode.json")).unwrap()).unwrap();
         assert!(opencode["mcp"].as_object().unwrap().is_empty());

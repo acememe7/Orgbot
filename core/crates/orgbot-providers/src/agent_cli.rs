@@ -198,7 +198,7 @@ impl AgentCliProvider {
             }
             CliKind::Antigravity => {
                 return Err(ProviderError::Unsupported(
-                    "Antigravity is unavailable in the protected workspace because no verified isolated authentication source is configured".into(),
+                    "Antigravity execution remains disabled until isolated authentication and runtime permissions are verified; use `orgbot agy login` only to initialize its private sign-in profile".into(),
                 ));
             }
             _ => {}
@@ -2878,7 +2878,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
         )
         .unwrap_err()
         .to_string()
-        .contains("no verified isolated authentication source"));
+        .contains("execution remains disabled until isolated authentication"));
     }
 
     #[cfg(unix)]

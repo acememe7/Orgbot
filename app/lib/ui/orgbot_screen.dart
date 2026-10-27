@@ -27,6 +27,7 @@ import 'desktop_integrations_view.dart';
 import 'themes.dart';
 import '../workspace/desktop_files.dart';
 import 'trash_storage_settings.dart';
+import 'antigravity_auth_tile.dart';
 import '../orgbot/roles.dart';
 import '../orgbot/attention.dart';
 import '../state/room_store.dart';
@@ -1827,6 +1828,7 @@ class _CliStatusTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final status = findCli(cli);
+    if (cli == CliKind.antigravity) return const AntigravityAuthTile();
     return Padding(
       padding: const EdgeInsets.only(bottom: 1),
       child: Material(
@@ -1834,9 +1836,7 @@ class _CliStatusTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
         child: ListTile(
           title: Text(_cliLabel(cli)),
-          subtitle: cli == CliKind.antigravity
-              ? const Text('Isolated sign-in is not supported yet.')
-              : cli == CliKind.opencode && status.available
+          subtitle: cli == CliKind.opencode && status.available
               ? const Text(
                   'Uses the selected OpenCode API credential. OAuth reuse is unavailable.',
                 )
@@ -1863,20 +1863,14 @@ class _CliStatusTile extends StatelessWidget {
                   ],
                 ),
           trailing: Text(
-            cli == CliKind.antigravity
-                ? 'Unavailable'
-                : status.available
+            status.available
                 ? cli.requiresProtectedRuntime
                       ? 'Found'
                       : 'Installed'
                 : 'Missing',
             style: TextStyle(
               fontSize: 12,
-              color: cli == CliKind.antigravity
-                  ? scheme.error
-                  : status.available
-                  ? scheme.primary
-                  : scheme.error,
+              color: status.available ? scheme.primary : scheme.error,
             ),
           ),
         ),
@@ -2404,12 +2398,12 @@ class _BotEditorState extends State<_BotEditor> {
         children: [
           StatusPill(
             color: scheme.error,
-            label: 'Unavailable',
+            label: 'Execution unavailable',
             icon: Icons.error_outline,
           ),
           const SizedBox(height: 6),
           Text(
-            'Isolated sign-in is not supported yet.',
+            'Sign-in can be started from Connections & tools. Account access and protected execution still require verification.',
             style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
           ),
         ],

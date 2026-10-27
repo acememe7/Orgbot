@@ -4,12 +4,14 @@ import io
 import importlib.util
 import json
 import os
+import signal
 import socket
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from pathlib import Path
@@ -546,6 +548,322 @@ for path in (Path(os.environ['OPENCODE_CONFIG_DIR']), Path(os.environ['HOME']) /
             self.assertEqual(received, [b"room-only"])
         finally:
             listener.close()
+
+    def test_agy_status_is_pending_without_creating_or_reading_host_secrets(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}), \
+             patch.object(workspace, "_set_process_limits"), \
+             patch.object(workspace, "_secret_item_paths_for_host", side_effect=AssertionError("host Secret Service queried")), \
+             patch.object(workspace, "_agy_private_secret_service", side_effect=AssertionError("private store should not start")):
+            result = workspace._agy_auth_status()
+        self.assertEqual(result, {"ok": True, "credentials_present": False, "state": "pending_login"})
+        self.assertFalse((xdg_data / "orgbot/agy").exists())
+
+    def test_agy_login_requires_tty_before_secret_service_access(self):
+        with patch.object(workspace, "_set_process_limits"), \
+             patch.object(workspace.os, "isatty", return_value=False), \
+             patch.object(workspace, "_secret_item_paths_for_host", side_effect=AssertionError("host Secret Service queried")):
+            with self.assertRaisesRegex(workspace.WorkspaceError, "interactive terminal"):
+                workspace._agy_auth_login()
+
+    def test_agy_profile_uses_exact_deny_settings_and_rejects_mutation(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            self.assertIsNotNone(profile)
+            settings = json.loads(profile["settings"].read_text(encoding="utf-8"))
+            self.assertFalse(settings["useG1Credits"])
+            self.assertEqual(settings["permissions"]["deny"], [
+                "command(*)", "unsandboxed(*)", "read_file(*)", "write_file(*)",
+                "read_url(*)", "execute_url(*)", "mcp(*)",
+            ])
+            self.assertEqual(list(profile["plugins"].iterdir()), [])
+            self.assertEqual(list((profile["project"] / ".agents").iterdir()), [])
+            self.assertEqual(stat.S_IMODE(profile["settings"].stat().st_mode), 0o600)
+            profile["settings"].write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(workspace.WorkspaceError, "unmanaged"):
+                workspace._agy_profile_paths(create=True)
+
+    def test_agy_wrapping_key_never_uses_ambiguous_or_missing_existing_secret(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            self.assertIsNotNone(profile)
+            with patch.object(workspace, "_secret_item_paths_for_host", return_value=["/a", "/b"]), \
+                 patch.object(workspace, "_agy_keyring_has_data", return_value=False), \
+                 patch.object(workspace, "_secret_tool") as secret_tool, \
+                 self.assertRaisesRegex(workspace.WorkspaceError, "Multiple OrgBots"):
+                workspace._host_wrapping_passphrase(profile)
+            secret_tool.assert_not_called()
+            with patch.object(workspace, "_secret_item_paths_for_host", return_value=[]), \
+                 patch.object(workspace, "_agy_keyring_has_data", return_value=True), \
+                 patch.object(workspace, "_secret_tool") as secret_tool, \
+                 self.assertRaisesRegex(workspace.WorkspaceError, "refusing reset"):
+                workspace._host_wrapping_passphrase(profile)
+            secret_tool.assert_not_called()
+
+    def test_agy_secret_item_creation_passes_generated_key_only_on_stdin(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data), "DBUS_SESSION_BUS_ADDRESS": "unix:path=/synthetic-bus"}):
+            profile = workspace._agy_profile_paths(create=True)
+            self.assertIsNotNone(profile)
+            with patch.object(workspace, "_secret_item_paths_for_host", side_effect=([], ["/org/freedesktop/secrets/item/1"])), \
+                 patch.object(workspace, "_agy_keyring_has_data", return_value=False), \
+                 patch.object(workspace, "_secret_tool", return_value="/usr/bin/secret-tool"), \
+                 patch.object(workspace, "_agy_run", return_value=subprocess.CompletedProcess([], 0)) as run:
+                value = workspace._host_wrapping_passphrase(profile)
+            self.assertGreaterEqual(len(value), 40)
+            args, kwargs = run.call_args
+            self.assertNotIn(value.decode(), " ".join(args[0]))
+            self.assertIn("DBUS_SESSION_BUS_ADDRESS", kwargs["env"])
+            self.assertNotIn(value.decode(), " ".join(f"{key}={item}" for key, item in kwargs["env"].items()))
+            self.assertEqual(kwargs["input"].rstrip(b"\n"), bytes(value))
+            workspace._zero_bytes(value)
+
+    def test_agy_sandbox_mounts_only_private_home_project_config_and_bus(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            self.assertIsNotNone(profile)
+            runtime = self.root / "runtime"
+            runtime.mkdir(mode=0o700)
+            (runtime / "bus.sock").touch()
+            binary = self.root / "agy"
+            binary.write_text("synthetic binary", encoding="utf-8")
+            args = workspace._agy_sandbox_args(profile, binary, runtime)
+        rendered = " ".join(args)
+        self.assertIn("--tmpfs /", rendered)
+        self.assertIn("--ro-bind " + os.fspath(profile["home"]) + " /home/orgbot", rendered)
+        self.assertIn("--bind " + os.fspath(profile["data"]) + " /home/orgbot/.local/share", rendered)
+        self.assertIn("--bind " + os.fspath(profile["cli_config"]) + " /home/orgbot/.gemini/antigravity-cli", rendered)
+        self.assertIn("--ro-bind " + os.fspath(profile["settings"]) + " /home/orgbot/.gemini/antigravity-cli/settings.json", rendered)
+        self.assertNotIn("--bind " + os.fspath(profile["home"]) + " /home/orgbot", rendered)
+        self.assertIn("--ro-bind " + os.fspath(profile["global_config"]) + " /home/orgbot/.gemini/config", rendered)
+        self.assertIn("--ro-bind " + os.fspath(profile["project"]) + " /tmp/orgbot-workspace", rendered)
+        self.assertIn("--ro-bind " + os.fspath(runtime / "bus.sock"), rendered)
+        self.assertNotIn(os.fspath(profile["keyring_data"]), rendered)
+        self.assertNotIn(os.fspath(profile["service_home"]), rendered)
+        self.assertNotIn("--ro-bind /run ", rendered)
+        self.assertNotIn("--ro-bind /home ", rendered)
+        self.assertIn("--clearenv", args)
+        self.assertIn("/bin/false", args)
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
+                         "Linux bubblewrap is required")
+    def test_agy_sandbox_prevents_settings_directory_rename_and_settings_write(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            runtime = self.root / "runtime"
+            runtime.mkdir(mode=0o700)
+            (runtime / "bus.sock").touch()
+            binary = self.root / "agy-probe"
+            binary.write_text(
+                "#!/bin/sh\n"
+                "if mv /home/orgbot/.gemini /home/orgbot/.gemini-moved 2>/dev/null; then\n"
+                "  echo gemini-rename-allowed\n"
+                "else echo gemini-rename-blocked; fi\n"
+                "if mv /home/orgbot/.gemini/antigravity-cli /home/orgbot/.gemini/antigravity-cli-moved 2>/dev/null; then\n"
+                "  echo rename-allowed\n"
+                "else echo rename-blocked; fi\n"
+                "if printf changed > /home/orgbot/.gemini/antigravity-cli/settings.json 2>/dev/null; then\n"
+                "  echo settings-write-allowed\n"
+                "else echo settings-write-blocked; fi\n"
+                "printf synthetic-log > /home/orgbot/.gemini/antigravity-cli/cli.log 2>/dev/null && echo cli-log-write-allowed\n",
+                encoding="utf-8",
+            )
+            os.chmod(binary, 0o700)
+            args = workspace._agy_sandbox_args(profile, binary, runtime)
+        result = subprocess.run(
+            args,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "PWD": "/tmp/orgbot-workspace"},
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr[-1000:])
+        self.assertEqual(result.stdout.splitlines(), [
+            "gemini-rename-blocked", "rename-blocked", "settings-write-blocked", "cli-log-write-allowed",
+        ])
+        self.assertTrue((profile["home"] / ".gemini/antigravity-cli").is_dir())
+        self.assertEqual(json.loads(profile["settings"].read_text(encoding="utf-8"))["useG1Credits"], False)
+        self.assertEqual((profile["cli_config"] / "cli.log").read_text(encoding="utf-8"), "synthetic-log")
+
+    def test_agy_partial_store_fails_without_reset(self):
+        xdg_data = self.root / "xdg-data"
+        root = xdg_data / "orgbot/agy"
+        root.mkdir(parents=True, mode=0o700)
+        (root / "keyring-data").mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            with self.assertRaisesRegex(workspace.WorkspaceError, "incomplete; refusing reset"):
+                workspace._agy_profile_paths(create=False)
+            with self.assertRaisesRegex(workspace.WorkspaceError, "incomplete; refusing reset"):
+                workspace._agy_profile_paths(create=True)
+            self.assertEqual({path.name for path in root.iterdir()}, {"keyring-data"})
+
+    def test_agy_auth_lock_contention_fails_immediately(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            first = workspace._agy_auth_lock(profile["root"])
+            try:
+                with self.assertRaisesRegex(workspace.WorkspaceError, "already running"):
+                    workspace._agy_auth_lock(profile["root"])
+            finally:
+                os.close(first)
+
+    def test_agy_secret_service_rejects_malformed_success_reply(self):
+        valid = (
+            b'method return time=0.000 sender=:1.1 -> dest=:1.2 reply_serial=3\n'
+            b'   array [\n'
+            b'      object path "/org/freedesktop/secrets/collection/login/1"\n'
+            b'   ]\n'
+            b'   array [\n'
+            b'      object path "/org/freedesktop/secrets/collection/login/2"\n'
+            b'   ]\n'
+        )
+        with patch.object(workspace, "_agy_run", return_value=subprocess.CompletedProcess([], 0, valid, b"")):
+            self.assertEqual(workspace._secret_item_paths("unix:path=/private/bus", {}), [
+                "/org/freedesktop/secrets/collection/login/1",
+                "/org/freedesktop/secrets/collection/login/2",
+            ])
+        malformed = b"method return time=0 sender=:1.1 -> dest=:1.2 reply_serial=3\nmetadata missing\n"
+        with patch.object(workspace, "_agy_run", return_value=subprocess.CompletedProcess([], 0, malformed, b"")):
+            with self.assertRaisesRegex(workspace.WorkspaceError, "malformed metadata"):
+                workspace._secret_item_paths("unix:path=/private/bus", {})
+
+    def test_agy_run_routes_input_to_pipe_and_rejects_stdin_conflict(self):
+        result = workspace._agy_run(
+            [sys.executable, "-c", "import sys; print(sys.stdin.buffer.read().decode(), end='')"],
+            timeout=3,
+            input=b"synthetic-stdin-only",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"synthetic-stdin-only")
+        with patch.object(workspace, "_agy_owned_popen") as popen:
+            with self.assertRaisesRegex(ValueError, "stdin and input"):
+                workspace._agy_run(
+                    ["/bin/true"], timeout=1, input=b"synthetic", stdin=subprocess.DEVNULL,
+                )
+            popen.assert_not_called()
+
+    def test_agy_existing_host_wrapping_key_lookup_fails_closed(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data), "DBUS_SESSION_BUS_ADDRESS": "unix:path=/synthetic-host-bus"}):
+            profile = workspace._agy_profile_paths(create=True)
+            for stdout, code in ((b"", 1), (b"", 0), (b"synthetic-key\nextra\n", 0), (b"not a token!\n", 0)):
+                with self.subTest(stdout=stdout, code=code), \
+                     patch.object(workspace, "_secret_item_paths_for_host", return_value=["/org/freedesktop/secrets/item/1"]), \
+                     patch.object(workspace, "_agy_keyring_has_data", return_value=False), \
+                     patch.object(workspace, "_secret_tool", return_value="/usr/bin/secret-tool"), \
+                     patch.object(workspace, "_agy_run", return_value=subprocess.CompletedProcess([], code, stdout, b"")):
+                    with self.assertRaisesRegex(workspace.WorkspaceError, "locked or invalid"):
+                        workspace._host_wrapping_passphrase(profile)
+
+    def test_agy_private_profile_rejects_symlink_ancestors_and_hardlinked_files(self):
+        xdg_data = self.root / "real-xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        alias = self.root / "xdg-alias"
+        alias.symlink_to(xdg_data, target_is_directory=True)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(alias)}):
+            with self.assertRaisesRegex(workspace.WorkspaceError, "Unsafe directory component"):
+                workspace._agy_profile_paths(create=True)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            hardlink = self.root / "settings-copy"
+            os.link(profile["settings"], hardlink)
+            with self.assertRaisesRegex(workspace.WorkspaceError, "file is unsafe"):
+                workspace._agy_profile_paths(create=False)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux parent-death signal is required")
+    def test_agy_sigterm_cancels_and_reaps_owned_child(self):
+        child = workspace._agy_owned_popen(["/bin/sleep", "30"], stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            with self.assertRaises(workspace._AgyAuthCancelled):
+                with workspace._agy_signal_scope():
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    time.sleep(0.1)
+        finally:
+            workspace._stop_owned_process(child)
+        self.assertIsNotNone(child.poll())
+        self.assertNotIn(child, workspace._AGY_CHILDREN)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux parent-death signal is required")
+    def test_agy_owned_child_stops_when_synthetic_parent_dies(self):
+        pidfile = self.root / "owned-child.pid"
+        code = (
+            "import importlib.util, os, sys; "
+            f"spec=importlib.util.spec_from_file_location('orgbot_workspace', {str(MODULE_PATH)!r}); "
+            "m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); "
+            "p=m._agy_owned_popen(['/bin/sleep','30'], stdin=m.subprocess.DEVNULL, "
+            "stdout=m.subprocess.DEVNULL, stderr=m.subprocess.DEVNULL); "
+            f"open({str(pidfile)!r},'w').write(str(p.pid)); os._exit(0)"
+        )
+        parent = subprocess.Popen([sys.executable, "-B", "-c", code], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.assertEqual(parent.wait(timeout=5), 0)
+        child_pid = int(pidfile.read_text(encoding="ascii"))
+
+        def child_running():
+            try:
+                state = Path(f"/proc/{child_pid}/stat").read_text(encoding="ascii").split()[2]
+                return state != "Z"
+            except FileNotFoundError:
+                return False
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and child_running():
+            time.sleep(0.05)
+        self.assertFalse(child_running(), "synthetic owned child survived its parent")
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("dbus-daemon") and
+                         workspace.shutil.which("gnome-keyring-daemon") and workspace.shutil.which("secret-tool") and
+                         workspace.shutil.which("dbus-send"), "Linux Secret Service tools are required")
+    def test_agy_private_keyring_persists_synthetic_item_across_daemon_restart(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            self.assertIsNotNone(profile)
+            passphrase = bytearray(b"synthetic-orgbots-private-keyring-passphrase")
+            env = None
+            try:
+                with workspace._agy_private_secret_service(profile, passphrase) as (env, _runtime):
+                    stored = workspace._agy_run(
+                        ["/usr/bin/secret-tool", "store", "--label=OrgBots synthetic test",
+                         "service", "orgbots", "purpose", "agy-test", "version", "1"],
+                        input=b"synthetic-only\n", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        env=env, timeout=5,
+                    )
+                    self.assertEqual(stored.returncode, 0, stored.stderr.decode(errors="replace"))
+                    paths = workspace._secret_item_paths(env["DBUS_SESSION_BUS_ADDRESS"], {})
+                    self.assertEqual(len(paths), 1)
+                with workspace._agy_private_secret_service(profile, passphrase) as (env, _runtime):
+                    readback = workspace._agy_run(
+                        ["/usr/bin/secret-tool", "lookup", "service", "orgbots", "purpose", "agy-test", "version", "1"],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        env=env, timeout=5,
+                    )
+                    self.assertEqual(readback.returncode, 0, readback.stderr.decode(errors="replace"))
+                    self.assertEqual(readback.stdout.strip(), b"synthetic-only")
+                    self.assertEqual(len(workspace._secret_item_paths(env["DBUS_SESSION_BUS_ADDRESS"], {})), 1)
+            finally:
+                workspace._zero_bytes(passphrase)
+            self.assertTrue(workspace._agy_keyring_has_data(profile))
 
 
 if __name__ == "__main__":

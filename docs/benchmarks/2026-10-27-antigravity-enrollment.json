@@ -1,0 +1,107 @@
+{
+  "date": "2026-10-27",
+  "scope": "Development-source private AGY enrollment; runtime model execution remains blocked",
+  "binary": {
+    "version": "1.4.8",
+    "sha256": "70b1d27f1812f5ebccc8f13daf2209112447413437dd1ab6d87c58b8a04fe35b"
+  },
+  "workspace_helper_sha256": "87f8b14193214d2687336b3efc4eb24e60014792a0d2ad1d6b8ef5dd67c7e8e0",
+  "native_probe": {
+    "network_disabled": true,
+    "host_credentials_used": false,
+    "model_prompts_submitted": 0,
+    "model_calls": 0,
+    "owner_sign_in_completed": false,
+    "oauth_url_and_code_prompt_observed": true,
+    "terminal_supported": true,
+    "read_only_settings_did_not_block_startup": true,
+    "stopped_after_seconds": 15,
+    "exit_code": -15,
+    "raw_terminal_output_persisted": false
+  },
+  "isolation_checks": {
+    "host_home_absent": true,
+    "host_sentinel_and_auth_root_absent": true,
+    "host_dbus_socket_absent": true,
+    "api_adc_environment_absent": true,
+    "private_socket_present": true,
+    "settings_write_denied": true,
+    "global_hook_write_denied": true,
+    "project_hook_write_denied": true,
+    "settings_ancestor_renames_denied": true,
+    "synthetic_keyring_survived_restart": true,
+    "locked_metadata_query_passed": true,
+    "wrapping_key_create_and_lookup_roundtrip_on_synthetic_bus": true,
+    "private_runtime_removed": true
+  },
+  "tests": {
+    "workspace_helper": {
+      "passed": 45,
+      "command": "python3 -B app/packaging/test-orgbot-workspace.py"
+    },
+    "rust_cli": {
+      "passed": 4,
+      "command": "cargo test -p orgbot-server --bin orgbot agy_auth"
+    },
+    "rust_profiles": {
+      "passed": 2,
+      "command": "cargo test -p orgbot-providers --lib new_cli_profile"
+    },
+    "rust_stream_and_session": {
+      "passed": 3,
+      "command": "cargo test -p orgbot-providers --lib antigravity"
+    },
+    "flutter": {
+      "passed": 13,
+      "files": [
+        "test/antigravity_auth_tile_test.dart",
+        "test/cli_ui_test.dart",
+        "test/ui/workspace_changes_dialog_test.dart"
+      ]
+    },
+    "rust_constructor": {
+      "passed": 1,
+      "command": "cargo test -p orgbot-providers --lib new_cli_models_are_explicit_before_binary_lookup"
+    }
+  },
+  "review_corrections": [
+    "Development helper lookup anchored to executable; never working directory",
+    "Private binary mount moved outside read-only system directory",
+    "Read-only profile ancestors and fixed writable mountpoints prevent settings bypass",
+    "Passphrase input explicitly piped to secret-tool store"
+  ],
+  "ui": {
+    "full_setup_render_widths": [
+      375,
+      1280
+    ],
+    "reviewed": true,
+    "account_data": "isolated fixture",
+    "automatic_status_queries": false
+  },
+  "pending": [
+    "Owner-completed Google sign-in in separate profile",
+    "Native token refresh and restart with real AGY credentials",
+    "Actual native tool and room-MCP conformance after authentication",
+    "Subscription and credit-overage behavior",
+    "Gemini context and separate usage validation"
+  ],
+  "release": {
+    "installed": false,
+    "published": false,
+    "website_updated": false
+  },
+  "review": {
+    "reviewer": "gpt-6-astra",
+    "enrollment": "approved",
+    "model_execution": "blocked pending real account and permission verification"
+  },
+  "checks": {
+    "targeted_flutter_analyzer": "passed, 7 files",
+    "debian_packaging_metadata": "passed",
+    "shell_syntax": "passed",
+    "diff_whitespace": "passed",
+    "source_rust_binary_build": "passed"
+  },
+  "owner_terminal_opened": true
+}
