@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import signal
+import shutil
 import socket
 import stat
 import subprocess
@@ -702,6 +703,10 @@ for path in (Path(os.environ['OPENCODE_CONFIG_DIR']), Path(os.environ['HOME']) /
                 "read_url(*)", "execute_url(*)", "mcp(*)",
             ])
             self.assertEqual(list(profile["plugins"].iterdir()), [])
+            self.assertEqual(list(profile["projects"].iterdir()), [profile["projects"] / workspace.AGY_DEFAULT_PROJECT_FILENAME])
+            self.assertEqual(json.loads((profile["projects"] / workspace.AGY_DEFAULT_PROJECT_FILENAME).read_text()),
+                             workspace.AGY_DEFAULT_PROJECT)
+            self.assertEqual(stat.S_IMODE((profile["projects"] / workspace.AGY_DEFAULT_PROJECT_FILENAME).stat().st_mode), 0o600)
             self.assertEqual(list((profile["project"] / ".agents").iterdir()), [])
             self.assertEqual(stat.S_IMODE(profile["settings"].stat().st_mode), 0o600)
             profile["settings"].write_text("{}", encoding="utf-8")
@@ -766,6 +771,7 @@ for path in (Path(os.environ['OPENCODE_CONFIG_DIR']), Path(os.environ['HOME']) /
         self.assertIn("--ro-bind " + os.fspath(profile["settings"]) + " /home/orgbot/.gemini/antigravity-cli/settings.json", rendered)
         self.assertNotIn("--bind " + os.fspath(profile["home"]) + " /home/orgbot", rendered)
         self.assertIn("--ro-bind " + os.fspath(profile["global_config"]) + " /home/orgbot/.gemini/config", rendered)
+        self.assertNotIn("--bind " + os.fspath(profile["projects"]), rendered)
         self.assertIn("--ro-bind " + os.fspath(profile["project"]) + " /tmp/orgbot-workspace", rendered)
         self.assertIn("--ro-bind " + os.fspath(runtime / "bus.sock"), rendered)
         self.assertNotIn(os.fspath(profile["keyring_data"]), rendered)
@@ -797,6 +803,21 @@ for path in (Path(os.environ['OPENCODE_CONFIG_DIR']), Path(os.environ['HOME']) /
                 "if printf changed > /home/orgbot/.gemini/antigravity-cli/settings.json 2>/dev/null; then\n"
                 "  echo settings-write-allowed\n"
                 "else echo settings-write-blocked; fi\n"
+                "if mv /home/orgbot/.gemini/config/projects /home/orgbot/.gemini/config/projects-moved 2>/dev/null; then\n"
+                "  echo projects-rename-allowed\n"
+                "else echo projects-rename-blocked; fi\n"
+                "if printf changed > /home/orgbot/.gemini/config/projects/default-cli-project.json 2>/dev/null; then\n"
+                "  echo project-metadata-write-allowed\n"
+                "else echo project-metadata-write-blocked; fi\n"
+                "if cat /home/orgbot/.gemini/config/projects/default-cli-project.json >/dev/null 2>&1; then\n"
+                "  echo project-seed-readable\n"
+                "else echo project-seed-unreadable; fi\n"
+                "if printf changed > /home/orgbot/.gemini/config/mcp_config.json 2>/dev/null; then\n"
+                "  echo mcp-write-allowed\n"
+                "else echo mcp-write-blocked; fi\n"
+                "if printf changed > /home/orgbot/.gemini/config/plugins/probe 2>/dev/null; then\n"
+                "  echo plugin-write-allowed\n"
+                "else echo plugin-write-blocked; fi\n"
                 "printf synthetic-log > /home/orgbot/.gemini/antigravity-cli/cli.log 2>/dev/null && echo cli-log-write-allowed\n",
                 encoding="utf-8",
             )
@@ -814,11 +835,79 @@ for path in (Path(os.environ['OPENCODE_CONFIG_DIR']), Path(os.environ['HOME']) /
         )
         self.assertEqual(result.returncode, 0, result.stderr[-1000:])
         self.assertEqual(result.stdout.splitlines(), [
-            "gemini-rename-blocked", "rename-blocked", "settings-write-blocked", "cli-log-write-allowed",
+            "gemini-rename-blocked", "rename-blocked", "settings-write-blocked", "projects-rename-blocked",
+            "project-metadata-write-blocked", "project-seed-readable", "mcp-write-blocked", "plugin-write-blocked",
+            "cli-log-write-allowed",
         ])
         self.assertTrue((profile["home"] / ".gemini/antigravity-cli").is_dir())
         self.assertEqual(json.loads(profile["settings"].read_text(encoding="utf-8"))["useG1Credits"], False)
         self.assertEqual((profile["cli_config"] / "cli.log").read_text(encoding="utf-8"), "synthetic-log")
+        self.assertEqual(json.loads((profile["projects"] / workspace.AGY_DEFAULT_PROJECT_FILENAME).read_text()),
+                         workspace.AGY_DEFAULT_PROJECT)
+
+    def test_agy_old_private_profile_gets_only_additive_default_project_migration(self):
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            settings_before = profile["settings"].read_bytes()
+            mcp_before = profile["mcp_config"].read_bytes()
+            auth_dir = profile["keyring_data"] / "keyrings"
+            auth_dir.mkdir(mode=0o700)
+            auth_marker = auth_dir / "synthetic-auth-marker"
+            auth_marker.write_bytes(b"synthetic-only")
+            os.chmod(auth_marker, 0o600)
+            shutil.rmtree(profile["projects"])
+            old_entries = {entry.name for entry in profile["global_config"].iterdir()}
+            self.assertEqual(old_entries, {"mcp_config.json", "plugins"})
+            read_only_profile = workspace._agy_profile_paths(create=False)
+            self.assertIsNotNone(read_only_profile)
+            self.assertFalse(read_only_profile["projects"].exists())
+            with patch.object(workspace, "_set_process_limits"):
+                status = workspace._agy_auth_status()
+            self.assertEqual(status, {"ok": True, "credentials_present": False, "state": "pending_login"})
+            self.assertFalse(profile["projects"].exists())
+            upgraded = workspace._agy_profile_paths(create=True)
+            self.assertEqual(upgraded["settings"].read_bytes(), settings_before)
+            self.assertEqual(upgraded["mcp_config"].read_bytes(), mcp_before)
+            self.assertEqual(auth_marker.read_bytes(), b"synthetic-only")
+            self.assertEqual(json.loads((upgraded["projects"] / workspace.AGY_DEFAULT_PROJECT_FILENAME).read_text()),
+                             workspace.AGY_DEFAULT_PROJECT)
+            self.assertEqual({entry.name for entry in upgraded["global_config"].iterdir()},
+                             {"mcp_config.json", "plugins", "projects"})
+
+    def test_agy_default_project_seed_rejects_unexpected_or_linked_metadata(self):
+        for fixture in ("extra-fields", "nonempty-resources", "extra-file", "hardlink", "symlink", "directory-symlink"):
+            with self.subTest(fixture=fixture):
+                xdg_data = self.root / ("xdg-" + fixture)
+                xdg_data.mkdir(mode=0o700)
+                with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+                    profile = workspace._agy_profile_paths(create=True)
+                    seed = profile["projects"] / workspace.AGY_DEFAULT_PROJECT_FILENAME
+                    if fixture == "extra-fields":
+                        seed.write_text(json.dumps({**workspace.AGY_DEFAULT_PROJECT, "extra": "synthetic"}), encoding="utf-8")
+                    elif fixture == "nonempty-resources":
+                        seed.write_text(json.dumps({**workspace.AGY_DEFAULT_PROJECT,
+                                                    "projectResources": {"folders": ["/synthetic/outside"]}}), encoding="utf-8")
+                    elif fixture == "extra-file":
+                        (profile["projects"] / "other-project.json").write_text("{}", encoding="utf-8")
+                    elif fixture == "hardlink":
+                        link = self.root / "hardlinked-project.json"
+                        os.link(seed, link)
+                    elif fixture == "symlink":
+                        seed.unlink()
+                        seed.symlink_to(self.root / "missing-project-target.json")
+                    elif fixture == "directory-symlink":
+                        projects = profile["projects"]
+                        (projects / workspace.AGY_DEFAULT_PROJECT_FILENAME).unlink()
+                        projects.rmdir()
+                        projects.symlink_to(self.root / "missing-project-dir", target_is_directory=True)
+                    with self.assertRaises(workspace.WorkspaceError):
+                        workspace._agy_profile_paths(create=False)
+                    if fixture == "extra-fields":
+                        self.assertIn(b'"extra": "synthetic"', seed.read_bytes())
+                    elif fixture == "nonempty-resources":
+                        self.assertIn(b"/synthetic/outside", seed.read_bytes())
 
     def test_agy_partial_store_fails_without_reset(self):
         xdg_data = self.root / "xdg-data"

@@ -32,6 +32,12 @@ AGY_WRAP_ATTRIBUTES = {
     "purpose": "antigravity-private-keyring-passphrase",
     "version": "1",
 }
+AGY_DEFAULT_PROJECT = {
+    "id": "default-cli-project",
+    "name": "CLI Project",
+    "projectResources": {},
+}
+AGY_DEFAULT_PROJECT_FILENAME = "default-cli-project.json"
 _AGY_CHILDREN: set[subprocess.Popen[bytes]] = set()
 MAX_ENTRIES = 150_000
 MAX_FILE_BYTES = 512 * 1024 * 1024
@@ -873,6 +879,7 @@ def _agy_profile_paths(*, create: bool) -> dict[str, Path] | None:
     cli_config = gemini / "antigravity-cli"
     global_config = gemini / "config"
     plugins = global_config / "plugins"
+    projects = global_config / "projects"
     for path in (gemini, cli_config, global_config, plugins):
         if create:
             if not initialize_store and not path.exists():
@@ -922,8 +929,17 @@ def _agy_profile_paths(*, create: bool) -> dict[str, Path] | None:
         _fail("Private Antigravity settings differ from the controlled deny profile")
     if {entry.name for entry in plugins.iterdir()}:
         _fail("Private Antigravity plugin directory must remain empty")
-    if {entry.name for entry in global_config.iterdir()} != {"mcp_config.json", "plugins"}:
+    global_config_entries = {entry.name for entry in global_config.iterdir()}
+    if global_config_entries not in ({"mcp_config.json", "plugins"}, {"mcp_config.json", "plugins", "projects"}):
         _fail("Private Antigravity global configuration contains unmanaged files")
+    if global_config_entries == {"mcp_config.json", "plugins", "projects"}:
+        _check_private_dir(projects)
+    elif projects.exists():
+        _fail("Private Antigravity projects path is inconsistent")
+    _ensure_default_project_seed(
+        {"projects": projects, "global_config": global_config, "mcp_config": mcp_config, "plugins": plugins},
+        create=create,
+    )
     agents = project / ".agents"
     if create:
         if not initialize_store and not agents.exists():
@@ -944,12 +960,63 @@ def _agy_profile_paths(*, create: bool) -> dict[str, Path] | None:
         "service_home": service_home, "service_config": service_config,
         "service_state": service_state, "service_cache": service_cache,
         "settings": settings, "cli_config": cli_config, "global_config": global_config,
-        "mcp_config": mcp_config, "plugins": plugins,
+        "mcp_config": mcp_config, "plugins": plugins, "projects": projects,
     }
 
 
 def _canonical_json_bytes(value: dict[str, Any]) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _validate_default_project_seed(path: Path) -> None:
+    _check_private_file(path)
+    if path.stat().st_size > 16 * 1024:
+        _fail("Private Antigravity default project metadata is too large")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        _fail("Private Antigravity default project metadata is invalid")
+    if not isinstance(value, dict) or value != AGY_DEFAULT_PROJECT:
+        _fail("Private Antigravity default project metadata is not the controlled seed")
+
+
+def _ensure_default_project_seed(profile: dict[str, Path], *, create: bool) -> None:
+    projects = profile["projects"]
+    global_config = profile["global_config"]
+    try:
+        projects_info = projects.lstat()
+    except FileNotFoundError:
+        if not create:
+            return
+        if {entry.name for entry in global_config.iterdir()} != {"mcp_config.json", "plugins"}:
+            _fail("Private Antigravity project seed migration is unsafe")
+        if profile["mcp_config"].read_bytes() != _canonical_json_bytes({"mcpServers": {}}) or any(profile["plugins"].iterdir()):
+            _fail("Private Antigravity project seed migration is unsafe")
+        _mkdir_chain_no_symlinks(projects)
+        projects_info = projects.lstat()
+    except OSError as exc:
+        _fail(f"Cannot inspect private Antigravity project metadata: {exc}")
+    if stat.S_ISLNK(projects_info.st_mode) or not stat.S_ISDIR(projects_info.st_mode) or projects_info.st_uid != os.getuid() or projects_info.st_mode & 0o077:
+        _fail("Private Antigravity projects directory is unsafe")
+    entries = list(projects.iterdir())
+    seed = projects / AGY_DEFAULT_PROJECT_FILENAME
+    if any(entry.name != AGY_DEFAULT_PROJECT_FILENAME for entry in entries):
+        _fail("Private Antigravity projects directory contains unmanaged files")
+    try:
+        seed.lstat()
+    except FileNotFoundError:
+        if not create:
+            return
+        _write_private_json(seed, AGY_DEFAULT_PROJECT)
+        dir_fd = os.open(projects, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        return
+    except OSError as exc:
+        _fail(f"Cannot inspect private Antigravity project metadata: {exc}")
+    _validate_default_project_seed(seed)
 
 
 def _check_private_file(path: Path) -> None:
@@ -1279,6 +1346,7 @@ def _agy_private_secret_service(profile: dict[str, Path], passphrase: bytearray 
 
 
 def _agy_sandbox_args(profile: dict[str, Path], binary: Path, runtime: Path) -> list[str]:
+    _ensure_default_project_seed(profile, create=True)
     uid = os.getuid()
     runtime_mount = f"/run/user/{uid}/orgbots-agy-runtime"
     args = [

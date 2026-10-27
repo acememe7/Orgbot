@@ -80,7 +80,7 @@
     "automatic_status_queries": false
   },
   "pending": [
-    "Native token refresh and restart with real AGY credentials",
+    "Native token refresh after expiry",
     "Actual native tool and room-MCP conformance after authentication",
     "Subscription and credit-overage behavior",
     "Gemini context and separate usage validation"
@@ -135,5 +135,43 @@
       "useG1Credits": false
     }
   },
-  "source_commit": "055642a"
+  "source_commit": "055642a",
+  "headless_startup_followup": {
+    "source_probe": {
+      "exit_code": 0,
+      "requested_model": "gemini-3.8-flash-medium",
+      "helper_sha256": "521d19cae6ea186b3fd492bae54f43777789bdd87ed8158961b35193dcb5383e",
+      "config_unchanged": true,
+      "settings_and_global_config_read_only": true,
+      "project_seed_from_production_helper": true,
+      "api_credentials_supplied": false,
+      "useG1Credits": false,
+      "stderr_bytes": 0,
+      "reported_model": "gemini-3.8-flash-medium",
+      "status": "SUCCESS",
+      "exact_ready": true,
+      "usage": {
+        "input_tokens": 6781,
+        "output_tokens": 30,
+        "thinking_tokens": 29,
+        "cache_read_tokens": 0,
+        "total_tokens": 6811
+      }
+    },
+    "helper_tests_passed": 51,
+    "configuration_change": "Precreate the exact native default-project record; global config remains read-only",
+    "existing_records": "Validated without replacement; unexpected paths/resources and links rejected",
+    "runtime_provider_enabled": false,
+    "mcp_context_and_ledger_verified": false,
+    "first_prototype_completion": {
+      "model": "gemini-3.8-flash-medium",
+      "input_tokens": 6776,
+      "output_tokens": 27,
+      "thinking_tokens": 26,
+      "cache_read_tokens": 0,
+      "total_tokens": 6803
+    },
+    "completed_native_preflight_calls": 2,
+    "billing_claim": "No API key supplied; AI-credit overages disabled in protected settings. Token counts are not an invoice."
+  }
 }

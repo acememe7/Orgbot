@@ -374,3 +374,30 @@ metadata is now present and must be preserved.
   enrollment correction. Commit it as a separate verified milestone.
 - [ ] Resolve authenticated model-runtime settings compatibility and the
   existing live permission/context/usage gates before enabling AGY execution.
+
+### Protected headless startup compatibility
+
+- [x] Find the second startup blocker: the protected global config had no
+  default CLI project record. A response attempt failed before conversation
+  creation because AGY could not create its `projects` directory.
+- [x] Observe the native structural record in an isolated networkless fixture:
+  `{"id":"default-cli-project","name":"CLI Project","projectResources":{}}`.
+  Confirm the next run reuses this record with all global config read-only.
+- [x] Add the exact record through the existing private JSON writer, preserving
+  old profiles and rejecting unexpected records, resources, symlinks or
+  hardlinks. Status accepts the old layout without modifying it.
+- [x] Complete a protected Gemini 3.8 Flash Medium `READY` probe with the seed;
+  all settings/global config stayed read-only, no API credential was supplied,
+  and AI-credit overages were disabled. This is direct CLI evidence, not an
+  OrgBots room integration or provider-billing proof.
+- [x] Verify the final source-generated seed with the real CLI (`READY`, 6,781
+  input / 30 output / 0 cache tokens), pass all 51 helper tests, and obtain
+  Astra approval for the separate compatibility milestone.
+
+Remaining runtime integration must keep per-bot CLI homes separate from the
+global keyring. The current Rust launcher applies private XDG overrides to its
+host Python helper; AGY must retain the host auth-root resolution there and set
+per-bot XDG paths only inside bubblewrap. Runtime also needs a protected room
+MCP relay, exclusion of workspace `.agents` configuration, the supported
+`--conversation` resume flag, and actual native permission/context/usage tests.
+The three application execution gates remain intact until those checks pass.

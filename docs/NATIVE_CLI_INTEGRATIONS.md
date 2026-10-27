@@ -132,6 +132,17 @@ using the existing private keyring with networking disabled and settings
 unchanged. This proves that the saved credentials can be loaded for that
 built-in command; it does not establish model execution or token refresh.
 
+The next response test exposed a separate missing default-project record. The
+helper now precreates the exact structural metadata written by AGY 1.4.8 and
+keeps the whole global configuration read-only. Existing records are validated,
+not overwritten. Two direct protected Gemini 3.8 Flash Medium probes then
+returned `READY`; the final source-generated-profile probe reported 6,781 input
+tokens, 30 output tokens (including 29 thinking tokens), and zero cache reads.
+It confirmed model `gemini-3.8-flash-medium`, unchanged protected configuration,
+and no stderr. No API credential was supplied and `useG1Credits` remained false.
+These direct CLI checks do not validate the OrgBots room MCP/runtime adapter,
+shared context or separate room-ledger usage.
+
 Credential refresh, subscription/overage behavior, actual native
 tool permissions, room MCP, and live context/usage checks remain required
 before removing the three execution gates. The
