@@ -263,3 +263,22 @@ overflow, broken images or console errors. GitHub website and installer checks
 `40810982134` and `40810982314` passed. A new Lighthouse or field-performance
 audit was not run for this content update. The analytics flag remains false.
 
+## 2.2.0 evidence-led site, 29 October 2026
+
+Committed source `6b6ee9d39190fc178258d028a7df5ff91e913b7f` is on `main` and
+`master`; immutable website release `6b6ee9d` is active. The homepage now opens
+with the benefit and its proof (one bot alone passed 3 of 10 hidden checks, a
+reviewed room 10 of 10), adds a section on owner control, and trims long copy.
+The results page leads with the experiment, adds 2.2.0 observations from the
+live room with the room's own cleanup notice, and keeps the earlier records.
+Titles, descriptions, social tags and structured data were updated, and the
+vhost CSP carries the new JSON-LD hashes.
+
+Static checks for 6 pages and the consent test passed. Public checks matched all
+19 file responses to source, including the genuine 404. HTTP redirect, security
+headers and direct-origin HTTP and HTTPS denial passed. Live browser checks at
+375 and 1440 pixels for home, results and install found no overflow, broken
+images or console errors. GitHub website checks `40911820438` and
+`40911821485` passed. A new Lighthouse or field-performance audit was not run.
+Analytics remains off.
+

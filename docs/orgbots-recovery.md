@@ -221,3 +221,16 @@ on the owner's machine; uploading it to the owner-only Drive folder is pending,
 so this recovery point is not yet off both machines. Earlier recovery points
 remain. Recurring uploads and failure alerts remain unconfigured.
 
+## Current 2.2.0 release backup
+
+On 29 October 2026, release `6b6ee9d` replaced `8a4227d` after the signed
+2.2.0 packages passed independent public verification. All 19 public files
+and the active vhost match committed source. The previous release, its vhost
+and the release pointer are kept in `/var/backups/orgbots/6b6ee9d` on Hermes.
+
+A snapshot of the exact deployed files and vhost is 290,396 bytes with SHA-256
+`7dc05530b6f90ad1415f5124d1df1d6e067899b22957efc74bcaea49ff82edf4`. All 20
+manifest entries restored into a new isolated directory. It is kept on the
+owner's machine; uploading it and the 2.1.0 snapshot to the owner-only Drive
+folder is pending.
+

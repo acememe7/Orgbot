@@ -100,7 +100,37 @@ Final engine SHA-256:
 
 ## Publication
 
-PUBLICATION_PENDING
+The owner approved publication. Source revision
+`6b6ee9d39190fc178258d028a7df5ff91e913b7f` was pushed to `main` and `master`;
+it includes the unpublished 2.1.1 handoff commits. Signed archive revision
+`b15a677544570df818fafbec2a0bf4344b6313e7` keeps the 2.0.0 to 2.1.0 packages
+byte-identical to the previous archive and adds 2.2.0 (2.1.1 was never
+published). It was pushed and verified before
+[Pages run 40912017444](https://github.com/acememe7/Orgbot/actions/runs/40912017444)
+was dispatched; its log confirms both exact revisions and good signatures.
+
+A fresh isolated APT refresh against the public HTTPS archive verified the
+signature, selected 2.2.0, solved the upgrade from an installed 2.1.0 with no
+removals, and downloaded both packages. Their hashes match the table.
+
+Website release `6b6ee9d` was activated after public package verification. It
+leads with the one-bot versus reviewed-room result and the 2.2.0 live-room
+observations. All 19 public files match source byte for byte, including the
+custom 404, and the active vhost carries the new structured-data hashes. Nginx
+validation and reload passed with the four pre-existing shared-vhost warnings.
+HTTP redirect, security headers and direct-origin denial passed. Live browser
+checks of the home, results and install pages at 375 and 1440 pixels found no
+overflow, broken images or console errors. GitHub website checks
+`40911820438` and `40911821485` passed. The previous `8a4227d` release and
+vhost are retained for rollback.
+
+A snapshot of the deployed site and vhost restored all 20 manifest entries into
+a fresh isolated directory. The 290,396-byte archive has SHA-256
+`7dc05530b6f90ad1415f5124d1df1d6e067899b22957efc74bcaea49ff82edf4` and is kept
+on the owner's machine; upload to the owner's private Drive folder is pending,
+as it is for the 2.1.0 snapshot.
+
+The release commits passed secret scanning with no findings.
 
 ## Known limits
 
