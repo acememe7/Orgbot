@@ -136,6 +136,12 @@ on the owner's machine and in the owner-only `orgbots_backups` Drive folder,
 where its size matches and only the owner has access. It was not downloaded
 back for a hash comparison.
 
+Later the same day the 2.2.0 packages were rebuilt under the same version
+with the room-bridge access fix (source `e803d87`). Signed archive revision
+`9612c8ccfd18c2642c9a62e8b85ca22a320406d8` replaces only the 2.2.0 packages;
+[Pages run 40918122421](https://github.com/acememe7/Orgbot/actions/runs/40918122421)
+published it, and the public archive serves the hashes in the table above.
+
 The release commits passed secret scanning with no findings.
 
 ## Known limits
