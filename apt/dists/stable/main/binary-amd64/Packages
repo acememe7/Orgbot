@@ -4,10 +4,10 @@ Architecture: all
 Maintainer: OrgBot <theaeceme@gmail.com>
 Depends: orgbots (= 2.2.0)
 Filename: pool/main/o/orgbot/orgbot_2.2.0_all.deb
-Size: 2996
-MD5sum: 8c692ba2f130e9ea02b3014ace41eb01
-SHA1: 24d266cb3d1b0a0620e736f454919fcad4507551
-SHA256: 4422bb01d0a8de84761f32b30e5283d9b8f2be521c54927a34e1fd37fa6bd5b7
+Size: 2992
+MD5sum: a45fc4f59c80a0654725d26bef03bb47
+SHA1: 7ee9473f2b6a662df54c4905b3568768f4aa044d
+SHA256: 9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef
 Section: oldlibs
 Priority: optional
 Description: transitional package for OrgBots
@@ -22,10 +22,10 @@ Depends: libatk1.0-0t64 (>= 2.7.91), libc6 (>= 2.39), libcairo-gobject2 (>= 1.10
 Breaks: orgbot (<< 2.2.0)
 Replaces: orgbot (<< 2.2.0)
 Filename: pool/main/o/orgbots/orgbots_2.2.0_amd64.deb
-Size: 15761574
-MD5sum: 8c943b91c1e5a370063c46f4cca82560
-SHA1: cd47dd90d99fa3e792e013aa29441e688eb78432
-SHA256: c51511b0b6a39887d1be8043984027e173d8fecd399d6bbc29fc57d804f56e1c
+Size: 15762306
+MD5sum: 3a7532b641de6acab3eff72f393db6bb
+SHA1: 04cb857f05eeaf0b3c2b70c9899d0472a4da7035
+SHA256: ff12262afbe1b43e008572f01a0bbdc00232ec7474092c13a6f55a1d12c5a075
 Section: devel
 Priority: optional
 Description: CLI and API agents working together in shared rooms
