@@ -160,7 +160,11 @@ published it.
 
 Later that night they were rebuilt once more under the same version with the
 bounded catch-up, after the Grok bot faulted on "Argument list too long"
-(source and archive revision below).
+(source `f225c61`). Signed archive revision
+`d0666190ec45466f27f0bdade3ccf9711770ce98` again replaces only
+`orgbots_2.2.0_amd64.deb`;
+[Pages run 40966749910](https://github.com/acememe7/Orgbot/actions/runs/40966749910)
+published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
 
