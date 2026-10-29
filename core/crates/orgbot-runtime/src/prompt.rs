@@ -132,7 +132,9 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            2-6 distinct options, even before any task is claimed. Custom answers are \
            supported. Include a task only when you own it. An answer never bypasses \
            configured tool or filesystem permissions. Continue from the answer instead \
-           of asking the same question again.\n\
+           of asking the same question again. While it waits in the owner's queue, \
+           wait for the answer: you will be woken when it comes. Do not hand the wait \
+           to another bot or post reminders about it.\n\
          - Avoid repeating another bot's status or asking it to confirm a requirement already stated. \
            Contribute new evidence, a decision, or completed work.\n\
          - If you need someone to *do* something, use offer_handoff, not a chat \
@@ -347,6 +349,11 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
             "Handoffs you accepted and have not delivered — finish them with \
              complete_handoff, or fail_handoff with the reason if you cannot:\n",
         );
+        if engine.awaiting_owner(agent) {
+            out.push_str(
+                "  They stay open while your question to the owner is unanswered.\n",
+            );
+        }
         for id in accepted {
             let Some(handoff) = engine.handoff(id) else {
                 continue;

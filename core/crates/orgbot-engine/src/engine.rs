@@ -1472,6 +1472,13 @@ impl Engine {
             .collect()
     }
 
+    /// Whether `agent` has a question in the owner's queue still unanswered.
+    pub fn awaiting_owner(&self, agent: AgentId) -> bool {
+        self.decisions
+            .pending()
+            .any(|decision| decision.asked_by.contains(&agent))
+    }
+
     pub fn offers_for(&self, agent: AgentId) -> Vec<HandoffId> {
         let Some(spec) = self.specs.get(&agent) else {
             return Vec::new();
@@ -3406,6 +3413,22 @@ impl Engine {
 
     /// Expire stale handoffs and look for deadlocks.
     fn tick(&mut self, now: Timestamp) -> Result<Vec<EventEnvelope>> {
+        // From the live room: a bot accepted an assist, asked the owner what it
+        // needed to finish, and the assist ran out while the owner had the
+        // question. The sender offered it again, and again. Until the answer
+        // comes the wait is the owner's, so what it took on stays open.
+        let waiting_on_owner: Vec<HandoffId> = self
+            .handoffs
+            .values()
+            .filter(|h| h.state == HandoffState::Accepted)
+            .filter(|h| h.accepted_by.is_some_and(|by| self.awaiting_owner(by)))
+            .map(|h| h.id)
+            .collect();
+        for id in waiting_on_owner {
+            if let Some(handoff) = self.handoffs.get_mut(&id) {
+                handoff.hold_open(now);
+            }
+        }
         let expired: Vec<HandoffId> = self
             .handoffs
             .values()

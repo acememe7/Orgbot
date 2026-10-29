@@ -2044,3 +2044,118 @@ async fn a_bot_is_woken_for_an_assist_it_accepted_and_has_not_delivered() {
     assert!(situation.contains(&handoff.to_string()), "and shown it: {situation}");
     assert!(situation.contains("fail_handoff"));
 }
+
+#[tokio::test]
+async fn an_accepted_assist_waits_without_rerunning_while_its_bot_waits_on_the_owner() {
+    // From the live room: @opus accepted an assist, asked the owner what it
+    // needed to finish it, and was rerun every few minutes for the accepted
+    // assist while the owner had the question. The assist then ran out and
+    // its sender offered it again.
+    use orgbot_engine::Command;
+    use orgbot_proto::handoff::{HandoffKind, HandoffState, Recipient};
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "release".into(),
+        goal: "ship".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    let lead = room
+        .seat(spec("lead", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    let helper = room
+        .seat(spec("helper", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    room.start().unwrap();
+    let created = room
+        .engine_mut()
+        .apply(Command::CreateTask {
+            title: "Release the party build".into(),
+            brief: String::new(),
+            by: None,
+            required_role: None,
+            priority: orgbot_proto::task::Priority::Normal,
+            acceptance_criteria: vec![],
+            depends_on: vec![],
+            origin: TaskOrigin::plain(),
+        })
+        .unwrap();
+    let task = created
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+            _ => None,
+        })
+        .unwrap();
+    for command in [
+        Command::OpenTask { task },
+        Command::ClaimTask { task, by: lead },
+        Command::StartTask { task, by: lead },
+    ] {
+        room.engine_mut().apply(command).unwrap();
+    }
+    let offered = room
+        .engine_mut()
+        .apply(Command::OfferHandoff {
+            task,
+            from: lead,
+            to: Recipient::Agent { agent: helper },
+            kind: HandoffKind::Assist,
+            brief: "recheck the hosted version".into(),
+            expects: vec![],
+            context: vec![],
+            blocks_sender: None,
+            timeout_ms: Some(60_000),
+        })
+        .unwrap();
+    let handoff = offered
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::HandoffOffered { handoff } => Some(handoff.id),
+            _ => None,
+        })
+        .unwrap();
+    room.engine_mut()
+        .apply(Command::AcceptHandoff { handoff, by: helper })
+        .unwrap();
+    let asked = room
+        .engine_mut()
+        .apply(Command::AskOwner {
+            by: helper,
+            task: None,
+            question: "What does the version page show after a reload?".into(),
+            options: vec![],
+        })
+        .unwrap();
+    let decision = asked
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::DecisionAsked { decision } => Some(decision.id),
+            _ => None,
+        })
+        .unwrap();
+
+    assert!(!room.is_actionable(helper), "not rerun while the owner has its question");
+    room.engine_mut()
+        .apply(Command::Tick {
+            now: orgbot_proto::Timestamp::now().plus_millis(10 * 60_000),
+        })
+        .unwrap();
+    assert_eq!(
+        room.engine().handoff(handoff).unwrap().state,
+        HandoffState::Accepted,
+        "and what it took on does not run out meanwhile"
+    );
+
+    room.engine_mut()
+        .apply(Command::AnswerDecision {
+            decision,
+            answer: orgbot_proto::decision::Answer {
+                chosen: "Custom answer".into(),
+                note: "It shows the new tag".into(),
+                at: orgbot_proto::Timestamp::now(),
+            },
+        })
+        .unwrap();
+    assert!(room.is_actionable(helper), "the answer wakes it to finish the assist");
+}

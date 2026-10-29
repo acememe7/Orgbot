@@ -414,8 +414,10 @@ impl Orchestrator {
         if !engine.offers_for(agent).is_empty() {
             return Some(Wake::Handoff);
         }
-        // Work it took on for someone who is waiting for the result.
-        if !engine.handoffs_accepted_by(agent).is_empty() {
+        // Work it took on for someone who is waiting for the result, unless it
+        // is waiting on the owner itself: rerunning it then cannot deliver,
+        // and in the live room only spent turns until the owner answered.
+        if !engine.handoffs_accepted_by(agent).is_empty() && !engine.awaiting_owner(agent) {
             return Some(Wake::HeldWork);
         }
         // A question addressed to this bot that it has not answered yet. This

@@ -42,7 +42,10 @@ handoff fix prepared as 2.1.1, which was never published.
   begins a fresh turn, accepting restarts it, and the accepting turn is held
   open. A delegation is withdrawn with a reason when its sender lets the task
   go. A bot is woken for, and shown, handoffs it accepted and has not delivered,
-  and can give one up with `fail_handoff`.
+  and can give one up with `fail_handoff`. While that bot waits on your answer
+  to its own question, it is not woken for them and they do not expire; in the
+  live room such a bot was rerun nine times in 23 minutes while you had the
+  question, and the assist it held ran out and was offered again.
 - **Faster, clearer recovery.** A faulted bot is retried when its retry is due,
   not when another turn happens to finish (a Codex capacity error took eleven
   minutes to clear in the live room). A CLI "at capacity" or "overloaded" error
@@ -80,7 +83,7 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 933 passed, zero failures, three ignored.
+- Full Rust workspace (`--locked`): 934 passed, zero failures, three ignored.
   New tests cover the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
   pause and held rooms, retiring tasks and leftover-copy cleanup; each was checked to fail without
@@ -96,11 +99,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`36a141dae62782cf84aafea756c525bb089dc2788d56e1c92fe5cc9e84295c29`.
+`06f1ae0e592ea73c974f114e9b80a684bc612b053cad38078bcac1117a48a1d3`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `ff12262afbe1b43e008572f01a0bbdc00232ec7474092c13a6f55a1d12c5a075` |
+| orgbots_2.2.0_amd64.deb | `04bc65ff25d3de3d1790c822ede27e80421f69d305280de6238c2292179237ad` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
