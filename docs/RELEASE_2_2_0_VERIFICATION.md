@@ -25,6 +25,10 @@ handoff fix prepared as 2.1.1, which was never published.
   and it is retired, so it stops waking bots. In the live room an obsolete task
   woke idle bots every turn while the bots asked you to archive it in an app
   that had no way to.
+- **Leftover copies are cleaned up.** When a room starts, working copies of
+  bots no longer in it are removed if they hold no unmerged work; copies that
+  might hold unsaved work are kept and named in the room. In the live room such
+  copies had grown to 38 GB.
 - **Answers that take effect need a second tap.** Server access, outside tool
   calls and retiring a task ask you to confirm; every other answer stays one
   tap.
@@ -71,13 +75,13 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 931 passed, zero failures, three ignored.
+- Full Rust workspace (`--locked`): 932 passed, zero failures, three ignored.
   New tests cover the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
-  pause and held rooms, and retiring tasks; each was checked to fail without
+  pause and held rooms, retiring tasks and leftover-copy cleanup; each was checked to fail without
   its fix.
 - Full Flutter tests: 366 passed, five skipped. Flutter analysis: no issues.
-- Workspace sandbox helper: 67 passed, including real bubblewrap checks that a
+- Workspace sandbox helper: 68 passed, including real bubblewrap checks that a
   turn the owner did not allow, or a read-only turn, has no server key anywhere.
   Trash helper: 30 passed.
 - Linux acceptance: 17 passed, zero failed or skipped.
@@ -87,12 +91,12 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`8b4a8a44abb94eedc93946de8662c72b5a183bded322ca5b56b851ed282297c2`.
+`f2fe63c283b7a27ff0b7b628cebff0189b293860844ff6519fff523c94fab189`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `1a4a7e13ea9c8d44ca5bb3d1d22aeabb572567fa4366dea67f84531728b71aba` |
-| orgbot_2.2.0_all.deb | `12b20ec3799b6022f167025b066a2230bdb62c2b71c7c0bb4014e8fc9717bafe` |
+| orgbots_2.2.0_amd64.deb | `c51511b0b6a39887d1be8043984027e173d8fecd399d6bbc29fc57d804f56e1c` |
+| orgbot_2.2.0_all.deb | `4422bb01d0a8de84761f32b30e5283d9b8f2be521c54927a34e1fd37fa6bd5b7` |
 
 ## Publication
 

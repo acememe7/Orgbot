@@ -550,6 +550,9 @@ impl RoomSession {
             );
             self.orchestrator.attach_mcp_servers(servers);
         }
+        // After discovery, which works in a short-lived copy of its own.
+        #[cfg(target_os = "linux")]
+        self.prune_leftover_copies();
         let mut ticker = tokio::time::interval(IDLE_TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -613,6 +616,98 @@ impl RoomSession {
                 }
             }
         }
+    }
+
+    /// Remove, in the background, working copies of bots no longer in this
+    /// room that hold no unmerged work, and say what was freed or kept.
+    ///
+    /// From the live room: copies left by bot ids that were no longer in the
+    /// room had grown to 38 GB, three to four gigabytes each.
+    #[cfg(target_os = "linux")]
+    fn prune_leftover_copies(&self) {
+        let Some(state) = self
+            .state_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|dir| dir.join("workspaces"))
+            .filter(|dir| dir.join("agents").is_dir())
+        else {
+            return;
+        };
+        let keep: Vec<String> = self
+            .orchestrator
+            .engine()
+            .agents()
+            .flat_map(|spec| {
+                let id = spec.id.to_string();
+                [format!("{id}-verify"), id, crate::config::session_file_key(&spec.handle)]
+            })
+            .collect();
+        let shared = self.orchestrator.shared_engine();
+        std::thread::spawn(move || {
+            let Ok(helper) = orgbot_providers::workspace_guard::helper() else {
+                return;
+            };
+            let mut command = std::process::Command::new("/usr/bin/python3");
+            command.arg(helper).arg("prune").arg("--state").arg(&state);
+            for agent in &keep {
+                command.arg("--keep").arg(agent);
+            }
+            let output = match command.output() {
+                Ok(output) if output.status.success() => output,
+                Ok(output) => {
+                    tracing::warn!(stderr = %String::from_utf8_lossy(&output.stderr), "workspace cleanup failed");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "workspace cleanup could not start");
+                    return;
+                }
+            };
+            let Ok(report) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+                return;
+            };
+            let removed = report["removed"].as_array().map_or(0, Vec::len);
+            let kept = report["kept"].as_array().cloned().unwrap_or_default();
+            let freed = report["freed_bytes"].as_u64().unwrap_or(0);
+            tracing::info!(removed, kept = kept.len(), freed, "workspace cleanup");
+            if removed == 0 && kept.is_empty() {
+                return;
+            }
+            let mut body = String::new();
+            if removed > 0 {
+                body.push_str(&format!(
+                    "Removed {removed} leftover working {} of bots no longer in this room, freeing {:.1} GB.",
+                    if removed == 1 { "copy" } else { "copies" },
+                    freed as f64 / 1e9
+                ));
+            }
+            if !kept.is_empty() {
+                if !body.is_empty() {
+                    body.push(' ');
+                }
+                body.push_str(&format!(
+                    "Kept {} leftover {} that could hold unsaved work, in {}: {}.",
+                    kept.len(),
+                    if kept.len() == 1 { "copy" } else { "copies" },
+                    state.join("agents").display(),
+                    kept.iter()
+                        .map(|item| format!(
+                            "{} ({})",
+                            item["agent"].as_str().unwrap_or("?"),
+                            item["reason"].as_str().unwrap_or("kept")
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ));
+            }
+            shared.with(|engine| {
+                let room = engine.room().id;
+                let _ = engine.apply(Command::PostMessage {
+                    message: Box::new(ChatMessage::system(room, body)),
+                });
+            });
+        });
     }
 
     /// Give a batch of bots a turn, streaming and broadcasting the result.
@@ -2525,6 +2620,64 @@ mod tests {
         assert_eq!(times, 1, "each event reaches clients once");
         assert!(handle.send(Control::Stop).await);
         let _ = tokio::time::timeout(Duration::from_secs(2), running).await;
+    }
+
+    /// From the live room: copies left by bot ids no longer in the room had
+    /// grown to 38 GB. A room cleans up the ones holding no unmerged work when
+    /// it starts, keeps its own bots' copies, and says what it freed.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_room_removes_leftover_copies_of_bots_no_longer_in_it() {
+        let dir = std::env::home_dir().unwrap().join(format!(
+            "orgbot-prune-{}",
+            orgbot_proto::RoomId::new()
+        ));
+        let project = dir.join("project");
+        let workspaces = dir.join("state").join("workspaces");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&workspaces).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for private in [&dir, &dir.join("state"), &workspaces] {
+            std::fs::set_permissions(private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::write(project.join("README.md"), "hello\n").unwrap();
+        let helper = orgbot_providers::workspace_guard::helper().unwrap();
+        let prepared = std::process::Command::new("/usr/bin/python3")
+            .arg(&helper)
+            .args(["prepare", "--project"])
+            .arg(&project)
+            .arg("--state")
+            .arg(&workspaces)
+            .args(["--agent", "bot_long_gone"])
+            .output()
+            .unwrap();
+        assert!(prepared.status.success(), "{}", String::from_utf8_lossy(&prepared.stderr));
+        let copies = workspaces.join("agents");
+        let leftover = std::fs::read_dir(&copies).unwrap().next().unwrap().unwrap().path().join("bot_long_gone");
+        assert!(leftover.is_dir());
+
+        let mut config = RoomConfig::parse(SCRIPTED_ROOM, "prune.toml").unwrap();
+        config.room.state_path = Some(dir.join("state").join("state.json"));
+        let (session, handle) = RoomSession::build(config.resolve().unwrap()).unwrap();
+        let shared = session.orchestrator.shared_engine();
+        let running = tokio::spawn(session.run());
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !shared.with(|engine| {
+                engine
+                    .transcript()
+                    .iter()
+                    .any(|message| message.body.starts_with("Removed 1 leftover working copy"))
+            }) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the room says what it cleaned up");
+        assert!(!leftover.exists());
+        assert!(project.join("README.md").is_file(), "the project is never touched");
+        assert!(handle.send(Control::Stop).await);
+        let _ = tokio::time::timeout(Duration::from_secs(2), running).await;
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// From the live room: pausing to install an update cut short every turn

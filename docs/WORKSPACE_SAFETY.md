@@ -109,6 +109,19 @@ available in this mode. A check that needs them must be reported as unavailable;
 passing the Python fixture does not establish that every project's build can
 run in the sandbox. Android and SSH workspaces do not advertise this Linux tool.
 
+## Leftover copies
+
+Each bot can have two copies of the project: the one its own coding CLI works
+in, named after its handle, and the one OrgBots uses for the room's workspace
+tools, named after its id (plus a read-only `-verify` copy for reviewers). When
+a room starts, `prune` removes copies belonging to bots no longer in that room,
+but only when everything in the copy is already in the project or never left
+it. A copy with changes that never merged (including deletions still waiting
+for approval), a missing or unreadable baseline, or a project that is gone is
+kept, and the room says which copies it kept and why. Current bots' copies and
+the project itself are never touched. `prune --dry-run` reports what would be
+removed without removing it.
+
 ## Integration and recovery
 
 `status` returns `changed` records (`path`, `kind`), `added`, `deleted`, and

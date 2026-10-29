@@ -70,7 +70,8 @@ changed the license; see [License](#license) for the current terms and the
 [2.1.0 live room record](docs/benchmarks/2026-10-29-live-room-run.md).
 Version 2.2.0 keeps servers out of reach until you allow a bot onto one for a
 specific task, lets bots finish the turn they are on when you pause, lets a
-coordinator propose retiring stale tasks for you to approve with one tap, keeps
+coordinator propose retiring stale tasks for you to approve with one tap, cleans
+up working copies left by bots no longer in a room, keeps
 handoffs open while the receiving bot is busy, retries a
 bot that hit a temporary provider error on time, names the CLI to sign in to
 when a sign-in expires, and moves to the PolyForm Shield License, which allows

@@ -734,7 +734,7 @@ impl RoomConfig {
     }
 }
 
-fn session_file_key(handle: &str) -> String {
+pub(crate) fn session_file_key(handle: &str) -> String {
     handle.bytes().map(|byte| format!("{byte:02x}")).collect()
 }
 

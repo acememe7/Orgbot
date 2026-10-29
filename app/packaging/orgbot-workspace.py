@@ -767,6 +767,86 @@ def _status(state_arg: str, agent_arg: str) -> dict[str, Any]:
         os.close(lock_fd)
 
 
+def _tree_bytes(root: Path) -> int:
+    total = 0
+    for directory, _dirs, files in os.walk(root, followlinks=False):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(directory, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, Any]:
+    """Remove working copies that belong to no current bot and hold no unmerged work.
+
+    From the live room: copies left by bot ids that were no longer in the room
+    had grown to 38 GB, three to four gigabytes each. A copy is removed only
+    when everything in it is already in the project (or never left it); one
+    with changes that never merged, a missing or unreadable baseline, or a
+    project that is gone is kept and reported, because it may be the only
+    place that work exists.
+    """
+    keep_set = {_safe_agent(agent) for agent in keep}
+    state = _canonical_directory(state_arg, "state")
+    _check_private_dir(state)
+    removed: list[dict[str, Any]] = []
+    kept: list[dict[str, str]] = []
+    agents_root = state / "agents"
+    if not agents_root.is_dir() or agents_root.is_symlink():
+        return {"ok": True, "removed": removed, "kept": kept, "freed_bytes": 0}
+    # No project lock: nothing writes to a copy whose bot is gone, and a
+    # project changing during the scan can only make a copy look changed, so
+    # it is kept. Holding the lock would stall the room's own file work.
+    project_scans: dict[str, dict[str, dict[str, Any]]] = {}
+    for project_dir in sorted(agents_root.iterdir()):
+        if project_dir.is_symlink() or not project_dir.is_dir():
+            continue
+        for agent_root in sorted(project_dir.iterdir()):
+            agent = agent_root.name
+            if agent in keep_set or not AGENT_RE.fullmatch(agent):
+                continue
+            if agent_root.is_symlink() or not agent_root.is_dir() or agent_root.stat().st_uid != os.getuid():
+                kept.append({"agent": agent, "reason": "not a private directory"})
+                continue
+            manifest = state / "manifests" / project_dir.name / f"{agent}.json"
+            try:
+                raw = _read_private_json(manifest, "workspace baseline manifest")
+                project_value = raw.get("project") if isinstance(raw, dict) else None
+                if not isinstance(project_value, str):
+                    raise WorkspaceError("no project identity")
+                project = _canonical_directory(project_value, "project")
+            except (WorkspaceError, OSError, ValueError, json.JSONDecodeError):
+                kept.append({"agent": agent, "reason": "its baseline or project could not be read"})
+                continue
+            if _project_id(project) != project_dir.name:
+                kept.append({"agent": agent, "reason": "its baseline names another project"})
+                continue
+            try:
+                data = _manifest_read(manifest, project, agent)
+                workspace = agent_root / "project"
+                if workspace.is_symlink() or not workspace.is_dir():
+                    raise WorkspaceError("workspace missing")
+                current = project_scans.get(project_dir.name)
+                if current is None:
+                    current = project_scans[project_dir.name] = _scan(project)
+                diffs = _changes(data["entries"], current, _scan_workspace(workspace, data["entries"]))
+            except (WorkspaceError, OSError, ValueError, json.JSONDecodeError):
+                kept.append({"agent": agent, "reason": "its changes could not be checked"})
+                continue
+            pending = len(diffs["changed"]) + len(diffs["added"]) + len(diffs["deleted"])
+            if pending:
+                kept.append({"agent": agent, "reason": f"{pending} change(s) never merged into the project"})
+                continue
+            size = _tree_bytes(agent_root)
+            if not dry_run:
+                shutil.rmtree(agent_root)
+                manifest.unlink(missing_ok=True)
+            removed.append({"agent": agent, "bytes": size})
+    return {"ok": True, "dry_run": dry_run, "removed": removed, "kept": kept, "freed_bytes": sum(item["bytes"] for item in removed)}
+
+
 def _gpu_device_args() -> list[str]:
     """Pass the machine's graphics card into a sandbox.
 
@@ -2468,6 +2548,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--mcp-relay")
     run.add_argument("--agent-cli", choices=("opencode", "agy"))
     run.add_argument("program", nargs=argparse.REMAINDER)
+    prune = sub.add_parser("prune", help="Remove working copies of bots no longer in the room that hold no unmerged work")
+    prune.add_argument("--state", required=True)
+    prune.add_argument("--keep", action="append", default=[])
+    prune.add_argument("--dry-run", action="store_true", help="Report what would be removed without removing it")
     apply = sub.add_parser("apply")
     apply.add_argument("--state", required=True)
     apply.add_argument("--agent", required=True)
@@ -2489,6 +2573,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             program = args.program[1:] if args.program and args.program[0] == "--" else args.program
             return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket, agent_cli=args.agent_cli, mcp_relay=args.mcp_relay, verify=args.verify, server_access=args.server_access)
+        if args.command == "prune":
+            _json(_prune(args.state, args.keep, args.dry_run))
+            return 0
         if args.command == "agy-auth":
             result = _agy_auth_login() if args.action == "login" else _agy_auth_status()
             _json(result)

@@ -613,6 +613,35 @@ Path('/tmp/private.txt').write_text('temporary')
             result = workspace._run(os.fspath(self.state), "dev", [sys.executable, "-c", code, os.fspath(home)], read_only=False, profiles=[], private_home_arg=None, mcp_socket=None)
         self.assertEqual(result, 0)
 
+    def test_leftover_copies_without_unmerged_work_are_removed_and_the_rest_kept(self):
+        # From the live room: copies left by bot ids no longer in the room had
+        # grown to 38 GB. Only copies whose work is all in the project go.
+        current = self.prepare("bot_current")
+        (current / "src/main.py").write_text("work in progress\n", encoding="utf-8")
+        self.prepare("bot_gone")
+        self.prepare("bot_gone-verify", read_only=True)
+        unmerged = self.prepare("bot_gone_with_work")
+        (unmerged / "notes.md").write_text("only here\n", encoding="utf-8")
+        integrated = self.prepare("6f6c64")  # an old native copy whose edit was applied
+        (integrated / "README.md").write_text("applied\n", encoding="utf-8")
+        (self.project / "README.md").write_text("applied\n", encoding="utf-8")
+        orphan = self.state / "agents" / workspace._project_id(self.project.resolve()) / "bot_orphan"
+        orphan.mkdir(mode=0o700)
+
+        result = workspace._prune(os.fspath(self.state), ["bot_current"])
+
+        removed = {item["agent"] for item in result["removed"]}
+        kept = {item["agent"]: item["reason"] for item in result["kept"]}
+        self.assertEqual(removed, {"bot_gone", "bot_gone-verify", "6f6c64"})
+        self.assertIn("never merged", kept["bot_gone_with_work"])
+        self.assertIn("could not be read", kept["bot_orphan"])
+        self.assertNotIn("bot_current", removed | set(kept))
+        self.assertEqual((current / "src/main.py").read_text(encoding="utf-8"), "work in progress\n")
+        self.assertEqual((unmerged / "notes.md").read_text(encoding="utf-8"), "only here\n")
+        self.assertFalse(integrated.exists())
+        self.assertGreater(result["freed_bytes"], 0)
+        self.assertEqual((self.project / "README.md").read_text(encoding="utf-8"), "applied\n", "the project is never touched")
+
     def test_bots_run_the_packaged_trash_helper_not_a_stale_per_user_copy(self):
         packaged_dir = self.root / "usr-bin"
         stale_dir = self.root / "local-bin"
