@@ -78,7 +78,37 @@ Final engine SHA-256:
 
 ## Publication
 
-PUBLICATION_PENDING
+The owner chose to verify this release personally instead of a bot review.
+Source revision `8a4227dcee77565cd4f5ce40c2e20f0fca8cccdc` was pushed to
+`main` and `master`. Signed archive revision
+`347424fccca656f969b0c91940d81b55570ba1eb` keeps the 2.0.0 to 2.0.3 packages
+byte-identical to the previous archive and adds 2.1.0. It was pushed and
+verified before
+[Pages run 40811091881](https://github.com/acememe7/Orgbot/actions/runs/40811091881)
+was dispatched; its log confirms both exact revisions and good signatures.
+Publication succeeded.
+
+A fresh isolated APT refresh against the public HTTPS archive verified the
+signature, selected 2.1.0, solved the upgrade from an installed 2.0.3 with no
+removals, and downloaded both packages. Their hashes exactly match the table.
+
+Website release `8a4227d` was activated only after public package
+verification. All 18 public files match source byte for byte, including the
+custom 404, and the active vhost matches source. Nginx validation and reload
+passed with the four pre-existing shared-vhost warnings. HTTP redirect, HTTPS
+routes, security headers and direct-origin denial passed. Live browser checks of
+the home, results and install pages at 375 and 1440 pixels found no document
+overflow, broken images or console errors. Both GitHub website and installer
+checks passed. The previous `f1931cf` release and vhost are retained for
+rollback.
+
+A snapshot of the deployed site and vhost restored all 19 manifest entries into
+a fresh isolated directory. The 281,025-byte archive has SHA-256
+`1923ece57670765b4fe164dd38dcfb916f118b2ab3cf662e610571d4303cc2a8`. It is kept
+on the owner's machine; the upload to the owner's private Drive folder is
+pending.
+
+The staged release diff passed secret scanning with no findings.
 
 ## Known limits
 

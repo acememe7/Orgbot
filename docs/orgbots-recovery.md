@@ -204,3 +204,20 @@ independently downloaded archive is 330,706 bytes with SHA-256
 It matches the local archive, and all 20 manifest entries restored into a new
 isolated directory. Earlier recovery points remain. Recurring uploads and
 failure alerts remain unconfigured; no full-machine recovery is claimed.
+
+
+## Current 2.1.0 release backup
+
+On 29 October 2026, release `8a4227d` replaced `f1931cf` after the signed
+2.1.0 packages passed independent public verification. All 18 public files
+and the active vhost match committed source. The previous release, its vhost
+and the release pointer are kept in `/var/backups/orgbots/8a4227d` on Hermes.
+HTTP redirect, custom 404, security headers and direct-origin denial passed.
+
+A snapshot of the exact deployed files and vhost is 281,025 bytes with SHA-256
+`1923ece57670765b4fe164dd38dcfb916f118b2ab3cf662e610571d4303cc2a8`. All 19
+manifest entries restored into a new isolated directory. The archive is kept
+on the owner's machine; uploading it to the owner-only Drive folder is pending,
+so this recovery point is not yet off both machines. Earlier recovery points
+remain. Recurring uploads and failure alerts remain unconfigured.
+

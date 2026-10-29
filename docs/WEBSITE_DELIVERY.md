@@ -241,3 +241,25 @@ remain outside this publication.
 Final scoped Astra review approved the live site, release documentation and
 backup evidence. GitHub website/installer checks passed for the published
 source in runs 40532204564 and 40532203553.
+
+
+## 2.1.0 live room evidence publication, 29 October 2026
+
+Committed source `8a4227dcee77565cd4f5ce40c2e20f0fca8cccdc` is on `main`
+and `master`; immutable website release `8a4227d` is active. The synthetic
+gallery and figures are gone. The home and results pages now use cropped real
+screenshots and the overnight live room record: 118 turns from 10 bots on 5
+providers, 8 tasks delivered after review, the owner's account dashboards and
+their limits. The terms page carries the PolyForm Noncommercial 1.0.0 license
+and the Apache 2.0 note for 2.0.3 and earlier. Version copy, install links and
+JSON-LD identify 2.1.0, and the vhost CSP carries the new JSON-LD hashes.
+
+Static checks for 6 pages passed. Public checks matched all 18 file responses
+to source, including the genuine 404. HTTP redirect, security headers and
+direct-origin HTTP and HTTPS denial passed. Nginx validation and reload
+succeeded with the four pre-existing shared-vhost warnings. Live browser checks
+at 375 and 1440 pixels for home, results and install reported no document
+overflow, broken images or console errors. GitHub website and installer checks
+`40810982134` and `40810982314` passed. A new Lighthouse or field-performance
+audit was not run for this content update. The analytics flag remains false.
+
