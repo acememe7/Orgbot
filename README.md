@@ -68,6 +68,8 @@ Codex bots generate right in the chat, lets bots use your graphics card, and
 gives them their own SSH key for servers you choose instead of yours. It also
 moves to the PolyForm Noncommercial License; see [License](#license) and the
 [2.1.0 live room record](docs/benchmarks/2026-10-29-live-room-run.md).
+Version 2.1.1 stops handoffs between bots from expiring while the receiving bot
+is still busy with another turn, or with the handed-off work itself.
 Set up the signed third-party APT repository once on each computer:
 
 ```bash
