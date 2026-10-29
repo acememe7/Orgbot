@@ -2159,3 +2159,58 @@ async fn an_accepted_assist_waits_without_rerunning_while_its_bot_waits_on_the_o
         .unwrap();
     assert!(room.is_actionable(helper), "the answer wakes it to finish the assist");
 }
+
+#[tokio::test]
+async fn a_bot_back_after_a_long_absence_gets_a_bounded_catch_up() {
+    // From the live room: @grok sat out eight hours while the room posted 258
+    // messages. Its next prompt (133 KB) was longer than Linux allows one
+    // command-line argument to be, so the CLI never started and the bot
+    // faulted.
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "release".into(),
+        goal: "ship".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    let lead = room
+        .seat(spec("lead", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    let away = room
+        .seat(spec("away", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    room.start().unwrap();
+    let ask = format!(
+        "@away please take the lint failure when you are back. {}",
+        "The failing rule is the empty catch in the QA script. ".repeat(30)
+    );
+    owner_asks(&room.shared_engine(), Some(away), &ask);
+    for n in 0..258 {
+        let room_id = room.engine().room_id();
+        room.engine_mut()
+            .apply(orgbot_engine::Command::PostMessage {
+                message: Box::new(orgbot_proto::ChatMessage {
+                    id: orgbot_proto::MessageId::new(),
+                    room: room_id,
+                    author: orgbot_proto::Author::Agent { agent: lead },
+                    audience: orgbot_proto::Audience::Everyone,
+                    intent: orgbot_proto::MessageIntent::Status,
+                    body: format!("status {n}: {}", "progress on the freeze capture ".repeat(17)),
+                    task: None,
+                    handoff: None,
+                    reply_to: None,
+                    attachments: vec![],
+                    files: vec![],
+                    sent_at: orgbot_proto::Timestamp::now(),
+                }),
+            })
+            .unwrap();
+    }
+
+    let situation = orgbot_runtime::prompt::situation(&room.engine(), away, orgbot_proto::event::Seq::ZERO);
+    assert!(situation.len() < 64 * 1024, "bounded: {} bytes", situation.len());
+    assert!(situation.contains("please take the lint failure"), "what was asked of it is kept");
+    assert!(situation.contains("status 257:"), "the latest is kept");
+    assert!(!situation.contains("status 0:"), "the oldest chatter is left out");
+    assert!(situation.contains("earlier updates are left out"), "and says so");
+}

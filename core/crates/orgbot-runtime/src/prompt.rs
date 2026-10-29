@@ -628,11 +628,21 @@ fn owner_name_note(name: &str) -> String {
     )
 }
 
+/// The most of what it missed a bot is shown, in bytes.
+///
+/// From the live room: @grok sat out eight hours while the room posted 258
+/// messages, and the prompt for its next turn (133 KB) was longer than Linux
+/// allows a single command-line argument to be, so its CLI never started.
+/// Beyond this, the oldest updates are left out; what was addressed to the
+/// bot is kept ahead of general chatter while it fits.
+const CATCH_UP_BUDGET: usize = 32 * 1024;
+
 /// Render chat and state changes a bot has not seen yet.
 fn recent_messages(engine: &Engine, agent: AgentId, since: Seq) -> String {
     use orgbot_proto::Event;
 
-    let mut out = String::new();
+    // Each update, and whether it is the bot's own business.
+    let mut entries: Vec<(bool, String)> = Vec::new();
     for envelope in engine.events_since(since) {
         match &envelope.event {
             Event::MessagePosted { message } => {
@@ -659,7 +669,8 @@ fn recent_messages(engine: &Engine, agent: AgentId, since: Seq) -> String {
                 let to_you = directed && message.audience.addresses(agent, roles);
                 let asks_everyone = matches!(message.audience, orgbot_proto::Audience::Everyone)
                     && message.wakes(agent, roles);
-                out.push_str(&format!(
+                let from_human = matches!(message.author, orgbot_proto::Author::Human { .. });
+                entries.push((to_you || asks_everyone || from_human, format!(
                     "  {who}{}: {}\n",
                     if to_you {
                         " (to you)"
@@ -671,15 +682,15 @@ fn recent_messages(engine: &Engine, agent: AgentId, since: Seq) -> String {
                         ""
                     },
                     message.body
-                ));
+                )));
             }
             Event::ArtifactAdded { artifact } => {
-                out.push_str(&format!("  [artifact available] {}: {} (task {}). Read it with read_artifact if relevant.\n",
-                    artifact.id, artifact.name, artifact.task));
+                entries.push((false, format!("  [artifact available] {}: {} (task {}). Read it with read_artifact if relevant.\n",
+                    artifact.id, artifact.name, artifact.task)));
             }
             Event::TaskTransitioned { task, to, .. } if *to == TaskState::Submitted => {
                 if let Some(record) = engine.task(*task) {
-                    out.push_str(&format!("  [delivered] {}\n", record.title));
+                    entries.push((false, format!("  [delivered] {}\n", record.title)));
                 }
             }
             Event::ReviewRecorded { review } => {
@@ -691,7 +702,7 @@ fn recent_messages(engine: &Engine, agent: AgentId, since: Seq) -> String {
                 if !is_mine {
                     continue;
                 }
-                out.push_str(&format!("  [inspection] {}\n", review.summary));
+                let mut out = format!("  [inspection] {}\n", review.summary);
                 for finding in &review.findings {
                     out.push_str(&format!(
                         "    {:?}: {}{}\n",
@@ -704,6 +715,7 @@ fn recent_messages(engine: &Engine, agent: AgentId, since: Seq) -> String {
                             .unwrap_or_default()
                     ));
                 }
+                entries.push((true, out));
             }
             Event::HandoffTransitioned { handoff, to, .. } => {
                 let Some(record) = engine.handoff(*handoff) else {
@@ -717,14 +729,46 @@ fn recent_messages(engine: &Engine, agent: AgentId, since: Seq) -> String {
                     .as_ref()
                     .map(|o| format!(": {}", o.summary))
                     .unwrap_or_default();
-                out.push_str(&format!(
+                entries.push((true, format!(
                     "  [your request {} was {}]{}\n",
                     record.id.short(),
                     to.as_str(),
                     detail
-                ));
+                )));
             }
             _ => {}
+        }
+    }
+    fit_catch_up(entries, CATCH_UP_BUDGET)
+}
+
+/// Keep the newest updates that fit in `budget` bytes, the bot's own business
+/// first, and say how many older ones were left out.
+fn fit_catch_up(entries: Vec<(bool, String)>, budget: usize) -> String {
+    let mut kept = vec![false; entries.len()];
+    let mut used = 0;
+    for own in [true, false] {
+        for (index, (mine, text)) in entries.iter().enumerate().rev() {
+            if *mine != own {
+                continue;
+            }
+            if used + text.len() > budget {
+                break;
+            }
+            used += text.len();
+            kept[index] = true;
+        }
+    }
+    let omitted = kept.iter().filter(|kept| !**kept).count();
+    let mut out = String::new();
+    if omitted > 0 {
+        out.push_str(&format!(
+            "  ({omitted} earlier updates are left out for length; the board above is current.)\n"
+        ));
+    }
+    for ((_, text), kept) in entries.into_iter().zip(kept) {
+        if kept {
+            out.push_str(&text);
         }
     }
     out

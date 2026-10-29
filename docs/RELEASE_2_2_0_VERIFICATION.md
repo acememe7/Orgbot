@@ -52,7 +52,11 @@ handoff fix prepared as 2.1.1, which was never published.
   is waited out instead of faulting the bot. A lost sign-in names the CLI to
   sign in to again.
 - **Less noise.** A question from one bot to another no longer pages you, and
-  bots post at most one short room message per turn.
+  bots post at most one short room message per turn. A bot returning after a
+  long absence is shown the newest 32 KB of what it missed, messages to it and
+  from you first, with a count of what was left out. In the live room a bot
+  away for eight hours was due 133 KB of catch-up, more than Linux allows in
+  one command-line argument, so its CLI could not start.
 - **Easier to find.** The workspace review is a labelled "Workspace changes"
   button, a bot asking for file removals says where it is, and each bot's two
   project copies are labelled "its own CLI" and "room tools".
@@ -83,7 +87,7 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 934 passed, zero failures, three ignored.
+- Full Rust workspace (`--locked`): 935 passed, zero failures, three ignored.
   New tests cover the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
   pause and held rooms, retiring tasks and leftover-copy cleanup; each was checked to fail without
@@ -99,11 +103,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`06f1ae0e592ea73c974f114e9b80a684bc612b053cad38078bcac1117a48a1d3`.
+`f6e4337073700fc535c16f74919ac5a121378a1b5a4a91be303610507c5083f4`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `04bc65ff25d3de3d1790c822ede27e80421f69d305280de6238c2292179237ad` |
+| orgbots_2.2.0_amd64.deb | `666bf3f6904d7296196e7507d5b7e6a727ff2216b17c7a9b9e59b365d0d68596` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
@@ -152,7 +156,11 @@ changed). Signed archive revision `0b1e04d0a9413b678fd24d5cdae56c8f33fdb696`
 replaces only `orgbots_2.2.0_amd64.deb`; the transitional package and every
 older package are byte-identical.
 [Pages run 40955267257](https://github.com/acememe7/Orgbot/actions/runs/40955267257)
-published it, and the public archive serves the hashes in the table above.
+published it.
+
+Later that night they were rebuilt once more under the same version with the
+bounded catch-up, after the Grok bot faulted on "Argument list too long"
+(source and archive revision below).
 
 The release commits passed secret scanning with no findings.
 
