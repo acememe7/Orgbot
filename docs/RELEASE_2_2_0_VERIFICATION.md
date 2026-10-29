@@ -143,6 +143,15 @@ Later the same day the 2.2.0 packages were rebuilt under the same version
 with the room-bridge access fix (source `e803d87`). Signed archive revision
 `9612c8ccfd18c2642c9a62e8b85ca22a320406d8` replaces only the 2.2.0 packages;
 [Pages run 40918122421](https://github.com/acememe7/Orgbot/actions/runs/40918122421)
+published it.
+
+That evening they were rebuilt again under the same version so a bot waiting
+on the owner is not rerun for an assist it accepted (source `9e734a3`; the
+Flutter bundle is byte-identical to the earlier package, only the engine
+changed). Signed archive revision `0b1e04d0a9413b678fd24d5cdae56c8f33fdb696`
+replaces only `orgbots_2.2.0_amd64.deb`; the transitional package and every
+older package are byte-identical.
+[Pages run 40955267257](https://github.com/acememe7/Orgbot/actions/runs/40955267257)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
