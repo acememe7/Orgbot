@@ -1,31 +1,31 @@
 Package: orgbot
-Version: 2.1.0
+Version: 2.2.0
 Architecture: all
 Maintainer: OrgBot <theaeceme@gmail.com>
-Depends: orgbots (= 2.1.0)
-Filename: pool/main/o/orgbot/orgbot_2.1.0_all.deb
-Size: 2626
-MD5sum: 2abb25297671b51350d02a68c77348dd
-SHA1: d0fdf550e94cf47a3e23e453ec4bf55c6f7cb23f
-SHA256: e30b7cbc415cde0ba897fcda9a64c74d35276212987303c28f3492b5830886a2
+Depends: orgbots (= 2.2.0)
+Filename: pool/main/o/orgbot/orgbot_2.2.0_all.deb
+Size: 2996
+MD5sum: 8c692ba2f130e9ea02b3014ace41eb01
+SHA1: 24d266cb3d1b0a0620e736f454919fcad4507551
+SHA256: 4422bb01d0a8de84761f32b30e5283d9b8f2be521c54927a34e1fd37fa6bd5b7
 Section: oldlibs
 Priority: optional
 Description: transitional package for OrgBots
  This package upgrades installations of the former orgbot package to orgbots.
 
 Package: orgbots
-Version: 2.1.0
+Version: 2.2.0
 Architecture: amd64
 Maintainer: OrgBot <theaeceme@gmail.com>
-Installed-Size: 44956
+Installed-Size: 45048
 Depends: libatk1.0-0t64 (>= 2.7.91), libc6 (>= 2.39), libcairo-gobject2 (>= 1.10.0), libcairo2 (>= 1.14.0), libepoxy0 (>= 1.0), libfontconfig1 (>= 2.12.6), libgcc-s1 (>= 4.2), libgdk-pixbuf-2.0-0 (>= 2.22.0), libglib2.0-0t64 (>= 2.79.0), libgtk-3-0t64 (>= 3.21.4), libharfbuzz0b (>= 0.6.0), libjavascriptcoregtk-4.1-0, libpango-1.0-0 (>= 1.29.4), libpangocairo-1.0-0 (>= 1.14.0), libsecret-1-0 (>= 0.7), libsoup-3.0-0 (>= 2.4.0), libstdc++6 (>= 11), libvte-2.91-0 (>= 0.47.90), libwebkit2gtk-4.1-0 (>= 2.15.4), zlib1g (>= 1:1.1.4), python3, bubblewrap, dbus-daemon, gnome-keyring, libnotify-bin, libsecret-tools, ffmpeg, gstreamer1.0-libav, gstreamer1.0-plugins-good
-Breaks: orgbot (<< 2.1.0)
-Replaces: orgbot (<< 2.1.0)
-Filename: pool/main/o/orgbots/orgbots_2.1.0_amd64.deb
-Size: 15735256
-MD5sum: 8d94eb1896caf9dcf06ae55c9b3e94f0
-SHA1: 9fd5ea8746404883857387aec95b588d6a3bd5f5
-SHA256: caaec9c402a3b431f3eedf020531322f6ed3cdca637cbafbf1fa3431bd611ee4
+Breaks: orgbot (<< 2.2.0)
+Replaces: orgbot (<< 2.2.0)
+Filename: pool/main/o/orgbots/orgbots_2.2.0_amd64.deb
+Size: 15761574
+MD5sum: 8c943b91c1e5a370063c46f4cca82560
+SHA1: cd47dd90d99fa3e792e013aa29441e688eb78432
+SHA256: c51511b0b6a39887d1be8043984027e173d8fecd399d6bbc29fc57d804f56e1c
 Section: devel
 Priority: optional
 Description: CLI and API agents working together in shared rooms
