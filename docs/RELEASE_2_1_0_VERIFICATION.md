@@ -105,8 +105,9 @@ rollback.
 A snapshot of the deployed site and vhost restored all 19 manifest entries into
 a fresh isolated directory. The 281,025-byte archive has SHA-256
 `1923ece57670765b4fe164dd38dcfb916f118b2ab3cf662e610571d4303cc2a8`. It is kept
-on the owner's machine; the upload to the owner's private Drive folder is
-pending.
+on the owner's machine and, since 29 October, in the owner-only
+`orgbots_backups` Drive folder, where its size matches and only the owner has
+access.
 
 The staged release diff passed secret scanning with no findings.
 

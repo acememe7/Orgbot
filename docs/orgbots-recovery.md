@@ -217,8 +217,8 @@ HTTP redirect, custom 404, security headers and direct-origin denial passed.
 A snapshot of the exact deployed files and vhost is 281,025 bytes with SHA-256
 `1923ece57670765b4fe164dd38dcfb916f118b2ab3cf662e610571d4303cc2a8`. All 19
 manifest entries restored into a new isolated directory. The archive is kept
-on the owner's machine; uploading it to the owner-only Drive folder is pending,
-so this recovery point is not yet off both machines. Earlier recovery points
+on the owner's machine and in the owner-only `orgbots_backups` Drive folder,
+where its size matches and only the owner has access. Earlier recovery points
 remain. Recurring uploads and failure alerts remain unconfigured.
 
 ## Current 2.2.0 release backup
@@ -231,6 +231,7 @@ and the release pointer are kept in `/var/backups/orgbots/6b6ee9d` on Hermes.
 A snapshot of the exact deployed files and vhost is 290,396 bytes with SHA-256
 `7dc05530b6f90ad1415f5124d1df1d6e067899b22957efc74bcaea49ff82edf4`. All 20
 manifest entries restored into a new isolated directory. It is kept on the
-owner's machine; uploading it and the 2.1.0 snapshot to the owner-only Drive
-folder is pending.
+owner's machine and in the owner-only `orgbots_backups` Drive folder, where its
+size matches and only the owner has access; it was not downloaded back for a
+hash comparison.
 

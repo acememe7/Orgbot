@@ -126,9 +126,10 @@ vhost are retained for rollback.
 
 A snapshot of the deployed site and vhost restored all 20 manifest entries into
 a fresh isolated directory. The 290,396-byte archive has SHA-256
-`7dc05530b6f90ad1415f5124d1df1d6e067899b22957efc74bcaea49ff82edf4` and is kept
-on the owner's machine; upload to the owner's private Drive folder is pending,
-as it is for the 2.1.0 snapshot.
+`7dc05530b6f90ad1415f5124d1df1d6e067899b22957efc74bcaea49ff82edf4`. It is kept
+on the owner's machine and in the owner-only `orgbots_backups` Drive folder,
+where its size matches and only the owner has access. It was not downloaded
+back for a hash comparison.
 
 The release commits passed secret scanning with no findings.
 
