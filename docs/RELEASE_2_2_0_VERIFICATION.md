@@ -15,6 +15,11 @@ handoff fix prepared as 2.1.1, which was never published.
   answered decision itself, so a restored room grants exactly what you allowed.
   The key folder is also hidden at its own path. In the 2.1.0 live room a bot
   had deployed a server release while the rest of the room held it.
+  The 2.2.0 package was rebuilt the same day under the same version: in the
+  live room the owner allowed Sol the key, but workspace commands a CLI bot
+  sends through the room bridge still ran without it. The republished package
+  passes the grant on that path too, with a test that fails without the fix;
+  installations of the first 2.2.0 package need `apt install --reinstall`.
 - **Pausing loses no work.** Pause now stops new turns and lets the bots already
   in a turn finish it, then pauses; the room shows "Pausing after current turns"
   until it is safe to close or update. "Stop turns now" in the room menu cuts
@@ -75,7 +80,7 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 932 passed, zero failures, three ignored.
+- Full Rust workspace (`--locked`): 933 passed, zero failures, three ignored.
   New tests cover the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
   pause and held rooms, retiring tasks and leftover-copy cleanup; each was checked to fail without
@@ -91,12 +96,12 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`f2fe63c283b7a27ff0b7b628cebff0189b293860844ff6519fff523c94fab189`.
+`36a141dae62782cf84aafea756c525bb089dc2788d56e1c92fe5cc9e84295c29`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `c51511b0b6a39887d1be8043984027e173d8fecd399d6bbc29fc57d804f56e1c` |
-| orgbot_2.2.0_all.deb | `4422bb01d0a8de84761f32b30e5283d9b8f2be521c54927a34e1fd37fa6bd5b7` |
+| orgbots_2.2.0_amd64.deb | `ff12262afbe1b43e008572f01a0bbdc00232ec7474092c13a6f55a1d12c5a075` |
+| orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
 

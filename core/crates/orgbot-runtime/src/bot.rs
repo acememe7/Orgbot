@@ -1038,7 +1038,10 @@ async fn dispatch_room_mcp(
             "Review-only bots cannot change workspace files or run commands.",
         )
     } else if let Some(workspace) = workspace {
-        workspace.call(actor, &name, &args).await
+        // A CLI bot's room workspace tools arrive here mid-episode; the
+        // owner's server-access grant applies to them as to an API bot's.
+        let server_access = engine.with(|engine| engine.server_access_for(actor));
+        workspace.call_as(actor, &name, &args, server_access).await
     } else {
         orgbot_tools::ToolOutcome::error("No workspace attached")
     };
@@ -2009,6 +2012,123 @@ mod tests {
                 if tool_use_id == "late-call" && content.contains("not loaded"))
             }));
         server.abort();
+    }
+
+    /// From the live room: the owner allowed Sol the server key, but Sol's
+    /// workspace commands through the room bridge still ran without it,
+    /// because that path never asked the room whether access was granted.
+    #[tokio::test]
+    async fn room_bridge_workspace_commands_carry_the_owners_server_access_grant() {
+        use crate::workspace::{Workspace, WorkspaceSpec};
+        use orgbot_proto::decision::{Answer, SERVER_ACCESS_ALLOW};
+        let spec = spec();
+        let engine = mcp_test_engine(&spec).await;
+        let task = engine.with(|room| {
+            let created = room
+                .apply(Command::CreateTask {
+                    title: "Deploy the reviewed build".into(),
+                    brief: String::new(),
+                    by: None,
+                    required_role: None,
+                    priority: orgbot_proto::task::Priority::Normal,
+                    acceptance_criteria: vec![],
+                    depends_on: vec![],
+                    origin: orgbot_proto::graph::TaskOrigin::plain(),
+                })
+                .unwrap();
+            let task = created
+                .iter()
+                .find_map(|event| match &event.event {
+                    orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+                    _ => None,
+                })
+                .unwrap();
+            for command in [
+                Command::OpenTask { task },
+                Command::ClaimTask { task, by: spec.id },
+                Command::StartTask { task, by: spec.id },
+            ] {
+                room.apply(command).unwrap();
+            }
+            task
+        });
+        let (tx, mut calls) = mpsc::channel(4);
+        let workspace = Workspace::new(
+            WorkspaceSpec {
+                label: "test".into(),
+                root: "/work".into(),
+                writable: true,
+                commands: true,
+            },
+            tx,
+        );
+        let mut tools = crate::mcp::room_tools_for(&spec);
+        tools.extend(workspace.definitions());
+        let mut session = crate::mcp::McpSession::new(tools);
+        session.handle(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, |_, _| {
+            panic!("initialization must not dispatch")
+        });
+        let request = json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"workspace_run","arguments":{"command":"ssh hermes-vps true"}}})
+        .to_string();
+        let mut tally = McpTally::default();
+        let mut capabilities = crate::capabilities::Capabilities::default();
+        let host = async {
+            let call = calls.recv().await.unwrap();
+            let access = call.server_access;
+            call.reply.send(orgbot_tools::ToolOutcome::ok("ran")).unwrap();
+            access
+        };
+        let (_, before) = tokio::join!(
+            dispatch_room_mcp(
+                &mut session, &request, &engine, spec.id, None, Some(&workspace), false,
+                &mut tally, &mut capabilities,
+            ),
+            host
+        );
+        assert!(!before, "no key before the owner allows it");
+
+        let decision = engine.with(|room| {
+            let events = room
+                .apply(Command::RequestServerAccess {
+                    by: spec.id,
+                    task,
+                    reason: "deploy the reviewed build".into(),
+                })
+                .unwrap();
+            let decision = events
+                .iter()
+                .find_map(|event| match &event.event {
+                    orgbot_proto::Event::DecisionAsked { decision } => Some(decision.id),
+                    _ => None,
+                })
+                .unwrap();
+            room.apply(Command::AnswerDecision {
+                decision,
+                answer: Answer {
+                    chosen: SERVER_ACCESS_ALLOW.into(),
+                    note: String::new(),
+                    at: orgbot_proto::Timestamp::now(),
+                },
+            })
+            .unwrap();
+            decision
+        });
+        let _ = decision;
+        let host = async {
+            let call = calls.recv().await.unwrap();
+            let access = call.server_access;
+            call.reply.send(orgbot_tools::ToolOutcome::ok("ran")).unwrap();
+            access
+        };
+        let (_, after) = tokio::join!(
+            dispatch_room_mcp(
+                &mut session, &request, &engine, spec.id, None, Some(&workspace), false,
+                &mut tally, &mut capabilities,
+            ),
+            host
+        );
+        assert!(after, "allowed, the bridge's workspace command carries the key");
     }
 
     #[tokio::test]
