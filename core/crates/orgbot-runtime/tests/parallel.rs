@@ -17,8 +17,9 @@ use async_trait::async_trait;
 use orgbot_engine::{Command, Engine};
 use orgbot_proto::agent::{Autonomy, ProviderRef};
 use orgbot_proto::graph::TaskOrigin;
+use orgbot_proto::handoff::{HandoffKind, HandoffState, Recipient};
 use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
-use orgbot_proto::{AgentSpec, TaskId, TaskState};
+use orgbot_proto::{AgentSpec, TaskId, TaskState, Timestamp};
 use orgbot_providers::types::{
     CompletionRequest, CompletionResponse, ContentBlock, StopReason, StreamEvent, Usage,
 };
@@ -1124,4 +1125,346 @@ async fn a_roster_on_one_account_is_not_throttled_by_default() {
         4,
         "the room's own concurrency is the only limit until one is asked for"
     );
+}
+
+// ------------------------------------------------- offers to a busy recipient
+
+/// Holds its first turn open until the test lets it finish, then accepts the
+/// first offer it is shown. Every other request only talks.
+#[derive(Debug)]
+struct BusyThenAccepts {
+    turns: AtomicUsize,
+    release: tokio::sync::Semaphore,
+}
+
+/// The first offer in the board snapshot that opens this turn, if any.
+fn offered_in(request: &CompletionRequest) -> Option<String> {
+    request.messages.last()?.content.iter().find_map(|block| match block {
+        ContentBlock::Text { text } => {
+            let offers = text.split("Handoffs waiting on your answer").nth(1)?;
+            let start = offers.find("ho_")?;
+            offers[start..].split_whitespace().next().map(str::to_string)
+        }
+        _ => None,
+    })
+}
+
+#[async_trait]
+impl Provider for BusyThenAccepts {
+    fn name(&self) -> &str {
+        "busy then accepts"
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+        _sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> orgbot_providers::Result<CompletionResponse> {
+        let text = |body: &str| CompletionResponse {
+            model: "test".into(),
+            content: vec![ContentBlock::text(body)],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        let continuing = request.messages.last().is_some_and(|turn| {
+            turn.content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        });
+        if continuing {
+            return Ok(text("done"));
+        }
+        if self.turns.fetch_add(1, Ordering::SeqCst) == 0 {
+            let _ = self.release.acquire().await;
+            return Ok(text("finished the long job"));
+        }
+        Ok(match offered_in(&request) {
+            Some(handoff) => CompletionResponse {
+                model: "test".into(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "toolu_accept".into(),
+                    name: "accept_handoff".into(),
+                    input: json!({ "handoff": handoff }),
+                }],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+            None => text("nothing for me"),
+        })
+    }
+}
+
+/// Seat nobody for `handle` but put it on the board holding a started task,
+/// so the test can make its moves for it.
+fn sender_holding_a_task(room: &mut Orchestrator, handle: &str) -> (orgbot_proto::AgentId, TaskId) {
+    let mut engine = room.engine_mut();
+    let sender = worker(handle);
+    let id = sender.id;
+    engine
+        .apply(Command::JoinAgent {
+            spec: Box::new(sender),
+        })
+        .unwrap();
+    let task = open_task(&mut engine, "party queue");
+    engine.apply(Command::ClaimTask { task, by: id }).unwrap();
+    engine.apply(Command::StartTask { task, by: id }).unwrap();
+    (id, task)
+}
+
+fn delegate(
+    engine: &mut Engine,
+    task: TaskId,
+    from: orgbot_proto::AgentId,
+    to: orgbot_proto::AgentId,
+) -> orgbot_proto::HandoffId {
+    let events = engine
+        .apply(Command::OfferHandoff {
+            task,
+            from,
+            to: Recipient::Agent { agent: to },
+            kind: HandoffKind::Delegate,
+            brief: "this is yours".into(),
+            expects: vec![],
+            context: vec![],
+            blocks_sender: None,
+            timeout_ms: None,
+        })
+        .unwrap();
+    events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            orgbot_proto::Event::HandoffOffered { handoff } => Some(handoff.id),
+            _ => None,
+        })
+        .expect("the handoff was offered")
+}
+
+/// From the live room: @opus offered @grok-quick a delegation while
+/// @grok-quick was in a turn that had begun before the offer and ran fifteen
+/// minutes more. Other bots' turns ended meanwhile, each tick found the offer
+/// past its five minutes, and it expired before @grok-quick ever saw it.
+/// Thirteen of the night's fifteen offers expired.
+#[tokio::test]
+async fn an_offer_made_mid_turn_is_still_open_when_the_recipients_next_turn_begins() {
+    let quick = Arc::new(BusyThenAccepts {
+        turns: AtomicUsize::new(0),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let mut spec = room_spec(2);
+    // Longer than the orchestrator's one-second heartbeat, as five minutes is.
+    spec.limits.handoff_timeout_ms = 2_000;
+    let mut room = Orchestrator::new(spec);
+    let quick_id = room.seat(worker("quick"), quick.clone() as Arc<dyn Provider>).unwrap();
+    room.start().unwrap();
+    let (sender, task) = sender_holding_a_task(&mut room, "opus");
+    owner_asks(&mut room, quick_id, "start the long job");
+    let engine = room.shared_engine();
+    let state = |handoff| engine.with(|engine| engine.handoff(handoff).unwrap().state);
+
+    let sinks = |_| None;
+    let handoff = {
+        let first = room.step_rolling(2, &sinks);
+        tokio::pin!(first);
+        let offer_mid_turn = async {
+            while quick.turns.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let handoff = engine.with(|engine| delegate(engine, task, sender, quick_id));
+            // The long turn runs on past the offer's timeout, and another
+            // bot's turn ending meanwhile ticks the room.
+            tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+            engine.with(|engine| engine.apply(Command::Tick { now: Timestamp::now() }).unwrap());
+            handoff
+        };
+        let handoff = tokio::select! {
+            _ = &mut first => panic!("the run ended while the long turn was still going"),
+            handoff = offer_mid_turn => handoff,
+        };
+        assert_eq!(
+            state(handoff),
+            HandoffState::Offered,
+            "an offer must not expire while its recipient is in a turn that began before it"
+        );
+        quick.release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), first)
+            .await
+            .expect("the run should end once the long turn does");
+        handoff
+    };
+    assert_eq!(
+        state(handoff),
+        HandoffState::Offered,
+        "nor while it waits for the turn in which it will read it"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), room.step_rolling(2, &sinks))
+        .await
+        .expect("the next run should end");
+    assert_eq!(state(handoff), HandoffState::Accepted, "its next turn takes the offer");
+    assert_eq!(
+        engine.with(|engine| engine.task(task).unwrap().assignee),
+        Some(quick_id)
+    );
+}
+
+/// The hold lasts only until the recipient has been shown the offer. A bot
+/// that reads it and carries on with something else must not keep its sender
+/// waiting for as long as it stays busy.
+#[tokio::test]
+async fn an_offer_its_recipient_has_read_runs_out_however_busy_it_stays() {
+    let quick = Arc::new(OnlyTalks::default());
+    let mut spec = room_spec(1);
+    spec.limits.handoff_timeout_ms = 300;
+    let mut room = Orchestrator::new(spec);
+    let quick_id = room.seat(worker("quick"), quick.clone() as Arc<dyn Provider>).unwrap();
+    room.start().unwrap();
+    let (sender, task) = sender_holding_a_task(&mut room, "opus");
+    let handoff = delegate(&mut room.engine_mut(), task, sender, quick_id);
+
+    let reports = room.step(None).await;
+    assert!(reports.is_some(), "the offer wakes its recipient");
+    assert_eq!(quick.turns.load(Ordering::SeqCst), 1);
+
+    // Past the timeout, with the recipient still in line for a turn.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let mut engine = room.engine_mut();
+    engine.apply(Command::KeepAlive { agent: quick_id }).unwrap();
+    engine.apply(Command::Tick { now: Timestamp::now() }).unwrap();
+    assert_eq!(
+        engine.handoff(handoff).unwrap().state,
+        HandoffState::Expired,
+        "an offer that was read and left unanswered still expires"
+    );
+}
+
+/// Accepts the offer it is shown, works on it until the test lets it finish,
+/// then delivers, all in one turn. Every later turn only talks.
+#[derive(Debug)]
+struct TakesItOnAndDelivers {
+    steps: AtomicUsize,
+    release: tokio::sync::Semaphore,
+    handoff: std::sync::Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl Provider for TakesItOnAndDelivers {
+    fn name(&self) -> &str {
+        "takes it on and delivers"
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+        _sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> orgbot_providers::Result<CompletionResponse> {
+        let call = |id: &str, name: &str, input: serde_json::Value| CompletionResponse {
+            model: "test".into(),
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input,
+            }],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        };
+        Ok(match self.steps.fetch_add(1, Ordering::SeqCst) {
+            0 => {
+                let handoff = offered_in(&request).expect("the offer is in front of it");
+                *self.handoff.lock().unwrap() = Some(handoff.clone());
+                call("toolu_accept", "accept_handoff", json!({ "handoff": handoff }))
+            }
+            1 => {
+                let _ = self.release.acquire().await;
+                let handoff = self.handoff.lock().unwrap().clone();
+                call(
+                    "toolu_complete",
+                    "complete_handoff",
+                    json!({ "handoff": handoff, "summary": "the independent run is clean" }),
+                )
+            }
+            _ => CompletionResponse {
+                model: "test".into(),
+                content: vec![ContentBlock::text("delivered")],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        })
+    }
+}
+
+/// From the live room: @ollama-glm accepted an assist for @mira in a turn
+/// that ran on for fifteen minutes doing it. Another bot's turn ended five
+/// minutes after the offer, its tick expired the assist, @mira was released
+/// without the result, and @ollama-glm finished the run with nowhere to
+/// deliver it.
+#[tokio::test]
+async fn a_handoff_taken_on_mid_turn_can_still_be_delivered_at_the_end_of_that_turn() {
+    let glm = Arc::new(TakesItOnAndDelivers {
+        steps: AtomicUsize::new(0),
+        release: tokio::sync::Semaphore::new(0),
+        handoff: std::sync::Mutex::new(None),
+    });
+    let mut spec = room_spec(2);
+    // Longer than the orchestrator's one-second heartbeat, as five minutes is.
+    spec.limits.handoff_timeout_ms = 2_000;
+    let mut room = Orchestrator::new(spec);
+    let glm_id = room.seat(worker("glm"), glm.clone() as Arc<dyn Provider>).unwrap();
+    room.start().unwrap();
+    let (sender, task) = sender_holding_a_task(&mut room, "mira");
+    let handoff = {
+        let mut engine = room.engine_mut();
+        let events = engine
+            .apply(Command::OfferHandoff {
+                task,
+                from: sender,
+                to: Recipient::Agent { agent: glm_id },
+                kind: HandoffKind::Assist,
+                brief: "run the checks independently".into(),
+                expects: vec!["a clean run".into()],
+                context: vec![],
+                blocks_sender: None,
+                timeout_ms: None,
+            })
+            .unwrap();
+        events
+            .iter()
+            .find_map(|envelope| match &envelope.event {
+                orgbot_proto::Event::HandoffOffered { handoff } => Some(handoff.id),
+                _ => None,
+            })
+            .expect("the handoff was offered")
+    };
+    let engine = room.shared_engine();
+    let state = || engine.with(|engine| engine.handoff(handoff).unwrap().state);
+    let task_state = || engine.with(|engine| engine.task(task).unwrap().state);
+    assert_eq!(task_state(), TaskState::Blocked, "the sender waits on the assist");
+
+    let sinks = |_| None;
+    let run = room.step_rolling(2, &sinks);
+    tokio::pin!(run);
+    let working = async {
+        while glm.steps.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // Past the timeout, still working, and another bot's turn ends.
+        tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+        engine.with(|engine| engine.apply(Command::Tick { now: Timestamp::now() }).unwrap());
+    };
+    tokio::select! {
+        _ = &mut run => panic!("the run ended while the work was still going"),
+        _ = working => {}
+    }
+    assert_eq!(
+        state(),
+        HandoffState::Accepted,
+        "a handoff must not expire in the turn that is doing it"
+    );
+    assert_eq!(task_state(), TaskState::Blocked, "nor release its sender early");
+
+    glm.release.add_permits(1);
+    tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("the run should end once the work is delivered");
+    assert_eq!(state(), HandoffState::Completed, "the result reaches its sender");
+    assert_eq!(task_state(), TaskState::InProgress, "who picks the task back up");
 }

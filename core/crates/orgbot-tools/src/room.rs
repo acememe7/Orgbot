@@ -255,8 +255,9 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             "Ask another bot to take on work. Choose the kind carefully:\n\
              - \"assist\": you need something back and will wait for it. Your task is \
              blocked automatically until they answer, so do not also call wait_for.\n\
-             - \"delegate\": they take ownership of the task outright. You stop working \
-             it and are not blocked.\n\
+             - \"delegate\": they take ownership of the task outright when they accept. \
+             You are not blocked, but keep holding the task until then: releasing it \
+             withdraws the offer.\n\
              - \"review\": you want their inspection.\n\
              - \"escalate\": push the decision to a supervisor.\n\
              Address one bot with `to_agent`, or a role with `to_role` so whoever is \

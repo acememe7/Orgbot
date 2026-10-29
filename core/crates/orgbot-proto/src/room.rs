@@ -54,7 +54,10 @@ pub struct RoomLimits {
     pub max_total_turns: u32,
     /// Wall-clock ceiling in milliseconds. Zero means no limit.
     pub max_duration_ms: i64,
-    /// How long an unanswered handoff waits before expiring.
+    /// How long a handoff waits before expiring: an offer for its answer, an
+    /// accepted handoff for its result. Time its bot spends in a turn that
+    /// began before the offer, or in the turn that took the handoff on, is
+    /// not counted.
     pub handoff_timeout_ms: i64,
     /// How many consecutive failed turns fault a bot.
     pub max_consecutive_errors: u32,

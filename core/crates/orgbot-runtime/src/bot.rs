@@ -327,6 +327,9 @@ impl Bot {
         // One lock for the whole prompt, so what the bot is told about the
         // board is a single moment rather than several stitched together.
         let (turn, head) = engine.with(|engine| {
+            // The offers below are now in front of this bot, so from here
+            // their timeouts run instead of being held for it.
+            let _ = engine.apply(Command::BeginTurn { agent: self.spec.id });
             let mut situation = prompt::situation(engine, self.spec.id, self.last_seen);
             situation.push_str(&memory_notes);
             let mut turn = Turn::user(situation);

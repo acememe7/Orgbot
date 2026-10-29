@@ -919,7 +919,9 @@ impl Orchestrator {
                     // Expire stale handoffs and break any circular wait the
                     // turn created, before choosing who goes next. Bots still
                     // mid-turn are alive: their claims are renewed first so
-                    // the tick cannot hand their work to someone else.
+                    // the tick cannot hand their work to someone else, and
+                    // handoffs waiting on them since their turn began are
+                    // held open, as are those of bots waiting for a slot.
                     let waiting = self.waiting_for_a_slot();
                     self.engine.with(|engine| {
                         for agent in running_backend.keys().chain(&waiting) {

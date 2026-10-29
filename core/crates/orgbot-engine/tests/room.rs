@@ -10,7 +10,7 @@ use orgbot_engine::engine::Engine;
 use orgbot_proto::agent::{Autonomy, ProviderRef};
 use orgbot_proto::artifact::ArtifactBody;
 use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope};
-use orgbot_proto::handoff::{HandoffKind, HandoffState, Recipient};
+use orgbot_proto::handoff::{HandoffKind, HandoffState, HandoffTransition, Recipient};
 use orgbot_proto::review::Finding;
 use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
 use orgbot_proto::task::{BlockReason, Priority, TaskState};
@@ -574,6 +574,140 @@ fn an_unanswered_handoff_expires_and_frees_the_sender() {
     assert_eq!(f.state(task), TaskState::InProgress);
 }
 
+/// From the live room: @opus offered @grok-quick a delegation while
+/// @grok-quick was in a turn that had begun before the offer and ran fifteen
+/// minutes more. The offer's five minutes ran out before that turn ended, so
+/// it expired without ever being shown to the bot it was for.
+#[test]
+fn an_offer_waits_for_a_busy_recipient_to_have_a_turn_before_it_can_expire() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.start_task("write the release notes", worker);
+
+    // worker2 is mid-turn on something else when the offer arrives.
+    f.apply(Command::BeginTurn { agent: worker2 });
+    let events = f.apply(Command::OfferHandoff {
+        task,
+        from: worker,
+        to: Recipient::Agent { agent: worker2 },
+        kind: HandoffKind::Delegate,
+        brief: "you own this now".into(),
+        expects: vec![],
+        context: vec![],
+        blocks_sender: None,
+        timeout_ms: Some(100),
+    });
+    let handoff = offered_handoff(&events);
+
+    // That turn outlasts the timeout. The orchestrator vouches for a bot
+    // mid-turn every second, and that is what keeps the offer open.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    f.apply(Command::KeepAlive { agent: worker2 });
+    f.apply(Command::Tick {
+        now: Timestamp::now(),
+    });
+    assert_eq!(
+        f.engine.handoff(handoff).unwrap().state,
+        HandoffState::Offered,
+        "an offer its recipient has not yet been shown must not run out"
+    );
+
+    // Its next turn shows it the offer, and from then the timeout runs, however
+    // busy the bot stays.
+    f.apply(Command::BeginTurn { agent: worker2 });
+    f.apply(Command::KeepAlive { agent: worker2 });
+    f.apply(Command::Tick {
+        now: Timestamp::now().plus_millis(150),
+    });
+    assert_eq!(
+        f.engine.handoff(handoff).unwrap().state,
+        HandoffState::Expired,
+        "an offer that was read and left unanswered still expires"
+    );
+}
+
+/// From the live room: @mira accepted a delegation four seconds after its
+/// deadline had passed, before the room had ticked. The accept went through,
+/// and the next tick expired a handoff that was already under way.
+#[test]
+fn accepting_a_handoff_restarts_its_timeout() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.start_task("write the release notes", worker);
+    let events = f.apply(Command::OfferHandoff {
+        task,
+        from: worker,
+        to: Recipient::Agent { agent: worker2 },
+        kind: HandoffKind::Assist,
+        brief: "check the dates".into(),
+        expects: vec![],
+        context: vec![],
+        blocks_sender: None,
+        timeout_ms: Some(100),
+    });
+    let handoff = offered_handoff(&events);
+
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    f.apply(Command::AcceptHandoff {
+        handoff,
+        by: worker2,
+    });
+    f.apply(Command::Tick {
+        now: Timestamp::now(),
+    });
+    assert_eq!(
+        f.engine.handoff(handoff).unwrap().state,
+        HandoffState::Accepted,
+        "the time it waited to be answered is not time to do the work in"
+    );
+}
+
+/// From the live room: @ollama-glm accepted an assist for @mira in a turn
+/// that ran on for fifteen minutes doing it. The assist expired five minutes
+/// after it was offered, @mira was released without the result, and the
+/// finished run had nowhere to go.
+#[test]
+fn an_accepted_handoff_does_not_expire_during_the_turn_that_took_it_on() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.start_task("write the release notes", worker);
+    let events = f.apply(Command::OfferHandoff {
+        task,
+        from: worker,
+        to: Recipient::Agent { agent: worker2 },
+        kind: HandoffKind::Assist,
+        brief: "run the checks".into(),
+        expects: vec![],
+        context: vec![],
+        blocks_sender: None,
+        timeout_ms: Some(100),
+    });
+    let handoff = offered_handoff(&events);
+    f.apply(Command::BeginTurn { agent: worker2 });
+    f.apply(Command::AcceptHandoff {
+        handoff,
+        by: worker2,
+    });
+
+    // The work takes longer than the timeout, all within that turn.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    f.apply(Command::KeepAlive { agent: worker2 });
+    f.apply(Command::Tick {
+        now: Timestamp::now(),
+    });
+    assert_eq!(f.engine.handoff(handoff).unwrap().state, HandoffState::Accepted);
+    assert_eq!(f.state(task), TaskState::Blocked, "the sender is still waiting for it");
+
+    // A later turn that does not finish it does not keep the sender waiting.
+    f.apply(Command::BeginTurn { agent: worker2 });
+    f.apply(Command::KeepAlive { agent: worker2 });
+    f.apply(Command::Tick {
+        now: Timestamp::now().plus_millis(150),
+    });
+    assert_eq!(f.engine.handoff(handoff).unwrap().state, HandoffState::Expired);
+    assert_eq!(f.state(task), TaskState::InProgress, "and the sender is released");
+}
+
 #[test]
 fn a_delegation_moves_the_task_to_whoever_accepts() {
     let mut f = fixture();
@@ -603,6 +737,97 @@ fn a_delegation_moves_the_task_to_whoever_accepts() {
         by: worker2,
     });
     assert_eq!(f.engine.task(task).unwrap().assignee, Some(worker2));
+}
+
+/// The reason given when the room withdrew `handoff`, if it did.
+fn withdrawal_reason(events: &[EventEnvelope], handoff: HandoffId) -> Option<String> {
+    events.iter().find_map(|e| match &e.event {
+        Event::HandoffTransitioned {
+            handoff: id,
+            transition,
+            ..
+        } if *id == handoff => match transition.as_ref() {
+            HandoffTransition::Withdraw { reason, .. } => Some(reason.clone()),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// From the live room: @opus offered @grok-quick a delegation and then
+/// released the task. Accepting needs the sender to hold the task, so the
+/// offer could never be taken. @grok-quick tried, claimed the task, tried
+/// again, and rejected the offer: "the card was unowned, then held by me
+/// rather than the sender."
+#[test]
+fn releasing_a_delegated_task_withdraws_the_offer() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.start_task("write the release notes", worker);
+    let events = f.apply(Command::OfferHandoff {
+        task,
+        from: worker,
+        to: Recipient::Agent { agent: worker2 },
+        kind: HandoffKind::Delegate,
+        brief: "you own this now".into(),
+        expects: vec![],
+        context: vec![],
+        blocks_sender: None,
+        timeout_ms: None,
+    });
+    let handoff = offered_handoff(&events);
+
+    let events = f.apply(Command::ReleaseTask {
+        task,
+        by: worker,
+        reason: "this is theirs to do".into(),
+    });
+    assert_eq!(
+        f.engine.handoff(handoff).unwrap().state,
+        HandoffState::Withdrawn,
+        "an offer nobody can accept must not stay open"
+    );
+    let reason = withdrawal_reason(&events, handoff).expect("withdrawn with the release");
+    assert!(
+        reason.contains("no longer holds") && reason.contains("back on the board"),
+        "the reason says what happened: {reason}"
+    );
+
+    // The recipient takes the work the ordinary way.
+    assert!(f.engine.offers_for(worker2).is_empty());
+    f.apply(Command::ClaimTask { task, by: worker2 });
+    assert_eq!(f.engine.task(task).unwrap().assignee, Some(worker2));
+}
+
+/// Losing the task counts as much as letting it go.
+#[test]
+fn a_delegation_is_withdrawn_when_the_senders_claim_lapses() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.start_task("write the release notes", worker);
+    let events = f.apply(Command::OfferHandoff {
+        task,
+        from: worker,
+        to: Recipient::Agent { agent: worker2 },
+        kind: HandoffKind::Delegate,
+        brief: "you own this now".into(),
+        expects: vec![],
+        context: vec![],
+        blocks_sender: None,
+        timeout_ms: Some(60 * 60 * 1_000),
+    });
+    let handoff = offered_handoff(&events);
+
+    // Past the claim's window, well inside the offer's.
+    let events = f.apply(Command::Tick {
+        now: Timestamp::now().plus_millis(DEFAULT_LEASE_MILLIS + 60_000),
+    });
+    assert_eq!(f.engine.task(task).unwrap().assignee, None, "the claim lapsed");
+    assert_eq!(
+        f.engine.handoff(handoff).unwrap().state,
+        HandoffState::Withdrawn
+    );
+    assert!(withdrawal_reason(&events, handoff).is_some());
 }
 
 #[test]

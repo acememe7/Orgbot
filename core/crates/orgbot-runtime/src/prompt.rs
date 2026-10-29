@@ -140,6 +140,9 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            chased up if it goes unanswered.\n\
          - An \"assist\" handoff parks your task until they answer. You will be woken \
            when it settles — do not poll, and do not sit in a loop waiting.\n\
+         - A \"delegate\" handoff passes on a task you hold, so keep holding it until \
+           they accept. Releasing it withdraws the offer and puts the task back on \
+           the board, where anyone may claim it.\n\
          - If you cannot make progress, say so: block_on if you are waiting for \
            something specific, release_task if someone else would do better. \
            Holding work you are stuck on is the one thing that actually stalls the \
@@ -703,5 +706,28 @@ mod tests {
         assert!(prompt.contains("one short verification note per submission"));
         assert!(prompt.contains("Do not write plan, checkpoint, status, audit, handover or summary"));
         assert!(prompt.contains("only when the owner or the task asks for one"));
+    }
+
+    #[test]
+    fn delegators_are_told_to_keep_the_task_until_the_offer_is_accepted() {
+        // From the live room: @opus released a task it had just delegated,
+        // and the room withdraws a delegation whose sender lets the task go.
+        let engine = Engine::new(RoomSpec {
+            name: "delegation".into(),
+            goal: "ship".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+        });
+        let spec = AgentSpec::new(
+            "lead",
+            "Lead",
+            ProviderRef::Scripted {
+                script: "test".into(),
+            },
+        );
+        let prompt = system_prompt(&engine, &spec);
+        assert!(prompt.contains("keep holding it until they accept"));
+        assert!(prompt.contains("Releasing it withdraws the offer"));
     }
 }

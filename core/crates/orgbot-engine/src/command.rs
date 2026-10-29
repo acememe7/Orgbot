@@ -202,11 +202,21 @@ pub enum Command {
     },
 
     // ---- engine housekeeping ----
-    /// A bot is in a turn right now: renew its claims. A turn can run far
-    /// longer than a claim's window (an agent running tests, a slow command)
-    /// without touching the board, and its work must not be taken away while
-    /// it is still doing it.
+    /// A bot is in a turn right now, or has something to do and is waiting
+    /// only for a free slot: renew its claims, and hold open the handoffs
+    /// waiting on it that came to it since its latest turn began — offers it
+    /// has not yet been shown, and handoffs it accepted in that turn. A turn
+    /// can run far longer than a claim's window (an agent running tests, a
+    /// slow command) without touching the board, and its work must not be
+    /// taken away while it is still doing it. Nor should an offer made to it
+    /// meanwhile run out before it has had a turn in which to read it, or a
+    /// handoff it took on run out while it is doing the work.
     KeepAlive { agent: AgentId },
+    /// A bot's turn is starting and it is being shown the board, including
+    /// every offer it could accept. From here the timeouts of those offers,
+    /// and of handoffs it accepted in earlier turns, run, and
+    /// [`Command::KeepAlive`] no longer holds them open.
+    BeginTurn { agent: AgentId },
     /// Charge one model turn against the room budget.
     RecordTurn {
         agent: AgentId,
@@ -272,6 +282,7 @@ impl Command {
             Self::AskOwner { .. } => "ask_owner",
             Self::AnswerDecision { .. } => "answer_decision",
             Self::KeepAlive { .. } => "keep_alive",
+            Self::BeginTurn { .. } => "begin_turn",
             Self::RecordTurn { .. } => "record_turn",
             Self::ReportError { .. } => "report_error",
             Self::Tick { .. } => "tick",
@@ -312,6 +323,7 @@ impl Command {
                 | Self::CreateTask { .. }
                 | Self::Tick { .. }
                 | Self::KeepAlive { .. }
+                | Self::BeginTurn { .. }
                 // Speaking is always allowed. A paused or finished room still
                 // has a transcript, and a message that is silently refused
                 // leaves the person staring at a chat that swallowed it.

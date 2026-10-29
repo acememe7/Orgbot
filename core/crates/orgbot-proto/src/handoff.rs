@@ -250,6 +250,12 @@ pub struct Handoff {
     pub outcome: Option<HandoffOutcome>,
     /// When the handoff expires if unresolved.
     pub deadline: Option<Timestamp>,
+    /// How long the bot whose move it is has to make it once it is free to:
+    /// the distance from the offer to `deadline`, kept so the deadline can be
+    /// pushed back while that bot is not yet free (see [`Handoff::hold_open`]).
+    /// Absent on offers saved before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<i64>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -281,6 +287,7 @@ impl Handoff {
             accepted_by: None,
             outcome: None,
             deadline: None,
+            timeout_ms: None,
             created_at: now,
             updated_at: now,
         }
@@ -289,6 +296,32 @@ impl Handoff {
     /// Whether this offer has outlived its deadline as of `now`.
     pub fn is_expired_at(&self, now: Timestamp) -> bool {
         self.state.is_pending() && self.deadline.is_some_and(|d| now >= d)
+    }
+
+    /// Keep a pending handoff open for at least its whole timeout from `now`.
+    ///
+    /// For an offer whose recipient has not yet had a turn in which to read
+    /// it — still busy in a turn that began before the offer, or waiting for
+    /// a slot — and for a handoff taken on in a turn that is still running.
+    /// The timeout is how long a bot has to act once it is free to, and time
+    /// spent busy elsewhere, or doing the very work asked for, is not that.
+    /// Never brings a deadline forward, and leaves a settled handoff alone.
+    pub fn hold_open(&mut self, now: Timestamp) {
+        if !self.state.is_pending() {
+            return;
+        }
+        let Some(deadline) = self.deadline else {
+            return;
+        };
+        // An offer saved without its timeout was never held, so its deadline
+        // is still the whole window from the moment it was made.
+        let timeout = *self
+            .timeout_ms
+            .get_or_insert(self.created_at.elapsed_to(deadline));
+        let held = now.plus_millis(timeout);
+        if held > deadline {
+            self.deadline = Some(held);
+        }
     }
 
     /// Check that `agent` (holding `roles`) may accept, then accept.
@@ -521,6 +554,67 @@ mod tests {
             !handoff.is_expired_at(Timestamp(5_000)),
             "a finished handoff never expires"
         );
+    }
+
+    #[test]
+    fn holding_an_offer_open_restarts_its_timeout_and_never_shortens_it() {
+        let (task, sender, worker) = ids();
+        let mut handoff = Handoff::offer(
+            task,
+            sender,
+            Recipient::Agent { agent: worker },
+            HandoffKind::Delegate,
+            "take it",
+        );
+        handoff.created_at = Timestamp(1_000);
+        handoff.deadline = Some(Timestamp(6_000));
+        handoff.timeout_ms = Some(5_000);
+
+        handoff.hold_open(Timestamp(4_000));
+        assert_eq!(handoff.deadline, Some(Timestamp(9_000)));
+        handoff.hold_open(Timestamp(2_000));
+        assert_eq!(handoff.deadline, Some(Timestamp(9_000)), "a hold never brings it forward");
+
+        handoff.state = Accepted;
+        handoff.hold_open(Timestamp(5_000));
+        assert_eq!(handoff.deadline, Some(Timestamp(10_000)), "work under way is held too");
+
+        handoff.state = Completed;
+        handoff.hold_open(Timestamp(20_000));
+        assert_eq!(handoff.deadline, Some(Timestamp(10_000)), "a settled handoff is not");
+    }
+
+    #[test]
+    fn an_offer_saved_without_its_timeout_is_held_for_its_original_window() {
+        let (task, sender, worker) = ids();
+        let mut handoff = Handoff::offer(
+            task,
+            sender,
+            Recipient::Agent { agent: worker },
+            HandoffKind::Assist,
+            "help",
+        );
+        handoff.created_at = Timestamp(1_000);
+        handoff.deadline = Some(Timestamp(4_000));
+
+        handoff.hold_open(Timestamp(3_500));
+        assert_eq!(handoff.deadline, Some(Timestamp(6_500)));
+        handoff.hold_open(Timestamp(5_000));
+        assert_eq!(
+            handoff.deadline,
+            Some(Timestamp(8_000)),
+            "the window is fixed at the first hold, not widened by it"
+        );
+
+        let mut open_ended = Handoff::offer(
+            task,
+            sender,
+            Recipient::Agent { agent: worker },
+            HandoffKind::Assist,
+            "help",
+        );
+        open_ended.hold_open(Timestamp(5_000));
+        assert_eq!(open_ended.deadline, None, "an offer with no deadline stays without one");
     }
 
     #[test]

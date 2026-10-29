@@ -124,6 +124,11 @@ pub struct Engine {
     /// itself after the owner signs in again. Defaulted so older saves load.
     #[serde(default)]
     fault_retry: BTreeMap<AgentId, FaultRetry>,
+    /// When each bot's latest turn began: everything offered to it before
+    /// then has been in front of it. Not saved, because a turn cut short by a
+    /// restart never got to answer, so after one every offer counts as unread.
+    #[serde(skip)]
+    turn_began: BTreeMap<AgentId, Timestamp>,
     /// Every question put to the operator and every answer given, so the room
     /// can tell what it has already been told.
     ///
@@ -243,6 +248,7 @@ impl Engine {
                         record
                             .accept_by(by, roles, envelope.at)
                             .map_err(|e| e.to_string())?;
+                        record.hold_open(envelope.at);
                         if record.kind.transfers_ownership() {
                             engine
                                 .tasks
@@ -347,6 +353,7 @@ impl Engine {
             seq: Seq::ZERO,
             error_streak: BTreeMap::new(),
             fault_retry: BTreeMap::new(),
+            turn_began: BTreeMap::new(),
             decisions: DecisionLog::default(),
             roles: RoleTable::default(),
             governance: Governance::default(),
@@ -1676,7 +1683,7 @@ impl Engine {
         }
         // Which task, if any, this command is a sign of life on.
         let touched = command.task();
-        let outcome = match command {
+        let mut outcome = match command {
             Command::JoinAgent { spec } => self.join_agent(*spec),
             Command::LeaveAgent { agent, reason } => self.leave_agent(agent, reason),
             Command::StartRoom => self.set_phase(RoomPhase::Running, "started"),
@@ -1852,6 +1859,11 @@ impl Engine {
                 for task in self.active_tasks_of(agent) {
                     self.renew_lease(task);
                 }
+                self.hold_handoffs_awaiting(agent);
+                Ok(Vec::new())
+            }
+            Command::BeginTurn { agent } => {
+                self.turn_began.insert(agent, Timestamp::now());
                 Ok(Vec::new())
             }
             Command::RecordTurn { agent, usage } => self.record_turn(agent, usage),
@@ -1867,7 +1879,7 @@ impl Engine {
         // work downstream. Recomputing here means a dependent becomes
         // eligible the moment its upstream lands, with no coordinator
         // needed to notice and announce it.
-        if outcome.is_ok() {
+        if let Ok(events) = &mut outcome {
             // Acting on a task is the heartbeat that holds its lease. A bot
             // working steadily never has its claim reclaimed; one that has
             // stopped does.
@@ -1875,6 +1887,9 @@ impl Engine {
                 self.renew_lease(task);
             }
             self.recompute_dependencies();
+            // Likewise any command may have taken a task from the bot that
+            // was delegating it: a release, a lapsed claim, a cancellation.
+            events.extend(self.withdraw_orphaned_delegations());
         }
         outcome
     }
@@ -2624,7 +2639,8 @@ impl Engine {
         }
         let timeout = timeout_ms.unwrap_or(self.room.spec.limits.handoff_timeout_ms);
         if timeout > 0 {
-            handoff.deadline = Some(Timestamp::now().plus_millis(timeout));
+            handoff.deadline = Some(handoff.created_at.plus_millis(timeout));
+            handoff.timeout_ms = Some(timeout);
         }
         let (id, blocks) = (handoff.id, handoff.blocks_sender);
         self.handoffs.insert(id, handoff.clone());
@@ -2696,7 +2712,11 @@ impl Engine {
         let from = record.state;
         let kind = record.kind;
         let task = record.task;
-        record.accept_by(by, &roles, Timestamp::now())?;
+        let now = Timestamp::now();
+        record.accept_by(by, &roles, now)?;
+        // Taking it on restarts the clock: the time the offer spent waiting
+        // was the recipient's to answer in, not to do the work in.
+        record.hold_open(now);
         let to = record.state;
 
         let mut events = vec![self.emit(Event::HandoffTransitioned {
@@ -2798,6 +2818,107 @@ impl Engine {
             events.extend(self.transition(task, TaskTransition::Unblock, None)?);
         }
         Ok(events)
+    }
+
+    /// Hold open the handoffs waiting on `agent` that came to it since its
+    /// latest turn began: offers it has not yet been shown, and handoffs it
+    /// accepted in that turn.
+    ///
+    /// From the live room: @opus offered @grok-quick a delegation while
+    /// @grok-quick was in a turn that had begun before the offer and ran
+    /// fifteen minutes more. The offer's five minutes were up before that
+    /// turn ended, so it expired unread; thirteen of the night's fifteen
+    /// offers expired. And @ollama-glm accepted an assist for @mira in a
+    /// turn that ran on for fifteen minutes doing it: the assist expired five
+    /// minutes after it was offered, @mira was released without the result,
+    /// and @ollama-glm finished the run only to find nothing left to deliver
+    /// it to.
+    ///
+    /// The orchestrator vouches for the bot — it sends this only for one
+    /// mid-turn or waiting for a slot — so a bot that is offline or faulted
+    /// holds nothing up. Once a turn has begun after the offer or the
+    /// acceptance, the timeout runs as before: a bot that read an offer and
+    /// left it, or took one on and did not finish in that turn, cannot keep
+    /// its sender waiting for as long as it stays busy.
+    fn hold_handoffs_awaiting(&mut self, agent: AgentId) {
+        let now = Timestamp::now();
+        let began = self.turn_began.get(&agent).copied();
+        let taken_on = self
+            .handoffs
+            .values()
+            .filter(|h| h.state == HandoffState::Accepted && h.accepted_by == Some(agent))
+            .map(|h| h.id)
+            .collect::<Vec<_>>();
+        for id in self.offers_for(agent).into_iter().chain(taken_on) {
+            let Some(handoff) = self.handoffs.get_mut(&id) else {
+                continue;
+            };
+            // When it came to this bot. An accepted handoff changes only when
+            // it settles, so its last change is the acceptance.
+            let came = match handoff.state {
+                HandoffState::Accepted => handoff.updated_at,
+                _ => handoff.created_at,
+            };
+            // In the same millisecond as the turn began, it may or may not
+            // have been part of that turn: hold it, at the cost of one more.
+            if began.is_none_or(|began| came >= began) {
+                handoff.hold_open(now);
+            }
+        }
+    }
+
+    /// Withdraw every delegation whose sender no longer holds the task.
+    ///
+    /// From the live room: @opus offered @grok-quick a delegation, then
+    /// released the task while the offer was open. Accepting a delegation
+    /// needs the sender to hold what it is handing over, so the offer could
+    /// never be taken: @grok-quick tried, claimed the task itself, tried
+    /// again, and spent its turn finding that out. A delegation passes on a
+    /// holding, so when the holding goes the offer goes with it, and the task
+    /// is wherever the release left it — on the board for anyone to claim, the
+    /// recipient included.
+    fn withdraw_orphaned_delegations(&mut self) -> Vec<EventEnvelope> {
+        let orphaned: Vec<(HandoffId, AgentId, String)> = self
+            .handoffs
+            .values()
+            .filter(|h| h.state == HandoffState::Offered && h.kind.transfers_ownership())
+            .filter_map(|h| {
+                let holder = self.tasks.get(&h.task).and_then(|task| task.assignee);
+                if holder == Some(h.from) {
+                    return None;
+                }
+                let sender = self.handle_or_short(h.from);
+                let whereabouts = match holder {
+                    Some(other) => format!("is held by @{}", self.handle_or_short(other)),
+                    None => "is back on the board for anyone to claim".into(),
+                };
+                let reason = format!(
+                    "@{sender} no longer holds task {}, so there is nothing to delegate; \
+                     the task {whereabouts}",
+                    h.task.short()
+                );
+                Some((h.id, h.from, reason))
+            })
+            .collect();
+
+        let mut events = Vec::new();
+        for (handoff, sender, reason) in orphaned {
+            if let Ok(withdrawn) = self.drive_handoff(
+                handoff,
+                HandoffTransition::Withdraw { by: sender, reason },
+            ) {
+                events.extend(withdrawn);
+            }
+        }
+        events
+    }
+
+    /// A bot's handle, or its short id when it is no longer seated.
+    fn handle_or_short(&self, agent: AgentId) -> String {
+        self.specs
+            .get(&agent)
+            .map(|spec| spec.handle.clone())
+            .unwrap_or_else(|| agent.short())
     }
 
     // ------------------------------------------------------ artifacts & review
