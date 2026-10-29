@@ -70,6 +70,26 @@ struct UnmetDependency {
     present: bool,
 }
 
+/// A faulted bot's place in its retry schedule.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct FaultRetry {
+    /// When it last faulted.
+    at: Timestamp,
+    /// Faults in a row since its last successful turn.
+    faults: u32,
+}
+
+impl FaultRetry {
+    /// One minute after the first fault, doubling each time, at most thirty.
+    ///
+    /// A retry that fails again costs one quick launch: an expired sign-in or
+    /// a missing binary fails before any model call.
+    fn retry_at(self) -> Timestamp {
+        let minutes = 1i64 << self.faults.saturating_sub(1).min(5);
+        self.at.plus_millis(minutes.min(30) * 60_000)
+    }
+}
+
 /// A live group chat and everything in it.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Engine {
@@ -98,6 +118,12 @@ pub struct Engine {
     seq: Seq,
     /// Consecutive failed turns per bot, reset by any success.
     error_streak: BTreeMap<AgentId, u32>,
+    /// When each faulted bot faulted, and how many faults in a row it has had
+    /// since its last successful turn. The tick retries a faulted bot once
+    /// its wait is over, so a bot whose CLI sign-in expired comes back by
+    /// itself after the owner signs in again. Defaulted so older saves load.
+    #[serde(default)]
+    fault_retry: BTreeMap<AgentId, FaultRetry>,
     /// Every question put to the operator and every answer given, so the room
     /// can tell what it has already been told.
     ///
@@ -320,6 +346,7 @@ impl Engine {
             log: Vec::new(),
             seq: Seq::ZERO,
             error_streak: BTreeMap::new(),
+            fault_retry: BTreeMap::new(),
             decisions: DecisionLog::default(),
             roles: RoleTable::default(),
             governance: Governance::default(),
@@ -661,6 +688,26 @@ impl Engine {
     }
 
     /// The room transcript, oldest first.
+    /// The name the owner goes by: the one they last wrote under here.
+    ///
+    /// Used when the room writes on their behalf, such as recording a
+    /// decision answer, so bots see "Aece answered" rather than a stand-in.
+    /// Only a room the owner has never written in falls back to the stand-in.
+    pub fn owner_name(&self) -> String {
+        self.transcript()
+            .iter()
+            .rev()
+            .find_map(|message| match &message.author {
+                orgbot_proto::Author::Human { name }
+                    if !name.trim().is_empty() && name != orgbot_proto::OWNER_STAND_IN =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| orgbot_proto::OWNER_STAND_IN.to_string())
+    }
+
     pub fn transcript(&self) -> &[ChatMessage] {
         &self.transcript
     }
@@ -1644,6 +1691,17 @@ impl Engine {
                     self.room.turns_used = 0;
                 }
                 let mut events = self.set_phase(RoomPhase::Running, "resumed")?;
+                // Nobody could act while the room was paused, so every claim
+                // gets a fresh window rather than lapsing on the first tick.
+                let held: Vec<TaskId> = self
+                    .tasks
+                    .values()
+                    .filter(|task| task.assignee.is_some() && !task.state.is_terminal())
+                    .map(|task| task.id)
+                    .collect();
+                for task in held {
+                    self.renew_lease(task);
+                }
                 // Resuming is the owner's retry action. Released work stays on
                 // the board; no tool operation or old bot response is replayed.
                 let faulted: Vec<_> = self
@@ -1653,6 +1711,7 @@ impl Engine {
                     .collect();
                 for agent in faulted {
                     self.error_streak.insert(agent, 0);
+                    self.fault_retry.remove(&agent);
                     events.extend(self.set_status(agent, AgentStatus::Idle));
                 }
                 Ok(events)
@@ -1789,6 +1848,12 @@ impl Engine {
 
             Command::AnswerDecision { decision, answer } => self.answer_decision(decision, answer),
 
+            Command::KeepAlive { agent } => {
+                for task in self.active_tasks_of(agent) {
+                    self.renew_lease(task);
+                }
+                Ok(Vec::new())
+            }
             Command::RecordTurn { agent, usage } => self.record_turn(agent, usage),
             Command::ReportError {
                 agent,
@@ -2236,12 +2301,13 @@ impl Engine {
             }
             Settled::Already(prior) => {
                 let answer = prior.answer.expect("settled decision has an answer");
-                let mut body = format!("The owner previously answered: {}", answer.chosen);
+                let owner = self.owner_name();
+                let mut body = format!("{owner} previously answered: {}", answer.chosen);
                 if !answer.note.is_empty() {
                     body.push_str(" — ");
                     body.push_str(&answer.note);
                 }
-                let message = ChatMessage::human(self.room.id, "Owner", body)
+                let message = ChatMessage::human(self.room.id, owner, body)
                     .to_agents(vec![by])
                     .with_intent(orgbot_proto::chat::MessageIntent::Answer);
                 self.post_message(message)
@@ -2353,12 +2419,13 @@ impl Engine {
         })];
 
         if !settled.asked_by.is_empty() {
-            let mut body = format!("The owner answered: {}", answer.chosen);
+            let owner = self.owner_name();
+            let mut body = format!("{owner} answered: {}", answer.chosen);
             if !answer.note.trim().is_empty() {
                 body.push_str(" — ");
                 body.push_str(answer.note.trim());
             }
-            let reply = ChatMessage::human(self.room.id, "Owner", body)
+            let reply = ChatMessage::human(self.room.id, owner, body)
                 .to_agents(settled.asked_by.clone())
                 .with_intent(orgbot_proto::chat::MessageIntent::Answer);
             events.extend(self.post_message(reply)?);
@@ -2969,6 +3036,13 @@ impl Engine {
         self.spend.entry(agent).or_default().record(usage);
         let recorded = self.emit(Event::UsageRecorded { agent, usage });
         self.error_streak.insert(agent, 0);
+        self.fault_retry.remove(&agent);
+        // A finished turn is a sign of life on everything the bot holds. An
+        // agent CLI can work for a long time on files without touching the
+        // board, and its claim must not lapse for that.
+        for task in self.active_tasks_of(agent) {
+            self.renew_lease(task);
+        }
         if self.room.is_out_of_turns() {
             let mut events = vec![recorded];
             events.extend(self.set_phase(RoomPhase::Paused, "turn budget exhausted")?);
@@ -3019,6 +3093,14 @@ impl Engine {
                 }
             }
             self.statuses.insert(agent, AgentStatus::Faulted);
+            let faults = self.fault_retry.get(&agent).map_or(0, |r| r.faults) + 1;
+            self.fault_retry.insert(
+                agent,
+                FaultRetry {
+                    at: Timestamp::now(),
+                    faults,
+                },
+            );
         }
         Ok(events)
     }
@@ -3040,12 +3122,37 @@ impl Engine {
             // than a dead end.
             events.extend(self.drive_handoff(handoff, HandoffTransition::Expire)?);
         }
+        events.extend(self.retry_faulted(now));
         events.extend(self.clear_landed_dependencies()?);
         events.extend(self.reconcile_ownership(now)?);
         events.extend(self.report_health());
         self.retain_recent();
         events.extend(self.sweep_deadlocks());
         Ok(events)
+    }
+
+    /// Give faulted bots another go once their wait is over.
+    ///
+    /// A fault used to last until the owner paused and resumed the room, so
+    /// a bot whose sign-in expired stayed out even after the owner signed in
+    /// again. A retried bot gets a single attempt: if it fails again it
+    /// faults straight away and waits twice as long.
+    fn retry_faulted(&mut self, now: Timestamp) -> Vec<EventEnvelope> {
+        let due: Vec<AgentId> = self
+            .fault_retry
+            .iter()
+            .filter(|(agent, retry)| {
+                self.status(**agent) == AgentStatus::Faulted && retry.retry_at() <= now
+            })
+            .map(|(agent, _)| *agent)
+            .collect();
+        let mut events = Vec::new();
+        for agent in due {
+            let one_more = self.room.spec.limits.max_consecutive_errors.saturating_sub(1);
+            self.error_streak.insert(agent, one_more);
+            events.extend(self.set_status(agent, AgentStatus::Idle));
+        }
+        events
     }
 
     /// Put ownership back in agreement with itself.
@@ -3138,12 +3245,19 @@ impl Engine {
 
         // 5. Held by a bot that has stopped reporting progress. A faulted bot
         //    cannot act, so it cannot renew, so it arrives here on its own.
-        let stale: Vec<TaskId> = self
-            .tasks
-            .values()
-            .filter(|task| task.lease_expired_at(now))
-            .map(|task| task.id)
-            .collect();
+        //    Not while the room is paused: nobody can report progress then,
+        //    and resuming renews every claim. Not while the task is blocked
+        //    either: its holder is waiting on a teammate, a task or the owner,
+        //    that wait ends on its own, and unblocking renews the claim.
+        let stale: Vec<TaskId> = if self.room.phase == RoomPhase::Running {
+            self.tasks
+                .values()
+                .filter(|task| task.state != TaskState::Blocked && task.lease_expired_at(now))
+                .map(|task| task.id)
+                .collect()
+        } else {
+            Vec::new()
+        };
         for task in stale {
             let held_by = self
                 .tasks
@@ -3410,7 +3524,16 @@ impl Engine {
                     record.blocked_on.push(reason.clone());
                 }
             }
-            TaskTransition::Unblock => record.blocked_on.clear(),
+            TaskTransition::Unblock => {
+                record.blocked_on.clear();
+                // Its holder was waiting on someone else, not idle. The claim
+                // starts fresh, so the holder has a whole window to get a turn
+                // and pick the work back up, not whatever the wait left of it.
+                if record.assignee.is_some() {
+                    record.lease_expires_at =
+                        Some(Timestamp::now().plus_millis(DEFAULT_LEASE_MILLIS));
+                }
+            }
             TaskTransition::SubmitForReview { artifacts } => {
                 for artifact in artifacts {
                     if !record.artifacts.contains(artifact) {

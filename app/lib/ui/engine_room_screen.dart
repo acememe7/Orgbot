@@ -26,6 +26,7 @@ import '../protocol/models.dart' show ChatFile;
 import '../protocol/models.dart' show ChatMessage;
 import '../orgbot/room_check.dart';
 import '../state/room_store.dart';
+import '../net/room_client.dart' show LinkState;
 import 'brand.dart';
 import 'room_widgets.dart';
 import 'polish.dart';
@@ -79,6 +80,7 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   final FocusNode _composeFocus = FocusNode();
   final FocusNode _attentionFocus = FocusNode(debugLabel: 'Room needs you');
   final _projectKey = GlobalKey();
+  final _projectFiles = ProjectFileRequests();
   final _conversationKey = GlobalKey();
   bool _showInspector = false;
   bool _openedInspector = false;
@@ -272,6 +274,7 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
     _attentionFocus.dispose();
     _memory.dispose();
     _scroll.dispose();
+    _projectFiles.dispose();
     super.dispose();
   }
 
@@ -340,9 +343,15 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
 
     return Scaffold(
       appBar: _appBar(store),
-      body: store == null && _desktop
-          ? _desktopWorkspace(body, _inspectorPanel(null))
-          : body,
+      // Bots link what they made by its path in the project; on the desktop
+      // those links open in the project tab, and images show in the message.
+      body: RoomFileLinks(
+        projectRoot: _desktop ? widget.room.path : null,
+        open: _desktop ? _showProjectFile : null,
+        child: store == null && _desktop
+            ? _desktopWorkspace(body, _inspectorPanel(null))
+            : body,
+      ),
     );
   }
 
@@ -395,10 +404,21 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
     );
   }
 
+  /// Open the project tab on a file a message links to.
+  void _showProjectFile(String path) {
+    setState(() {
+      _showInspector = true;
+      _inspector = 0;
+      _openedInspector = true;
+    });
+    _projectFiles.show(path);
+  }
+
   Widget _projectPane() => DesktopProjectPane(
     key: _projectKey,
     projectPath: widget.room.path,
     roomId: widget.room.id,
+    requests: _projectFiles,
     onProjectSelected: (path) async {
       widget.room.path = path;
       await widget.library.save();
@@ -458,6 +478,11 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
         ? 'Could not start'
         : !_controller.isRunning
         ? 'Saved'
+        // A dropped link is said plainly; a frozen screen reads as a stuck room.
+        : store != null &&
+              (store.connection == LinkState.closed ||
+                  store.connection == LinkState.error)
+        ? 'Reconnecting…'
         : store?.runStateLabel ?? 'Active';
     return AppBar(
       automaticallyImplyLeading: !widget.embedded,

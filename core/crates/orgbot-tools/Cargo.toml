@@ -3,7 +3,7 @@ name = "orgbot-tools"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 description = "The tool surface bots use to drive a room: chat, the task board, handoffs, inspection."
 
 [dependencies]

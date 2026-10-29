@@ -2732,6 +2732,137 @@ fn a_bot_that_cannot_run_faults_on_the_first_attempt() {
     );
 }
 
+/// A claim survives a pause and a long turn: bots cannot report progress while
+/// the room is paused, and an agent CLI can work for a long time on files
+/// without touching the board.
+#[test]
+fn claims_do_not_lapse_across_a_pause_or_a_long_turn() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("finish the web game", worker);
+    let at = |minutes: i64| Timestamp::now().plus_millis(minutes * 60_000);
+
+    // Paused past the lease: nothing is reclaimed while paused.
+    f.apply(Command::PauseRoom { reason: "owner".into() });
+    f.apply(Command::Tick { now: at(20) });
+    assert_eq!(f.state(task), TaskState::InProgress, "kept while paused");
+
+    // Resuming gives the claim a fresh window.
+    f.apply(Command::ResumeRoom);
+    f.apply(Command::Tick { now: at(10) });
+    assert_eq!(f.state(task), TaskState::InProgress, "renewed on resume");
+
+    // A turn that ends without touching the board still renews the claim.
+    f.apply(Command::RecordTurn {
+        agent: worker,
+        usage: Default::default(),
+    });
+    f.apply(Command::Tick { now: at(14) });
+    assert_eq!(f.state(task), TaskState::InProgress, "renewed by a finished turn");
+
+    // A holder that really goes quiet still loses it.
+    f.apply(Command::Tick { now: at(16) });
+    assert_eq!(f.state(task), TaskState::Ready, "a lapsed claim returns to the pool");
+}
+
+/// From the live room: Miles blocked "finish the web game" on a teammate's
+/// handoff. The claim kept counting down while it waited; the handoff came
+/// back fourteen minutes later, every slot was busy, and the room took the
+/// task away before Miles got a turn. Waiting on someone else is not walking
+/// away from the work.
+#[test]
+fn a_claim_does_not_lapse_while_its_holder_waits_on_a_teammate() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.start_task("finish the web game", worker);
+    let at = |minutes: i64| Timestamp::now().plus_millis(minutes * 60_000);
+    let claimed_until = f.engine.task(task).unwrap().lease_expires_at.unwrap();
+
+    let events = f.apply(Command::OfferHandoff {
+        task,
+        from: worker,
+        to: Recipient::Agent { agent: worker2 },
+        kind: HandoffKind::Assist,
+        brief: "finish the party queue first".into(),
+        expects: vec![],
+        context: vec![],
+        blocks_sender: None,
+        timeout_ms: Some(60 * 60_000),
+    });
+    let handoff = offered_handoff(&events);
+    f.apply(Command::AcceptHandoff {
+        handoff,
+        by: worker2,
+    });
+    assert_eq!(f.state(task), TaskState::Blocked);
+    f.apply(Command::Tick { now: at(20) });
+    assert_eq!(f.state(task), TaskState::Blocked, "kept while waiting");
+    assert_eq!(f.engine.task(task).unwrap().assignee, Some(worker));
+
+    // The teammate delivers and the room unblocks the task by itself; the
+    // holder gets a whole new window to come back to it.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    f.apply(Command::CompleteHandoff {
+        handoff,
+        by: worker2,
+        artifacts: vec![],
+        summary: "party queue done".into(),
+    });
+    assert_eq!(f.state(task), TaskState::InProgress);
+    assert!(
+        f.engine.task(task).unwrap().lease_expires_at.unwrap() > claimed_until,
+        "unblocking starts the claim fresh"
+    );
+}
+
+/// A bot whose CLI sign-in expired comes back by itself once the owner signs
+/// in again, instead of staying faulted until the room is paused and resumed.
+#[test]
+fn a_faulted_bot_is_retried_on_a_growing_schedule() {
+    use orgbot_proto::agent::AgentStatus;
+    let mut f = fixture();
+    let worker = f.worker;
+    let expired = || Command::ReportError {
+        agent: worker,
+        task: None,
+        error: "CLI reported an error: Failed to authenticate: OAuth session expired".into(),
+        permanent: true,
+    };
+    let tick = |f: &mut Fixture, minutes: i64| {
+        f.apply(Command::Tick {
+            now: Timestamp::now().plus_millis(minutes * 60_000 + 5_000),
+        });
+    };
+
+    f.apply(expired());
+    assert_eq!(f.engine.status(worker), AgentStatus::Faulted);
+    tick(&mut f, 0);
+    assert_eq!(f.engine.status(worker), AgentStatus::Faulted, "not before a minute");
+    tick(&mut f, 1);
+    assert_ne!(f.engine.status(worker), AgentStatus::Faulted, "retried after a minute");
+
+    // Still signed out: one attempt, then faulted again and a longer wait.
+    f.apply(expired());
+    assert_eq!(f.engine.status(worker), AgentStatus::Faulted);
+    tick(&mut f, 1);
+    assert_eq!(f.engine.status(worker), AgentStatus::Faulted, "the second wait is longer");
+    tick(&mut f, 2);
+    assert_ne!(f.engine.status(worker), AgentStatus::Faulted);
+
+    // Signed in again: a successful turn clears the schedule.
+    f.apply(Command::RecordTurn {
+        agent: worker,
+        usage: Default::default(),
+    });
+    f.apply(expired());
+    tick(&mut f, 1);
+    assert_ne!(
+        f.engine.status(worker),
+        AgentStatus::Faulted,
+        "after a success the next fault waits a minute again"
+    );
+}
+
 /// A network blip still gets its retries.
 #[test]
 fn a_transient_failure_is_still_retried() {

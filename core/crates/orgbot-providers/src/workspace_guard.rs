@@ -1058,7 +1058,13 @@ fn private_home_from(
                     ],
                 };
                 for file in files {
-                    copy_file_if_missing(&from.join(file), &to.join(file), &mut budget)?;
+                    if credential_files(name).contains(file) {
+                        // Sign-ins follow the owner: a newer real file (after
+                        // signing in again) replaces the bot's copy.
+                        refresh_credential(&from.join(file), &to.join(file), &mut budget)?;
+                    } else {
+                        copy_file_if_missing(&from.join(file), &to.join(file), &mut budget)?;
+                    }
                 }
                 for directory in [
                     "skills", "plugins", "rules", "prompts", "commands", "agents", "hooks",
@@ -1214,6 +1220,149 @@ fn copy_matching_session(
     Ok(())
 }
 
+/// The sign-in files each agent CLI keeps in its config folder.
+///
+/// These hold refresh tokens that are replaced each time they are used, so a
+/// copy that never syncs goes stale: a bot keeps an expired sign-in after the
+/// owner signs in again, and bots refreshing their own copies invalidate each
+/// other's and the owner's. They are kept in step with the real file instead.
+fn credential_files(cli_dir: &str) -> &'static [&'static str] {
+    match cli_dir {
+        ".claude" => &[".credentials.json", "credentials.json"],
+        ".codex" => &["auth.json"],
+        ".grok" => &["auth.json", "credentials.json", ".credentials.json"],
+        _ => &[],
+    }
+}
+
+/// A regular, non-symlinked file's modification time, if it is one.
+fn regular_file_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    (meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= PROFILE_MAX_FILE_BYTES)
+        .then(|| meta.modified().ok())
+        .flatten()
+}
+
+/// Replace `to` with `from` atomically, private to the owner.
+fn replace_private_file(from: &Path, to: &Path) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let bytes = std::fs::read(from).map_err(|e| format!("read CLI sign-in: {e}"))?;
+    let parent = to.parent().ok_or("CLI sign-in has no folder")?;
+    let temp = parent.join(format!(
+        ".orgbot-signin-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(0x20000) // O_NOFOLLOW
+            .open(&temp)?;
+        file.write_all(&bytes)?;
+        // Keep the original's time, so "newer" compares sign-ins rather than
+        // when a copy happened to be made.
+        if let Ok(modified) = std::fs::metadata(from).and_then(|m| m.modified()) {
+            file.set_modified(modified)?;
+        }
+        file.sync_all()?;
+        std::fs::rename(&temp, to)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result.map_err(|e| format!("update CLI sign-in: {e}"))
+}
+
+/// Whether a file holds a sign-in: a non-empty JSON object, not a placeholder
+/// or a half-written file. Nothing else is ever copied in either direction.
+fn holds_sign_in(path: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let bytes = std::fs::read(path).ok()?;
+    match serde_json::from_slice::<serde_json::Value>(&bytes).ok()? {
+        serde_json::Value::Object(map) if !map.is_empty() => Some(map),
+        _ => None,
+    }
+}
+
+/// Bring a bot's copy of a sign-in up to date with the owner's.
+fn refresh_credential(source: &Path, copy: &Path, budget: &mut CopyBudget) -> Result<(), String> {
+    // A bot with no copy yet gets the owner's file as it is, as it always has;
+    // an existing copy that is unsafe (a symlink) is refused here.
+    let had_copy = std::fs::symlink_metadata(copy).is_ok();
+    copy_file_if_missing(source, copy, budget)?;
+    if !had_copy {
+        // Keep the original's time, so later comparisons are between sign-ins.
+        if let (Ok(modified), Ok(file)) = (
+            std::fs::metadata(source).and_then(|m| m.modified()),
+            std::fs::File::options().write(true).open(copy),
+        ) {
+            let _ = file.set_modified(modified);
+        }
+        return Ok(());
+    }
+    let Some(source_time) = regular_file_mtime(source) else {
+        return Ok(());
+    };
+    if holds_sign_in(source).is_none() {
+        // A damaged owner file does not replace a bot's copy.
+        return Ok(());
+    }
+    let newer = regular_file_mtime(copy).is_none_or(|copy_time| source_time > copy_time);
+    if !newer || std::fs::read(source).ok() == std::fs::read(copy).ok() {
+        return Ok(());
+    }
+    replace_private_file(source, copy)
+}
+
+/// After a turn, hand a sign-in the bot refreshed back to the owner's file,
+/// so the owner and the other bots continue from the newest token rather than
+/// one the refresh has just invalidated.
+///
+/// Only when the bot's copy is newer: if the owner signed in meanwhile, their
+/// file wins and reaches the bot on its next turn. Only a real sign-in that
+/// keeps every field the owner's file has is written, and the owner's previous
+/// file is kept beside it as `<name>.orgbot-previous`.
+///
+/// `owner_home` must be the home the private copy was made from. It is passed
+/// in rather than read from `HOME`, so nothing but the real owner's profile is
+/// ever written; a test run once replaced a real sign-in with a fixture here.
+pub fn write_back_credentials_to(private_home: &Path, owner_home: &Path) -> Result<(), String> {
+    let source_home = owner_home;
+    for cli_dir in [".claude", ".codex", ".grok"] {
+        for file in credential_files(cli_dir) {
+            let copy = private_home.join(cli_dir).join(file);
+            let source = source_home.join(cli_dir).join(file);
+            let (Some(copy_time), Some(source_time)) =
+                (regular_file_mtime(&copy), regular_file_mtime(&source))
+            else {
+                // A signed-out owner stays signed out.
+                continue;
+            };
+            if copy_time <= source_time || std::fs::read(&copy).ok() == std::fs::read(&source).ok() {
+                continue;
+            }
+            let Some(refreshed) = holds_sign_in(&copy) else {
+                continue;
+            };
+            if let Some(current) = holds_sign_in(&source) {
+                if !current.keys().all(|key| refreshed.contains_key(key)) {
+                    // Not the same kind of sign-in; leave the owner's alone.
+                    continue;
+                }
+            }
+            let previous = source.with_file_name(format!("{file}.orgbot-previous"));
+            replace_private_file(&source, &previous)?;
+            replace_private_file(&copy, &source)?;
+        }
+    }
+    Ok(())
+}
+
 fn copy_file_if_missing(from: &Path, to: &Path, budget: &mut CopyBudget) -> Result<(), String> {
     use std::io::{Read, Write};
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -1292,6 +1441,74 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn bot_sign_ins_stay_in_step_with_the_owners() {
+        use std::time::{Duration, SystemTime};
+        let root = std::env::temp_dir().join(format!(
+            "orgbot-signin-sync-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let owner = root.join("owner");
+        let profiles = root.join("profiles");
+        std::fs::create_dir_all(owner.join(".claude")).unwrap();
+        std::fs::create_dir_all(&profiles).unwrap();
+        let owner_file = owner.join(".claude/.credentials.json");
+        let sign_in = |token: &str| format!(r#"{{"claudeAiOauth":{{"accessToken":"{token}"}}}}"#);
+        let set = |path: &Path, text: &str, age_secs: u64| {
+            std::fs::write(path, text).unwrap();
+            let file = std::fs::File::options().write(true).open(path).unwrap();
+            file.set_modified(SystemTime::now() - Duration::from_secs(age_secs))
+                .unwrap();
+        };
+        let read = |path: &Path| std::fs::read_to_string(path).unwrap();
+
+        // First turn: the bot gets the owner's sign-in.
+        set(&owner_file, &sign_in("t1"), 500);
+        let home = private_home_from(&profiles, &owner, None).unwrap();
+        let bot_file = home.join(".claude/.credentials.json");
+        assert_eq!(read(&bot_file), sign_in("t1"));
+
+        // The owner signs in again: the bot's next turn uses the new sign-in.
+        set(&owner_file, &sign_in("t2"), 400);
+        private_home_from(&profiles, &owner, None).unwrap();
+        assert_eq!(read(&bot_file), sign_in("t2"));
+
+        // The bot's CLI refreshes its copy: it goes back to the owner, the
+        // owner's previous file is kept, and the older owner file does not
+        // overwrite the bot's on the next turn.
+        set(&bot_file, &sign_in("t3"), 300);
+        write_back_credentials_to(&home, &owner).unwrap();
+        assert_eq!(read(&owner_file), sign_in("t3"));
+        assert_eq!(read(&owner.join(".claude/.credentials.json.orgbot-previous")), sign_in("t2"));
+        private_home_from(&profiles, &owner, None).unwrap();
+        assert_eq!(read(&bot_file), sign_in("t3"));
+
+        // Anything that is not a real sign-in is never written to the owner:
+        // not a placeholder, and not a different kind of file.
+        set(&bot_file, "modified-private-auth", 200);
+        write_back_credentials_to(&home, &owner).unwrap();
+        assert_eq!(read(&owner_file), sign_in("t3"));
+        set(&bot_file, r#"{"somethingElse":true}"#, 100);
+        write_back_credentials_to(&home, &owner).unwrap();
+        assert_eq!(read(&owner_file), sign_in("t3"));
+
+        // And a damaged owner file is not spread to the bot.
+        set(&owner_file, "garbage", 50);
+        private_home_from(&profiles, &owner, None).unwrap();
+        assert_eq!(read(&bot_file), r#"{"somethingElse":true}"#);
+
+        // A signed-out owner is not signed back in by a bot.
+        std::fs::remove_file(&owner_file).unwrap();
+        set(&bot_file, &sign_in("t4"), 0);
+        write_back_credentials_to(&home, &owner).unwrap();
+        assert!(!owner_file.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn new_cli_private_home_does_not_seed_other_provider_profiles() {
         use std::os::unix::fs::symlink;

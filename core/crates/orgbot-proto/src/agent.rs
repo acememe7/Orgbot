@@ -107,6 +107,11 @@ pub enum ProviderRef {
         /// tasks, hand work off, and ask for review mid-episode.
         #[serde(default)]
         mcp: bool,
+        /// How hard the agent reasons, as the CLI's own effort level (`low`,
+        /// `medium`, `high`, `xhigh`, and `max` for Claude Code). Empty keeps
+        /// the CLI's default.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        effort: String,
     },
 }
 

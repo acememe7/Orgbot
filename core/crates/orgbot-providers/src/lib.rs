@@ -98,13 +98,11 @@ pub fn build(reference: &ProviderRef) -> Result<Arc<dyn Provider>> {
             workdir,
             policy,
             mcp,
-        } => Arc::new(AgentCliProvider::new(
-            *cli,
-            model.clone(),
-            workdir.clone(),
-            *policy,
-            *mcp,
-        )?),
+            effort,
+        } => Arc::new(
+            AgentCliProvider::new(*cli, model.clone(), workdir.clone(), *policy, *mcp)?
+                .with_effort(effort)?,
+        ),
     })
 }
 

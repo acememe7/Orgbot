@@ -47,6 +47,13 @@ main{overflow:hidden}
 .media-frame{min-width:0}
 .media-frame img{width:100%;border:1px solid #d1d4cd}
 .media-frame figcaption{margin-top:.75rem;color:var(--muted);font-size:.88rem}
+.media-frame.panel img{width:auto;max-width:min(100%,420px);display:block;margin:0 auto}
+.media-frame.panel figcaption{text-align:center}
+.split-single{grid-template-columns:1fr}
+.split-single .split-copy p{max-width:44rem}
+.plain-list{padding-left:1.1rem;margin:1rem 0}
+.plain-list li{margin:.4rem 0}
+.evidence-shots{margin-top:2rem;align-items:start}
 .surface-band{background:var(--paper-deep)}
 .steps{counter-reset:step;display:grid;grid-template-columns:repeat(3,1fr);gap:2rem}
 .step{border-top:1px solid var(--green);padding-top:1rem}

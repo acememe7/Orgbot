@@ -107,8 +107,11 @@ async fn a_stalled_model_does_not_block_snapshot_human_input_or_pause() {
             .is_some()
     );
     let mut events = handle.subscribe();
-    // Each request deliberately never responds. Both messages must still be
-    // committed once and included in the next request, including after rearming.
+    // The request deliberately never responds. Both messages must still be
+    // committed once and shown at once, durable before they are shown, and
+    // the stalled turn must not be cut short by them: the owner's input never
+    // interrupts a bot that is working.
+    let journal = path.with_file_name("owner-input.jsonl");
     for body in ["@idle change direction", "@idle use the new research"] {
         assert!(handle.try_send(orgbot_server::Control::HumanMessage {
             files: vec![],
@@ -117,15 +120,32 @@ async fn a_stalled_model_does_not_block_snapshot_human_input_or_pause() {
             task: None,
             reply_to: None,
         }));
-        let next = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-            .await.unwrap().unwrap();
-        assert!(next["messages"].to_string().contains(body));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let orgbot_server::ServerMessage::Event { envelope, .. } =
+                    events.recv().await.unwrap()
+                {
+                    if matches!(&envelope.event,
+                        Event::MessagePosted { message } if message.body == body)
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the message is shown while the model is still stalled");
+        let durable = std::fs::read_to_string(&journal).unwrap_or_default()
+            + &std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(durable.contains(body), "echo must follow a durable write");
         let backlog = handle.backlog(orgbot_proto::Seq::ZERO).await;
         assert_eq!(backlog.iter().filter(|e| matches!(&e.event,
             Event::MessagePosted { message } if message.body == body)).count(), 1);
         assert!(!backlog.iter().any(|e| matches!(&e.event, Event::AgentErrored { .. })));
-        let saved = std::fs::read_to_string(&path).unwrap();
-        assert!(saved.contains(body), "echo must follow durable save");
+        assert!(
+            requests.try_recv().is_err(),
+            "the stalled turn must not be abandoned and restarted"
+        );
     }
     assert!(
         handle

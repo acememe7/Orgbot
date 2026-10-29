@@ -37,6 +37,11 @@ impl Author {
     }
 }
 
+/// The author name on messages the room writes on the owner's behalf, such as
+/// a recorded decision answer. It is not the owner's own name, so anything
+/// that wants to know what to call the owner must skip it.
+pub const OWNER_STAND_IN: &str = "Owner";
+
 /// Whether an `@tag` addresses the whole room rather than one bot.
 ///
 /// `@all` is the documented form; `@everyone` and `@everybody` are accepted

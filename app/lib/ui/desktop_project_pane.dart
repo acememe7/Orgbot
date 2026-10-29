@@ -9,12 +9,30 @@ import '../workspace/desktop_files.dart';
 import 'workspace_native_surface.dart';
 import 'workspace_text_editor.dart';
 
+/// Asks the project pane to show a file: a link a bot posted in the chat.
+class ProjectFileRequests extends ChangeNotifier {
+  String? _path;
+
+  void show(String path) {
+    _path = path;
+    notifyListeners();
+  }
+
+  /// The file asked for, once; null when nothing is waiting.
+  String? take() {
+    final path = _path;
+    _path = null;
+    return path;
+  }
+}
+
 class DesktopProjectPane extends StatefulWidget {
   const DesktopProjectPane({
     super.key,
     required this.projectPath,
     this.roomId,
     this.onProjectSelected,
+    this.requests,
     @visibleForTesting this.initialRootForTesting,
     @visibleForTesting this.gitOutputForTesting,
     @visibleForTesting this.gitActionForTesting,
@@ -23,6 +41,9 @@ class DesktopProjectPane extends StatefulWidget {
   final String? projectPath;
   final String? roomId;
   final ValueChanged<String>? onProjectSelected;
+
+  /// Files to show, asked for from outside the pane.
+  final ProjectFileRequests? requests;
 
   @visibleForTesting
   final String? initialRootForTesting;
@@ -159,15 +180,55 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
       _root = testRoot;
       _current = testRoot;
     }
+    widget.requests?.addListener(_onRequest);
     final path = widget.projectPath?.trim();
     if (path != null && path.isNotEmpty) {
-      unawaited(_setRoot(path).then<void>((_) {}));
+      // A link clicked before the pane existed is shown once it has loaded.
+      unawaited(_setRoot(path).then<void>((_) => _onRequest()));
+    }
+  }
+
+  void _onRequest() {
+    if (_root == null) return;
+    final path = widget.requests?.take();
+    if (path != null) unawaited(_reveal(path));
+  }
+
+  /// Browse to a file named in the chat and preview it.
+  Future<void> _reveal(String path) async {
+    final root = _root;
+    if (root == null) return;
+    try {
+      final canonical = await File(path).resolveSymbolicLinks();
+      _ensureWithinRoot(root, canonical);
+      if (!mounted) return;
+      setState(() {
+        _activePanel = 'files';
+        _current = File(canonical).parent.path;
+      });
+      await _refresh();
+      if (!mounted) return;
+      await _select(
+        _ProjectEntry(
+          path: canonical,
+          name: canonical.split(Platform.pathSeparator).last,
+          directory: false,
+          symlink: false,
+          regularFile: await FileSystemEntity.isFile(canonical),
+        ),
+      );
+    } catch (error) {
+      if (mounted) setState(() => _previewError = '$error');
     }
   }
 
   @override
   void didUpdateWidget(covariant DesktopProjectPane oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.requests != widget.requests) {
+      oldWidget.requests?.removeListener(_onRequest);
+      widget.requests?.addListener(_onRequest);
+    }
     if (oldWidget.projectPath != widget.projectPath) {
       final path = widget.projectPath?.trim();
       if (path == null || path.isEmpty) {
@@ -194,6 +255,7 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
 
   @override
   void dispose() {
+    widget.requests?.removeListener(_onRequest);
     unawaited(_removeThumbnail());
     _webAddress.dispose();
     for (final draft in _editDrafts.values) {

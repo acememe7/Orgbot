@@ -481,6 +481,125 @@ Path('/tmp/private.txt').write_text('temporary')
         self.assertEqual((work / "cwd-check").read_text(encoding="utf-8"), "yes")
         self.assertFalse((self.project / "cwd-check").exists())
 
+    def test_sandboxes_reach_the_graphics_card_and_no_other_device(self):
+        work = self.prepare("reviewer", read_only=True)
+        with patch.object(workspace.shutil, "which", return_value="/usr/bin/bwrap"), patch.object(
+            workspace.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+        ) as run:
+            workspace._run(
+                os.fspath(self.state), "reviewer", ["/usr/bin/python3", "-B", "-m", "unittest"],
+                read_only=True, profiles=[], private_home_arg=None, mcp_socket=None, verify=True,
+            )
+        verify = run.call_args.args[0]
+        xdg_data = self.root / "xdg-data"
+        xdg_data.mkdir(mode=0o700)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg_data)}):
+            profile = workspace._agy_profile_paths(create=True)
+            runtime = self.root / "runtime"
+            runtime.mkdir(mode=0o700)
+            (runtime / "bus.sock").touch()
+            binary = self.root / "agy"
+            binary.write_text("synthetic binary", encoding="utf-8")
+            agy = workspace._agy_sandbox_args(profile, binary, runtime)
+        for args in (verify, agy):
+            bound = [args[i + 1] for i, value in enumerate(args[:-1]) if value in ("--dev-bind", "--dev-bind-try")]
+            self.assertIn("/dev/dri", bound)
+            self.assertIn("/dev/nvidiactl", bound)
+            for device in bound:
+                self.assertTrue(device == "/dev/dri" or device == "/dev/kfd" or device.startswith("/dev/nvidia"), device)
+            # Bound over the sandbox's own /dev, not hidden underneath it.
+            self.assertLess(args.index("/dev"), args.index("/dev/dri"))
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
+                         "requires Linux bubblewrap user namespaces")
+    def test_bot_runtime_sees_the_hosts_graphics_devices(self):
+        self.prepare("dev")
+        present = [d for d in ("/dev/dri", "/dev/nvidiactl", "/dev/nvidia0") if os.path.exists(d)]
+        code = f"import os; missing = [d for d in {present!r} if not os.path.exists(d)]; raise SystemExit(7 if missing else 0)"
+        result = workspace._run(os.fspath(self.state), "dev", [sys.executable, "-c", code], read_only=False, profiles=[], private_home_arg=None, mcp_socket=None)
+        self.assertEqual(result, 0)
+
+    def _owner_home_with_secrets(self):
+        home = self.root / "owner-home"
+        for relative, text in {
+            ".ssh/id_ed25519": "personal key",
+            ".ssh/config": "Host everything",
+            ".codex/auth.json": "codex sign-in",
+            ".codex/packages/bin/codex": "the codex program",
+            ".claude.json": "claude account",
+            ".local/share/orgbot/.services/room/service.json": "room token",
+            ".config/opencode/opencode.json": "provider keys",
+            "projects/notes.txt": "ordinary file",
+        }.items():
+            (home / relative).parent.mkdir(parents=True, exist_ok=True)
+            (home / relative).write_text(text, encoding="utf-8")
+        return home
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
+                         "requires Linux bubblewrap user namespaces")
+    def test_bot_runtime_cannot_read_the_owners_keys_sign_ins_or_room_tokens(self):
+        self.prepare("dev")
+        home = self._owner_home_with_secrets()
+        xdg = self.root / "xdg"
+        bot_ssh = xdg / "orgbot" / "bot-ssh"
+        bot_ssh.mkdir(parents=True)
+        os.chmod(bot_ssh, 0o700)
+        for name, text in {"config": "Host hermes-vps", "hermes_ed25519": "bot key", "known_hosts": "hermes host key"}.items():
+            (bot_ssh / name).write_text(text, encoding="utf-8")
+            os.chmod(bot_ssh / name, 0o600)
+        code = (
+            "import os, sys; from pathlib import Path; h = Path(sys.argv[1])\n"
+            "def unreadable(path):\n"
+            "    try: path.read_bytes()\n"
+            "    except PermissionError: return True\n"
+            "    return False\n"
+            "checks = ["
+            "sorted(os.listdir(h / '.ssh')) == ['config', 'hermes_ed25519', 'known_hosts'],"
+            "(h / '.ssh/config').read_text() == 'Host hermes-vps',"
+            "unreadable(h / '.codex/auth.json'),"
+            "unreadable(h / '.claude.json'),"
+            "(h / '.codex/packages/bin/codex').read_text() == 'the codex program',"
+            "not (h / '.local/share/orgbot/.services').exists(),"
+            "not (h / '.config/opencode/opencode.json').exists(),"
+            "(h / 'projects/notes.txt').read_text() == 'ordinary file'];"
+            "raise SystemExit(0 if all(checks) else 10 + checks.index(False))"
+        )
+        owner = SimpleNamespace(pw_dir=os.fspath(home))
+        with patch.object(workspace.pwd, "getpwuid", return_value=owner), patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg)}):
+            result = workspace._run(os.fspath(self.state), "dev", [sys.executable, "-c", code, os.fspath(home)], read_only=False, profiles=[], private_home_arg=None, mcp_socket=None)
+        self.assertEqual(result, 0)
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
+                         "requires Linux bubblewrap user namespaces")
+    def test_bots_get_no_ssh_access_unless_a_safe_bot_folder_exists(self):
+        self.prepare("dev")
+        home = self._owner_home_with_secrets()
+        xdg = self.root / "xdg"
+        bot_ssh = xdg / "orgbot" / "bot-ssh"
+        bot_ssh.mkdir(parents=True)
+        (bot_ssh / "hermes_ed25519").write_text("bot key", encoding="utf-8")
+        os.chmod(bot_ssh, 0o755)  # readable by other users: not trusted
+        code = "import os, sys; raise SystemExit(0 if os.listdir(os.path.join(sys.argv[1], '.ssh')) == [] else 9)"
+        owner = SimpleNamespace(pw_dir=os.fspath(home))
+        with patch.object(workspace.pwd, "getpwuid", return_value=owner), patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg)}):
+            result = workspace._run(os.fspath(self.state), "dev", [sys.executable, "-c", code, os.fspath(home)], read_only=False, profiles=[], private_home_arg=None, mcp_socket=None)
+        self.assertEqual(result, 0)
+
+    def test_bots_run_the_packaged_trash_helper_not_a_stale_per_user_copy(self):
+        packaged_dir = self.root / "usr-bin"
+        stale_dir = self.root / "local-bin"
+        for directory in (packaged_dir, stale_dir):
+            directory.mkdir()
+        packaged = self.root / "orgbot-trash.py"
+        packaged.write_text("#!/usr/bin/python3\n", encoding="utf-8")
+        (packaged_dir / "orgbot-trash").symlink_to(packaged)
+        (stale_dir / "orgbot-trash").write_text('exec python3 "$HOME/.local/lib/orgbot/orgbot-trash.py"\n', encoding="utf-8")
+        args = workspace._packaged_trash_args([os.fspath(stale_dir), os.fspath(packaged_dir)], packaged)
+        self.assertEqual(args, ["--ro-bind", os.fspath(packaged), os.fspath(stale_dir / "orgbot-trash")])
+        # Nothing to cover when the packaged helper comes first, or is absent.
+        self.assertEqual(workspace._packaged_trash_args([os.fspath(packaged_dir), os.fspath(stale_dir)], packaged), [])
+        self.assertEqual(workspace._packaged_trash_args([os.fspath(stale_dir)], self.root / "missing.py"), [])
+
     def test_antigravity_missing_private_auth_fails_before_cli_spawn(self):
         (self.project / ".agents").mkdir()
         hook_source = self.project / ".agents/hooks.json"

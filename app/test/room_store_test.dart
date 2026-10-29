@@ -218,6 +218,47 @@ void main() {
       store.dispose();
     },
   );
+  test('a bot reset from faulted stops showing its old failure', () async {
+    final client = FakeClient();
+    final store = RoomStore(client);
+    store.restore([
+      {
+        'type': 'snapshot',
+        'head': 0,
+        'roster': [
+          {'id': 'bot_e', 'handle': 'ellis', 'status': 'idle'},
+        ],
+        'tasks': [],
+      },
+      event({
+        'event': 'agent_errored',
+        'agent': 'bot_e',
+        'error': 'OAuth session expired and could not be refreshed',
+        'attempt': 1,
+      }, seq: 1),
+      event({
+        'event': 'agent_status_changed',
+        'agent': 'bot_e',
+        'from': 'idle',
+        'to': 'faulted',
+      }, seq: 2),
+    ]);
+    expect(store.failing.single.lastError, contains('OAuth session expired'));
+
+    // The owner resumes the room, or the room retries the bot by itself.
+    store.restore([
+      event({
+        'event': 'agent_status_changed',
+        'agent': 'bot_e',
+        'from': 'faulted',
+        'to': 'idle',
+      }, seq: 3),
+    ]);
+    expect(store.failing, isEmpty);
+    expect(store.agents.single.status, AgentStatus.idle);
+    store.dispose();
+  });
+
   test('a delayed stream completion clears the thinking indicator', () async {
     final client = FakeClient();
     final store = RoomStore(client);

@@ -81,6 +81,13 @@ class RoomClient implements RoomLink {
   WebSocketChannel? _channel;
   StreamSubscription<Object?>? _subscription;
 
+  /// What the person said while the link was down, delivered in order as
+  /// soon as it is up again. Without this a message sent during a reconnect
+  /// stayed on screen as pending and never reached the room.
+  final List<Map<String, Object?>> _outbox = [];
+
+  static const _personInput = {'send_message', 'answer_decision', 'answer_bot'};
+
   final _messages = StreamController<Map<String, Object?>>.broadcast();
   final _state = StreamController<LinkState>.broadcast();
 
@@ -158,7 +165,10 @@ class RoomClient implements RoomLink {
         cancelOnError: false,
       );
       await admission;
-      if (!_closed) _setState(LinkState.connected);
+      if (!_closed) {
+        _setState(LinkState.connected);
+        _flushOutbox();
+      }
     } catch (error) {
       if (!_messages.isClosed) {
         _messages.add({'type': 'error', 'message': error.toString()});
@@ -199,9 +209,26 @@ class RoomClient implements RoomLink {
   /// Send a client message as JSON.
   @override
   void send(Map<String, Object?> message) {
+    // The person's own input waits for the link rather than vanishing.
+    if (_personInput.contains(message['type']) &&
+        (_current != LinkState.connected || _channel == null)) {
+      _outbox.add(message);
+      return;
+    }
     final channel = _channel;
     if (channel == null) return;
-    channel.sink.add(jsonEncode(message));
+    try {
+      channel.sink.add(jsonEncode(message));
+    } on StateError {
+      // The socket closed under us; keep the input for the reconnect.
+      if (_personInput.contains(message['type'])) _outbox.add(message);
+    }
+  }
+
+  void _flushOutbox() {
+    final waiting = List.of(_outbox);
+    _outbox.clear();
+    waiting.forEach(send);
   }
 
   // ---- typed client actions ------------------------------------------------

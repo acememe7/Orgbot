@@ -248,6 +248,7 @@ async fn tightening_cli_policy_discards_previous_conversation_context() {
         workdir: ".".into(),
         policy: AgentPolicy::WorkspaceWrite,
         mcp: false,
+        effort: String::new(),
     };
     room.seat(worker.clone(), claiming()).unwrap();
     room.start().unwrap();
@@ -327,7 +328,10 @@ async fn work_claimed_by_a_turn_that_never_finished_is_recovered() {
         Orchestrator::restore(room.checkpoint(), room_spec(), vec![(worker, claiming())])
             .expect("reopen");
 
-    // Time passes with the bot never coming back.
+    // A reopened room comes back paused, and nothing is reclaimed while it is
+    // paused; the owner resumes it, which renews the claim. Then time passes
+    // with the bot never coming back.
+    reopened.engine_mut().apply(Command::ResumeRoom).unwrap();
     reopened.engine_mut().task_mut(task).unwrap().lease_expires_at =
         Some(Timestamp::now().plus_millis(-1));
     reopened

@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -1426,6 +1427,51 @@ def cleanup(root: Path, *, now: float | None = None, dry_run: bool = False) -> t
     return purged, errors
 
 
+def _working_copy() -> Path | None:
+    """The bot working copy this helper runs in, if it runs in one.
+
+    OrgBots runs each bot on a private copy of the project and names it in
+    ORGBOT_WORKSPACE. The owner's trash is out of reach from there, and need
+    not be reached: the original stays in the project until the owner approves
+    its removal, and then goes to the owner's trash.
+    """
+    raw = os.environ.get("ORGBOT_WORKSPACE")
+    if not raw or not os.path.isabs(raw) or os.path.islink(raw) or not os.path.isdir(raw):
+        return None
+    return Path(os.path.realpath(raw))
+
+
+def _inside(workspace: Path, source: Path) -> Path | None:
+    """`source` relative to `workspace`, when it really is in there."""
+    absolute = Path(os.path.abspath(source))
+    parent = Path(os.path.realpath(absolute.parent))
+    if parent != workspace and workspace not in parent.parents:
+        return None
+    relative = (parent / absolute.name).relative_to(workspace)
+    return relative if relative.parts else None
+
+
+def working_copy_move(workspace: Path, relative: Path) -> str:
+    """Take a file out of a bot's working copy, keeping the bot's version."""
+    source = workspace / relative
+    if not os.path.lexists(source):
+        _fail(f"No such file in the working copy: {relative}")
+    held = (
+        _absolute_env_path("XDG_DATA_HOME", Path.home() / ".local/share")
+        / "orgbots" / "working-copy-trash"
+        / f"{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    )
+    destination = held / relative
+    destination.parent.mkdir(parents=True, mode=0o700)
+    # The working copy and the private home are separate mounts in the
+    # sandbox, so this copies where a rename cannot cross.
+    shutil.move(os.fspath(source), os.fspath(destination))
+    return (
+        f"Removed {relative} from your working copy (your version is kept at {destination}). "
+        "The original stays in the project until the owner approves its removal, then goes to the owner's trash."
+    )
+
+
 def _cli() -> int:
     parser = argparse.ArgumentParser(description="Move files to recoverable, project-grouped OrgBots trash")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1445,6 +1491,18 @@ def _cli() -> int:
     sub.add_parser("sync-systemd", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
+        if args.command in ("config", "configure") and _working_copy() is not None:
+            # Asked from a bot's working copy, where no trash location applies.
+            # Reporting the owner's selection here sent a bot to ask the owner
+            # to pick storage it neither needs nor can reach.
+            if args.command == "configure":
+                _fail("Not needed in a working copy: `orgbot-trash move` works here as it is")
+            print(json.dumps({
+                "mode": "working_copy",
+                "requires_selection": False,
+                "note": "move takes files out of this working copy and keeps them in your private home; the original goes to the owner's trash when the owner approves its removal",
+            }, sort_keys=True))
+            return 0
         if args.command == "config":
             print(json.dumps(_config_result(), sort_keys=True))
             return 0
@@ -1455,6 +1513,17 @@ def _cli() -> int:
             with _selected_root_locked() as root:
                 _sync_systemd(root)
             return 0
+        workspace = _working_copy() if args.command == "move" else None
+        if workspace is not None:
+            inside = [_inside(workspace, source) for source in args.paths]
+            if all(inside):
+                if args.expected_sha256 is not None:
+                    _fail("Expected SHA-256 applies to the owner's project, not a working copy")
+                for relative in inside:
+                    print(working_copy_move(workspace, relative))
+                return 0
+            if any(inside):
+                _fail("Trash working-copy files and other files in separate commands")
         mutating = args.command in ("move", "restore") or (args.command == "cleanup" and not args.dry_run)
         with _selected_root_locked(persist_selection=mutating) as root:
             if args.command == "move":

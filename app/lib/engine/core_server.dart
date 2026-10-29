@@ -221,6 +221,44 @@ Future<CoreServer> startRoom(
   return CoreServer._(process, 'ws://$address/ws', token, file, diagnostics);
 }
 
+/// Where a room's Linux background service keeps its config and saved state.
+String linuxServiceDirectory(String roomId) {
+  final dataHome = Platform.environment['XDG_DATA_HOME']?.trim();
+  final home = dataHome == null || dataHome.isEmpty
+      ? '${Platform.environment['HOME'] ?? '.'}/.local/share'
+      : dataHome;
+  return '$home/orgbot/.services/$roomId';
+}
+
+/// Stop a room's background service if one is running, whether or not this
+/// app opened the room in this session. Used when a room is deleted, so a
+/// deleted room cannot keep running out of sight. Its saved state stays.
+Future<void> stopLinuxRoomService(String roomId) async {
+  if (!Platform.isLinux || !RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(roomId)) {
+    return;
+  }
+  final directory = Directory(linuxServiceDirectory(roomId));
+  if (!await directory.exists()) return;
+  final engine = findEngine();
+  if (!engine.available) return;
+  try {
+    final status = await _serviceCommand(engine.path!, [
+      'status',
+      '--directory',
+      directory.path,
+    ]);
+    if (_decodeServiceResult(status, required: false)?['running'] == true) {
+      await _serviceCommand(engine.path!, [
+        'stop',
+        '--directory',
+        directory.path,
+      ]);
+    }
+  } catch (_) {
+    // Deleting the room from the list must not fail on a service hiccup.
+  }
+}
+
 Future<CoreServer> _startLinuxService(
   RoomFile room,
   String roomId,
@@ -229,11 +267,7 @@ Future<CoreServer> _startLinuxService(
   if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(roomId)) {
     throw EngineStartError('Invalid room identifier.');
   }
-  final dataHome = Platform.environment['XDG_DATA_HOME']?.trim();
-  final home = dataHome == null || dataHome.isEmpty
-      ? '${Platform.environment['HOME'] ?? '.'}/.local/share'
-      : dataHome;
-  final directory = Directory('$home/orgbot/.services/$roomId').absolute;
+  final directory = Directory(linuxServiceDirectory(roomId)).absolute;
   await directory.create(recursive: true);
   await _setMode(directory.path, '700');
   final roomFile = File('${directory.path}/room.toml');

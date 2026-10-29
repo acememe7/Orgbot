@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:orgbot_app/orgbot/library.dart';
+import 'package:orgbot_app/orgbot/models.dart';
 import 'package:orgbot_app/ui/orgbot_screen.dart';
 
 void main() {
@@ -88,6 +89,84 @@ void main() {
     expect(powers.mayInspect, isTrue);
     expect(powers.mayCreateTasks, isFalse);
     expect(powers.maySubmit, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a CLI bot can be given an effort level', (tester) async {
+    final library = Library(saver: MemorySaver());
+    await library.load();
+    addTearDown(library.dispose);
+    await tester.pumpWidget(
+      MaterialApp(home: OrgBotScreen(library: library, desktopClis: true)),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Team').first);
+    await tester.pump();
+    await tester.tap(find.byTooltip('New bot'));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final effort = find.byKey(const ValueKey('bot-effort'));
+    await tester.ensureVisible(effort);
+    expect(find.text('Default'), findsOneWidget);
+    await tester.tap(effort);
+    await tester.pump(const Duration(milliseconds: 400));
+    // Codex, the default CLI here, offers no Max.
+    expect(find.text('Max'), findsNothing);
+    await tester.tap(find.text('High').last);
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final nameField = find.byWidgetPredicate(
+      (widget) => widget is TextField && widget.decoration?.labelText == 'Name',
+    );
+    await tester.ensureVisible(nameField);
+    await tester.enterText(nameField, 'Thinker');
+    await tester.tap(find.text('Save').last);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(library.bots.single.effort, 'high');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a room can be deleted from its settings after confirming', (
+    tester,
+  ) async {
+    final library = Library(saver: MemorySaver());
+    await library.load();
+    addTearDown(library.dispose);
+    final bot = library.addBot(
+      BotDef(name: 'Iris', handle: 'iris', provider: ProviderKind.scripted),
+    );
+    library.addRoom(
+      RoomDef(name: 'Old experiment', goal: 'g', bots: [RoomSlot(bot.id)]),
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: OrgBotScreen(library: library, desktopClis: true)),
+    );
+    await tester.pumpAndSettle();
+
+    Future<void> openSettingsAndDelete() async {
+      await tester.tap(find.byTooltip('Session settings'));
+      await tester.pump(const Duration(milliseconds: 400));
+      final delete = find.byKey(const ValueKey('delete-room'));
+      await tester.ensureVisible(delete);
+      await tester.tap(delete);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('Delete “Old experiment”?'), findsOneWidget);
+    }
+
+    // Cancelling keeps it.
+    await openSettingsAndDelete();
+    await tester.tap(find.text('Cancel').last);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(library.rooms, hasLength(1));
+    await tester.tap(find.text('Cancel').last);
+    await tester.pump(const Duration(milliseconds: 400));
+
+    // Confirming deletes it and closes the settings.
+    await openSettingsAndDelete();
+    await tester.tap(find.byKey(const ValueKey('confirm-delete-room')));
+    await tester.pumpAndSettle();
+    expect(library.rooms, isEmpty);
+    expect(find.text('Old experiment'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }

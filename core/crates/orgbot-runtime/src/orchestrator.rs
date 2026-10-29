@@ -31,7 +31,7 @@ use orgbot_proto::{AgentId, AgentSpec, AgentStatus, TaskId, Timestamp};
 use orgbot_providers::{Provider, StreamEvent};
 use tokio::sync::mpsc;
 
-use crate::bot::{Bot, TurnReport};
+use crate::bot::{Bot, BotMemory, TurnReport};
 use crate::shared::SharedEngine;
 
 /// Why a run stopped.
@@ -82,12 +82,78 @@ pub struct Orchestrator {
     /// it is already talking to is usually where the servers live.
     workspace: Option<crate::workspace::Workspace>,
     allowances: Option<crate::allowance::Allowances>,
+    /// Bots handed back by turns that were cut short. A running turn holds
+    /// its bot outside `bots`, so other bots can be scheduled meanwhile; if
+    /// the turn is dropped (a pause, a stop, a deadline) the bot is parked
+    /// here rather than lost, and put back before anything reads `bots`.
+    parked: Arc<std::sync::Mutex<Vec<(AgentId, Bot)>>>,
+    /// Backends of the turns now running, so filling a free slot respects the
+    /// per-backend cap the same way a fresh batch does.
+    busy_backends: BTreeMap<String, usize>,
+    /// Each bot now in a turn, as it was when the turn began. A save made
+    /// mid-run writes this for it: what a turn reads is only marked seen when
+    /// the turn ends, so a room reopened from that save runs the turn again.
+    leased_memory: BTreeMap<AgentId, BotMemory>,
+    /// Writes the room to disk while a run is under way.
+    autosave: Option<Autosave>,
 }
 
+/// Saves the room's checkpoint. A run lasts as long as its slowest turn, and
+/// an agent CLI can work for an hour; the room must not go that long unsaved.
+#[derive(Clone)]
+pub struct Autosave(pub Arc<dyn Fn(serde_json::Value) + Send + Sync>);
+
+impl std::fmt::Debug for Autosave {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Autosave")
+    }
+}
+
+/// How long a bot whose last turn achieved nothing waits before another, when
+/// it still has something to do. A run now lasts as long as there is work, so
+/// "not again in this run" meant never: such bots sat idle until their claims
+/// lapsed.
+const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(2 * 60);
+
+/// How often a run saves the room while turns are under way.
+const AUTOSAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(2 * 60);
+
+/// How often a run looks for a free slot it could fill.
+const REFILL_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A bot on loan to its running turn; parks the bot if the turn is dropped.
+struct TurnLease {
+    id: AgentId,
+    bot: Option<Bot>,
+    parked: Arc<std::sync::Mutex<Vec<(AgentId, Bot)>>>,
+}
+
+impl Drop for TurnLease {
+    fn drop(&mut self) {
+        if let Some(bot) = self.bot.take() {
+            if let Ok(mut parked) = self.parked.lock() {
+                parked.push((self.id, bot));
+            }
+        }
+    }
+}
+
+type TurnOutcome = (AgentId, Bot, Result<TurnReport, orgbot_providers::ProviderError>);
+
 impl Orchestrator {
+    /// Put back every bot whose turn was dropped.
+    fn reclaim(&mut self) {
+        let parked = std::mem::take(&mut *self.parked.lock().unwrap());
+        for (id, bot) in parked {
+            self.bots.insert(id, bot);
+        }
+        self.busy_backends.clear();
+    }
+
     /// Expire temporary capabilities after a caller cancels a running batch,
     /// before saving the paused room or starting another turn.
     pub async fn finish_interrupted_turns(&mut self) {
+        self.reclaim();
         for bot in self.bots.values_mut() {
             bot.finish_turn(&self.engine).await;
         }
@@ -98,7 +164,15 @@ impl Orchestrator {
         let engine = self.engine.borrow();
         serde_json::json!({
             "version": 1, "engine": &*engine,
-            "bots": self.bots.iter().map(|(id, bot)| (*id, bot.memory())).collect::<BTreeMap<_, _>>(),
+            "bots": self
+                .bots
+                .iter()
+                .map(|(id, bot)| (*id, bot.memory()))
+                // A bot parked by a dropped turn is still part of the room.
+                .chain(self.parked.lock().unwrap().iter().map(|(id, bot)| (*id, bot.memory())))
+                // So is one in a turn right now.
+                .chain(self.leased_memory.iter().map(|(id, memory)| (*id, memory.clone())))
+                .collect::<BTreeMap<_, _>>(),
             "cursor": self.cursor,
         })
     }
@@ -153,6 +227,10 @@ impl Orchestrator {
             last_said: BTreeMap::new(),
             workspace: None,
             allowances: None,
+            parked: Default::default(),
+            busy_backends: BTreeMap::new(),
+            leased_memory: BTreeMap::new(),
+            autosave: None,
         };
         for (mut configured, provider) in providers {
             let saved = restored
@@ -195,6 +273,10 @@ impl Orchestrator {
             last_said: BTreeMap::new(),
             workspace: None,
             allowances: None,
+            parked: Default::default(),
+            busy_backends: BTreeMap::new(),
+            leased_memory: BTreeMap::new(),
+            autosave: None,
         }
     }
 
@@ -257,6 +339,11 @@ impl Orchestrator {
         for bot in self.bots.values_mut() {
             bot.attachments_root = Some(root.clone());
         }
+    }
+
+    /// Save the room every few minutes while a run is under way.
+    pub fn attach_autosave(&mut self, save: Autosave) {
+        self.autosave = Some(save);
     }
 
     /// Yield API waits to human input without interrupting workspace operations.
@@ -404,6 +491,22 @@ impl Orchestrator {
         })
     }
 
+    /// Whether an unseen message from the owner asks this bot something.
+    fn has_unanswered_owner_ask(&self, engine: &Engine, agent: AgentId) -> bool {
+        let Some(bot) = self.bots.get(&agent) else {
+            return false;
+        };
+        let roles = engine
+            .agent(agent)
+            .map(|spec| spec.roles.clone())
+            .unwrap_or_default();
+        engine.events_since(bot.last_seen()).any(|envelope| {
+            matches!(&envelope.event, Event::MessagePosted { message }
+                if matches!(message.author, orgbot_proto::Author::Human { .. })
+                    && message.wakes(agent, &roles))
+        })
+    }
+
     /// The next bot that should act, if any.
     pub fn next_actor(&self) -> Option<AgentId> {
         self.next_actors(1).first().copied()
@@ -472,26 +575,55 @@ impl Orchestrator {
     /// coordinators drawing up plans at the same moment produces two sets of
     /// tasks for the same goal, which is worse than a wasted turn.
     pub fn next_actors(&self, limit: usize) -> Vec<AgentId> {
+        self.pick_actors(limit, &mut BTreeMap::new(), |_| true)
+    }
+
+    /// [`Self::next_actors`] for a run already under way.
+    ///
+    /// `reserved` holds what bots still mid-turn were woken for, and gains
+    /// what is reserved for the bots picked now. Without it, a slot freed
+    /// halfway through a run is filled as if nobody were working: a second
+    /// inspector is woken for the review the first is still doing, and
+    /// arrives to find it done. Only bots `eligible` allows are considered.
+    fn pick_actors(
+        &self,
+        limit: usize,
+        reserved: &mut BTreeMap<AgentId, Reserved>,
+        eligible: impl Fn(AgentId) -> bool,
+    ) -> Vec<AgentId> {
         if self.rotation.is_empty() || limit == 0 {
             return Vec::new();
         }
         let engine = self.engine.borrow();
         let mut chosen = Vec::new();
-        // Work an earlier bot in this batch is expected to take.
-        let mut earmarked: BTreeSet<TaskId> = BTreeSet::new();
-        let mut deliveries = engine.awaiting_delivery().len();
+        // Work a bot already picked is expected to take.
+        let mut earmarked: BTreeSet<TaskId> = reserved
+            .values()
+            .filter_map(|held| match held {
+                Reserved::Task(task) => Some(*task),
+                _ => None,
+            })
+            .collect();
+        let mut deliveries = engine.awaiting_delivery().len().saturating_sub(
+            reserved
+                .values()
+                .filter(|held| matches!(held, Reserved::Delivery))
+                .count(),
+        );
         // Bots sharing a backend share its rate limit, so starting several at
         // once turns concurrency into 429s rather than throughput. The turns
         // are spent either way; the work only gets done if the request lands.
         let per_backend = engine.room().spec.limits.parallel_per_backend();
-        let mut in_flight: BTreeMap<String, usize> = BTreeMap::new();
+        // Turns already running count against their backend's cap.
+        let mut in_flight: BTreeMap<String, usize> = self.busy_backends.clone();
 
         let routing = crate::allowance::routing(self.allowances.as_ref());
         let mut candidates = (0..self.rotation.len())
             .map(|offset| self.rotation[(self.cursor + offset) % self.rotation.len()])
             .collect::<Vec<_>>();
         candidates.retain(|agent| {
-            self.bots.get(agent).is_some_and(|bot| bot.available())
+            eligible(*agent)
+                && self.bots.get(agent).is_some_and(|bot| bot.available())
                 && engine.status(*agent).is_available()
                 && engine
                     .agent(*agent)
@@ -504,9 +636,10 @@ impl Orchestrator {
             })
         });
         // Answering the request already provides the planning turn.
-        let mut planner_taken = candidates
-            .iter()
-            .any(|agent| self.has_unanswered_message(&engine, *agent));
+        let mut planner_taken = reserved.values().any(|held| matches!(held, Reserved::Planning))
+            || candidates
+                .iter()
+                .any(|agent| self.has_unanswered_message(&engine, *agent));
         candidates.sort_by_key(|agent| {
             let backend = engine
                 .agent(*agent)
@@ -540,6 +673,7 @@ impl Orchestrator {
                         continue;
                     };
                     earmarked.insert(task);
+                    reserved.insert(agent, Reserved::Task(task));
                 }
                 Wake::Planning => {
                     if planner_taken
@@ -551,12 +685,14 @@ impl Orchestrator {
                         continue;
                     }
                     planner_taken = true;
+                    reserved.insert(agent, Reserved::Planning);
                 }
                 Wake::Delivery => {
                     if deliveries == 0 {
                         continue;
                     }
                     deliveries -= 1;
+                    reserved.insert(agent, Reserved::Delivery);
                 }
                 Wake::Review { queue } => {
                     // The review queue is shared, not per-bot: every inspector
@@ -571,6 +707,7 @@ impl Orchestrator {
                         continue;
                     };
                     earmarked.insert(task);
+                    reserved.insert(agent, Reserved::Task(task));
                 }
                 // Nobody else can act on these, so there is nothing to divide.
                 Wake::Handoff | Wake::Question | Wake::HeldWork => {}
@@ -581,6 +718,26 @@ impl Orchestrator {
             chosen.push(agent);
         }
         chosen
+    }
+
+    /// Bots with something to do that are waiting only for a free slot.
+    ///
+    /// From the live room: Sol's task was unblocked while the other two bots
+    /// on its account held both of that account's slots. Sol waited seventeen
+    /// minutes for a turn and lost the task for "not reporting progress" it
+    /// never had the chance to make. A faulted or offline bot is not waiting,
+    /// so its claims still lapse.
+    fn waiting_for_a_slot(&self) -> Vec<AgentId> {
+        let engine = self.engine.borrow();
+        self.rotation
+            .iter()
+            .copied()
+            .filter(|agent| {
+                self.bots.get(agent).is_some_and(|bot| bot.available())
+                    && engine.status(*agent).is_available()
+                    && self.wake_reason(&engine, *agent).is_some()
+            })
+            .collect()
     }
 
     /// Give one bot one turn.
@@ -609,19 +766,62 @@ impl Orchestrator {
         limit: usize,
         sink: Option<mpsc::Sender<StreamEvent>>,
     ) -> Vec<TurnReport> {
-        let chosen = self.next_actors(limit);
+        // The single stream goes to the first bot chosen, which is the bot
+        // callers tag it with (they peek `next_actors`).
+        self.reclaim();
+        let lead = self.next_actors(limit).first().copied();
+        let sink = std::sync::Mutex::new(sink);
+        let sinks = |agent| {
+            if Some(agent) == lead {
+                sink.lock().unwrap().take()
+            } else {
+                None
+            }
+        };
+        self.run_turns(limit, &sinks, false).await
+    }
+
+    /// Like [`Self::step_many`], with a live stream for every running bot.
+    pub async fn step_many_with<F>(&mut self, limit: usize, sinks: &F) -> Vec<TurnReport>
+    where
+        F: Fn(AgentId) -> Option<mpsc::Sender<StreamEvent>> + Sync,
+    {
+        self.run_turns(limit, sinks, false).await
+    }
+
+    /// Give up to `limit` bots a turn at once, keeping slots full as turns end.
+    ///
+    /// A batch used to wait for its slowest turn before anyone else could
+    /// start, so a bot the owner had just asked something sat idle behind an
+    /// unrelated agent CLI working for many minutes. Now, whenever a slot is
+    /// free (a turn finished, or someone became actionable), the next bot
+    /// with something to do starts, for as long as the run lasts: a bot goes
+    /// again after a productive turn, at once when the owner asks it
+    /// something, and otherwise after [`RETRY_AFTER`]. The room is saved every [`AUTOSAVE_EVERY`] meanwhile, when
+    /// an [`Autosave`] is attached.
+    ///
+    /// `sinks` gives each bot its own live stream, tagged with it, so every
+    /// running bot shows what it is doing.
+    pub async fn step_rolling<F>(&mut self, limit: usize, sinks: &F) -> Vec<TurnReport>
+    where
+        F: Fn(AgentId) -> Option<mpsc::Sender<StreamEvent>> + Sync,
+    {
+        self.run_turns(limit, sinks, true).await
+    }
+
+    /// Run a batch of turns; with `refill`, keep free slots filled.
+    async fn run_turns<F>(&mut self, limit: usize, sinks: &F, refill: bool) -> Vec<TurnReport>
+    where
+        F: Fn(AgentId) -> Option<mpsc::Sender<StreamEvent>> + Sync,
+    {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        self.reclaim();
+        // What each bot mid-turn was woken for, so refills leave it to them.
+        let mut reserved: BTreeMap<AgentId, Reserved> = BTreeMap::new();
+        let chosen = self.pick_actors(limit, &mut reserved, |_| true);
         if chosen.is_empty() {
             return Vec::new();
-        }
-        // Resume after the last bot picked, so the next batch starts with
-        // whoever has been waiting longest.
-        if let Some(last) = chosen.last() {
-            self.cursor = self
-                .rotation
-                .iter()
-                .position(|id| id == last)
-                .map(|index| index + 1)
-                .unwrap_or(0);
         }
 
         let engine = self.engine.clone();
@@ -632,32 +832,154 @@ impl Orchestrator {
                 .map(|task| task.id)
                 .collect()
         });
-        // Only one bot streams. The deltas from several turns arriving on one
-        // channel would interleave into a paragraph none of them wrote; the
-        // rest of the batch still posts its work to the room as usual.
-        //
-        // The stream goes to the first bot chosen, which is the bot callers
-        // tag it with (they peek `next_actors`). Handing it to whichever bot
-        // comes first in seat order instead labels one bot's work as another's.
-        let mut streaming = sink;
-        let lead = chosen.first().copied();
-        let turns = self
-            .bots
-            .iter_mut()
-            .filter(|(id, _)| chosen.contains(id))
-            .map(|(id, bot)| {
-                let id = *id;
-                let engine = engine.clone();
-                let sink = if Some(id) == lead {
-                    streaming.take()
-                } else {
-                    None
-                };
-                async move { (id, bot.take_turn(&engine, sink).await) }
-            })
-            .collect::<Vec<_>>();
 
-        let finished = futures::future::join_all(turns).await;
+        let mut running: FuturesUnordered<
+            std::pin::Pin<Box<dyn std::future::Future<Output = TurnOutcome> + Send + '_>>,
+        > = FuturesUnordered::new();
+        let mut running_backend: BTreeMap<AgentId, String> = BTreeMap::new();
+        // Who has had a turn in this run, and which of them got something done
+        // in their last one. A bot goes again in the same run only after a
+        // productive turn (or when the owner asks it something), so one that
+        // achieved nothing cannot be restarted the moment it stops and burn
+        // the budget. A run lasts as long as its slowest turn, so the others
+        // must be able to keep working meanwhile.
+        let mut ran: BTreeSet<AgentId> = BTreeSet::new();
+        let mut productive: BTreeSet<AgentId> = BTreeSet::new();
+        let mut finished_at: BTreeMap<AgentId, tokio::time::Instant> = BTreeMap::new();
+        let mut last_save = tokio::time::Instant::now();
+        let mut finished = Vec::new();
+
+        // Lend `agent` to a turn of its own.
+        let start = |this: &mut Self,
+                         running: &mut FuturesUnordered<_>,
+                         running_backend: &mut BTreeMap<AgentId, String>,
+                         agent: AgentId| {
+            let Some(bot) = this.bots.remove(&agent) else {
+                return;
+            };
+            this.leased_memory.insert(agent, bot.memory());
+            // Resume after the last bot picked, so the next pick starts with
+            // whoever has been waiting longest.
+            if let Some(index) = this.rotation.iter().position(|id| *id == agent) {
+                this.cursor = index + 1;
+            }
+            let backend = engine
+                .with(|engine| engine.agent(agent).map(|spec| spec.provider.backend()))
+                .unwrap_or_default();
+            if !backend.is_empty() {
+                *this.busy_backends.entry(backend.clone()).or_default() += 1;
+            }
+            running_backend.insert(agent, backend);
+            let lease = TurnLease {
+                id: agent,
+                bot: Some(bot),
+                parked: this.parked.clone(),
+            };
+            let engine = engine.clone();
+            let sink = sinks(agent);
+            let turn: std::pin::Pin<Box<dyn std::future::Future<Output = TurnOutcome> + Send>> =
+                Box::pin(async move {
+                    let mut lease = lease;
+                    let result = lease
+                        .bot
+                        .as_mut()
+                        .expect("a leased bot")
+                        .take_turn(&engine, sink)
+                        .await;
+                    let bot = lease.bot.take().expect("a leased bot");
+                    (lease.id, bot, result)
+                });
+            running.push(turn);
+        };
+
+        for agent in chosen {
+            ran.insert(agent);
+            start(self, &mut running, &mut running_backend, agent);
+        }
+
+        let mut poll = tokio::time::interval(REFILL_POLL);
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        poll.tick().await;
+        loop {
+            tokio::select! {
+                outcome = running.next() => {
+                    let Some((agent, bot, result)) = outcome else { break };
+                    self.bots.insert(agent, bot);
+                    self.leased_memory.remove(&agent);
+                    reserved.remove(&agent);
+                    if matches!(&result, Ok(report) if report.tool_calls > report.tool_errors) {
+                        productive.insert(agent);
+                    }
+                    finished_at.insert(agent, tokio::time::Instant::now());
+                    if let Some(backend) = running_backend.remove(&agent) {
+                        if let Some(count) = self.busy_backends.get_mut(&backend) {
+                            *count = count.saturating_sub(1);
+                        }
+                    }
+                    // Expire stale handoffs and break any circular wait the
+                    // turn created, before choosing who goes next. Bots still
+                    // mid-turn are alive: their claims are renewed first so
+                    // the tick cannot hand their work to someone else.
+                    let waiting = self.waiting_for_a_slot();
+                    self.engine.with(|engine| {
+                        for agent in running_backend.keys().chain(&waiting) {
+                            let _ = engine.apply(Command::KeepAlive { agent: *agent });
+                        }
+                        let _ = engine.apply(Command::Tick { now: Timestamp::now() });
+                    });
+                    finished.push((agent, result));
+                }
+                _ = poll.tick() => {
+                    let waiting = self.waiting_for_a_slot();
+                    self.engine.with(|engine| {
+                        for agent in running_backend.keys().chain(&waiting) {
+                            let _ = engine.apply(Command::KeepAlive { agent: *agent });
+                        }
+                    });
+                    if last_save.elapsed() >= AUTOSAVE_EVERY {
+                        last_save = tokio::time::Instant::now();
+                        if let Some(Autosave(save)) = self.autosave.clone() {
+                            save(self.checkpoint());
+                        }
+                    }
+                }
+            }
+            // Fill free slots, unless the room should stop taking turns.
+            if refill && self.stop_condition().is_none() {
+                let slots = self
+                    .parallelism()
+                    .min(self.turns_left().saturating_sub(running.len()))
+                    .saturating_sub(running.len());
+                if slots > 0 {
+                    let engine = self.engine.borrow();
+                    let asked: BTreeSet<AgentId> = self
+                        .rotation
+                        .iter()
+                        .copied()
+                        .filter(|agent| self.has_unanswered_owner_ask(&engine, *agent))
+                        .collect();
+                    drop(engine);
+                    let next = self.pick_actors(slots, &mut reserved, |agent| {
+                        asked.contains(&agent)
+                            || !ran.contains(&agent)
+                            || productive.contains(&agent)
+                            || finished_at
+                                .get(&agent)
+                                .is_some_and(|at| at.elapsed() >= RETRY_AFTER)
+                    });
+                    for agent in next {
+                        ran.insert(agent);
+                        productive.remove(&agent);
+                        start(self, &mut running, &mut running_backend, agent);
+                    }
+                }
+            }
+            if running.is_empty() {
+                break;
+            }
+        }
+        drop(running);
+        self.reclaim();
         let memory_capture = self.engine.with(|engine| {
             let repository = engine.archive().memory_repository();
             let room_id = engine.room_id().to_string();
@@ -749,13 +1071,6 @@ impl Orchestrator {
                 }
             });
         }
-
-        // Expire stale handoffs and break any circular wait the batch created.
-        self.engine.with(|engine| {
-            let _ = engine.apply(Command::Tick {
-                now: Timestamp::now(),
-            });
-        });
 
         // A successful action is always progress. Saying something is progress
         // only if it is not a verbatim repeat of what this bot last said — a
@@ -998,6 +1313,17 @@ fn spawn_mcp_host(
         let _ = std::fs::remove_file(cleanup);
     });
     Some((rx, socket))
+}
+
+/// Shared work a bot was woken for, held for it until its turn ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reserved {
+    /// An open task, or a task waiting for inspection.
+    Task(TaskId),
+    /// Drawing up a plan for an empty board.
+    Planning,
+    /// Delivering approved work.
+    Delivery,
 }
 
 /// Why a bot is being woken.

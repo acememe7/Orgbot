@@ -299,6 +299,10 @@ pub enum ProviderConfig {
         /// Serve the room board to this agent as MCP tools.
         #[serde(default)]
         mcp: bool,
+        /// The CLI's effort level (`low`, `medium`, `high`, `xhigh`, and
+        /// `max` for Claude Code). Empty keeps the CLI's default.
+        #[serde(default)]
+        effort: String,
     },
     /// A deterministic in-process bot with no model.
     Scripted {
@@ -344,6 +348,7 @@ impl ProviderConfig {
                 workdir,
                 policy,
                 mcp,
+                effort,
             } => ProviderRef::CliAgent {
                 cli: *cli,
                 model: model.clone(),
@@ -352,6 +357,7 @@ impl ProviderConfig {
                 workdir: expand_home(workdir),
                 policy: *policy,
                 mcp: *mcp,
+                effort: effort.trim().to_string(),
             },
         }
     }
@@ -601,6 +607,7 @@ impl RoomConfig {
                         workdir,
                         policy,
                         mcp,
+                        effort,
                     } => {
                         let session_store = self.room.state_path.as_ref().and_then(|path| {
                             path.parent().map(|parent| {
@@ -616,6 +623,7 @@ impl RoomConfig {
                             *policy,
                             *mcp,
                         )
+                        .and_then(|provider| provider.with_effort(effort))
                         .map_err(|error| {
                             ConfigError::Invalid(format!("bot `{}`: {error}", section.handle))
                         })?;
@@ -987,12 +995,14 @@ mod tests {
                 workdir,
                 policy,
                 mcp,
+                effort,
             } => {
                 assert_eq!(*cli, CliKind::Codex);
                 assert_eq!(model, "gpt-5.2-codex");
                 assert_eq!(workdir, ".");
                 assert_eq!(*policy, AgentPolicy::WorkspaceWrite);
                 assert!(!mcp);
+                assert!(effort.is_empty(), "no effort keeps the CLI default");
             }
             other => panic!("expected cli_agent, got {other:?}"),
         }
@@ -1006,6 +1016,37 @@ mod tests {
                 assert!(!mcp);
             }
             other => panic!("expected CliAgent ref, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cli_bot_effort_level_is_read_and_checked_against_the_cli() {
+        let room = |cli: &str, effort: &str| {
+            RoomConfig::parse(
+                &format!(
+                    r#"
+                    [room]
+                    name = "r"
+                    goal = "g"
+                    [[bots]]
+                    handle = "worker"
+                    provider = {{ kind = "cli", cli = "{cli}", effort = "{effort}" }}
+                    "#
+                ),
+                "t.toml",
+            )
+            .unwrap()
+        };
+        let config = room("claude", "max");
+        assert!(matches!(
+            config.bots[0].provider.to_ref(),
+            ProviderRef::CliAgent { ref effort, .. } if effort == "max"
+        ));
+        // Codex offers no `max`. Seating is skipped when the CLI is not
+        // installed here, so only check the refusal where it would run.
+        if orgbot_providers::AgentCliProvider::available(CliKind::Codex) {
+            let error = room("codex", "max").resolve().unwrap_err().to_string();
+            assert!(error.contains("does not offer effort `max`"), "{error}");
         }
     }
 

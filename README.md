@@ -62,9 +62,12 @@ For community listings, use the [prepared sharing blurb](docs/SHARING.md).
 
 ## Install on Ubuntu
 
-The desktop package targets **Ubuntu 24.04 amd64**. Version 2.0.3 adds
-OpenCode and protected Antigravity CLI support, including Gemini context and
-usage verification; see the [release record](docs/RELEASE_2_0_3_VERIFICATION.md).
+The desktop package targets **Ubuntu 24.04 amd64**. Version 2.1.0 keeps
+several bots working side by side without idle slots, shows pictures that
+Codex bots generate right in the chat, lets bots use your graphics card, and
+gives them their own SSH key for servers you choose instead of yours. It also
+moves to the PolyForm Noncommercial License; see [License](#license) and the
+[2.1.0 live room record](docs/benchmarks/2026-10-29-live-room-run.md).
 Set up the signed third-party APT repository once on each computer:
 
 ```bash
@@ -115,7 +118,7 @@ Finding a CLI does not verify its account access; the CLI checks that when it
 runs. API keys are kept in encrypted platform storage. Available models and
 usage limits depend on each account.
 
-Version 2.0.3 includes OpenCode and Antigravity provider configuration. OpenCode
+Since 2.0.3, OrgBots includes OpenCode and Antigravity provider configuration. OpenCode
 requires an explicit `provider/model` and the selected
 provider's existing OpenCode API credential; OAuth reuse is unavailable.
 Antigravity uses a separate private sign-in. A protected Linux server smoke
@@ -124,14 +127,14 @@ completed on `gemini-3.8-flash-medium` through the room MCP bridge. A separate
 recall after restart, and a distinct isolated room that returned `UNKNOWN`.
 An authorized room-MCP file write and readback also passed while direct native
 file tools remained denied. Provider billing classification is unknown. These
-additions are included in the 2.0.3 package. See the
+additions have been included since the 2.0.3 package. See the
 [integration status and verification](docs/NATIVE_CLI_INTEGRATIONS.md)
 and [Antigravity runtime evidence](docs/benchmarks/2026-10-27-antigravity-runtime.json).
 
 The [development live-test report](docs/benchmarks/2026-10-27-subscription-free-validation.md)
 records the Astra/DeepSeek coding test, separate provider usage, and the
 OpenCode free-allowance result. The Antigravity runtime proof is recorded
-separately and is included with 2.0.3. These reports do not establish general subscription savings.
+separately and has been included since 2.0.3. These reports do not establish general subscription savings.
 
 Rooms have a shared conversation, task board, artifacts and editable memory.
 Reply to a message or use `@handle` to direct work to an agent; an untagged
@@ -212,6 +215,31 @@ See the [verified results](#verified-results) below and the
 [benchmark procedure](scripts/benchmarks/README.md).
 
 ## Verified results
+
+### 2.1.0 live room run, 28 to 29 October 2026
+
+One real project room ran overnight with **10 bots on 5 providers**: Claude
+Code, Codex, Grok CLI, the DeepSeek API and Ollama Cloud.
+
+- **118 turns** and **8 tasks delivered** after an independent review by another
+  bot, out of 15 created.
+- **1,418,410 output tokens**, 7,593,215 uncached input and cache-write tokens
+  and 190,907,064 cache-read tokens, as each provider reported them. These are
+  not invoices or quota readings.
+- **The final hour on the 2.1.0 package:** 34 turns, no claim released by
+  mistake, and one turn failed on a temporary Codex capacity error before the
+  bot recovered.
+- **Account dashboards the owner observed:** the Codex weekly limit still 97%
+  left; Ollama Pro credits used $0.37 for the month; DeepSeek about $0.25 for
+  the run. Claude showed 6% of the weekly limit, mostly from a separate
+  development session, and Grok 7% of a 5-hour window, as reported by the owner.
+- **2.1.0 checks:** 907 Rust tests and 363 Flutter tests passed, plus the
+  workspace sandbox and package tests.
+
+One room on one night is not a controlled comparison. See the
+[full record, per-bot table and limits](docs/benchmarks/2026-10-29-live-room-run.md).
+
+### 2.0.2 release checks and comparison, 27 October 2026
 
 Recorded **27 October 2026** for **OrgBots 2.0.2 on Ubuntu 24.04 amd64**:
 
@@ -508,8 +536,9 @@ The Memory tab includes editable room notes and saved outputs; your profile is
 shared across rooms.
 
 Rooms can continue through multiple turns, subject to configured room/task
-budgets, provider limits and failures. Linux CLI turns have a ten-minute default
-timeout, configurable with `ORGBOT_CLI_TURN_TIMEOUT_SECS`. Persistent sessions do
+budgets, provider limits and failures. Linux CLI turns have no time limit; they
+end when the agent finishes or when you pause or stop the room. Set
+`ORGBOT_CLI_TURN_TIMEOUT_SECS` to impose one. Persistent sessions do
 not remove per-call limits. Elapsed multi-day operation and physical
 suspend/reboot recovery remain unverified; the
 [release record](docs/LINUX_2_0_PLAN.md) distinguishes those gaps from the
@@ -557,7 +586,22 @@ If Wi-Fi ADB repeatedly loses the test debugger, `integration_test/smoke_main.da
 
 ## License
 
-Original OrgBots work is licensed under [Apache License 2.0](LICENSE). Copyright 2026 The
-AECE Studio. Bundled third-party components retain their own license terms and
-notices; for example, the Inter font's SIL Open Font License and attribution
-remain in `app/assets/fonts/OFL.txt` and in the desktop bundle.
+OrgBots 2.1.0 and all later releases and commits are licensed under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). Copyright 2026 The AECE Studio.
+
+- **Free for noncommercial use.** Personal study, research, testing, hobby
+  projects and use by charities, schools, public research bodies and
+  government institutions are permitted, as defined in the license.
+- **Commercial use needs a separate license.** Use by a for-profit
+  organization for its business, including internal team use, commercial
+  software development, hosting or reselling, requires a commercial license
+  from The AECE Studio: theaece@theaecestudio.com.
+- **No warranty.** The software is provided as is, without any warranty, and
+  the licensor is not liable for any damages.
+
+Releases 2.0.3 and earlier were published under the Apache License 2.0, and
+copies of those releases remain available under that license. Bundled
+third-party components keep their own license terms and notices; for example,
+the Inter font's SIL Open Font License and attribution remain in
+`app/assets/fonts/OFL.txt` and in the desktop bundle. This summary is not legal
+advice; the license text governs.

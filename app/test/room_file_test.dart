@@ -201,6 +201,34 @@ void main() {
     expect(file.skipped, isEmpty);
   });
 
+  test('a chosen effort is written only where the CLI offers it', () {
+    String toml(ProviderKind provider, String effort) => buildRoomFile(room(), [
+      BotDef(name: 'b', handle: 'b', provider: provider, effort: effort),
+    ], canRunClis: true).toml;
+
+    expect(toml(ProviderKind.anthropic, 'max'), contains('effort = "max"'));
+    expect(toml(ProviderKind.codex, 'xhigh'), contains('effort = "xhigh"'));
+    expect(toml(ProviderKind.grok, 'low'), contains('effort = "low"'));
+    if (Platform.isLinux) {
+      expect(
+        toml(ProviderKind.antigravity, 'high'),
+        contains('effort = "high"'),
+      );
+      // OpenCode takes effort as a model variant, so nothing is written.
+      expect(toml(ProviderKind.opencode, 'high'), isNot(contains('effort')));
+    }
+    // Codex has no `max`: left over from another CLI, it is dropped so the
+    // room still opens with the CLI's default.
+    expect(toml(ProviderKind.codex, 'max'), isNot(contains('effort')));
+    expect(toml(ProviderKind.anthropic, ''), isNot(contains('effort')));
+  });
+
+  test('a bot keeps its effort across saves', () {
+    final bot = BotDef(name: 'b', provider: ProviderKind.codex, effort: 'high');
+    expect(BotDef.fromJson(bot.toJson()).effort, 'high');
+    expect(BotDef.fromJson({'id': 'old', 'name': 'b'}).effort, '');
+  });
+
   test('each CLI maps to its canonical runtime name without auth env', () {
     if (!Platform.isLinux) return;
     for (final pair in [

@@ -1162,7 +1162,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                 ),
               );
             }
-            if (action == 'delete') lib.removeRoom(room.id);
+            if (action == 'delete') await _confirmDeleteRoom(room);
           },
           itemBuilder: (_) => [
             const PopupMenuItem(value: 'edit', child: Text('Room settings')),
@@ -1174,7 +1174,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                 child: Text('Working folder'),
               ),
             const PopupMenuItem(value: 'history', child: Text('Saved history')),
-            const PopupMenuItem(value: 'delete', child: Text('Remove room')),
+            const PopupMenuItem(value: 'delete', child: Text('Delete room…')),
           ],
         );
         return PressSurface(
@@ -1326,6 +1326,39 @@ class _OrgBotScreenState extends State<OrgBotScreen>
   }
 
   void _newRoom() => _roomDialog();
+
+  /// Ask before deleting a room; returns whether it was deleted.
+  Future<bool> _confirmDeleteRoom(RoomDef room) async {
+    final scheme = Theme.of(context).colorScheme;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Delete “${room.name}”?'),
+        content: const Text(
+          'The room is removed from your sessions and stops running. Its '
+          'saved history stays on this computer.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const ValueKey('confirm-delete-room'),
+            style: FilledButton.styleFrom(
+              backgroundColor: scheme.error,
+              foregroundColor: scheme.onError,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete room'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return false;
+    widget.library.removeRoom(room.id);
+    return true;
+  }
 
   Future<void> _roomDialog([RoomDef? existing]) async {
     final id = existing?.id ?? genId('room');
@@ -1571,6 +1604,18 @@ class _OrgBotScreenState extends State<OrgBotScreen>
             ),
           ),
           actions: [
+            if (existing != null)
+              TextButton(
+                key: const ValueKey('delete-room'),
+                style: TextButton.styleFrom(
+                  foregroundColor: Theme.of(context).colorScheme.error,
+                ),
+                onPressed: () async {
+                  final navigator = Navigator.of(context);
+                  if (await _confirmDeleteRoom(existing)) navigator.pop();
+                },
+                child: const Text('Delete room…'),
+              ),
             TextButton(
               onPressed: () => Navigator.pop(context),
               child: const Text('Cancel'),
@@ -1918,6 +1963,7 @@ class _BotEditorState extends State<_BotEditor> {
   late Set<String> _additionalRoles;
   RolePowers? _powers;
   String _model = '';
+  String _effort = '';
   bool _custom = false;
   bool _saving = false;
   bool _replaceKey = false;
@@ -1941,6 +1987,7 @@ class _BotEditorState extends State<_BotEditor> {
     _additionalRoles = {...?b?.additionalRoles};
     _powers = b?.powers;
     _model = b?.model ?? '';
+    _effort = b?.effort ?? '';
     _loadModels();
   }
 
@@ -2002,9 +2049,32 @@ class _BotEditorState extends State<_BotEditor> {
       _model = ModelCatalog.defaultFor(next);
       _custom = false;
       _customModel.clear();
+      // Levels differ between CLIs; keep one only where the new CLI has it.
+      if (!_effortLevels.contains(_effort)) _effort = '';
     });
     _loadModels();
   }
+
+  /// Effort levels for the chosen provider's agent CLI, or none.
+  List<String> get _effortLevels =>
+      widget.desktopClis ? _provider.cli?.effortLevels ?? const [] : const [];
+
+  Widget _effortField() => DropdownButtonFormField<String>(
+    key: const ValueKey('bot-effort'),
+    isExpanded: true,
+    initialValue: _effortLevels.contains(_effort) ? _effort : '',
+    decoration: const InputDecoration(
+      labelText: 'Effort',
+      helperText:
+          'How long the agent thinks before acting. Higher effort is slower '
+          'and uses more of your plan.',
+    ),
+    items: [
+      for (final level in ['', ..._effortLevels])
+        DropdownMenuItem(value: level, child: Text(CliKind.effortLabel(level))),
+    ],
+    onChanged: (value) => setState(() => _effort = value ?? ''),
+  );
 
   String get _resolvedModel => _custom ? _customModel.text.trim() : _model;
 
@@ -2167,6 +2237,10 @@ class _BotEditorState extends State<_BotEditor> {
                   if (_provider != ProviderKind.scripted) ...[
                     const SizedBox(height: 10),
                     _modelField(scheme),
+                  ],
+                  if (_effortLevels.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    _effortField(),
                   ],
                 ],
               ),
@@ -2703,6 +2777,7 @@ class _BotEditorState extends State<_BotEditor> {
           persona: _persona.text.trim(),
           provider: _provider,
           model: _resolvedModel,
+          effort: _effortLevels.contains(_effort) ? _effort : '',
           apiKey:
               _provider.needsApiKey &&
                   credentials == null &&

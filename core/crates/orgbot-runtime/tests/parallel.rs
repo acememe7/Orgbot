@@ -150,6 +150,19 @@ fn seat_writers(room: &mut Orchestrator, count: usize, provider: Arc<dyn Provide
     }
 }
 
+/// The owner asks `to` something directly.
+fn owner_asks(room: &mut Orchestrator, to: orgbot_proto::AgentId, body: &str) {
+    use orgbot_proto::chat::{Author, ChatMessage, MessageIntent};
+    let mut engine = room.engine_mut();
+    let mut message = ChatMessage::say(engine.room().id, to, body)
+        .to_agents(vec![to])
+        .with_intent(MessageIntent::Ask);
+    message.author = Author::Human {
+        name: "Aece".into(),
+    };
+    engine.apply(Command::PostMessage { message: Box::new(message) }).unwrap();
+}
+
 /// Put an open, claimable task on the board.
 fn open_task(engine: &mut Engine, title: &str) -> TaskId {
     let events = engine
@@ -656,6 +669,333 @@ async fn two_inspectors_are_not_woken_for_the_same_review() {
         "one task in review must wake one inspector, not three"
     );
     assert_ne!(woken[0], author_id, "and not the bot that wrote it");
+}
+
+/// Reviews until the test lets it finish, counting how many it started.
+#[derive(Debug)]
+struct HeldReview {
+    turns: AtomicUsize,
+    release: tokio::sync::Semaphore,
+}
+
+#[async_trait]
+impl Provider for HeldReview {
+    fn name(&self) -> &str {
+        "held review"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+        _sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> orgbot_providers::Result<CompletionResponse> {
+        self.turns.fetch_add(1, Ordering::SeqCst);
+        let _ = self.release.acquire().await;
+        Ok(CompletionResponse {
+            model: "test".into(),
+            content: vec![ContentBlock::text("reviewing")],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        })
+    }
+}
+
+/// From the live room: Ellis was mid-review when another bot's turn ended,
+/// and the freed slot woke Astra for the same review. Astra spent ten minutes
+/// on work that was approved and delivered before it finished, and the room
+/// refused its review.
+#[tokio::test]
+async fn a_freed_slot_does_not_wake_a_second_inspector_for_a_review_under_way() {
+    let quick = Arc::new(Fixed(CompletionResponse {
+        model: "test".into(),
+        content: vec![ContentBlock::text("answered")],
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    })) as Arc<dyn Provider>;
+    let review = Arc::new(HeldReview {
+        turns: AtomicUsize::new(0),
+        release: tokio::sync::Semaphore::new(0),
+    });
+
+    let mut room = Orchestrator::new(room_spec(3));
+    let author = room.seat(worker("author"), quick).unwrap();
+    for index in 0..2 {
+        let spec = AgentSpec::new(
+            format!("qa{index}"),
+            "Inspector",
+            ProviderRef::Scripted {
+                script: "test".into(),
+            },
+        )
+        .with_roles(vec!["reviewer"])
+        .with_autonomy(Autonomy::inspector());
+        room.seat(spec, review.clone() as Arc<dyn Provider>).unwrap();
+    }
+    room.start().unwrap();
+    let task = open_task(&mut room.engine_mut(), "the thing to inspect");
+    for command in [
+        Command::ClaimTask { task, by: author },
+        Command::StartTask { task, by: author },
+        Command::SubmitForReview {
+            task,
+            by: author,
+            artifacts: vec![],
+        },
+    ] {
+        room.engine_mut().apply(command).unwrap();
+    }
+    // The author has a quick question to answer, so its slot frees at once.
+    owner_asks(&mut room, author, "anything else?");
+
+    let shared = room.shared_engine();
+    let sinks = |_| None;
+    let run = room.step_rolling(3, &sinks);
+    tokio::pin!(run);
+    let answered = async {
+        while !shared.with(|engine| engine.transcript().iter().any(|m| m.body == "answered")) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    };
+    tokio::select! {
+        _ = &mut run => panic!("the run ended while the review was still going"),
+        done = tokio::time::timeout(std::time::Duration::from_secs(5), answered) => {
+            done.expect("the author should answer while the review runs");
+        }
+    }
+    assert_eq!(
+        review.turns.load(Ordering::SeqCst),
+        1,
+        "the freed slot must not start a second review of the same task"
+    );
+    review.release.add_permits(16);
+    tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("the run should end once the review does");
+}
+
+/// Its first turn does real work (a room tool call that succeeds); every later
+/// one only talks.
+#[derive(Debug, Default)]
+struct WorksOnce {
+    turns: AtomicUsize,
+}
+
+#[async_trait]
+impl Provider for WorksOnce {
+    fn name(&self) -> &str {
+        "works once"
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+        _sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> orgbot_providers::Result<CompletionResponse> {
+        let text = |body: &str| CompletionResponse {
+            model: "test".into(),
+            content: vec![ContentBlock::text(body)],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        // A bot keeps its conversation between turns, so a turn starts when
+        // the last message is not a tool result.
+        let continuing = request.messages.last().is_some_and(|turn| {
+            turn.content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        });
+        if continuing {
+            return Ok(text("read the board"));
+        }
+        if self.turns.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(CompletionResponse {
+                model: "test".into(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "toolu_list".into(),
+                    name: "list_tasks".into(),
+                    input: json!({}),
+                }],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            });
+        }
+        Ok(text("nothing new from me"))
+    }
+}
+
+/// From the live room: Mira's turn ran for over an hour. A run lasts as long
+/// as its slowest turn, and after its first ten minutes freed slots were no
+/// longer filled, so Quinn and Devon sat idle beside ready work the whole
+/// time. A bot whose turn got something done goes again; one that only
+/// talked does not.
+#[tokio::test]
+async fn a_long_turn_does_not_idle_everyone_else_for_the_rest_of_the_run() {
+    let slow = Arc::new(HeldReview {
+        turns: AtomicUsize::new(0),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let busy = Arc::new(WorksOnce::default());
+    let mut room = Orchestrator::new(room_spec(2));
+    // The slow bot cannot claim the open task, so it is woken only by the
+    // owner's question and leaves the task to the other.
+    let slow_spec = AgentSpec::new(
+        "slow",
+        "slow",
+        ProviderRef::Scripted {
+            script: "test".into(),
+        },
+    )
+    .with_roles(vec!["reviewer"]);
+    let slow_id = room.seat(slow_spec, slow.clone() as Arc<dyn Provider>).unwrap();
+    room.seat(worker("busy"), busy.clone() as Arc<dyn Provider>).unwrap();
+    room.start().unwrap();
+    open_task(&mut room.engine_mut(), "ready work");
+    owner_asks(&mut room, slow_id, "start the long job");
+
+    let sinks = |_| None;
+    let run = room.step_rolling(2, &sinks);
+    tokio::pin!(run);
+    let worked_again = async {
+        while busy.turns.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    };
+    tokio::select! {
+        _ = &mut run => panic!("the run ended while the long turn was still going"),
+        done = tokio::time::timeout(std::time::Duration::from_secs(5), worked_again) => {
+            done.expect("after a productive turn the bot must go again while the long turn runs");
+        }
+    }
+    assert_eq!(
+        busy.turns.load(Ordering::SeqCst),
+        2,
+        "a turn that only talked does not earn another"
+    );
+    assert_eq!(slow.turns.load(Ordering::SeqCst), 1, "the long turn is still the same one");
+    slow.release.add_permits(16);
+    tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("the run should end once the long turn does");
+}
+
+/// Only ever talks, counting its turns.
+#[derive(Debug, Default)]
+struct OnlyTalks {
+    turns: AtomicUsize,
+}
+
+#[async_trait]
+impl Provider for OnlyTalks {
+    fn name(&self) -> &str {
+        "only talks"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+        _sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> orgbot_providers::Result<CompletionResponse> {
+        self.turns.fetch_add(1, Ordering::SeqCst);
+        Ok(CompletionResponse {
+            model: "test".into(),
+            content: vec![ContentBlock::text("thinking about it")],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        })
+    }
+}
+
+/// From the live room: Julian and Finn each had a turn that achieved nothing,
+/// and a run now lasts as long as there is work, so neither got another for
+/// the rest of it. Both sat idle beside their own tasks until the claims
+/// lapsed. Such a bot waits a while, not forever.
+#[tokio::test(start_paused = true)]
+async fn a_bot_whose_turn_achieved_nothing_tries_again_later_in_the_run() {
+    let slow = Arc::new(HeldReview {
+        turns: AtomicUsize::new(0),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let talker = Arc::new(OnlyTalks::default());
+    let mut room = Orchestrator::new(room_spec(2));
+    let slow_spec = AgentSpec::new(
+        "slow",
+        "slow",
+        ProviderRef::Scripted {
+            script: "test".into(),
+        },
+    )
+    .with_roles(vec!["reviewer"]);
+    let slow_id = room.seat(slow_spec, slow.clone() as Arc<dyn Provider>).unwrap();
+    room.seat(worker("talker"), talker.clone() as Arc<dyn Provider>).unwrap();
+    room.start().unwrap();
+    open_task(&mut room.engine_mut(), "ready work");
+    owner_asks(&mut room, slow_id, "start the long job");
+
+    let sinks = |_| None;
+    let run = room.step_rolling(2, &sinks);
+    tokio::pin!(run);
+    let wait = |seconds| tokio::time::sleep(std::time::Duration::from_secs(seconds));
+    tokio::select! {
+        _ = &mut run => panic!("the run ended while the long turn was still going"),
+        _ = wait(60) => {}
+    }
+    assert_eq!(talker.turns.load(Ordering::SeqCst), 1, "not at once after a turn that achieved nothing");
+    tokio::select! {
+        _ = &mut run => panic!("the run ended while the long turn was still going"),
+        _ = wait(90) => {}
+    }
+    assert_eq!(talker.turns.load(Ordering::SeqCst), 2, "but again a little later, while it still has work");
+    slow.release.add_permits(16);
+    tokio::time::timeout(std::time::Duration::from_secs(600), run)
+        .await
+        .expect("the run should end once the long turn does");
+}
+
+/// From the live room: nothing was written to disk for the hour Mira's turn
+/// ran, because the room was only saved when a run ended. A crash then would
+/// have lost an hour of board changes.
+#[tokio::test(start_paused = true)]
+async fn the_room_is_saved_while_a_long_turn_runs() {
+    let slow = Arc::new(HeldReview {
+        turns: AtomicUsize::new(0),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let mut room = Orchestrator::new(room_spec(1));
+    let slow_id = room.seat(worker("slow"), slow.clone() as Arc<dyn Provider>).unwrap();
+    room.start().unwrap();
+    owner_asks(&mut room, slow_id, "start the long job");
+    let saves = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let saved = saves.clone();
+    room.attach_autosave(orgbot_runtime::Autosave(Arc::new(move |board| {
+        saved.lock().unwrap().push(board);
+    })));
+
+    let sinks = |_| None;
+    let run = room.step_rolling(1, &sinks);
+    tokio::pin!(run);
+    let saved_once = async {
+        while saves.lock().unwrap().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    };
+    tokio::select! {
+        _ = &mut run => panic!("the run ended while the long turn was still going"),
+        done = tokio::time::timeout(std::time::Duration::from_secs(10 * 60), saved_once) => {
+            done.expect("the room must be saved while the turn runs");
+        }
+    }
+    let board = saves.lock().unwrap()[0].clone();
+    assert!(
+        board["bots"].as_object().unwrap().contains_key(&slow_id.to_string()),
+        "the bot in its turn is saved too, as it was when the turn began: {}",
+        board["bots"]
+    );
+    slow.release.add_permits(16);
+    tokio::time::timeout(std::time::Duration::from_secs(60), run)
+        .await
+        .expect("the run should end once the turn does");
 }
 
 /// Concurrency is not aimed all at one provider.

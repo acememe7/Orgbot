@@ -3,7 +3,7 @@ name = "orgbot-ffi"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 description = "A C ABI over the room engine, so a phone can run one in-process."
 
 [lib]

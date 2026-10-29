@@ -76,8 +76,8 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            body with use_skill or its available file reader. Do not dump the whole \
            skill catalog or read every manual. Reuse unchanged rules already read \
            in this session; avoid recursively reloading cross-references. Record \
-           selected domain rules and their reason in the existing verification \
-           artifact, not repeated status messages.\n\
+           selected domain rules and their reason in the task's verification \
+           note, not repeated status messages.\n\
          - This room assigns specialists and independent reviewers. Use its tasks \
            and handoffs; do not create a second external review/delegation workflow \
            merely because a general CLI rule describes one. The room's permissions \
@@ -97,9 +97,11 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
     out.push_str(
         "Verification before review:\n\
          - Workers run focused checks for their changes before submit_for_review. \
-           Attach the exact commands, exit results, tested files or revision, and \
-           any checks that could not run to a verification artifact. Never infer \
-           a passing test from a planned command or missing output.\n\
+           Put the exact commands, exit results, tested files or revision, and \
+           any checks that could not run in one short verification note per \
+           submission. A resubmission adds a note of what changed, not a new full \
+           report. Never infer a passing test from a planned command or missing \
+           output.\n\
          - Use a QA/tester teammate for reproduction, broader coverage, or a \
            combined suite when changes interact. Reuse current evidence instead \
            of making every teammate repeat the same full audit.\n\
@@ -109,7 +111,13 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            generated outputs in temporary storage. If a check needs writable \
            project files or unavailable tools, hand it to a QA/tester teammate \
            and inspect the returned command results. Do not approve work with \
-           failed required checks or present unrun checks as verified.\n\n",
+           failed required checks or present unrun checks as verified.\n\
+         - Every document costs the owner tokens to write and teammates tokens to \
+           read. Do not write plan, checkpoint, status, audit, handover or summary \
+           documents, as artifacts or as project files: status goes in one short \
+           room message, and what a teammate needs goes in the verification note \
+           or the handoff brief. Write a document, or add a Markdown file to the \
+           project, only when the owner or the task asks for one.\n\n",
     );
 
     out.push_str(
@@ -154,6 +162,15 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
              unprefixed ones do not exist.\n\n",
         );
     }
+    if matches!(spec.provider, orgbot_proto::agent::ProviderRef::CliAgent { .. }) {
+        out.push_str(
+            "Images you make with your own image tool are posted to the room for \
+             you, so the owner sees them; say in a sentence what you made. Do not \
+             copy them into the project unless the owner or the task asks. To work \
+             from an image someone replied to, import it with \
+             workspace_import_attachment.\n\n",
+        );
+    }
 
     if !engine.archive().is_empty() {
         out.push_str(
@@ -177,8 +194,9 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
          lease even while awaiting approval; reload and retry the same arguments \
          after the owner allows it. Loading never grants execution permission. \
          Native CLI transcripts may retain previously read text; unloading does \
-         not erase that history or reset your session. Save useful findings in \
-         artifacts before releasing context.\n",
+         not erase that history or reset your session. Save findings a teammate \
+         will need in your verification note or handoff before releasing \
+         context.\n",
     );
 
     out.push_str(
@@ -200,7 +218,8 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
         "\nFile retention: never permanently delete project files without explicit \
          owner permission. For recoverable removal use the installed shell command \
          `orgbot-trash move --project PROJECT -- PATH...`, with each argument safely \
-         quoted. It moves files to the owner's configured trash by project. Do not use rm, unlink, \
+         quoted. It moves files to the owner's configured trash by project. In your working copy it \
+         needs no setup: do not configure trash storage or ask the owner to choose one. Do not use rm, unlink, \
          deletion patches, git clean, or other deletion shortcuts. If the command or \
          selected storage is unavailable, preserve the files and ask the owner. The independent \
          cleanup timer removes trash only after seven full days; never create an AI \
@@ -531,7 +550,11 @@ fn latest_human_name(engine: &Engine, since: Seq) -> Option<String> {
         .events_since(since)
         .filter_map(|envelope| match &envelope.event {
             orgbot_proto::Event::MessagePosted { message } => match &message.author {
-                orgbot_proto::Author::Human { name } if !name.trim().is_empty() => {
+                // A message the room wrote for the owner carries a stand-in
+                // name, not the one they go by.
+                orgbot_proto::Author::Human { name }
+                    if !name.trim().is_empty() && name.trim() != orgbot_proto::OWNER_STAND_IN =>
+                {
                     Some(name.trim().to_string())
                 }
                 _ => None,
@@ -648,4 +671,37 @@ fn recent_messages(engine: &Engine, agent: AgentId, since: Seq) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orgbot_proto::agent::ProviderRef;
+    use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+
+    #[test]
+    fn bots_are_told_not_to_write_documents_nobody_asked_for() {
+        // A live room wrote sixteen Markdown reports in three hours: a
+        // verification file beside every patch, plus plans, checkpoints and
+        // custody notes. Each one is output tokens, then input for every
+        // teammate who reads it.
+        let engine = Engine::new(RoomSpec {
+            name: "docs".into(),
+            goal: "ship".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+        });
+        let spec = AgentSpec::new(
+            "dev",
+            "Dev",
+            ProviderRef::Scripted {
+                script: "test".into(),
+            },
+        );
+        let prompt = system_prompt(&engine, &spec);
+        assert!(prompt.contains("one short verification note per submission"));
+        assert!(prompt.contains("Do not write plan, checkpoint, status, audit, handover or summary"));
+        assert!(prompt.contains("only when the owner or the task asks for one"));
+    }
 }

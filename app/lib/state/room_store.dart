@@ -621,6 +621,18 @@ class RoomStore extends ChangeNotifier {
       case 'task_transitioned':
         _applyTaskTransition(event);
       case 'agent_status_changed':
+        // Leaving the faulted state (a resume, or the room retrying the bot)
+        // clears the failure shown for it. Done for replayed events too: the
+        // reset comes after the error in the log, so an idle bot must not keep
+        // showing a failure it has been given a fresh start from.
+        if (event['from'] == 'faulted' && event['to'] != 'faulted') {
+          final entry = _activity[event['agent'] as String?];
+          if (entry != null) {
+            entry.lastError = null;
+            entry.lastErrorAt = null;
+            entry.errorStreak = 0;
+          }
+        }
         // The snapshot is newer than its replayed journal. A formerly faulted
         // bot may now have a repaired model and be ready to run.
         if (seq <= _snapshotHead) break;

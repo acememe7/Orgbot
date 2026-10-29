@@ -3,7 +3,7 @@ name = "orgbot-runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 description = "The bot turn loop and the scheduler that decides who acts next."
 
 [dependencies]
@@ -13,6 +13,7 @@ orgbot-providers.workspace = true
 orgbot-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
@@ -26,4 +27,4 @@ libc = "0.2"
 sha2.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

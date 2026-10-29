@@ -100,6 +100,10 @@ class BotDef {
   String model;
   String apiKey;
 
+  /// How hard an agent CLI reasons (`low` … `max`); empty keeps the CLI's own
+  /// default. Only levels the bot's CLI offers are sent to it.
+  String effort;
+
   /// The job this bot holds. A property of the bot, not of a room — the same
   /// reviewer reviews wherever it is seated.
   String role;
@@ -118,6 +122,7 @@ class BotDef {
     this.provider = ProviderKind.anthropic,
     this.model = '',
     this.apiKey = '',
+    this.effort = '',
     this.role = Roles.defaultKey,
     this.additionalRoles = const [],
     this.powers,
@@ -142,6 +147,7 @@ class BotDef {
     'provider': provider.key,
     'model': model,
     'apiKey': apiKey,
+    if (effort.isNotEmpty) 'effort': effort,
     'role': role,
     'additional_roles': additionalRoles,
     'powers': powers?.toJson(),
@@ -155,6 +161,7 @@ class BotDef {
     provider: ProviderKind.fromKey(json['provider'] as String? ?? ''),
     model: json['model'] as String? ?? '',
     apiKey: json['apiKey'] as String? ?? '',
+    effort: json['effort'] as String? ?? '',
     role: json['role'] as String? ?? Roles.defaultKey,
     additionalRoles: (json['additional_roles'] as List? ?? [])
         .whereType<String>()

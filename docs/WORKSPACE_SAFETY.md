@@ -25,10 +25,23 @@ be used when writing CLI or room-MCP configuration. It copies the project into
 The trusted launcher may copy the owner’s CLI configuration and authentication
 files into `private_home`; `HOME` inside the sandbox points to a private mount
 under `/run/user/<uid>/orgbot-home`. The host home remains visible through the
-read-only root so installed CLI binaries resolve. CLI environment variables
-point at the private profile copies, but read-only visibility still lets a
-process read files in the real host home. The copies are not an OS-level
-credential-isolation boundary.
+read-only root so installed CLI binaries resolve, with known secrets hidden:
+SSH and GPG keys, every CLI's sign-in file, cloud, registry and Git
+credentials, browser profiles, shell histories, and OrgBots' own data, which
+holds every room's access token. A folder is covered with an empty tmpfs where
+no program lives in it; where a CLI keeps its program beside its sign-in (Codex,
+Grok), only the sign-in file is covered and reads as permission denied. This is
+a list of known locations (`_OWNER_SECRET_DIRS` and `_OWNER_SECRET_FILES`), not
+a full boundary: other files in the home, such as a project's `.env`, stay
+readable.
+
+Bots reach servers over SSH only through `~/.local/share/orgbot/bot-ssh`
+(under `$XDG_DATA_HOME` when set). When that folder is owned by the user and
+private (mode 0700), it is mounted read-only as the account's `~/.ssh`, which is
+where OpenSSH looks whatever `HOME` says. It holds only the keys, host entries
+and known hosts meant for bots, so `ssh <host>` works for those servers and no
+others. Otherwise bots see an empty `~/.ssh`. Revoke a server by deleting the
+bot key from its `authorized_keys`.
 Optional `--profile` binds accept only that agent’s private
 `private_home/.codex`, `private_home/.claude`, or `private_home/.grok` directory.
 
@@ -53,9 +66,10 @@ not a general Unix-socket filtering boundary.
 The helper also points native CLIs at their private profile directories with
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `GROK_HOME`. Those directories remain
 writable for provider session state. Host CLI binaries and their installation
-files are readable through the read-only host root. Since the host home is also
-readable, a CLI or process can still access files there; the launcher’s copied
-profiles provide writable session isolation, not complete credential secrecy.
+files are readable through the read-only host root. Files in the host home
+outside the hidden list remain readable; the launcher’s copied profiles provide
+writable session isolation, and the hidden list covers the known credential
+locations, not every secret a home might hold.
 
 The development OpenCode adapter uses a separate `profiles/home-opencode`
 directory and a generated, read-only configuration. It imports only the selected

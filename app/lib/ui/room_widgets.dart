@@ -4,6 +4,8 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/rendering.dart';
@@ -12,8 +14,10 @@ import 'dart:io';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../orgbot/room_check.dart' show expandHome;
 import '../protocol/models.dart';
 import '../state/room_store.dart';
+import '../workspace/desktop_files.dart';
 import 'brand.dart';
 import 'polish.dart';
 import 'widgets/mentions.dart';
@@ -1517,7 +1521,176 @@ class _SystemNoticeState extends State<_SystemNotice> {
   }
 }
 
-/// Shared rendering for messages and saved reports. Images never load implicitly.
+/// Lets links in messages open files in the room's project on this computer.
+///
+/// Bots link what they made (screenshots, patches, logs) by its path in the
+/// project. Without this those links did nothing at all.
+class RoomFileLinks extends InheritedWidget {
+  const RoomFileLinks({
+    super.key,
+    required this.projectRoot,
+    required this.open,
+    required super.child,
+  });
+
+  /// The room's project folder, if it has one here.
+  final String? projectRoot;
+
+  /// Shows a project file, given its path.
+  final ValueChanged<String>? open;
+
+  static RoomFileLinks? maybeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<RoomFileLinks>();
+
+  /// `href` as a path inside the project, or null when it names anything
+  /// else. Only a first filter: whatever reads the file checks again with
+  /// symbolic links resolved.
+  String? resolve(String? href) {
+    final raw = projectRoot?.trim();
+    if (href == null || href.isEmpty || raw == null || raw.isEmpty) return null;
+    final root = Uri.directory(expandHome(raw)).normalizePath().toFilePath();
+    final uri = Uri.tryParse(href);
+    final String path;
+    if (uri != null && uri.scheme == 'file') {
+      path = uri.toFilePath();
+    } else if (href.startsWith('/')) {
+      path = Uri.decodeFull(href);
+    } else if (uri == null || uri.hasScheme || href.startsWith('#')) {
+      return null;
+    } else {
+      path = '$root${Uri.decodeFull(href)}';
+    }
+    final normal = Uri.file(path).normalizePath().toFilePath();
+    return normal.startsWith(root) && normal.length > root.length ? normal : null;
+  }
+
+  @override
+  bool updateShouldNotify(RoomFileLinks oldWidget) =>
+      oldWidget.projectRoot != projectRoot || oldWidget.open != open;
+}
+
+const _previewableImages = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'};
+
+/// Pixels a preview may decode. A small file can claim enormous dimensions
+/// and take the app's memory once decoded; such an image is not previewed.
+const _maxPreviewPixels = 40 * 1000 * 1000;
+
+/// Image bytes, once their declared size is known to be safe to decode. Only
+/// the header is read for the check.
+Future<Uint8List> checkedImage(Future<Uint8List> bytes) async {
+  final data = await bytes;
+  final buffer = await ui.ImmutableBuffer.fromUint8List(data);
+  final descriptor = await ui.ImageDescriptor.encoded(buffer);
+  final pixels = descriptor.width * descriptor.height;
+  descriptor.dispose();
+  buffer.dispose();
+  if (pixels > _maxPreviewPixels) {
+    throw const FormatException('Too large to preview');
+  }
+  return data;
+}
+
+bool _isImagePath(String path) =>
+    _previewableImages.contains(path.split('.').last.toLowerCase());
+
+/// A project image shown inside a message, read through the same checked path
+/// as the project pane.
+class ProjectImageThumb extends StatefulWidget {
+  const ProjectImageThumb({
+    super.key,
+    required this.root,
+    required this.path,
+    this.onTap,
+  });
+
+  final String root;
+  final String path;
+  final VoidCallback? onTap;
+
+  @override
+  State<ProjectImageThumb> createState() => _ProjectImageThumbState();
+}
+
+class _ProjectImageThumbState extends State<ProjectImageThumb> {
+  // A message list rebuilds often; the same screenshot is read once.
+  static final _cache = <String, Future<Uint8List>>{};
+  late Future<Uint8List> _bytes;
+
+  Future<Uint8List> _load() {
+    if (_cache.length > 64) _cache.remove(_cache.keys.first);
+    return _cache[widget.path] ??= checkedImage(
+      DesktopFiles.readProjectFile(expandHome(widget.root), widget.path),
+    ).catchError((Object error) {
+      _cache.remove(widget.path);
+      throw error;
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _bytes = _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant ProjectImageThumb oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.path != widget.path) _bytes = _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final name = widget.path.split('/').last;
+    return Tooltip(
+      message: name,
+      child: InkWell(
+        onTap: widget.onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          width: 168,
+          height: 112,
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+            border: Border.all(color: scheme.outlineVariant),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: FutureBuilder<Uint8List>(
+            future: _bytes,
+            builder: (context, snapshot) {
+              if (snapshot.hasData) {
+                return Image.memory(
+                  snapshot.data!,
+                  fit: BoxFit.cover,
+                  cacheWidth: 336,
+                  semanticLabel: name,
+                  errorBuilder: (_, _, _) => _unavailable(scheme, name),
+                );
+              }
+              if (snapshot.hasError) return _unavailable(scheme, name);
+              return const SizedBox.expand();
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _unavailable(ColorScheme scheme, String name) => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(8),
+      child: Text(
+        '$name\nnot available',
+        textAlign: TextAlign.center,
+        style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+      ),
+    ),
+  );
+}
+
+/// Shared rendering for messages and saved reports. Remote images never load;
+/// images in the room's own project show as thumbnails.
 class MessageText extends StatelessWidget {
   final String text;
   const MessageText({super.key, required this.text});
@@ -1585,19 +1758,55 @@ class MessageText extends StatelessWidget {
         ),
       };
 
+  // Plain links, not `![]()` images, which the image builder already shows.
+  static final _linkTargets = RegExp(r'(?<!!)\[[^\]]*\]\(\s*<?([^)\s>]+)>?');
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return MarkdownBody(
+    final links = RoomFileLinks.maybeOf(context);
+    final root = links?.projectRoot;
+    Widget thumb(String path) => ProjectImageThumb(
+      root: root!,
+      path: path,
+      onTap: links?.open == null ? null : () => links!.open!(path),
+    );
+    final images = links == null
+        ? const <String>[]
+        : {
+            for (final match in _linkTargets.allMatches(text))
+              if (links.resolve(match.group(1)) case final path?)
+                if (_isImagePath(path)) path,
+          }.take(8).toList();
+    final body = MarkdownBody(
       data: text,
       softLineBreak: true,
       inlineSyntaxes: [MentionSyntax()],
       builders: _buildersFor(theme),
-      imageBuilder: (uri, title, alt) =>
-          Text(alt?.isNotEmpty == true ? alt! : 'Image attachment'),
+      imageBuilder: (uri, title, alt) {
+        final path = links?.resolve(uri.toString());
+        if (path != null && _isImagePath(path)) return thumb(path);
+        return Text(alt?.isNotEmpty == true ? alt! : 'Image attachment');
+      },
       onTapLink: (_, href, _) async {
+        final path = links?.resolve(href);
+        if (path != null && links?.open != null) {
+          links!.open!(path);
+          return;
+        }
         final uri = href == null ? null : Uri.tryParse(href);
-        if (uri == null || !['https', 'http'].contains(uri.scheme)) return;
+        if (uri == null || !['https', 'http'].contains(uri.scheme)) {
+          if (href != null && (href.startsWith('/') || uri?.scheme == 'file')) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'That file is outside this room\'s project, so it is not opened here.',
+                ),
+              ),
+            );
+          }
+          return;
+        }
         try {
           await launchUrl(uri, mode: LaunchMode.externalApplication);
         } catch (_) {
@@ -1609,6 +1818,15 @@ class MessageText extends StatelessWidget {
         }
       },
       styleSheet: _sheetFor(theme),
+    );
+    if (images.isEmpty) return body;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        body,
+        const SizedBox(height: 8),
+        Wrap(spacing: 8, runSpacing: 8, children: [for (final path in images) thumb(path)]),
+      ],
     );
   }
 }
@@ -2236,6 +2454,45 @@ class AttachmentTile extends StatelessWidget {
         root != null &&
         file.images > 0 &&
         RegExp(r'^att_[a-f0-9]{32}$').hasMatch(file.id);
+    // In a message, an image is shown properly, not as a stamp: a generated
+    // picture is something to look at and reply to.
+    if (preview && onRemove == null && file.mimeType.startsWith('image/')) {
+      return Container(
+        width: 264,
+        margin: const EdgeInsets.only(right: 8, top: 6, bottom: 6),
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHigh,
+          border: Border.all(color: scheme.outlineVariant),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Tooltip(
+          message: '${file.name}\n${file.note}',
+          child: InkWell(
+            onTap: onOpen,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 264,
+                  height: 176,
+                  child: _AttachmentImage(path: '$root/${file.id}/image-0.jpg'),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
+                  child: Text(
+                    file.note.isNotEmpty ? '${file.name} · ${file.note}' : file.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
     final size = file.bytes < 1024 * 1024
         ? '${(file.bytes / 1024).ceil()} KB'
         : '${(file.bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
@@ -2323,6 +2580,56 @@ class AttachmentTile extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// An attachment's image, checked before it is decoded.
+class _AttachmentImage extends StatefulWidget {
+  const _AttachmentImage({required this.path});
+
+  final String path;
+
+  @override
+  State<_AttachmentImage> createState() => _AttachmentImageState();
+}
+
+class _AttachmentImageState extends State<_AttachmentImage> {
+  late Future<Uint8List> _bytes = checkedImage(File(widget.path).readAsBytes());
+
+  @override
+  void didUpdateWidget(covariant _AttachmentImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.path != widget.path) {
+      _bytes = checkedImage(File(widget.path).readAsBytes());
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return FutureBuilder<Uint8List>(
+      future: _bytes,
+      builder: (context, snapshot) {
+        if (snapshot.hasData) {
+          return Image.memory(
+            snapshot.data!,
+            fit: BoxFit.cover,
+            cacheWidth: 528,
+            errorBuilder: (_, _, _) =>
+                Icon(Icons.broken_image_outlined, color: scheme.onSurfaceVariant),
+          );
+        }
+        if (snapshot.hasError) {
+          return Center(
+            child: Text(
+              'Preview not available',
+              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+            ),
+          );
+        }
+        return ColoredBox(color: scheme.surfaceContainerHighest.withValues(alpha: 0.6));
+      },
     );
   }
 }

@@ -98,6 +98,42 @@ class TrashTests(unittest.TestCase):
         self.assertEqual(payload["root"], str(data / "orgbots/trash"))
         self.assertEqual(len(trash.list_entries(data / "orgbots/trash")), 1)
 
+    def test_a_bot_trashes_from_its_working_copy_without_the_owners_trash(self):
+        # From the live room: Sol could not remove a dead workflow file, because
+        # the owner's trash is out of reach inside a bot's sandbox. The bot only
+        # edits a copy; the original waits for the owner's approval anyway.
+        workspace = self.base / "orgbot-workspace"
+        (workspace / ".github/workflows").mkdir(parents=True)
+        (workspace / ".github/workflows/pages.yml").write_text("on: push", encoding="utf-8")
+        outside = self.sources / "owner-file.txt"
+        outside.write_text("not the bot's", encoding="utf-8")
+        data = self.base / "private-home-data"
+        env = {"HOME": str(self.base), "XDG_CONFIG_HOME": str(self.base / "no-config"), "XDG_DATA_HOME": str(data), "ORGBOT_WORKSPACE": str(workspace)}
+        out = io.StringIO()
+        with patch.dict(os.environ, env), patch.object(os, "getcwd", return_value=str(workspace)), patch.object(sys, "argv", [str(MODULE_PATH), "move", "--project", "Protest", str(workspace / ".github/workflows/pages.yml")]), redirect_stdout(out):
+            self.assertEqual(trash._cli(), 0)
+        self.assertFalse((workspace / ".github/workflows/pages.yml").exists())
+        kept = list((data / "orgbots/working-copy-trash").rglob("pages.yml"))
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0].read_text(encoding="utf-8"), "on: push")
+        self.assertIn("until the owner approves", out.getvalue())
+        self.assertFalse((self.base / "no-config/orgbots/trash.json").exists(), "the owner's trash selection is untouched")
+
+        # Asking about storage from a working copy says none is needed.
+        out = io.StringIO()
+        with patch.dict(os.environ, env), patch.object(sys, "argv", [str(MODULE_PATH), "config"]), redirect_stdout(out):
+            self.assertEqual(trash._cli(), 0)
+        self.assertEqual(json.loads(out.getvalue())["requires_selection"], False)
+        with patch.dict(os.environ, env), patch.object(sys, "argv", [str(MODULE_PATH), "configure", "--root", "/mnt/hdd/trash"]), redirect_stdout(io.StringIO()), patch("sys.stderr", io.StringIO()):
+            self.assertEqual(trash._cli(), 2)
+        self.assertFalse((self.base / "no-config/orgbots/trash.json").exists())
+
+        # Anything outside the working copy still goes through the owner's
+        # trash rules, which a sandbox cannot satisfy: it is refused, not moved.
+        with patch.dict(os.environ, env), patch.object(sys, "argv", [str(MODULE_PATH), "move", "--project", "Protest", str(outside), str(workspace / "missing")]), redirect_stdout(io.StringIO()), patch("sys.stderr", io.StringIO()):
+            self.assertEqual(trash._cli(), 2)
+        self.assertTrue(outside.exists())
+
     def test_config_switch_waits_for_shared_root_lock(self):
         import threading
 

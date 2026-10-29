@@ -8,6 +8,7 @@ import contextlib
 import ctypes
 import errno
 import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -766,6 +767,104 @@ def _status(state_arg: str, agent_arg: str) -> dict[str, Any]:
         os.close(lock_fd)
 
 
+def _gpu_device_args() -> list[str]:
+    """Pass the machine's graphics card into a sandbox.
+
+    Without it a bot only sees a software renderer, so frame rates, shaders,
+    CUDA and GPU tests measure the CPU instead. Device nodes only: no display
+    server, input devices, or other hardware.
+    """
+    devices = ["/dev/dri", "/dev/kfd", "/dev/nvidiactl", "/dev/nvidia-modeset",
+               "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools"]
+    devices.extend(sorted(glob.glob("/dev/nvidia[0-9]*")))
+    args: list[str] = []
+    for device in devices:
+        args.extend(["--dev-bind-try", device, device])
+    return args
+
+
+# What a bot's runtime must never read from the owner's home. The runtime sees
+# the rest of the filesystem read-only, because toolchains and the CLIs
+# themselves live all over it (Codex and Grok keep their programs beside their
+# sign-ins), so secrets are hidden one by one: whole folders where no program
+# lives, single files where one does. OrgBots' own data is hidden too: it holds
+# every room's access token, which would let a bot act as the owner anywhere.
+_OWNER_SECRET_DIRS = (
+    ".ssh", ".gnupg", ".password-store", ".local/share/keyrings", ".pki",
+    ".gemini", ".config/opencode", ".local/share/opencode",
+    ".aws", ".azure", ".config/gcloud", ".kube", ".docker", ".terraform.d",
+    ".config/gh", ".config/hub",
+    ".mozilla", ".config/google-chrome", ".config/chromium", ".config/BraveSoftware",
+    ".config/Claude", ".local/share/orgbot", ".config/orgbot",
+)
+_OWNER_SECRET_FILES = (
+    ".codex/auth.json", ".grok/auth.json", ".claude/.credentials.json",
+    ".claude/.firecrawl.env", ".claude/.claude.json", ".claude.json",
+    ".netrc", ".git-credentials", ".config/git/credentials", ".npmrc", ".pypirc",
+    ".cargo/credentials", ".cargo/credentials.toml", ".vault-token",
+    ".config/rclone/rclone.conf", ".bash_history", ".zsh_history", ".python_history",
+)
+
+
+def _bot_ssh_dir() -> Path | None:
+    """The folder bots see as ~/.ssh, when the owner has set one up.
+
+    It holds only the keys, host entries and known hosts meant for bots, so
+    `ssh <host>` works for the servers the owner chose and reaches nothing
+    else. Anything unsafe about it means no SSH access, not a failed turn.
+    """
+    raw_xdg = os.environ.get("XDG_DATA_HOME")
+    data = Path(raw_xdg) if raw_xdg and Path(raw_xdg).is_absolute() else Path.home() / ".local/share"
+    folder = data / "orgbot" / "bot-ssh"
+    try:
+        info = folder.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        return None
+    return folder
+
+
+def _owner_secret_mask_args(owner_home: Path, bot_ssh: Path | None) -> list[str]:
+    """Hide the owner's secrets from a runtime that mounts / read-only."""
+    args: list[str] = []
+    for relative, is_dir in [(r, True) for r in _OWNER_SECRET_DIRS] + [(r, False) for r in _OWNER_SECRET_FILES]:
+        path = owner_home / relative
+        if path.is_symlink():
+            path = Path(os.path.realpath(path))
+        if is_dir and path.is_dir():
+            # OpenSSH reads the account's home, not $HOME, so this is the
+            # ~/.ssh a bot's `ssh` sees.
+            if relative == ".ssh" and bot_ssh is not None:
+                args.extend(["--ro-bind", os.fspath(bot_ssh), os.fspath(path)])
+            else:
+                args.extend(["--size", "65536", "--tmpfs", os.fspath(path)])
+        elif not is_dir and path.is_file():
+            args.extend(["--ro-bind", "/dev/null", os.fspath(path)])
+    return args
+
+
+def _packaged_trash_args(path_dirs: list[str], packaged: Path = Path("/usr/lib/orgbot/orgbot-trash.py")) -> list[str]:
+    """Make `orgbot-trash` in a bot's sandbox the packaged helper.
+
+    An older per-user install (~/.local/bin/orgbot-trash) can come first on
+    PATH, and it runs a helper from $HOME, which in the sandbox is the bot's
+    private home, so every removal failed. The owner's copy is left alone
+    outside the sandbox: their cleanup timer may still use it.
+    """
+    if not packaged.is_file():
+        return []
+    args: list[str] = []
+    for entry in path_dirs:
+        candidate = Path(entry) / "orgbot-trash"
+        if not candidate.exists():
+            continue
+        if Path(os.path.realpath(candidate)) == Path(os.path.realpath(packaged)):
+            break
+        args.extend(["--ro-bind", os.fspath(packaged), os.path.realpath(candidate)])
+    return args
+
+
 def _verify_sandbox_args(workspace: Path, program: list[str]) -> list[str]:
     """Build a minimal, networkless root for reviewer test commands."""
     args = [
@@ -777,6 +876,7 @@ def _verify_sandbox_args(workspace: Path, program: list[str]) -> list[str]:
         "--size", "67108864", "--tmpfs", "/home", "--dir", "/home/orgbot",
         "--size", "67108864", "--tmpfs", "/root",
         "--size", "16777216", "--tmpfs", "/run", "--dir", "/etc",
+        *_gpu_device_args(),
     ]
     # These are runtime files only; the root filesystem starts empty and no
     # host configuration, user data, state, or profiles are mounted.
@@ -1368,6 +1468,7 @@ def _agy_sandbox_args(
         "--size", "67108864", "--tmpfs", "/home", "--dir", "/home/orgbot",
         "--size", "67108864", "--tmpfs", "/root", "--size", "16777216", "--tmpfs", "/run",
         "--dir", "/run/user", "--dir", f"/run/user/{uid}", "--dir", runtime_mount,
+        *_gpu_device_args(),
     ]
     for source in ("/usr", "/usr/local", "/bin", "/sbin", "/lib", "/lib64"):
         if Path(source).exists():
@@ -1986,7 +2087,8 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
             )
         private_cli_overlays: list[tuple[Path, str]] = []
         private_home_bind = "--ro-bind" if agent_cli == "opencode" else "--bind"
-        args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--size", "1073741824", "--tmpfs", "/tmp", "--dir", "/tmp/orgbot-workspace", "--tmpfs", "/run", "--dir", "/run/user", "--dir", f"/run/user/{os.getuid()}", "--dir", private_home_mount, private_home_bind, os.fspath(supplied_home), private_home_mount]
+        args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--size", "1073741824", "--tmpfs", "/tmp", "--dir", "/tmp/orgbot-workspace", "--tmpfs", "/run", "--dir", "/run/user", "--dir", f"/run/user/{os.getuid()}", "--dir", private_home_mount, private_home_bind, os.fspath(supplied_home), private_home_mount, *_gpu_device_args()]
+        args.extend(_owner_secret_mask_args(Path(pwd.getpwuid(os.getuid()).pw_dir), _bot_ssh_dir()))
         if agent_cli == "opencode":
             for relative in (".local/share", ".local/state", ".cache"):
                 directory = supplied_home / relative
@@ -2107,6 +2209,7 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
         for standard in ("/usr/local/bin", "/usr/bin", "/bin"):
             if Path(standard).is_dir() and standard not in safe_path:
                 safe_path.append(standard)
+        args.extend(_packaged_trash_args(safe_path))
         env_args = ["--clearenv", "--setenv", "PATH", os.pathsep.join(safe_path), "--setenv", "HOME", private_home_mount, "--setenv", "CODEX_HOME", f"{private_home_mount}/.codex", "--setenv", "CLAUDE_CONFIG_DIR", f"{private_home_mount}/.claude", "--setenv", "GROK_HOME", f"{private_home_mount}/.grok", "--setenv", "TMPDIR", "/tmp", "--setenv", "ORGBOT_WORKSPACE", "/tmp/orgbot-workspace", "--setenv", "LANG", "C.UTF-8"]
         if agent_cli is not None:
             xdg_config = f"{private_home_mount}/.config"

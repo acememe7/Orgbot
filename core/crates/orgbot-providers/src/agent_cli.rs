@@ -98,11 +98,21 @@ use crate::types::{
     CompletionRequest, CompletionResponse, ContentBlock, Role, StopReason, StreamEvent, Turn, Usage,
 };
 
-/// How long one agent episode may run before it is killed.
+/// An agent episode runs until it finishes, or until the owner pauses or
+/// stops the room (which cancels the turn and kills the CLI).
 ///
-/// Agents do real work — long tool chains, tests, renders — so this is
-/// generous. Override with the `ORGBOT_CLI_TURN_TIMEOUT_SECS` variable.
-const DEFAULT_TURN_TIMEOUT_SECS: u64 = 600;
+/// Agents do real work, long tool chains, tests, renders, and a fixed ceiling
+/// threw that work away mid-task. A ceiling can still be set with the
+/// `ORGBOT_CLI_TURN_TIMEOUT_SECS` variable.
+fn turn_timeout() -> Duration {
+    std::env::var("ORGBOT_CLI_TURN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        // `tokio::time::timeout` treats an unreachable deadline as "never".
+        .unwrap_or(Duration::MAX)
+}
 
 /// Extra places to look for a CLI beyond PATH: this machine installs its
 /// global CLIs under the user's home.
@@ -134,7 +144,9 @@ pub struct AgentCliProvider {
     last_socket: Mutex<Option<String>>,
     /// Whether the room's board is served to the agent as MCP tools.
     mcp: bool,
-    /// Turn ceiling.
+    /// The CLI's own effort level; empty keeps the CLI's default.
+    effort: String,
+    /// Turn ceiling; `Duration::MAX` (the default) means none.
     timeout: Duration,
     /// Optional owner-only record that lets one bot resume its native session
     /// after the room process is rebuilt.
@@ -220,11 +232,7 @@ impl AgentCliProvider {
             ))
         })?;
         let workdir = workdir.into();
-        let timeout = std::env::var("ORGBOT_CLI_TURN_TIMEOUT_SECS")
-            .ok()
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS));
+        let timeout = turn_timeout();
         Ok(Self {
             cli,
             bin,
@@ -241,10 +249,35 @@ impl AgentCliProvider {
             last_socket: Mutex::new(None),
             timeout,
             session_store: Mutex::new(None),
+            effort: String::new(),
             native_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
         })
+    }
+
+    /// Set how hard the agent reasons, using the CLI's own effort level.
+    ///
+    /// An empty level keeps the CLI's default. A level the CLI does not offer
+    /// is refused here, when the room is set up, rather than failing a turn.
+    pub fn with_effort(mut self, effort: &str) -> Result<Self> {
+        let effort = effort.trim();
+        if !effort.is_empty() && !effort_levels(self.cli).contains(&effort) {
+            return Err(ProviderError::Unsupported(match effort_levels(self.cli) {
+                [] => format!(
+                    "{} has no separate effort setting; choose a model variant instead \
+                     (provider/model#variant)",
+                    self.cli.label()
+                ),
+                levels => format!(
+                    "{} does not offer effort `{effort}`; use one of: {}",
+                    self.cli.label(),
+                    levels.join(", ")
+                ),
+            }));
+        }
+        self.effort = effort.to_string();
+        Ok(self)
     }
 
     /// Persist this bot's native session in the private room-state directory.
@@ -508,6 +541,8 @@ struct Episode {
     opencode_usage_complete: bool,
     opencode_terminal_finish: bool,
     antigravity_result_seen: bool,
+    /// Images the CLI generated this turn, in its private home.
+    generated: Vec<PathBuf>,
 }
 
 #[async_trait]
@@ -647,13 +682,27 @@ impl Provider for AgentCliProvider {
         } else {
             request.model.clone()
         };
+        let mut content = if episode.text.trim().is_empty() {
+            vec![]
+        } else {
+            vec![ContentBlock::text(episode.text)]
+        };
+        content.extend(episode.generated.into_iter().map(|path| {
+            let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase();
+            ContentBlock::Image {
+                media_type: match extension.as_str() {
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "webp" => "image/webp",
+                    "gif" => "image/gif",
+                    _ => "image/png",
+                }
+                .into(),
+                source: crate::types::ImageSource::File { path },
+            }
+        }));
         Ok(CompletionResponse {
             model,
-            content: if episode.text.trim().is_empty() {
-                vec![]
-            } else {
-                vec![ContentBlock::text(episode.text)]
-            },
+            content,
             stop_reason: StopReason::EndTurn,
             usage: episode.usage,
         })
@@ -807,6 +856,7 @@ impl AgentCliProvider {
             self.policy,
             mcp_config,
             self.mcp,
+            &self.effort,
         );
         remove_app_credentials(&mut cmd, std::env::vars_os().map(|(name, _)| name));
         if !self.workdir.as_os_str().is_empty() {
@@ -898,6 +948,8 @@ impl AgentCliProvider {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        #[cfg(target_os = "linux")]
+        let started = std::time::SystemTime::now();
         let mut child = cmd.spawn().map_err(|error| {
             ProviderError::Unsupported(format!("could not start {}: {}", self.cli.binary(), error))
         })?;
@@ -973,10 +1025,25 @@ impl AgentCliProvider {
                         }
                         _ => {}
                     }
+                    // A sign-in the CLI refreshed this turn goes back to the
+                    // owner's file. Never fatal: the turn's work stands.
+                    if let Some(owner) = self.credential_owner_home() {
+                        if let Err(error) =
+                            crate::workspace_guard::write_back_credentials_to(home, &owner)
+                        {
+                            tracing::warn!(%error, "could not hand a refreshed sign-in back");
+                        }
+                    }
                 }
             }
             Ok(())
         };
+        // Codex and Grok keep what their image tools make in their own home,
+        // which for a bot is private. Collected so the room can show it.
+        #[cfg(target_os = "linux")]
+        if let Some(home) = private_home.as_deref() {
+            episode.generated = generated_images(home, started);
+        }
         #[cfg(target_os = "linux")]
         if outcome.is_ok() {
             cleanup_private_profile()?;
@@ -1058,6 +1125,23 @@ impl AgentCliProvider {
                     detail: format!("timed out after {}s", self.timeout.as_secs()),
                 })
             }
+        }
+    }
+
+    /// The home whose sign-ins this bot's private profile was copied from,
+    /// and so the only one a refreshed sign-in may be written back to.
+    ///
+    /// Under test that is the fixture's source and never the real `HOME`: a
+    /// test once wrote its fake sign-in over the developer's real one.
+    #[cfg(target_os = "linux")]
+    fn credential_owner_home(&self) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            self.guard.as_ref().and_then(|guard| guard.profile_source.clone())
+        }
+        #[cfg(not(test))]
+        {
+            std::env::var_os("HOME").map(PathBuf::from)
         }
     }
 
@@ -1495,7 +1579,7 @@ fn ingest_codex_line(
                 sink,
                 StreamEvent::ToolUseStart {
                     id: id.chars().take(96).collect(),
-                    name: label.into(),
+                    name: codex_mcp_tool(item).unwrap_or_else(|| label.into()),
                 },
             );
         }
@@ -1650,6 +1734,57 @@ fn ingest_messages_line(
     }
 }
 
+/// Most generated images collected from one turn.
+const MAX_GENERATED_IMAGES: usize = 8;
+
+/// Where each CLI's image tool saves what it makes, under its home.
+///
+/// Only these are read. Scanning the whole home took plugin artwork Codex
+/// refreshes at the start of every turn (a marketplace plugin's logo and
+/// waitlist banners) and posted it as images the bot had generated. Grok is
+/// left out until where it saves its pictures has been verified.
+const IMAGE_OUTPUT_DIRS: &[&str] = &[".codex/generated_images"];
+
+/// Image files written in a CLI's image output folders since `since`: what
+/// its image tool made this turn. Bounded, so a large folder cannot stall a
+/// turn.
+fn generated_images(home: &Path, since: std::time::SystemTime) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending: Vec<(PathBuf, usize)> = IMAGE_OUTPUT_DIRS
+        .iter()
+        .map(|dir| (home.join(dir), 0))
+        .collect();
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > 20_000 || found.len() >= MAX_GENERATED_IMAGES {
+                return found;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let path = entry.path();
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                if depth < 8 && entry.file_name() != "node_modules" {
+                    pending.push((path, depth + 1));
+                }
+            } else if meta.is_file()
+                && meta.modified().is_ok_and(|modified| modified >= since)
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif"))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 fn codex_activity_label(item_type: &str) -> Option<&'static str> {
     match item_type {
         "command_execution" => Some("Run command"),
@@ -1660,6 +1795,18 @@ fn codex_activity_label(item_type: &str) -> Option<&'static str> {
         "image_generation_call" => Some("Generate an image"),
         _ => None,
     }
+}
+
+/// Which connected tool a Codex MCP call used, named the way other CLIs name
+/// it (`mcp__server__tool`), so the room shows `room · claim task` rather
+/// than the same generic label for every call. Arguments are never included.
+fn codex_mcp_tool(item: &Value) -> Option<String> {
+    if item.get("type").and_then(Value::as_str) != Some("mcp_tool_call") {
+        return None;
+    }
+    let server = item.get("server").and_then(Value::as_str)?;
+    let tool = item.get("tool").and_then(Value::as_str)?;
+    Some(safe_tool_label(&format!("mcp__{server}__{tool}")))
 }
 
 fn safe_tool_label(name: &str) -> String {
@@ -2063,6 +2210,7 @@ fn latest_instruction(messages: &[Turn]) -> Option<String> {
 }
 
 /// Lay out the CLI invocation for one turn.
+#[allow(clippy::too_many_arguments)]
 fn build_args(
     cmd: &mut Command,
     cli: CliKind,
@@ -2072,6 +2220,7 @@ fn build_args(
     policy: AgentPolicy,
     mcp_config: Option<&Path>,
     mcp: bool,
+    effort: &str,
 ) {
     let (policy_flag, policy_value) = policy_flags(cli, policy);
     if let Some(path) = mcp_config {
@@ -2109,10 +2258,8 @@ fn build_args(
             }
         }
         (CliKind::Codex, None) => {
-            cmd.arg("exec")
-                .arg("--json")
-                .arg("--skip-git-repo-check")
-                .arg(prompt);
+            // The prompt goes last, after `--` (see the end of this function).
+            cmd.arg("exec").arg("--json").arg("--skip-git-repo-check");
             cmd.arg(policy_flag)
                 .arg(policy_value)
                 .arg("-c")
@@ -2130,8 +2277,9 @@ fn build_args(
                 .arg("approval_policy=\"never\"");
         }
         (CliKind::Claude, None) => {
+            // `-p` only switches on print mode; the prompt is positional and
+            // goes last, after `--` (see the end of this function).
             cmd.arg("-p")
-                .arg(prompt)
                 .arg("--output-format")
                 .arg("stream-json")
                 .arg("--verbose")
@@ -2140,7 +2288,6 @@ fn build_args(
         }
         (CliKind::Claude, Some(session)) => {
             cmd.arg("-p")
-                .arg(prompt)
                 .arg("--output-format")
                 .arg("stream-json")
                 .arg("--verbose")
@@ -2150,16 +2297,17 @@ fn build_args(
                 .arg(session);
         }
         (CliKind::Grok, None) => {
-            cmd.arg("-p")
-                .arg(prompt)
+            // Grok refuses a `-p` value that starts with `-`, as a resumed
+            // turn's board does ("--- the board ..."); the attached form
+            // passes any prompt.
+            cmd.arg(format!("--single={prompt}"))
                 .arg("--output-format")
                 .arg("streaming-messages-json")
                 .arg("--permission-mode")
                 .arg(policy_value);
         }
         (CliKind::Grok, Some(session)) => {
-            cmd.arg("-p")
-                .arg(prompt)
+            cmd.arg(format!("--single={prompt}"))
                 .arg("--output-format")
                 .arg("streaming-messages-json")
                 .arg("--permission-mode")
@@ -2177,7 +2325,26 @@ fn build_args(
             CliKind::OpenCode | CliKind::Antigravity => unreachable!("model flags handled above"),
         };
     }
-    if cli == CliKind::Codex && model == "gpt-6.1-sol" {
+    // Effort goes before the prompt's `--`. A chosen level wins; otherwise
+    // Sol keeps the extra-high setting it is seated for.
+    if !effort.is_empty() {
+        match cli {
+            CliKind::Claude => {
+                cmd.arg("--effort").arg(effort);
+            }
+            CliKind::Codex => {
+                cmd.arg("-c")
+                    .arg(format!("model_reasoning_effort=\"{effort}\""));
+            }
+            CliKind::Grok => {
+                cmd.arg("--reasoning-effort").arg(effort);
+            }
+            CliKind::Antigravity => {
+                cmd.arg("--effort").arg(effort);
+            }
+            CliKind::OpenCode => {}
+        }
+    } else if cli == CliKind::Codex && model == "gpt-6.1-sol" {
         cmd.arg("-c").arg("model_reasoning_effort=\"xhigh\"");
     }
 
@@ -2208,12 +2375,35 @@ fn build_args(
             CliKind::Codex | CliKind::OpenCode | CliKind::Antigravity => {}
         }
     }
-    if cli == CliKind::Codex {
-        if let Some(session) = resumed {
-            // A resumed prompt can begin with `-`; stop option parsing before
-            // passing the session id and prompt as positional arguments.
-            cmd.arg("--").arg(session).arg(prompt);
+    // A prompt can begin with `-`: a resumed turn's prompt is the board,
+    // which opens with "--- the board, as it stands now ---". Passed as a bare
+    // argument, Claude Code rejects it as "unknown option" and the turn dies,
+    // so the prompt always goes last, after `--`, which also closes Claude's
+    // variadic `--allowedTools` list.
+    match cli {
+        CliKind::Claude => {
+            cmd.arg("--").arg(prompt);
         }
+        CliKind::Codex => {
+            cmd.arg("--");
+            if let Some(session) = resumed {
+                cmd.arg(session);
+            }
+            cmd.arg(prompt);
+        }
+        CliKind::OpenCode | CliKind::Antigravity | CliKind::Grok => {}
+    }
+}
+
+/// The effort levels each CLI accepts, as its own `--help` lists them.
+///
+/// OpenCode has no fixed list: effort there is a per-model variant chosen in
+/// the model id (`provider/model#variant`), so it takes no separate setting.
+pub fn effort_levels(cli: CliKind) -> &'static [&'static str] {
+    match cli {
+        CliKind::Claude | CliKind::Antigravity => &["low", "medium", "high", "xhigh", "max"],
+        CliKind::Codex | CliKind::Grok => &["low", "medium", "high", "xhigh"],
+        CliKind::OpenCode => &[],
     }
 }
 
@@ -2431,7 +2621,7 @@ printf '%s\n' '---ARGS---' >> 'ARGS_PATH'
 capture=0
 for arg in "$@"; do
   if [ "$capture" -eq 1 ]; then printf '%s\n' "$arg" >> 'PROMPT_PATH'; capture=0; fi
-  if [ "$arg" = "-p" ]; then capture=1; fi
+  if [ "$arg" = "--" ]; then capture=1; fi
   printf '%s\n' "$arg" >> 'ARGS_PATH'
 done
 printf '%s\n' '---END---' >> 'PROMPT_PATH'
@@ -2474,6 +2664,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
+            effort: String::new(),
             native_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
@@ -2577,6 +2768,54 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
         assert!(episode.text.is_empty());
     }
 
+    #[test]
+    fn images_a_cli_drew_this_turn_are_collected_from_its_home() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("orgbot-drawn-{nonce}"));
+        let folder = home.join(".codex/generated_images/session");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(home.join("node_modules/pkg")).unwrap();
+        let plugin = home.join(".codex/.tmp/marketplaces/ponytail/assets");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(folder.join("before.png"), b"old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let since = std::time::SystemTime::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(folder.join("exec-1.png"), b"new").unwrap();
+        std::fs::write(folder.join("notes.txt"), b"not an image").unwrap();
+        std::fs::write(home.join("node_modules/pkg/icon.png"), b"dependency").unwrap();
+        // Codex refreshes plugin artwork at the start of every turn; that is
+        // not something the bot drew.
+        std::fs::write(plugin.join("waitlist-banner-es.png"), b"plugin art").unwrap();
+
+        assert_eq!(generated_images(&home, since), vec![folder.join("exec-1.png")]);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_room_tool_calls_are_named_without_their_arguments() {
+        let (sink, mut events) = mpsc::channel(8);
+        let mut episode = Episode::default();
+        ingest_line(
+            CliKind::Codex,
+            r#"{"type":"item.started","item":{"id":"item-7","type":"mcp_tool_call","server":"orgbot_room","tool":"claim_task","arguments":{"task":"secret-task-brief"},"status":"in_progress"}}"#,
+            &Some(sink),
+            &mut episode,
+        );
+        let start = events.try_recv().unwrap();
+        assert_eq!(
+            start,
+            StreamEvent::ToolUseStart {
+                id: "item-7".into(),
+                name: "mcp__orgbot_room__claim_task".into(),
+            }
+        );
+        assert!(!serde_json::to_string(&start).unwrap().contains("secret-task-brief"));
+    }
+
     #[tokio::test]
     async fn codex_process_activity_uses_categories_without_command_text() {
         let (sink, mut events) = mpsc::channel(8);
@@ -2674,6 +2913,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
+            effort: String::new(),
             native_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
@@ -2828,6 +3068,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
                 AgentPolicy::FullAccess,
                 None,
                 true,
+                "",
             );
             let args: Vec<_> = command
                 .as_std()
@@ -2871,6 +3112,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             AgentPolicy::ReadOnly,
             None,
             false,
+            "",
         );
         let fresh_args: Vec<_> = fresh
             .as_std()
@@ -2983,6 +3225,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             mcp: true,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
+            effort: String::new(),
             native_usage: Mutex::new(None),
             guard: None,
         }
@@ -3082,6 +3325,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
+            effort: String::new(),
             native_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
@@ -3160,6 +3404,7 @@ fi
                 mcp: false,
                 timeout: Duration::from_secs(5),
                 session_store: Mutex::new(None),
+                effort: String::new(),
                 native_usage: Mutex::new(None),
                 #[cfg(target_os = "linux")]
                 guard: None,
@@ -3259,6 +3504,7 @@ fi
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
+            effort: String::new(),
             native_usage: Mutex::new(Some(usage_from_json(&serde_json::json!({
                 "input_tokens": 100, "output_tokens": 10
             })))),
@@ -3323,6 +3569,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
                 mcp: false,
                 timeout: Duration::from_secs(5),
                 session_store: Mutex::new(None),
+                effort: String::new(),
                 native_usage: Mutex::new(None),
                 #[cfg(target_os = "linux")]
                 guard: None,
@@ -3371,6 +3618,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
                 policy,
                 None,
                 true,
+                "",
             );
             let args: Vec<_> = cmd
                 .as_std()
@@ -3402,6 +3650,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
                 policy,
                 None,
                 true,
+                "",
             );
             let args: Vec<_> = cmd
                 .as_std()
@@ -3448,6 +3697,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
                 AgentPolicy::ReadOnly,
                 None,
                 false,
+                "",
             );
             let arguments: Vec<String> = command
                 .as_std()
@@ -3515,6 +3765,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             mcp: store.mcp,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
+            effort: String::new(),
             native_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
@@ -3658,6 +3909,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             mcp: store.mcp,
             timeout: Duration::from_millis(50),
             session_store: Mutex::new(Some(store.clone())),
+            effort: String::new(),
             native_usage: Mutex::new(None),
             #[cfg(target_os = "linux")]
             guard: None,
@@ -4248,6 +4500,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
                     policy,
                     None,
                     true,
+                    "",
                 );
                 let args: Vec<_> = cmd
                     .as_std()
@@ -4285,6 +4538,154 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
     }
 
     #[test]
+    fn each_cli_gets_its_own_effort_flag() {
+        let expected: [(CliKind, &[&str]); 4] = [
+            (CliKind::Claude, &["--effort", "high"]),
+            (CliKind::Antigravity, &["--effort", "high"]),
+            (CliKind::Codex, &["-c", "model_reasoning_effort=\"high\""]),
+            (CliKind::Grok, &["--reasoning-effort", "high"]),
+        ];
+        for (cli, flag) in expected {
+            let mut cmd = Command::new("cli");
+            build_args(
+                &mut cmd,
+                cli,
+                "do the work",
+                None,
+                "some-model",
+                AgentPolicy::ReadOnly,
+                None,
+                false,
+                "high",
+            );
+            let args: Vec<_> = cmd
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let at = args
+                .windows(2)
+                .position(|pair| pair == flag)
+                .unwrap_or_else(|| panic!("{cli:?} is missing {flag:?}: {args:?}"));
+            // Where the prompt follows `--`, nothing after it is an option.
+            if let Some(terminator) = args.iter().position(|arg| arg == "--") {
+                assert!(at < terminator, "{cli:?}: effort must precede `--`");
+            }
+        }
+        // A chosen level replaces Sol's default extra-high effort.
+        let mut cmd = Command::new("codex");
+        build_args(
+            &mut cmd,
+            CliKind::Codex,
+            "p",
+            None,
+            "gpt-6.1-sol",
+            AgentPolicy::ReadOnly,
+            None,
+            false,
+            "low",
+        );
+        let args = format!("{:?}", cmd.as_std().get_args().collect::<Vec<_>>());
+        assert!(args.contains("model_reasoning_effort=\\\"low\\\""), "{args}");
+        assert!(!args.contains("xhigh"), "{args}");
+    }
+
+    #[test]
+    fn an_effort_a_cli_does_not_offer_is_refused_at_setup() {
+        let provider = || AgentCliProvider {
+            cli: CliKind::Codex,
+            bin: "codex".into(),
+            model: String::new(),
+            workdir: PathBuf::new(),
+            policy: AgentPolicy::ReadOnly,
+            session: Mutex::new(None),
+            session_system_brief: Mutex::new(None),
+            last_socket: Mutex::new(None),
+            mcp: false,
+            effort: String::new(),
+            timeout: Duration::MAX,
+            session_store: Mutex::new(None),
+            native_usage: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            guard: None,
+        };
+        assert!(provider().with_effort("max").is_err(), "codex has no max");
+        assert_eq!(provider().with_effort(" high ").unwrap().effort, "high");
+        assert_eq!(provider().with_effort("").unwrap().effort, "");
+    }
+
+    #[tokio::test]
+    async fn agent_turns_have_no_time_limit_unless_one_is_set() {
+        // The variable is not set in the test environment.
+        if std::env::var_os("ORGBOT_CLI_TURN_TIMEOUT_SECS").is_none() {
+            assert_eq!(turn_timeout(), Duration::MAX);
+        }
+        // An unbounded deadline must not overflow when the turn is wrapped.
+        let finished = timeout(Duration::MAX, async { 7 }).await;
+        assert_eq!(finished.ok(), Some(7));
+    }
+
+    #[test]
+    fn a_prompt_that_starts_with_dashes_is_passed_after_the_option_terminator() {
+        // A resumed turn's prompt is the board, which opens with "---". Given
+        // as a bare argument, Claude Code reads it as an unknown option.
+        let board = "--- the board, as it stands now ---\nnothing new";
+        for (cli, resumed) in [
+            (CliKind::Claude, None),
+            (CliKind::Claude, Some("session-1")),
+            (CliKind::Codex, None),
+            (CliKind::Codex, Some("session-1")),
+        ] {
+            let mut cmd = Command::new("cli");
+            build_args(
+                &mut cmd,
+                cli,
+                board,
+                resumed,
+                "some-model",
+                AgentPolicy::WorkspaceWrite,
+                None,
+                true,
+                "",
+            );
+            let args: Vec<_> = cmd
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(args.last().map(String::as_str), Some(board), "{cli:?}");
+            let terminator = args.iter().position(|arg| arg == "--").expect("an option terminator");
+            assert!(
+                args[terminator + 1..].iter().all(|arg| !arg.starts_with('-') || arg == board),
+                "{cli:?}: only positionals may follow `--`: {args:?}"
+            );
+        }
+        // Grok takes the prompt as an option value, attached so a leading
+        // dash cannot be read as another option.
+        for resumed in [None, Some("session-1")] {
+            let mut cmd = Command::new("grok");
+            build_args(
+                &mut cmd,
+                CliKind::Grok,
+                board,
+                resumed,
+                "",
+                AgentPolicy::ReadOnly,
+                None,
+                false,
+                "",
+            );
+            let args: Vec<_> = cmd
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert!(args.contains(&format!("--single={board}")), "{args:?}");
+            assert!(!args.iter().any(|arg| arg == board), "{args:?}");
+        }
+    }
+
+    #[test]
     fn claude_read_only_mcp_uses_dont_ask_with_explicit_tools() {
         let mut cmd = Command::new("claude");
         build_args(
@@ -4296,6 +4697,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             AgentPolicy::ReadOnly,
             Some(Path::new("/private/orgbot-room-mcp.json")),
             true,
+            "",
         );
         let args: Vec<_> = cmd
             .as_std()

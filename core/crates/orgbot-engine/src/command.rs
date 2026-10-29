@@ -202,6 +202,11 @@ pub enum Command {
     },
 
     // ---- engine housekeeping ----
+    /// A bot is in a turn right now: renew its claims. A turn can run far
+    /// longer than a claim's window (an agent running tests, a slow command)
+    /// without touching the board, and its work must not be taken away while
+    /// it is still doing it.
+    KeepAlive { agent: AgentId },
     /// Charge one model turn against the room budget.
     RecordTurn {
         agent: AgentId,
@@ -266,6 +271,7 @@ impl Command {
             Self::SetAuthorization { .. } => "set_authorization",
             Self::AskOwner { .. } => "ask_owner",
             Self::AnswerDecision { .. } => "answer_decision",
+            Self::KeepAlive { .. } => "keep_alive",
             Self::RecordTurn { .. } => "record_turn",
             Self::ReportError { .. } => "report_error",
             Self::Tick { .. } => "tick",
@@ -305,6 +311,7 @@ impl Command {
                 | Self::CloseRoom { .. }
                 | Self::CreateTask { .. }
                 | Self::Tick { .. }
+                | Self::KeepAlive { .. }
                 // Speaking is always allowed. A paused or finished room still
                 // has a transcript, and a message that is silently refused
                 // leaves the person staring at a chat that swallowed it.

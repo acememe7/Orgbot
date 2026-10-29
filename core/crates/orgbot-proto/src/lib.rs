@@ -39,7 +39,7 @@ pub mod time;
 
 pub use agent::{AgentPolicy, AgentSpec, AgentStatus, Autonomy, CliKind, ProviderRef};
 pub use artifact::{Artifact, ArtifactBody};
-pub use chat::{is_broadcast_tag, Audience, Author, ChatMessage, MessageIntent};
+pub use chat::{is_broadcast_tag, OWNER_STAND_IN, Audience, Author, ChatMessage, MessageIntent};
 pub use event::{Event, EventEnvelope, Seq};
 pub use handoff::{Handoff, HandoffKind, HandoffState, HandoffTransition, Recipient};
 pub use ids::{

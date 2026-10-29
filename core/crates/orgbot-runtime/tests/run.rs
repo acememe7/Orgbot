@@ -698,6 +698,21 @@ async fn an_ask_to_everyone_is_answered_by_every_bot() {
         })
         .unwrap();
 
+    // A decision answer the room records for the owner carries a stand-in
+    // author; it must not become the name bots call the owner.
+    room.engine_mut()
+        .apply(orgbot_engine::Command::PostMessage {
+            message: Box::new(
+                orgbot_proto::ChatMessage::human(
+                    room_id,
+                    orgbot_proto::OWNER_STAND_IN,
+                    "The owner answered: A",
+                )
+                .with_intent(orgbot_proto::MessageIntent::Answer),
+            ),
+        })
+        .unwrap();
+
     let mut acted = Vec::new();
     while room.next_actor().is_some() && acted.len() < 10 {
         acted.push(room.step(None).await.expect("a bot should act").agent);
@@ -714,6 +729,416 @@ async fn an_ask_to_everyone_is_answered_by_every_bot() {
             "@{handle} should have answered the roll call"
         );
     }
+}
+
+/// Waits for a release before answering, like an agent CLI on a long job.
+#[derive(Debug)]
+struct SlowWorker(Arc<tokio::sync::Notify>);
+
+#[async_trait]
+impl Provider for SlowWorker {
+    fn name(&self) -> &str {
+        "slow"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+        _sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> orgbot_providers::Result<CompletionResponse> {
+        self.0.notified().await;
+        Ok(say("slow job done"))
+    }
+}
+
+fn owner_asks(room: &orgbot_runtime::SharedEngine, to: Option<orgbot_proto::AgentId>, body: &str) {
+    room.with(|engine| {
+        let room_id = engine.room_id();
+        engine
+            .apply(orgbot_engine::Command::PostMessage {
+                message: Box::new(orgbot_proto::ChatMessage {
+                    id: orgbot_proto::MessageId::new(),
+                    room: room_id,
+                    author: orgbot_proto::Author::Human { name: "Aece".into() },
+                    audience: match to {
+                        Some(agent) => orgbot_proto::Audience::Agents { agents: vec![agent] },
+                        None => orgbot_proto::Audience::Everyone,
+                    },
+                    intent: orgbot_proto::MessageIntent::Ask,
+                    body: body.into(),
+                    task: None,
+                    handoff: None,
+                    reply_to: None,
+                    attachments: vec![],
+                    files: vec![],
+                    sent_at: orgbot_proto::Timestamp::now(),
+                }),
+            })
+            .unwrap();
+    });
+}
+
+#[tokio::test]
+async fn a_bot_asked_by_the_owner_answers_while_a_slower_turn_runs() {
+    // The room from the screenshot: one bot deep in a long turn, another done
+    // already, and the owner asking the free one a question. It must answer
+    // now, not after the slow turn ends.
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "rolling".into(),
+        goal: "answer".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits {
+            max_parallel_turns: 2,
+            ..RoomLimits::default()
+        },
+    });
+    let release = Arc::new(tokio::sync::Notify::new());
+    room.seat(
+        spec("slow", &["writer"], Autonomy::default()),
+        Arc::new(SlowWorker(release.clone())),
+    )
+    .unwrap();
+    let quick = room
+        .seat(
+            spec("quick", &["writer"], Autonomy::default()),
+            reactive("quick", |_last, all| {
+                if all.contains("what is slow waiting on?") {
+                    say("slow is waiting on its long job")
+                } else {
+                    say("hello")
+                }
+            }),
+        )
+        .unwrap();
+    room.start().unwrap();
+    let shared = room.shared_engine();
+    owner_asks(&shared, None, "@all start");
+
+    let said = |text: &'static str| {
+        let shared = shared.clone();
+        move || shared.with(|engine| engine.transcript().iter().any(|m| m.body == text))
+    };
+    let until = |done: Box<dyn Fn() -> bool>| async move {
+        while !done() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    let sinks = |_| None;
+    let run = room.step_rolling(2, &sinks);
+    tokio::pin!(run);
+    let scenario = async {
+        until(Box::new(said("hello"))).await;
+        owner_asks(&shared, Some(quick), "@quick what is slow waiting on?");
+        until(Box::new(said("slow is waiting on its long job"))).await;
+    };
+    tokio::select! {
+        _ = &mut run => panic!("the run ended while the slow turn was still going"),
+        done = tokio::time::timeout(std::time::Duration::from_secs(5), scenario) => {
+            done.expect("the asked bot must answer while the slow turn runs");
+        }
+    }
+    assert!(!said("slow job done")(), "the slow turn is still running");
+
+    release.notify_one();
+    let reports = run.await;
+    assert!(said("slow job done")());
+    assert_eq!(reports.len(), 3, "slow once, quick twice: {reports:?}");
+}
+
+/// Reports a picture the way an agent CLI does: an image file it saved.
+#[derive(Debug)]
+struct Draws(std::path::PathBuf);
+
+#[async_trait]
+impl Provider for Draws {
+    fn name(&self) -> &str {
+        "draws"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+        _sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> orgbot_providers::Result<CompletionResponse> {
+        Ok(CompletionResponse {
+            model: "draws".into(),
+            content: vec![
+                ContentBlock::text("the poster is ready"),
+                ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    source: orgbot_providers::types::ImageSource::File {
+                        path: self.0.clone(),
+                    },
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn an_image_a_bot_generates_is_shown_in_the_room() {
+    // Codex and Grok draw with their own image tools and keep the picture in
+    // their home, which for a bot is private: the owner never saw it.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("orgbot-drawn-room-{nonce}"));
+    let drawn = dir.join("home/.codex/generated_images/s/exec-1.png");
+    std::fs::create_dir_all(drawn.parent().unwrap()).unwrap();
+    std::fs::write(&drawn, b"\x89PNG\r\n\x1a\nrest of the picture").unwrap();
+    let attachments = dir.join("attachments");
+
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "poster".into(),
+        goal: "draw".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    let artist = room
+        .seat(spec("artist", &["designer"], Autonomy::default()), Arc::new(Draws(drawn.clone())))
+        .unwrap();
+    room.attach_attachments(attachments.clone());
+    room.start().unwrap();
+    owner_asks(&room.shared_engine(), Some(artist), "@artist draw the poster");
+    room.step(None).await;
+
+    let posted = room.engine().transcript().last().unwrap().clone();
+    assert_eq!(posted.body, "the poster is ready");
+    assert_eq!(posted.files.len(), 1, "the picture comes with the bot's message");
+    assert_eq!(posted.files[0].mime_type, "image/png");
+    assert!(attachments.join(&posted.files[0].id).join("manifest.json").is_file());
+    // It lives in the room, not in the conversation the bot carries forward.
+    assert!(!room.checkpoint().to_string().contains(drawn.to_str().unwrap()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_bot_working_past_its_claim_window_keeps_its_task() {
+    // From the live room: Devon and Quinn were each in one turn for over the
+    // fifteen-minute claim window, running commands that do not touch the
+    // board. Another bot finishing ran the housekeeping tick, which took their
+    // tasks away mid-turn, and Quinn's submit then failed.
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "keep alive".into(),
+        goal: "finish".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits {
+            max_parallel_turns: 2,
+            ..RoomLimits::default()
+        },
+    });
+    let release = Arc::new(tokio::sync::Notify::new());
+    let slow = room
+        .seat(
+            spec("slow", &["writer"], Autonomy::default()),
+            Arc::new(SlowWorker(release.clone())),
+        )
+        .unwrap();
+    let quick = room
+        .seat(
+            spec("quick", &["writer"], Autonomy::default()),
+            reactive("quick", |_last, _all| say("done quickly")),
+        )
+        .unwrap();
+    room.start().unwrap();
+    let task = {
+        let mut engine = room.engine_mut();
+        let id = engine
+            .apply(orgbot_engine::Command::CreateTask {
+                title: "long job".into(),
+                brief: "work for a long time".into(),
+                by: None,
+                required_role: Some("writer".into()),
+                priority: orgbot_proto::task::Priority::Normal,
+                acceptance_criteria: vec![],
+                depends_on: vec![],
+                origin: TaskOrigin::plain(),
+            })
+            .unwrap()
+            .iter()
+            .find_map(|envelope| match &envelope.event {
+                orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+                _ => None,
+            })
+            .unwrap();
+        engine
+            .apply(orgbot_engine::Command::OpenTask { task: id })
+            .unwrap();
+        engine
+            .apply(orgbot_engine::Command::ClaimTask { task: id, by: slow })
+            .unwrap();
+        engine
+            .apply(orgbot_engine::Command::StartTask { task: id, by: slow })
+            .unwrap();
+        id
+    };
+    let shared = room.shared_engine();
+    owner_asks(&shared, Some(slow), "@slow keep going");
+    owner_asks(&shared, Some(quick), "@quick say something");
+
+    let sinks = |_| None;
+    let run = room.step_rolling(2, &sinks);
+    tokio::pin!(run);
+    let scenario = async {
+        // The slow turn outlasts its claim window...
+        while !shared.with(|e| e.transcript().iter().any(|m| m.body == "done quickly")) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    // ...expire the claim while the slow turn is still running, before the
+    // quick bot's finish triggers the tick.
+    shared.with(|e| {
+        e.task_mut(task).unwrap().lease_expires_at =
+            Some(orgbot_proto::Timestamp::now().plus_millis(-1));
+    });
+    tokio::select! {
+        _ = &mut run => panic!("the run ended while the slow turn was still going"),
+        done = tokio::time::timeout(std::time::Duration::from_secs(5), scenario) => done.unwrap(),
+    }
+    // Let the poll and the tick after the quick turn run.
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(1500), &mut run).await;
+    let state = shared.with(|e| e.task(task).unwrap().state);
+    assert_eq!(state, TaskState::InProgress, "the working bot keeps its task");
+    release.notify_one();
+    run.await;
+}
+
+#[tokio::test]
+async fn a_bot_waiting_for_a_slot_keeps_its_task() {
+    // From the live room: Sol's task was unblocked while the two other bots
+    // on its account held both of that account's slots. Sol waited for a turn
+    // the whole claim window and lost the task for not reporting progress.
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "queued".into(),
+        goal: "wait in line".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits {
+            max_parallel_turns: 2,
+            max_parallel_per_backend: 1,
+            ..RoomLimits::default()
+        },
+    });
+    let same_account = |handle: &str| {
+        AgentSpec::new(
+            handle,
+            handle,
+            ProviderRef::Anthropic {
+                model: "claude-opus-5".into(),
+            },
+        )
+        .with_roles(vec!["writer"])
+    };
+    let release = Arc::new(tokio::sync::Notify::new());
+    let slow = room
+        .seat(same_account("slow"), Arc::new(SlowWorker(release.clone())))
+        .unwrap();
+    let queued = room
+        .seat(same_account("queued"), reactive("queued", |_, _| say("my turn")))
+        .unwrap();
+    room.start().unwrap();
+    let task = {
+        let mut engine = room.engine_mut();
+        let id = engine
+            .apply(orgbot_engine::Command::CreateTask {
+                title: "held work".into(),
+                brief: "work".into(),
+                by: None,
+                required_role: Some("writer".into()),
+                priority: orgbot_proto::task::Priority::Normal,
+                acceptance_criteria: vec![],
+                depends_on: vec![],
+                origin: TaskOrigin::plain(),
+            })
+            .unwrap()
+            .iter()
+            .find_map(|envelope| match &envelope.event {
+                orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+                _ => None,
+            })
+            .unwrap();
+        for command in [
+            orgbot_engine::Command::OpenTask { task: id },
+            orgbot_engine::Command::ClaimTask { task: id, by: queued },
+            orgbot_engine::Command::StartTask { task: id, by: queued },
+        ] {
+            engine.apply(command).unwrap();
+        }
+        id
+    };
+    let shared = room.shared_engine();
+    owner_asks(&shared, Some(slow), "@slow start the long job");
+
+    let sinks = |_| None;
+    let run = room.step_rolling(2, &sinks);
+    tokio::pin!(run);
+    // The slow bot holds the account's only slot; the other waits with its
+    // task, and the window runs out while it does.
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(200), &mut run).await;
+    shared.with(|e| {
+        e.task_mut(task).unwrap().lease_expires_at =
+            Some(orgbot_proto::Timestamp::now().plus_millis(-1));
+    });
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(1500), &mut run).await;
+    shared.with(|e| {
+        let _ = e.apply(orgbot_engine::Command::Tick {
+            now: orgbot_proto::Timestamp::now(),
+        });
+    });
+    let (state, holder) = shared.with(|e| {
+        let record = e.task(task).unwrap();
+        (record.state, record.assignee)
+    });
+    assert_eq!(state, TaskState::InProgress, "waiting for a slot is not walking away");
+    assert_eq!(holder, Some(queued));
+    release.notify_one();
+    run.await;
+}
+
+#[tokio::test]
+async fn a_rolling_run_cut_short_loses_no_bot() {
+    // A pause drops the run mid-turn. The bot that was on loan to its turn
+    // must come back: it is saved with the room and can take the next turn.
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "parked".into(),
+        goal: "keep everyone".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    let release = Arc::new(tokio::sync::Notify::new());
+    let slow = room
+        .seat(
+            spec("slow", &["writer"], Autonomy::default()),
+            Arc::new(SlowWorker(release.clone())),
+        )
+        .unwrap();
+    room.start().unwrap();
+    let shared = room.shared_engine();
+    owner_asks(&shared, Some(slow), "@slow begin");
+    let sinks = |_| None;
+    {
+        let run = room.step_rolling(1, &sinks);
+        // Cut the run off while the slow turn is in flight.
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), run).await;
+    }
+    let saved = room.checkpoint();
+    assert!(
+        saved["bots"].as_object().unwrap().contains_key(&slow.to_string()),
+        "a bot parked by a dropped turn is still saved: {saved}"
+    );
+    room.finish_interrupted_turns().await;
+    owner_asks(&shared, Some(slow), "@slow again");
+    release.notify_one();
+    let reports = room.step_rolling(1, &sinks).await;
+    assert_eq!(reports.len(), 1, "the bot is back and takes its turn");
+    assert_eq!(reports[0].agent, slow);
 }
 
 /// Streams its own handle, so a test can see whose turn a stream carries.
@@ -1014,6 +1439,7 @@ async fn a_cli_bot_that_posted_through_the_room_tool_is_not_echoed() {
             workdir: String::new(),
             policy: orgbot_proto::agent::AgentPolicy::ReadOnly,
             mcp: true,
+            effort: String::new(),
         },
     )
     .with_roles(["writer"]);
@@ -1074,6 +1500,7 @@ async fn an_mcp_agent_bot_claims_a_seeded_task_in_band() {
             workdir: String::new(),
             policy: orgbot_proto::agent::AgentPolicy::ReadOnly,
             mcp: true,
+            effort: String::new(),
         },
     )
     .with_roles(["writer"]);
@@ -1171,6 +1598,7 @@ async fn a_real_codex_bot_claims_a_task_through_the_room_bridge() {
             workdir: "/tmp/orgbot-e2e-ws".into(),
             policy: orgbot_proto::agent::AgentPolicy::ReadOnly,
             mcp: true,
+            effort: String::new(),
         },
     )
     .with_roles(["writer"])
@@ -1344,6 +1772,7 @@ async fn a_room_cycle_claim_work_review_submit_runs_through_the_bridge() {
                 workdir: String::new(),
                 policy: orgbot_proto::agent::AgentPolicy::ReadOnly,
                 mcp: true,
+                effort: String::new(),
             },
         )
         .with_roles(roles.iter().copied())

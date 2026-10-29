@@ -151,6 +151,7 @@ async fn an_mcp_disconnect_during_exchange_allows_reconnect() {
             workdir: ".".into(),
             policy: AgentPolicy::ReadOnly,
             mcp: true,
+            effort: String::new(),
         },
     )
     .with_roles(["coordinator"])

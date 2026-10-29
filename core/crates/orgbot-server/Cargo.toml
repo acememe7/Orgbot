@@ -3,7 +3,7 @@ name = "orgbot-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
 description = "Hosts group-chat rooms over WebSocket, and runs them headless from the CLI."
 default-run = "orgbot"
 

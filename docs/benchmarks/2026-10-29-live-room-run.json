@@ -1,0 +1,187 @@
+{
+  "record": "OrgBots 2.1.0 live room run",
+  "room": "One real project room: the owner's web game, 10 bots on 5 providers",
+  "window": {
+    "start": "2026-10-28T20:10",
+    "end": "2026-10-29T04:11",
+    "time_zone": "WAT (UTC+1)"
+  },
+  "counters": "OrgBots usage records per completed turn, as each CLI or API reported them; not invoices or quota readings",
+  "bots": [
+    {
+      "bot": "Julian",
+      "roles": "architect, coordinator",
+      "provider": "Claude Code \u00b7 Opus 5.5",
+      "turns": 23,
+      "uncached_input_and_cache_write": 452268,
+      "cache_read": 17370294,
+      "output": 66394
+    },
+    {
+      "bot": "Sol",
+      "roles": "engineer, ops",
+      "provider": "Codex CLI \u00b7 GPT-6.1 Sol",
+      "turns": 17,
+      "uncached_input_and_cache_write": 1068967,
+      "cache_read": 46626432,
+      "output": 202837
+    },
+    {
+      "bot": "Devon",
+      "roles": "engineer, backend",
+      "provider": "DeepSeek API \u00b7 DeepSeek Flash",
+      "turns": 16,
+      "uncached_input_and_cache_write": 1222836,
+      "cache_read": 13694464,
+      "output": 153215
+    },
+    {
+      "bot": "Mira",
+      "roles": "engineer, frontend",
+      "provider": "Codex CLI \u00b7 GPT-6 Luna",
+      "turns": 15,
+      "uncached_input_and_cache_write": 1365765,
+      "cache_read": 65696768,
+      "output": 391702
+    },
+    {
+      "bot": "Finn",
+      "roles": "engineer",
+      "provider": "Grok CLI \u00b7 Grok 4.7",
+      "turns": 14,
+      "uncached_input_and_cache_write": 1010578,
+      "cache_read": 17361152,
+      "output": 211694
+    },
+    {
+      "bot": "Quinn",
+      "roles": "QA",
+      "provider": "Ollama Cloud \u00b7 GLM 5.3 Flash",
+      "turns": 13,
+      "uncached_input_and_cache_write": 1106502,
+      "cache_read": 7871680,
+      "output": 302440
+    },
+    {
+      "bot": "Astra",
+      "roles": "security, reviewer, coordinator",
+      "provider": "Codex CLI \u00b7 GPT-6 Astra",
+      "turns": 8,
+      "uncached_input_and_cache_write": 402490,
+      "cache_read": 15202048,
+      "output": 36696
+    },
+    {
+      "bot": "Miles",
+      "roles": "support",
+      "provider": "Grok CLI \u00b7 Grok 4.7",
+      "turns": 6,
+      "uncached_input_and_cache_write": 518720,
+      "cache_read": 2515328,
+      "output": 22396
+    },
+    {
+      "bot": "Ellis",
+      "roles": "writer, reviewer",
+      "provider": "Claude Code \u00b7 Haiku 5.5",
+      "turns": 6,
+      "uncached_input_and_cache_write": 445089,
+      "cache_read": 4568898,
+      "output": 31036
+    },
+    {
+      "bot": "Rhea",
+      "roles": "researcher, analyst",
+      "provider": "Ollama Cloud \u00b7 DeepSeek v4.1 Flash",
+      "turns": 0,
+      "uncached_input_and_cache_write": 0,
+      "cache_read": 0,
+      "output": 0
+    }
+  ],
+  "totals": {
+    "turns": 118,
+    "uncached_input_and_cache_write": 7593215,
+    "cache_read": 190907064,
+    "output": 1418410
+  },
+  "tasks": {
+    "created": 15,
+    "delivered_after_independent_review": [
+      "Audit the game, its repository and its release path",
+      "Reconcile the next work plan with the owner's updated progress notes",
+      "QA baseline and acceptance matrix for the game's modes",
+      "Reconcile protocol and hosting documentation before a release gate",
+      "Correct a line in the studio website's FAQ on the owner's server (owner decision)",
+      "Remove an unused GitHub Pages workflow and tidy the docs (owner decision)",
+      "Queue whole parties of up to four players in public matches",
+      "Assess and contain a server release that went live during a review hold"
+    ]
+  },
+  "messages": {
+    "system": 24,
+    "agent": 101,
+    "human": 22
+  },
+  "turn_errors": {
+    "total": 11,
+    "turn time limit": 1,
+    "cli exit on a prompt starting with a dash": 3,
+    "signed out": 6,
+    "provider at capacity (temporary)": 1
+  },
+  "claims_released_by_mistake_before_2_1_0": 18,
+  "account_dashboards": [
+    {
+      "provider": "Codex (ChatGPT plan, shared weekly limit)",
+      "figure": "97% of the weekly limit left at 02:13",
+      "source": "owner screenshot",
+      "owner_estimate_for_run": "about 1% of the weekly limit"
+    },
+    {
+      "provider": "Ollama Cloud (Pro plan)",
+      "figure": "$0.37 of monthly credits used, 144 GLM 5.3 Flash requests this month, at 02:12",
+      "source": "owner screenshot"
+    },
+    {
+      "provider": "DeepSeek API",
+      "figure": "$4.92 over the last 30 days on the key used, all activity on that key",
+      "source": "owner screenshot",
+      "owner_estimate_for_run": "about $0.25"
+    },
+    {
+      "provider": "Claude (weekly limit)",
+      "figure": "6% of the weekly limit, which the owner attributes mostly (about 5 points) to a separate Claude Code development session, not the room",
+      "source": "owner report, no screenshot"
+    },
+    {
+      "provider": "Grok (premium plan, 5-hour window)",
+      "figure": "7% of the 5-hour window",
+      "source": "owner report, no screenshot"
+    }
+  ],
+  "limits": [
+    "One room and one night; not a controlled comparison with a single agent.",
+    "Dashboards are account-wide and include other activity on the same accounts.",
+    "Token counters are as reported by each provider and do not establish a dollar charge or quota share.",
+    "The room ran on development builds before 03:07 and on 2.1.0 afterwards.",
+    "Handoffs carry a deadline the sending bot sets. In the final hour two of four handoffs expired before the recipient acted, one while the recipient was in a long turn on other work."
+  ],
+  "final_package_hour": {
+    "start": "2026-10-29T03:07",
+    "end": "2026-10-29T04:11",
+    "bots_with_turns": 8,
+    "turns": 34,
+    "output": 357039,
+    "failed_turns": 1,
+    "failed_turn_cause": "provider-side Codex capacity error; the bot recovered on retry after 11 minutes",
+    "claims_released_by_mistake": 0,
+    "tasks_delivered_after_review": 1,
+    "handoffs": {
+      "expired": 2,
+      "rejected": 1,
+      "accepted": 2,
+      "completed": 1
+    }
+  }
+}

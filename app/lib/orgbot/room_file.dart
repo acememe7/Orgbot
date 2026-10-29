@@ -220,6 +220,11 @@ RoomFile buildRoomFile(
         ..writeln(
           'policy = "${powers.reviewOnly ? 'read_only' : 'workspace_write'}"',
         );
+      // A level this CLI does not offer (left from another CLI) is dropped
+      // rather than written, so the room still opens.
+      if (cli.effortLevels.contains(bot.effort)) {
+        buffer.writeln('effort = ' + _s(bot.effort));
+      }
     } else if (bot.provider.needsApiKey) {
       final key = bot.apiKey.trim().isNotEmpty
           ? bot.apiKey.trim()

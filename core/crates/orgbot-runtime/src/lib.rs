@@ -46,5 +46,5 @@ pub mod workspace;
 
 pub use bot::{Bot, TurnReport};
 pub use mcp::{room_tools_for, McpCall, McpSession};
-pub use orchestrator::{Orchestrator, RunOutcome};
+pub use orchestrator::{Autosave, Orchestrator, RunOutcome};
 pub use shared::SharedEngine;

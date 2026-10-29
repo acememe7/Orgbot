@@ -43,6 +43,32 @@ enum CliKind {
   bool get requiresProtectedRuntime =>
       this == CliKind.opencode || this == CliKind.antigravity;
 
+  /// The effort levels this CLI accepts, as its own `--help` lists them.
+  ///
+  /// OpenCode has none: its effort is a per-model variant chosen in the model
+  /// id (`provider/model#variant`). Mirrors `effort_levels` in the engine.
+  List<String> get effortLevels => switch (this) {
+    CliKind.claude || CliKind.antigravity => const [
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max',
+    ],
+    CliKind.codex || CliKind.grok => const ['low', 'medium', 'high', 'xhigh'],
+    CliKind.opencode => const [],
+  };
+
+  /// How an effort level reads in the picker.
+  static String effortLabel(String level) => switch (level) {
+    'low' => 'Low',
+    'medium' => 'Medium',
+    'high' => 'High',
+    'xhigh' => 'Extra high',
+    'max' => 'Max',
+    _ => 'Default',
+  };
+
   static CliKind? fromBinary(String name) {
     for (final k in values) {
       if (k.binary == name) return k;

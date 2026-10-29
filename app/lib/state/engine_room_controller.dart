@@ -64,6 +64,13 @@ class EngineRoomController extends ChangeNotifier {
   List<RoomIssue> issues = const [];
 
   CoreServer? _server;
+
+  /// Brings a dropped room connection back. A room's service can restart, or
+  /// the computer can sleep; without this the screen stayed disconnected,
+  /// showed no updates and swallowed messages while the room kept working.
+  StreamSubscription<LinkState>? _linkWatch;
+  Timer? _reconnectTimer;
+  int _reconnectAttempts = 0;
   RoomLink? _client;
   RoomStore? _store;
 
@@ -351,6 +358,41 @@ class EngineRoomController extends ChangeNotifier {
     if (client.current == LinkState.error) {
       throw EngineStartError('Connected to the engine but the socket failed.');
     }
+    _reconnectAttempts = 0;
+    _linkWatch = client.connectionState.listen((state) {
+      if (state == LinkState.connected) {
+        _reconnectAttempts = 0;
+      } else if (state == LinkState.closed || state == LinkState.error) {
+        _scheduleReconnect(file, client);
+      }
+    });
+  }
+
+  void _scheduleReconnect(RoomFile file, RoomClient client) {
+    if (_disposed || _reconnectTimer != null || !identical(_client, client)) {
+      return;
+    }
+    final seconds = 1 << _reconnectAttempts.clamp(0, 4);
+    _reconnectAttempts++;
+    _reconnectTimer = Timer(
+      Duration(seconds: seconds.clamp(1, 15)),
+      () => unawaited(_reconnect(file, client)),
+    );
+  }
+
+  Future<void> _reconnect(RoomFile file, RoomClient client) async {
+    _reconnectTimer = null;
+    if (_disposed || !identical(_client, client) || !isRunning) return;
+    try {
+      // Reuses the room's service when it is up, or starts it again.
+      final server = await startRoom(file, roomId: room.id);
+      if (_disposed || !identical(_client, client)) return;
+      _server = server;
+      await client.connect(server.url, token: server.token);
+    } catch (_) {
+      // Tried again below.
+    }
+    if (client.current != LinkState.connected) _scheduleReconnect(file, client);
   }
 
   /// Run the room inside this process, through the engine library.
@@ -719,6 +761,10 @@ class EngineRoomController extends ChangeNotifier {
   Future<void> _teardown({bool stopServer = false}) async {
     _renewalTimer?.cancel();
     _renewalTimer = null;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    await _linkWatch?.cancel();
+    _linkWatch = null;
     _providerEnvironment = {};
     _pump?.cancel();
     _pump = null;

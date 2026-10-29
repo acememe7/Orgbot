@@ -13,6 +13,7 @@ import 'models.dart';
 import 'credentials.dart';
 import '../protocol/models.dart' show ChatMessage;
 import '../state/engine_room_controller.dart';
+import '../engine/core_server.dart' show stopLinuxRoomService;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 /// Where the library persists. Encrypted platform storage on device; injectable
@@ -318,8 +319,11 @@ class Library extends ChangeNotifier {
     return room;
   }
 
+  /// Delete a room from the list and stop it, including a background
+  /// service this app did not open in this session. Saved history stays on
+  /// disk.
   void removeRoom(String id) {
-    unawaited(stopRoom(id));
+    unawaited(stopRoom(id).then((_) => stopLinuxRoomService(id)));
     rooms.removeWhere((r) => r.id == id);
     _persist();
   }
