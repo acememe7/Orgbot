@@ -17,17 +17,49 @@ trash = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(trash)
 
+# Deadline for cross-thread handshakes; passing runs return as soon as the event fires.
+THREAD_TIMEOUT = 30
+
 
 class TrashTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="orgbot-trash-test-")
         self.base = Path(self.tmp.name)
+        self._isolate_host()
         self.root = trash._prepare_root(self.base / "trash", require_mount=False)
         self.sources = self.base / "sources"
         self.sources.mkdir(mode=0o700)
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def _isolate_host(self):
+        # Never consult the owner's home, the package's legacy policy marker, the
+        # real legacy HDD or the systemd user manager; tests opt into those states.
+        environment = patch.dict(os.environ, {"HOME": str(self.base)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME"):
+            os.environ.pop(name, None)
+        for name, value in (
+            ("LEGACY_POLICY", self.base / "absent-legacy-policy"),
+            ("HDD_MOUNT", self.base / "hdd"),
+            ("LEGACY_TRASH_ROOT", self.base / "hdd/OrgBots Trash"),
+            ("SYSTEMCTL_CANDIDATES", ()),
+        ):
+            patcher = patch.object(trash, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _mounted_legacy_hdd(self):
+        # Stand in for a mounted ext4 legacy HDD inside the test directory.
+        trash.HDD_MOUNT.mkdir(mode=0o700)
+        return patch.object(trash, "_verify_hdd_mount")
+
+    def _finish_threads(self, *threads):
+        for thread in threads:
+            if thread.is_alive():
+                thread.join(timeout=THREAD_TIMEOUT)
 
     def test_move_list_restore_and_no_overwrite(self):
         source = self.sources / "project-data"
@@ -144,9 +176,10 @@ class TrashTests(unittest.TestCase):
         target.mkdir(mode=0o700)
         env = {"HOME": str(self.base), "XDG_CONFIG_HOME": str(config), "XDG_DATA_HOME": str(data)}
         with patch.dict(os.environ, env):
-            trash._prepare_root()
+            held_root = trash._prepare_root()
             entered = threading.Event()
             release = threading.Event()
+            switch_waiting = threading.Event()
             switched = threading.Event()
             errors = []
 
@@ -154,7 +187,7 @@ class TrashTests(unittest.TestCase):
                 try:
                     with trash._selected_root_locked():
                         entered.set()
-                        if not release.wait(timeout=3):
+                        if not release.wait(timeout=THREAD_TIMEOUT):
                             raise AssertionError("test did not release shared root lock")
                 except BaseException as exc:
                     errors.append(exc)
@@ -166,15 +199,25 @@ class TrashTests(unittest.TestCase):
                 except BaseException as exc:
                     errors.append(exc)
 
-            holder = threading.Thread(target=hold_selected_root)
-            holder.start()
-            self.assertTrue(entered.wait(timeout=3))
-            switcher = threading.Thread(target=switch_root)
-            switcher.start()
-            self.assertFalse(switched.wait(timeout=0.1), "root switch bypassed shared root lock")
-            release.set()
-            holder.join(timeout=3)
-            switcher.join(timeout=3)
+            original_locked = trash._locked
+
+            def observe_held_root_lock(root):
+                if threading.current_thread().name == "concurrent-root-switch" and root == held_root:
+                    switch_waiting.set()
+                return original_locked(root)
+
+            holder = threading.Thread(target=hold_selected_root, daemon=True)
+            switcher = threading.Thread(target=switch_root, name="concurrent-root-switch", daemon=True)
+            with patch.object(trash, "_locked", side_effect=observe_held_root_lock):
+                holder.start()
+                try:
+                    self.assertTrue(entered.wait(timeout=THREAD_TIMEOUT))
+                    switcher.start()
+                    self.assertTrue(switch_waiting.wait(timeout=THREAD_TIMEOUT), "root switch did not request the shared root lock")
+                    self.assertFalse(switched.wait(timeout=0.2), "root switch bypassed shared root lock")
+                finally:
+                    release.set()
+                    self._finish_threads(holder, switcher)
             self.assertFalse(holder.is_alive())
             self.assertFalse(switcher.is_alive())
             self.assertFalse(errors, errors)
@@ -352,7 +395,9 @@ class TrashTests(unittest.TestCase):
         target = self.base / "new-root"
         target.mkdir(mode=0o700)
         manager_env = trash.subprocess.CompletedProcess([], 0, stdout=b"XDG_CONFIG_HOME=/manager/config\n")
-        with patch.dict(os.environ, {"HOME": str(self.base), "XDG_CONFIG_HOME": str(config)}), patch.object(trash, "_systemctl_executable", return_value=Path("/usr/bin/systemctl")), patch.object(trash.subprocess, "run", return_value=manager_env):
+        with patch.dict(os.environ, {"HOME": str(self.base), "XDG_CONFIG_HOME": str(config)}), self._mounted_legacy_hdd(), patch.object(trash, "_systemctl_executable", return_value=Path("/usr/bin/systemctl")), patch.object(trash.subprocess, "run", return_value=manager_env):
+            # An installed cleanup service without a config is a legacy HDD install.
+            self.assertEqual(trash._selected_config()[1], "legacy-hdd")
             with self.assertRaisesRegex(trash.TrashError, "align XDG_CONFIG_HOME"):
                 trash._configure_root(str(target / "trash"))
         self.assertFalse((config / "orgbots/trash.json").exists())
@@ -376,7 +421,8 @@ class TrashTests(unittest.TestCase):
         target.mkdir(mode=0o700)
         manager_env = trash.subprocess.CompletedProcess([], 0, stdout=f"XDG_CONFIG_HOME={config}\n".encode())
         failed_reload = trash.subprocess.CompletedProcess([], 1)
-        with patch.dict(os.environ, {"HOME": str(self.base), "XDG_CONFIG_HOME": str(config), "XDG_DATA_HOME": str(data)}), patch.object(trash, "_systemctl_executable", return_value=Path("/usr/bin/systemctl")), patch.object(trash.subprocess, "run", side_effect=[manager_env, failed_reload, failed_reload]):
+        with patch.dict(os.environ, {"HOME": str(self.base), "XDG_CONFIG_HOME": str(config), "XDG_DATA_HOME": str(data)}), self._mounted_legacy_hdd(), patch.object(trash, "_systemctl_executable", return_value=Path("/usr/bin/systemctl")), patch.object(trash.subprocess, "run", side_effect=[manager_env, failed_reload, failed_reload]):
+            self.assertEqual(trash._selected_config()[1], "legacy-hdd")
             with self.assertRaisesRegex(trash.TrashError, "systemd rejected"):
                 trash._configure_root(str(target / "trash"))
         self.assertFalse((config / "orgbots/trash.json").exists())
@@ -414,7 +460,7 @@ class TrashTests(unittest.TestCase):
                 if reload_calls > 1:
                     return trash.subprocess.CompletedProcess(args[0], 1)
                 reload_entered.set()
-                if not finish_reload.wait(timeout=3):
+                if not finish_reload.wait(timeout=THREAD_TIMEOUT):
                     raise AssertionError("test did not release systemd reload")
                 return trash.subprocess.CompletedProcess(args[0], 1)
 
@@ -429,7 +475,8 @@ class TrashTests(unittest.TestCase):
                 with patch.object(sys, "argv", [str(MODULE_PATH), "move", "--project", "Demo", str(source)]), redirect_stdout(output):
                     move_results.append(trash._cli())
 
-            switcher = threading.Thread(target=switch_root)
+            switcher = threading.Thread(target=switch_root, daemon=True)
+            mover = threading.Thread(target=move_during_switch, name="concurrent-trash-move", daemon=True)
             move_waiting = threading.Event()
             original_locked = trash._locked
 
@@ -438,18 +485,18 @@ class TrashTests(unittest.TestCase):
                     move_waiting.set()
                 return original_locked(root)
 
-            with patch.object(trash, "_systemctl_executable", return_value=Path("/usr/bin/systemctl")), patch.object(trash.subprocess, "run", side_effect=blocked_failed_reload):
+            # Both threads finish before these patches and the test environment unwind.
+            with patch.object(trash, "_systemctl_executable", return_value=Path("/usr/bin/systemctl")), patch.object(trash.subprocess, "run", side_effect=blocked_failed_reload), patch.object(trash, "_locked", side_effect=observe_destination_lock):
                 switcher.start()
-                self.assertTrue(reload_entered.wait(timeout=3))
-                with patch.object(trash, "_locked", side_effect=observe_destination_lock):
-                    mover = threading.Thread(target=move_during_switch, name="concurrent-trash-move")
+                try:
+                    self.assertTrue(reload_entered.wait(timeout=THREAD_TIMEOUT))
                     mover.start()
-                    self.assertTrue(move_waiting.wait(timeout=3), "concurrent move did not observe the pending destination selection")
+                    self.assertTrue(move_waiting.wait(timeout=THREAD_TIMEOUT), "concurrent move did not observe the pending destination selection")
                     self.assertTrue(source.exists(), "move consumed source before pending reload committed")
                     self.assertEqual(trash.list_entries(new_root / "trash"), [])
+                finally:
                     finish_reload.set()
-                    switcher.join(timeout=3)
-                    mover.join(timeout=3)
+                    self._finish_threads(switcher, mover)
             self.assertFalse(switcher.is_alive())
             self.assertFalse(mover.is_alive())
             self.assertEqual(len(switch_errors), 1)
