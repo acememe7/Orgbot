@@ -377,6 +377,10 @@ impl Bot {
                     .as_ref()
                     .map(|path| path.to_string_lossy().into_owned()),
             );
+            // Decided afresh each step: a release, block or hold since the
+            // last one takes the server key away from this one.
+            request =
+                request.with_server_access(engine.with(|engine| engine.server_access_for(self.spec.id)));
 
             if let Some(tx) = &sink {
                 let _ = tx.send(StreamEvent::Thinking).await;
@@ -539,7 +543,13 @@ impl Bot {
                         )
                     } else {
                         match &self.workspace {
-                            Some(workspace) => workspace.call(self.spec.id, name, input).await,
+                            Some(workspace) => {
+                                let server_access = engine
+                                    .with(|engine| engine.server_access_for(self.spec.id));
+                                workspace
+                                    .call_as(self.spec.id, name, input, server_access)
+                                    .await
+                            }
                             None => orgbot_tools::ToolOutcome {
                                 content: "No workspace attached".into(),
                                 is_error: true,

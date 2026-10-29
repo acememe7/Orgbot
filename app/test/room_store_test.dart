@@ -43,6 +43,8 @@ class FakeClient implements RoomClient {
   @override
   void pause({String reason = ''}) => sent.add({'type': 'pause'});
   @override
+  void stopNow({String reason = ''}) => sent.add({'type': 'stop_now'});
+  @override
   void resume() => sent.add({'type': 'resume'});
   @override
   void resync() => sent.add({'type': 'resync'});
@@ -171,6 +173,44 @@ void main() {
       expect(store.isCompleted, isFalse);
       store.togglePause();
       expect(client.sent.last['type'], 'pause');
+    },
+  );
+  test(
+    'a pause shows as pausing until the turns under way finish; stop now is separate',
+    () async {
+      final client = FakeClient();
+      final store = RoomStore(client);
+      addTearDown(store.dispose);
+      store.restore([
+        {
+          'type': 'snapshot',
+          'room': {
+            'id': 'room_1',
+            'spec': {'name': 'Busy', 'goal': 'ship'},
+            'phase': 'running',
+          },
+          'roster': [],
+          'tasks': [],
+        },
+      ]);
+      store.togglePause();
+      expect(client.sent.last['type'], 'pause');
+      expect(store.isPausing, isTrue);
+      expect(store.runStateLabel, 'Pausing after current turns');
+      store.restore([
+        {'type': 'phase', 'phase': 'paused'},
+      ]);
+      expect(store.isPausing, isFalse);
+      expect(store.runStateLabel, 'Paused');
+
+      store.togglePause();
+      expect(client.sent.last['type'], 'resume');
+      store.restore([
+        {'type': 'phase', 'phase': 'running'},
+      ]);
+      expect(store.isPausing, isFalse);
+      store.stopNow();
+      expect(client.sent.last['type'], 'stop_now');
     },
   );
   test(

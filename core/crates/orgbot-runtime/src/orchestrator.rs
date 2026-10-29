@@ -96,6 +96,9 @@ pub struct Orchestrator {
     leased_memory: BTreeMap<AgentId, BotMemory>,
     /// Writes the room to disk while a run is under way.
     autosave: Option<Autosave>,
+    /// Set when the owner pauses mid-run: start no new turns, and let the
+    /// ones under way finish, so pausing loses no work.
+    holding: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Saves the room's checkpoint. A run lasts as long as its slowest turn, and
@@ -231,6 +234,7 @@ impl Orchestrator {
             busy_backends: BTreeMap::new(),
             leased_memory: BTreeMap::new(),
             autosave: None,
+            holding: Default::default(),
         };
         for (mut configured, provider) in providers {
             let saved = restored
@@ -277,6 +281,7 @@ impl Orchestrator {
             busy_backends: BTreeMap::new(),
             leased_memory: BTreeMap::new(),
             autosave: None,
+            holding: Default::default(),
         }
     }
 
@@ -346,6 +351,13 @@ impl Orchestrator {
         self.autosave = Some(save);
     }
 
+    /// A switch that, while set, stops this room starting new turns without
+    /// touching the ones under way. The session sets it when the owner pauses
+    /// mid-run and pauses the room once those turns have finished.
+    pub fn hold_switch(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.holding.clone()
+    }
+
     /// Yield API waits to human input without interrupting workspace operations.
     pub fn attach_input_interrupt(&mut self, token: tokio_util::sync::CancellationToken) {
         for bot in self.bots.values_mut() {
@@ -401,6 +413,10 @@ impl Orchestrator {
         // Someone is blocked on this bot's answer.
         if !engine.offers_for(agent).is_empty() {
             return Some(Wake::Handoff);
+        }
+        // Work it took on for someone who is waiting for the result.
+        if !engine.handoffs_accepted_by(agent).is_empty() {
+            return Some(Wake::HeldWork);
         }
         // A question addressed to this bot that it has not answered yet. This
         // is what lets a human (or another bot) talk to the room and get a
@@ -817,6 +833,10 @@ impl Orchestrator {
         use futures::stream::{FuturesUnordered, StreamExt};
 
         self.reclaim();
+        // A pause is waiting for the turns under way: start none.
+        if self.holding.load(std::sync::atomic::Ordering::SeqCst) {
+            return Vec::new();
+        }
         // What each bot mid-turn was woken for, so refills leave it to them.
         let mut reserved: BTreeMap<AgentId, Reserved> = BTreeMap::new();
         let chosen = self.pick_actors(limit, &mut reserved, |_| true);
@@ -937,6 +957,12 @@ impl Orchestrator {
                         for agent in running_backend.keys().chain(&waiting) {
                             let _ = engine.apply(Command::KeepAlive { agent: *agent });
                         }
+                        // A faulted bot's retry is due on its own schedule, not
+                        // whenever another turn happens to finish.
+                        let now = Timestamp::now();
+                        if engine.retry_due(now) {
+                            let _ = engine.apply(Command::Tick { now });
+                        }
                     });
                     if last_save.elapsed() >= AUTOSAVE_EVERY {
                         last_save = tokio::time::Instant::now();
@@ -947,7 +973,8 @@ impl Orchestrator {
                 }
             }
             // Fill free slots, unless the room should stop taking turns.
-            if refill && self.stop_condition().is_none() {
+            let holding = self.holding.load(std::sync::atomic::Ordering::SeqCst);
+            if refill && !holding && self.stop_condition().is_none() {
                 let slots = self
                     .parallelism()
                     .min(self.turns_left().saturating_sub(running.len()))

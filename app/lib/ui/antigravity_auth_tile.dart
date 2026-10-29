@@ -239,6 +239,17 @@ class _AntigravityAuthTileState extends State<AntigravityAuthTile> {
     ],
   );
 
+  /// Google's Antigravity FAQ and terms say a personal Google account must
+  /// not be used through third-party apps, and accounts have been suspended
+  /// for it. The owner should know before signing in, not after.
+  Widget _termsNotice(ColorScheme scheme) => Text(
+    "Google's terms do not allow a personal Google account to be used "
+    'through third-party apps such as OrgBots, and accounts have been '
+    'suspended for it. Use a work account whose plan allows it.',
+    key: const ValueKey('antigravity-terms-notice'),
+    style: TextStyle(fontSize: 12, color: scheme.error),
+  );
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -282,6 +293,8 @@ class _AntigravityAuthTileState extends State<AntigravityAuthTile> {
                         style: TextStyle(fontSize: 12),
                       ),
                       const SizedBox(height: 4),
+                      _termsNotice(scheme),
+                      const SizedBox(height: 4),
                       Align(
                         alignment: Alignment.centerRight,
                         child: _actions(),
@@ -308,6 +321,8 @@ class _AntigravityAuthTileState extends State<AntigravityAuthTile> {
                         'Uses a separate OrgBots sign-in.',
                         style: TextStyle(fontSize: 12),
                       ),
+                      const SizedBox(height: 5),
+                      _termsNotice(scheme),
                     ],
                   ),
                   trailing: _actions(),

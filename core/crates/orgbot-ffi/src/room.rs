@@ -257,6 +257,7 @@ impl Room {
                 note,
             },
             ClientMessage::Pause { reason } => Control::Pause { reason },
+            ClientMessage::StopNow { reason } => Control::StopNow { reason },
             ClientMessage::Resume => Control::Resume,
             ClientMessage::Resync | ClientMessage::Hello { .. } => {
                 self.resync.store(true, Ordering::Release);

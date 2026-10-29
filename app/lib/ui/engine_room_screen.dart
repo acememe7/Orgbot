@@ -440,6 +440,9 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   Future<void> _reviewWorkspaceChanges(RoomStore store) async {
     final agents = <WorkspaceAgentLabel>[];
     final seen = <String>{};
+    // Each bot can have two copies of the project: the one its own coding
+    // CLI works in, and the one OrgBots uses for the room's workspace tools
+    // (the only one an API bot has).
     for (final agent in store.agents) {
       final label = agent.handle.isNotEmpty
           ? '@${agent.handle}'
@@ -447,7 +450,9 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
           ? agent.displayName
           : agent.id;
       if (seen.add(agent.id)) {
-        agents.add(WorkspaceAgentLabel(id: agent.id, label: '$label · engine'));
+        agents.add(
+          WorkspaceAgentLabel(id: agent.id, label: '$label · room tools'),
+        );
       }
       if (agent.handle.isNotEmpty) {
         final nativeId = utf8
@@ -456,7 +461,7 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
             .join();
         if (seen.add(nativeId)) {
           agents.add(
-            WorkspaceAgentLabel(id: nativeId, label: '$label · native'),
+            WorkspaceAgentLabel(id: nativeId, label: '$label · its own CLI'),
           );
         }
       }
@@ -524,7 +529,9 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
                 ? 'Continue'
                 : store.isPaused
                 ? 'Resume'
-                : 'Pause',
+                : store.isPausing
+                ? 'Pausing after current turns'
+                : 'Pause after current turns',
             style: IconButton.styleFrom(
               foregroundColor: store.isPaused
                   ? scheme.primary
@@ -535,14 +542,17 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
                   ? Icons.play_arrow_rounded
                   : Icons.pause_rounded,
             ),
-            onPressed: _controller.isRunning
-                ? _controller.togglePause
-                : _controller.start,
+            onPressed: !_controller.isRunning
+                ? _controller.start
+                : store.isPausing
+                ? null
+                : _controller.togglePause,
           ),
         PopupMenuButton<String>(
           tooltip: 'Room actions',
           onSelected: (value) async {
             if (value == 'reconnect') await _controller.reconnectWorkspace();
+            if (value == 'stop-now') _controller.stopTurnsNow();
             if (value == 'stop') {
               await _controller.stop();
               if (mounted && !widget.embedded) Navigator.pop(context);
@@ -553,6 +563,11 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
               const PopupMenuItem(
                 value: 'reconnect',
                 child: Text('Reconnect computer'),
+              ),
+            if (store?.isActive == true)
+              const PopupMenuItem(
+                value: 'stop-now',
+                child: Text('Stop turns now'),
               ),
             const PopupMenuItem(value: 'stop', child: Text('Stop and save')),
           ],
@@ -853,13 +868,25 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
                     ),
                   ),
                   if (_inspector == 0 && _desktop)
-                    IconButton(
-                      key: const ValueKey('review-workspace-changes'),
-                      tooltip: 'Review agent workspace changes',
-                      onPressed: store == null
-                          ? null
-                          : () => _reviewWorkspaceChanges(store),
-                      icon: const Icon(Icons.merge_type, size: 18),
+                    // Labelled, not an icon alone: owners asked to approve
+                    // file removals could not find where to do it.
+                    Flexible(
+                      flex: 2,
+                      child: Tooltip(
+                        message: 'Review agent workspace changes',
+                        child: TextButton.icon(
+                          key: const ValueKey('review-workspace-changes'),
+                          onPressed: store == null
+                              ? null
+                              : () => _reviewWorkspaceChanges(store),
+                          icon: const Icon(Icons.merge_type, size: 18),
+                          label: const Text(
+                            'Workspace changes',
+                            overflow: TextOverflow.ellipsis,
+                            softWrap: false,
+                          ),
+                        ),
+                      ),
                     ),
                   IconButton(
                     key: const ValueKey('collapse-workspace'),

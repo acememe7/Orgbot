@@ -66,10 +66,15 @@ The desktop package targets **Ubuntu 24.04 amd64**. Version 2.1.0 keeps
 several bots working side by side without idle slots, shows pictures that
 Codex bots generate right in the chat, lets bots use your graphics card, and
 gives them their own SSH key for servers you choose instead of yours. It also
-moves to the PolyForm Noncommercial License; see [License](#license) and the
+changed the license; see [License](#license) for the current terms and the
 [2.1.0 live room record](docs/benchmarks/2026-10-29-live-room-run.md).
-Version 2.1.1 stops handoffs between bots from expiring while the receiving bot
-is still busy with another turn, or with the handed-off work itself.
+Version 2.2.0 keeps servers out of reach until you allow a bot onto one for a
+specific task, lets bots finish the turn they are on when you pause, lets a
+coordinator propose retiring stale tasks for you to approve with one tap, keeps
+handoffs open while the receiving bot is busy, retries a
+bot that hit a temporary provider error on time, names the CLI to sign in to
+when a sign-in expires, and moves to the PolyForm Shield License, which allows
+use at work.
 Set up the signed third-party APT repository once on each computer:
 
 ```bash
@@ -217,6 +222,24 @@ See the [verified results](#verified-results) below and the
 [benchmark procedure](scripts/benchmarks/README.md).
 
 ## Verified results
+
+### One bot versus a reviewed room, 29 October 2026
+
+The same real task, public party queueing in a private battle royale game, ran
+from the same commit with the same Codex model alone, and as the implementer in
+a room with an independent reviewer and a coordinator. Ten hidden checks,
+written beforehand, judged both.
+
+- **One bot: 3 of 10.** Its own tests and the project's 822 passed, yet it
+  shipped five defects, including parties that stayed queued after a member
+  left and a web cancel that never reached the server.
+- **Room: 10 of 10**, delivered after the reviewer sent the work back three
+  times (5, 2 and 1 blocking findings) and then approved it.
+- **Cost:** 2.7 times the output tokens (138,800 against 50,527) and about three
+  times the time.
+
+One task and one run of each. See the
+[full record and its limits](docs/benchmarks/2026-10-29-one-bot-vs-room.md).
 
 ### 2.1.0 live room run, 28 to 29 October 2026
 
@@ -586,24 +609,44 @@ Integration-test targets are refused unless `orgbotQa=true`, protecting the norm
 
 If Wi-Fi ADB repeatedly loses the test debugger, `integration_test/smoke_main.dart` runs phone-file, native-engine/tag, room navigation/restart and pinned-SSH-reconnect checks without a debugger. During its `background window` stage, background the QA app and turn off the display; `heartbeat.json` records progress and a native message plus an SSH reconnect run during that window. Reopen the QA app after 34 seconds to capture the restored chat and Memory screen. Build it with the same QA property and fixture defines using `flutter build apk --profile --target-platform android-arm64 -t integration_test/smoke_main.dart`, then install the QA APK, restore `adb reverse tcp:22222 tcp:22222`, and launch `com.orgbot.app.qa/com.orgbot.app.MainActivity`. Results are in the QA app’s `files/workspaces/smoke-result.json`. This smoke check supplements the widget/integration suite.
 
+## Provider terms
+
+OrgBots runs each provider's own CLI under your own sign-in and never calls a
+provider with a token it extracted. Whether a subscription may be used this way
+is up to each provider, and their terms change:
+
+- **Claude Code** documents `claude -p` on Pro and Max plans, but Anthropic's
+  terms restrict third-party tools that store or route subscription
+  credentials. Check the current terms before relying on a subscription.
+- **Codex CLI** documents non-interactive `codex exec` with a ChatGPT sign-in.
+- **Grok Build** documents headless use for SuperGrok and X Premium subscribers.
+- **Antigravity**: Google's FAQ and terms say a personal Google account must
+  not be used through third-party apps, and accounts have been suspended for
+  it. Do not use a personal Antigravity sign-in in OrgBots.
+- API providers such as DeepSeek and Ollama Cloud use API keys and bill per use.
+
+Several bots on one account share that account's limits.
+
 ## License
 
-OrgBots 2.1.0 and all later releases and commits are licensed under the
-[PolyForm Noncommercial License 1.0.0](LICENSE). Copyright 2026 The AECE Studio.
+OrgBots 2.2.0 and later releases are licensed under the
+[PolyForm Shield License 1.0.0](LICENSE). Copyright 2026 The AECE Studio.
 
-- **Free for noncommercial use.** Personal study, research, testing, hobby
-  projects and use by charities, schools, public research bodies and
-  government institutions are permitted, as defined in the license.
-- **Commercial use needs a separate license.** Use by a for-profit
-  organization for its business, including internal team use, commercial
-  software development, hosting or reselling, requires a commercial license
-  from The AECE Studio: theaece@theaecestudio.com.
+- **Free to use, including at work.** Individuals and companies may use,
+  change and share OrgBots for any purpose, including commercial software
+  development.
+- **No competing products.** You may not offer a product that competes with
+  OrgBots, whether sold or free: for example, bundling OrgBots into a product
+  you sell, reselling or white-labelling it, hosting it as a service, or
+  distributing a fork as a substitute. A separate commercial license for these
+  uses is available from The AECE Studio: theaece@theaecestudio.com.
 - **No warranty.** The software is provided as is, without any warranty, and
   the licensor is not liable for any damages.
 
-Releases 2.0.3 and earlier were published under the Apache License 2.0, and
-copies of those releases remain available under that license. Bundled
-third-party components keep their own license terms and notices; for example,
-the Inter font's SIL Open Font License and attribution remain in
+OrgBots 2.1.0 was published under the PolyForm Noncommercial License 1.0.0, and
+releases 2.0.3 and earlier under the Apache License 2.0; copies of
+those releases remain available under the license they were published with.
+Bundled third-party components keep their own license terms and notices; for
+example, the Inter font's SIL Open Font License and attribution remain in
 `app/assets/fonts/OFL.txt` and in the desktop bundle. This summary is not legal
 advice; the license text governs.

@@ -90,8 +90,14 @@ pub enum Control {
         /// The answer.
         answer: String,
     },
-    /// Pause the room.
+    /// Pause the room once the turns under way have finished: no new turn
+    /// starts meanwhile, and none is cut short.
     Pause {
+        /// Why.
+        reason: String,
+    },
+    /// Pause the room now, cutting short any turn under way.
+    StopNow {
         /// Why.
         reason: String,
     },
@@ -140,7 +146,11 @@ impl SessionHandle {
 
     pub fn try_send(&self, control: Control) -> bool {
         let stop = matches!(control, Control::Stop);
-        let interrupts = matches!(control, Control::Pause { .. } | Control::Stop);
+        // Only an emergency stop cuts turns short. An ordinary pause lets the
+        // turns under way finish: in the live room, pausing to install an
+        // update meant waiting for a moment when no bot was mid-turn, or
+        // throwing away every turn that was.
+        let interrupts = matches!(control, Control::StopNow { .. } | Control::Stop);
         // Human input never cuts a running turn short. Messages and decision
         // answers land in the room while turns run (see `step`), and each bot
         // reads them on its next turn; the bots already at work keep going.
@@ -652,6 +662,7 @@ impl RoomSession {
         let events = self.events.clone();
         let control = &mut self.control;
         let deferred = &mut self.deferred;
+        let hold = self.orchestrator.hold_switch();
         let alerts = &mut self.desktop_notifications;
         let committed = self.committed_attachment_ids.clone();
         let mut answered = false;
@@ -754,6 +765,18 @@ impl RoomSession {
                         // out behind a long turn.
                         Control::Memory { request, reply } => {
                             let _ = reply.send(engine.with(|engine| memory_reply(engine, &memory, request)));
+                        }
+                        // Pause once the turns under way finish: start no
+                        // more, and apply the pause when this run ends.
+                        pause @ Control::Pause { .. } => {
+                            hold.store(true, std::sync::atomic::Ordering::SeqCst);
+                            deferred.push_back(pause);
+                            let note = ChatMessage::system(
+                                engine.with(|engine| engine.room().id),
+                                "Pausing once the turns under way finish; no new turns will start.",
+                            );
+                            let _ = engine.with(|engine| engine.apply(Command::PostMessage { message: Box::new(note) }));
+                            send_unsent(&engine, &events, alerts, &committed, &published, &mut sent_head);
                         }
                         other => deferred.push_back(other),
                     },
@@ -954,7 +977,10 @@ impl RoomSession {
                 self.broadcast_new_events();
             }
             Control::Stop => return ControlFlow::Stop(RunOutcome::Idle),
-            Control::Pause { reason } => {
+            Control::Pause { reason } | Control::StopNow { reason } => {
+                self.orchestrator
+                    .hold_switch()
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 if self.orchestrator.engine().room().phase.is_finished() {
                     return ControlFlow::Continue;
                 }
@@ -2497,6 +2523,68 @@ mod tests {
             }
         }
         assert_eq!(times, 1, "each event reaches clients once");
+        assert!(handle.send(Control::Stop).await);
+        let _ = tokio::time::timeout(Duration::from_secs(2), running).await;
+    }
+
+    /// From the live room: pausing to install an update cut short every turn
+    /// under way, so the owner had to wait for a moment when no bot was
+    /// mid-turn. A pause now lets the turn finish, then pauses.
+    #[tokio::test]
+    async fn a_pause_lets_the_turn_under_way_finish_then_pauses() {
+        let resolved = {
+            let mut resolved = RoomConfig::parse(SCRIPTED_ROOM, "graceful-pause.toml")
+                .unwrap()
+                .resolve()
+                .unwrap();
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            resolved.bots[0].provider = Arc::new(HeldTurnProvider {
+                started: started.clone(),
+                release: release.clone(),
+            });
+            (resolved, started, release)
+        };
+        let (resolved, started, release) = resolved;
+        let (session, handle) = RoomSession::build(resolved).unwrap();
+        let shared = session.orchestrator.shared_engine();
+        let mut updates = handle.subscribe();
+        let running = tokio::spawn(session.run());
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("a turn should be in flight");
+
+        assert!(handle.send(Control::Pause { reason: "update".into() }).await);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            shared.with(|engine| engine.room().phase),
+            orgbot_proto::RoomPhase::Running,
+            "the room keeps running while the turn under way finishes"
+        );
+        assert!(
+            shared.with(|engine| engine
+                .transcript()
+                .iter()
+                .any(|message| message.body.contains("Pausing once the turns under way finish"))),
+            "the owner is told the pause is coming"
+        );
+
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(ServerMessage::Phase { phase: orgbot_proto::RoomPhase::Paused }) =
+                    updates.recv().await
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the room pauses once the turn has finished");
+        assert!(
+            shared.with(|engine| engine.transcript().iter().any(|message| message.body == "done")),
+            "the turn was finished, not cut short"
+        );
         assert!(handle.send(Control::Stop).await);
         let _ = tokio::time::timeout(Duration::from_secs(2), running).await;
     }

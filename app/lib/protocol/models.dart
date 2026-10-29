@@ -538,6 +538,7 @@ class PendingDecision {
     required this.title,
     required this.because,
     required this.options,
+    this.grantsWith,
   });
 
   /// The question itself. An answer is addressed to this, not to a task —
@@ -556,6 +557,11 @@ class PendingDecision {
   /// The answers offered, for a one-tap reply.
   final List<String> options;
 
+  /// The answer that takes an effect a stray tap should not (the server key,
+  /// an outside tool call, retiring a task), when one does. That answer is
+  /// confirmed before it is sent.
+  final String? grantsWith;
+
   factory PendingDecision.fromJson(Map<String, Object?> json) =>
       PendingDecision(
         id: json['id'] as String? ?? '',
@@ -563,6 +569,7 @@ class PendingDecision {
         title: json['title'] as String? ?? '',
         because: json['because'] as String? ?? '',
         options: (json['options'] as List? ?? const []).cast<String>(),
+        grantsWith: json['grants_with'] as String?,
       );
 }
 

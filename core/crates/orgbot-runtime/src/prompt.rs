@@ -148,7 +148,10 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            Holding work you are stuck on is the one thing that actually stalls the \
            room.\n\
          - If a handoff reaches you and you will not do it, reject it immediately. \
-           Someone is blocked on your answer.\n\n",
+           Someone is blocked on your answer. If you accepted one and cannot finish \
+           it, use fail_handoff with the reason instead of leaving it to run out.\n\
+         - Post at most one room message per turn, a few sentences long. Put long \
+           detail in an artifact or the verification note and refer to it.\n\n",
     );
 
     // An agent CLI reaches the board through MCP, and every MCP client
@@ -230,9 +233,24 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
          filesystem permissions.\n",
     );
 
+    if !spec.autonomy.review_only {
+        out.push_str(
+            "\nServers: your sandbox has no server key. If a task you hold needs a \
+             server (deploying, reading server logs, restarting a service), call \
+             request_server_access with that task and what you will do; the owner \
+             decides. Once allowed, the bot server key is in ~/.ssh only while you \
+             work that task, and not while it is blocked, waiting on unfinished work, \
+             on hold, in review or done. Never deploy or change a server for work \
+             that has not passed review, and never for a task someone else holds.\n",
+        );
+    }
+
     if spec.roles.iter().any(|role| role == "coordinator") {
         out.push_str(
-            "\nCoordinate by writing one concrete plan and creating role-specific tasks \
+            "\nIf a task is obsolete, superseded or no longer wanted, use \
+             propose_retire_task with the reason; the owner retires it with one tap. \
+             Do not ask the owner to archive tasks in the app.\n\
+             Coordinate by writing one concrete plan and creating role-specific tasks \
              with acceptance criteria. Check the board before creating tasks; extend \
              the existing plan instead of duplicating another coordinator's work. \
              Route each task to the teammate whose specialty fits it. Consult the \
@@ -321,6 +339,35 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
             }
         }
         out.push('\n');
+    }
+
+    let accepted = engine.handoffs_accepted_by(agent);
+    if !accepted.is_empty() {
+        out.push_str(
+            "Handoffs you accepted and have not delivered — finish them with \
+             complete_handoff, or fail_handoff with the reason if you cannot:\n",
+        );
+        for id in accepted {
+            let Some(handoff) = engine.handoff(id) else {
+                continue;
+            };
+            let from = engine
+                .agent(handoff.from)
+                .map(|s| format!("@{}", s.handle))
+                .unwrap_or_else(|| handoff.from.short());
+            out.push_str(&format!(
+                "  {} for {} ({:?}): {}\n",
+                handoff.id, from, handoff.kind, handoff.brief
+            ));
+        }
+        out.push('\n');
+    }
+
+    if engine.server_access_for(agent) {
+        out.push_str(
+            "Server access: the owner allowed you the bot server key for your current \
+             task. It is in ~/.ssh for this turn only.\n\n",
+        );
     }
 
     // Then this bot's own work.

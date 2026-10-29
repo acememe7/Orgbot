@@ -192,6 +192,30 @@ pub enum Command {
         options: Vec<String>,
     },
 
+    /// Ask the owner to let a bot use the bot server key for a task it holds.
+    /// The task waits on the answer like any question; once allowed, the key
+    /// is mounted for that bot only while the task is under way and clear to
+    /// proceed (see `Engine::server_access_for`).
+    RequestServerAccess {
+        /// The bot asking, which must hold the task.
+        by: AgentId,
+        /// The task that needs a server.
+        task: TaskId,
+        /// Why, shown to the owner.
+        reason: String,
+    },
+
+    /// Propose to the owner that a task nobody should work on be retired. The
+    /// owner's "Retire this task" answer retires it.
+    ProposeRetire {
+        /// The coordinating bot proposing it.
+        by: AgentId,
+        /// The task to retire.
+        task: TaskId,
+        /// Why it is obsolete, shown to the owner.
+        reason: String,
+    },
+
     /// Record the operator's answer to a question, releasing whatever it
     /// unblocks. One answer clears every task waiting on that same question.
     AnswerDecision {
@@ -280,6 +304,8 @@ impl Command {
             Self::RetireTask { .. } => "retire_task",
             Self::SetAuthorization { .. } => "set_authorization",
             Self::AskOwner { .. } => "ask_owner",
+            Self::RequestServerAccess { .. } => "request_server_access",
+            Self::ProposeRetire { .. } => "propose_retire",
             Self::AnswerDecision { .. } => "answer_decision",
             Self::KeepAlive { .. } => "keep_alive",
             Self::BeginTurn { .. } => "begin_turn",
@@ -307,6 +333,7 @@ impl Command {
             | Self::AddArtifact { task, .. }
             | Self::RecordReview { task, .. } => Some(*task),
             Self::AskOwner { task: Some(task), .. } => Some(*task),
+            Self::RequestServerAccess { task, .. } => Some(*task),
             _ => None,
         }
     }

@@ -36,12 +36,23 @@ a full boundary: other files in the home, such as a project's `.env`, stay
 readable.
 
 Bots reach servers over SSH only through `~/.local/share/orgbot/bot-ssh`
-(under `$XDG_DATA_HOME` when set). When that folder is owned by the user and
-private (mode 0700), it is mounted read-only as the account's `~/.ssh`, which is
-where OpenSSH looks whatever `HOME` says. It holds only the keys, host entries
-and known hosts meant for bots, so `ssh <host>` works for those servers and no
-others. Otherwise bots see an empty `~/.ssh`. Revoke a server by deleting the
-bot key from its `authorized_keys`.
+(under `$XDG_DATA_HOME` when set), and only with the owner's permission for one
+task. A bot holding a task that needs a server calls `request_server_access`
+with what it will do; the owner sees a decision and must confirm "Allow server
+access for this task". From then on, for that bot and that task only, the
+folder is mounted read-only as the account's `~/.ssh`, which is where OpenSSH
+looks whatever `HOME` says, provided the folder is owned by the user and
+private (mode 0700). The room decides this afresh for every turn and every
+command: the key is not mounted while the task is blocked, waiting on
+unfinished work, on hold, in review or done, never for a review-only or
+read-only bot, and never for any other bot. Every other sandbox sees an empty
+`~/.ssh`, and the folder is hidden at its own path too. The folder holds only
+the keys, host entries and known hosts meant for bots, so `ssh <host>` works for
+those servers and no others. Revoke a server by deleting the bot key from its
+`authorized_keys`. A sandbox started with the key keeps it until that turn
+ends, so a hold placed mid-turn applies from the next turn; restrict the bot
+key in `authorized_keys` (for example `restrict,from=...`) for a server-side
+limit as well.
 Optional `--profile` binds accept only that agent’s private
 `private_home/.codex`, `private_home/.claude`, or `private_home/.grok` directory.
 

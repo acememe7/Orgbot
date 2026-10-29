@@ -316,6 +316,18 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             ),
         ),
         tool(
+            "fail_handoff",
+            "Give up a handoff you accepted but cannot finish, saying why, so the sender \
+             is released instead of waiting for it to run out.",
+            schema::object(
+                vec![
+                    ("handoff", schema::string("The handoff id.")),
+                    ("reason", schema::string("Why you cannot finish it.")),
+                ],
+                &["handoff", "reason"],
+            ),
+        ),
+        tool(
             "complete_handoff",
             "Deliver on a handoff you accepted. The sender is unblocked the moment you \
              do. Put the actual work in artifacts and summarise it here.",
@@ -341,6 +353,36 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                     ("task", schema::string("Your active task to block while waiting, if any.")),
                 ],
                 &["question", "options"],
+            ),
+        ),
+        tool(
+            "request_server_access",
+            "Ask the owner to let you use the bot server key (SSH) for a task you hold, for \
+             example to deploy, read server logs or restart a service. Your sandbox has no \
+             server key otherwise. Your task waits for the answer. Once allowed, the key is \
+             in ~/.ssh only while you work that task: not while it is blocked, waiting on \
+             unfinished work, on hold, in review or done.",
+            schema::object(
+                vec![
+                    ("task", schema::string("Your task that needs a server.")),
+                    ("reason", schema::string("What you will do on which server, in one or two sentences.")),
+                ],
+                &["task", "reason"],
+            ),
+        ),
+        tool(
+            "propose_retire_task",
+            "Coordinators: propose to the owner that a task nobody should work on be \
+             retired, for example one a later owner decision or another task superseded. \
+             The owner answers with one tap; until then the task stays as it is. Use this \
+             instead of asking the owner to archive a task in the app, which has no such \
+             button.",
+            schema::object(
+                vec![
+                    ("task", schema::string("The task to retire.")),
+                    ("reason", schema::string("Why it is obsolete, in one or two sentences.")),
+                ],
+                &["task", "reason"],
             ),
         ),
         tool(
@@ -521,6 +563,9 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
         ));
     }
 
+    if !spec.roles.iter().any(|role| role == "coordinator") {
+        tools.retain(|tool| tool.name != "propose_retire_task");
+    }
     if spec.autonomy.review_only {
         tools.retain(|tool| review_only_tool_allowed(spec, &tool.name));
     }
@@ -533,6 +578,7 @@ fn review_only_tool_allowed(spec: &AgentSpec, name: &str) -> bool {
         && match name {
             "create_task" => spec.autonomy.may_create_tasks,
             "submit_task" => spec.autonomy.may_submit,
+            "propose_retire_task" => true,
             _ => false,
         })
         || matches!(
@@ -602,6 +648,9 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
         "reject_handoff" => reject_handoff(engine, actor, input),
         "complete_handoff" => complete_handoff(engine, actor, input),
         "ask_owner" => ask_owner(engine, actor, input),
+        "request_server_access" => request_server_access(engine, actor, input),
+        "fail_handoff" => fail_handoff(engine, actor, input),
+        "propose_retire_task" => propose_retire_task(engine, actor, input),
         "block_on" => block_on(engine, actor, input),
         "release_task" => release_task(engine, actor, input),
         "create_task" => create_task(engine, actor, input),
@@ -1584,6 +1633,21 @@ fn reject_handoff(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOut
     }
 }
 
+fn fail_handoff(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
+    let (handoff, reason) = match (handoff_arg(input), required_str(input, "reason")) {
+        (Ok(handoff), Ok(reason)) => (handoff, reason.to_string()),
+        (Err(message), _) | (_, Err(message)) => return ToolOutcome::error(message),
+    };
+    match engine.apply(Command::FailHandoff {
+        handoff,
+        by: actor,
+        reason,
+    }) {
+        Ok(_) => ToolOutcome::ok("Given up. The sender has been released."),
+        Err(error) => explain(error),
+    }
+}
+
 fn complete_handoff(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
     let (handoff, summary) = match (handoff_arg(input), required_str(input, "summary")) {
         (Ok(handoff), Ok(summary)) => (handoff, summary.to_string()),
@@ -1651,6 +1715,85 @@ fn ask_owner(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome 
                             "That question is already waiting for an answer. Continue with other work.",
                         )
                     }),
+            }
+        }
+        Err(error) => explain(error),
+    }
+}
+
+fn propose_retire_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
+    let task = match task_arg(input, "task") {
+        Ok(task) => task,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    let reason = match required_str(input, "reason") {
+        Ok(reason) => reason.to_string(),
+        Err(message) => return ToolOutcome::error(message),
+    };
+    match engine.apply(Command::ProposeRetire {
+        by: actor,
+        task,
+        reason,
+    }) {
+        Ok(events) => {
+            for event in &events {
+                match &event.event {
+                    orgbot_proto::Event::DecisionAsked { decision } => {
+                        return ToolOutcome::ok(format!(
+                            "Retirement proposal {} is waiting for the owner. Leave the task \
+                             alone until then.",
+                            decision.id
+                        ));
+                    }
+                    orgbot_proto::Event::MessagePosted { message } => {
+                        return ToolOutcome::ok(message.body.clone());
+                    }
+                    _ => {}
+                }
+            }
+            ToolOutcome::ok("That proposal is already waiting for the owner.")
+        }
+        Err(error) => explain(error),
+    }
+}
+
+fn request_server_access(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
+    let task = match task_arg(input, "task") {
+        Ok(task) => task,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    let reason = match required_str(input, "reason") {
+        Ok(reason) => reason.to_string(),
+        Err(message) => return ToolOutcome::error(message),
+    };
+    match engine.apply(Command::RequestServerAccess {
+        by: actor,
+        task,
+        reason,
+    }) {
+        Ok(events) => {
+            for event in &events {
+                match &event.event {
+                    orgbot_proto::Event::DecisionAsked { decision } => {
+                        return ToolOutcome::ok(format!(
+                            "Server access request {} is waiting for the owner. Your task \
+                             waits for the answer; continue with other work.",
+                            decision.id
+                        ));
+                    }
+                    orgbot_proto::Event::MessagePosted { message } => {
+                        return ToolOutcome::ok(message.body.clone());
+                    }
+                    _ => {}
+                }
+            }
+            if engine.server_access_for(actor) {
+                ToolOutcome::ok("You already have server access for this task.")
+            } else {
+                ToolOutcome::ok(
+                    "That request is already waiting for the owner, or the owner has allowed it \
+                     and the task is not under way yet. Continue with other work.",
+                )
             }
         }
         Err(error) => explain(error),

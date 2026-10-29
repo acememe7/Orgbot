@@ -92,7 +92,14 @@ pub fn reason_for(event: &Event) -> Option<Reason> {
         // are things a person is waiting to be told rather than expected to
         // discover by opening the app.
         Event::MessagePosted { message } => {
-            if message.intent.expects_reply() && message.author.agent().is_some() {
+            // Only a question put to the person, or to everyone: one bot
+            // asking another is the room working, and paging the owner for
+            // it teaches them to ignore the page that matters.
+            let to_the_owner = matches!(
+                message.audience,
+                orgbot_proto::chat::Audience::Human | orgbot_proto::chat::Audience::Everyone
+            );
+            if message.intent.expects_reply() && message.author.agent().is_some() && to_the_owner {
                 Some(Reason::Mentioned)
             } else if message.body.contains("turn budget exhausted") {
                 Some(Reason::BudgetSpent)
@@ -309,6 +316,18 @@ mod attention_tests {
         assert_eq!(notification.reason, Reason::Mentioned);
         assert!(notification.urgent);
         assert!(notification.body.contains("Which registry"));
+    }
+
+    /// One bot asking another is not a page for the owner.
+    #[test]
+    fn a_bot_asking_another_bot_does_not_page_you() {
+        let mut event = said("@mira can you rerun lint?", MessageIntent::Ask, true);
+        if let Event::MessagePosted { message } = &mut event {
+            message.audience = Audience::Agents {
+                agents: vec![AgentId::new()],
+            };
+        }
+        assert!(notification_for(&event).is_none());
     }
 
     /// Bots talking among themselves is not.

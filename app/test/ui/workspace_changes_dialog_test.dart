@@ -191,7 +191,7 @@ Widget _host({required WorkspaceProcessRunner runner}) => MaterialApp(
             stateDirectory: Directory('/tmp/room/workspaces'),
             helperPath: '/test/orgbot-workspace.py',
             agents: const [
-              WorkspaceAgentLabel(id: 'agent-uuid', label: '@astra · engine'),
+              WorkspaceAgentLabel(id: 'agent-uuid', label: '@astra · room tools'),
             ],
             processRunner: runner,
           ),

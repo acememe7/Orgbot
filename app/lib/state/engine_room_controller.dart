@@ -741,6 +741,13 @@ class EngineRoomController extends ChangeNotifier {
     }
   }
 
+  /// Pause now, cutting short any turn under way. For emergencies.
+  void stopTurnsNow() {
+    final store = _store;
+    if (store == null || _disposed || !store.isActive) return;
+    store.stopNow(reason: 'Stopped now by the owner');
+  }
+
   Future<void> togglePause() async {
     final store = _store;
     if (store == null || _controlBusy || _disposed) return;
@@ -802,7 +809,8 @@ class EngineRoomController extends ChangeNotifier {
   /// Stop explicitly; navigation only detaches the screen.
   Future<void> stop() async {
     if (isRunning && _store?.isActive == true) {
-      _client?.pause(reason: 'Stopped by the owner');
+      // Closing the room ends its turns either way; say so honestly.
+      _client?.stopNow(reason: 'Stopped by the owner');
       for (var i = 0; i < 40 && _store?.isActive == true; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 50));
       }

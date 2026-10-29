@@ -202,6 +202,11 @@ pub struct CompletionRequest {
     /// A unix socket where the room's MCP bridge is listening, for agent-CLI
     /// bots that act on the board mid-episode.
     pub mcp_socket: Option<String>,
+    /// Whether the owner has allowed this bot the bot server key for the work
+    /// it is doing now. Decided by the room for each turn, never by the model;
+    /// without it the sandbox has no server key.
+    #[serde(default)]
+    pub server_access: bool,
 }
 
 impl CompletionRequest {
@@ -218,6 +223,7 @@ impl CompletionRequest {
             effort: Some(Effort::High),
             stream: true,
             mcp_socket: None,
+            server_access: false,
         }
     }
 
@@ -236,6 +242,12 @@ impl CompletionRequest {
     /// Builder: point an agent-CLI bot at its room's MCP bridge socket.
     pub fn with_mcp_socket(mut self, socket: Option<String>) -> Self {
         self.mcp_socket = socket;
+        self
+    }
+
+    /// Builder: let this turn's sandbox have the bot server key.
+    pub fn with_server_access(mut self, allowed: bool) -> Self {
+        self.server_access = allowed;
         self
     }
 }

@@ -3137,3 +3137,216 @@ fn a_faulted_bot_is_not_counted_as_available() {
         "a bot that cannot take a turn is not spare capacity"
     );
 }
+
+// ------------------------------------------------------------ server access
+
+fn answer(f: &mut Fixture, decision: orgbot_proto::DecisionId, chosen: &str) {
+    f.apply(Command::AnswerDecision {
+        decision,
+        answer: Answer {
+            chosen: chosen.into(),
+            note: String::new(),
+            at: Timestamp::now(),
+        },
+    });
+}
+
+fn ask_for_server(f: &mut Fixture, task: TaskId, by: AgentId) -> orgbot_proto::DecisionId {
+    let events = f.apply(Command::RequestServerAccess {
+        by,
+        task,
+        reason: "deploy the reviewed build to the game server".into(),
+    });
+    asked_decision(&events)
+}
+
+/// From the live room: a bot installed a server release over SSH while the
+/// rest of the room had that release on hold, because every sandbox carried
+/// the bot server key. Now only the owner grants it, for one bot and one
+/// task, and only while that task is under way.
+#[test]
+fn the_server_key_is_granted_by_the_owner_for_one_task_while_it_is_under_way() {
+    use orgbot_proto::decision::SERVER_ACCESS_ALLOW;
+    let mut f = fixture();
+    let (worker, worker2, inspector) = (f.worker, f.worker2, f.inspector);
+    let task = f.start_task("deploy the release", worker);
+    assert!(!f.engine.server_access_for(worker), "nobody has the key by default");
+
+    let decision = ask_for_server(&mut f, task, worker);
+    assert_eq!(f.state(task), TaskState::Blocked, "the task waits on the owner");
+    assert!(!f.engine.server_access_for(worker), "asking is not being allowed");
+    let again = f.apply(Command::RequestServerAccess {
+        by: worker,
+        task,
+        reason: "deploy the reviewed build to the game server".into(),
+    });
+    assert!(
+        !again.iter().any(|e| matches!(e.event, Event::DecisionAsked { .. })),
+        "the same request is put to the owner once"
+    );
+
+    answer(&mut f, decision, SERVER_ACCESS_ALLOW);
+    assert_eq!(f.state(task), TaskState::InProgress);
+    assert!(f.engine.server_access_for(worker));
+    assert!(!f.engine.server_access_for(worker2), "only the bot that was allowed");
+    assert!(!f.engine.server_access_for(inspector));
+
+    // A restored room grants exactly what the owner allowed.
+    let restored = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec())
+        .expect("history replays");
+    assert!(restored.server_access_for(worker));
+    assert!(!restored.server_access_for(worker2));
+
+    // Blocked, the key goes; unblocked, it comes back.
+    f.apply(Command::BlockTask {
+        task,
+        by: worker,
+        reason: BlockReason::Other {
+            detail: "waiting for the database backup".into(),
+        },
+    });
+    assert!(!f.engine.server_access_for(worker));
+    f.apply(Command::UnblockTask { task });
+    assert!(f.engine.server_access_for(worker));
+
+    // A hold takes it away too.
+    f.apply(Command::SetAuthorization {
+        task,
+        authorization: AuthorizationState::HeldByPolicy {
+            policy: "release freeze".into(),
+            reason: "the coordinator put the release on hold".into(),
+        },
+    });
+    assert!(!f.engine.server_access_for(worker));
+    f.apply(Command::SetAuthorization {
+        task,
+        authorization: AuthorizationState::Authorized,
+    });
+    assert!(f.engine.server_access_for(worker));
+
+    // In review the work is done with: no key.
+    let artifact = f.add_artifact(task, worker);
+    f.apply(Command::SubmitForReview {
+        task,
+        by: worker,
+        artifacts: vec![artifact],
+    });
+    assert!(!f.engine.server_access_for(worker));
+}
+
+#[test]
+fn a_denied_request_gives_no_server_key_and_lets_the_work_go_on() {
+    use orgbot_proto::decision::SERVER_ACCESS_DENY;
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("deploy the release", worker);
+    let decision = ask_for_server(&mut f, task, worker);
+    answer(&mut f, decision, SERVER_ACCESS_DENY);
+    assert_eq!(f.state(task), TaskState::InProgress);
+    assert!(!f.engine.server_access_for(worker));
+}
+
+#[test]
+fn only_the_bot_holding_the_task_may_ask_for_the_server_key() {
+    let mut f = fixture();
+    let (worker, worker2, inspector) = (f.worker, f.worker2, f.inspector);
+    let task = f.start_task("deploy the release", worker);
+    let reason = || "deploy the reviewed build to the game server".to_string();
+    f.reject(Command::RequestServerAccess {
+        by: worker2,
+        task,
+        reason: reason(),
+    });
+    f.reject(Command::RequestServerAccess {
+        by: inspector,
+        task,
+        reason: reason(),
+    });
+    f.reject(Command::RequestServerAccess {
+        by: worker,
+        task,
+        reason: "  ".into(),
+    });
+}
+
+/// From the live room: a Codex bot faulted on a temporary capacity error and
+/// waited eleven minutes, behind other bots' long turns, for a retry due
+/// after one. The run now asks whether a retry is due and ticks when it is.
+#[test]
+fn a_faulted_bot_says_when_its_retry_is_due() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let now = Timestamp::now();
+    assert!(!f.engine.retry_due(now), "nobody is faulted");
+    f.apply(Command::ReportError {
+        agent: worker,
+        task: None,
+        error: "selected model is at capacity".into(),
+        permanent: true,
+    });
+    assert_eq!(f.engine.status(worker), orgbot_proto::AgentStatus::Faulted);
+    assert!(!f.engine.retry_due(Timestamp::now()), "not before its wait is over");
+    let later = Timestamp::now().plus_millis(61_000);
+    assert!(f.engine.retry_due(later));
+    f.apply(Command::Tick { now: later });
+    assert_eq!(f.engine.status(worker), orgbot_proto::AgentStatus::Idle);
+    assert!(!f.engine.retry_due(later), "once retried, nothing is due");
+}
+
+// ------------------------------------------------------------ retiring tasks
+
+/// From the live room: an obsolete task stayed open and woke idle bots every
+/// turn, and the bots asked the owner to archive it in an app with no way to.
+#[test]
+fn a_coordinator_proposes_retiring_a_task_and_the_owners_answer_retires_it() {
+    use orgbot_proto::decision::RETIRE_TASK_ALLOW;
+    let mut f = fixture();
+    let lead = f.coordinator;
+    let task = f.open_task("try a shadow experiment for the stutter", None);
+    let events = f.apply(Command::ProposeRetire {
+        by: lead,
+        task,
+        reason: "the owner chose to keep High, which replaced this experiment".into(),
+    });
+    let decision = asked_decision(&events);
+    assert_eq!(f.state(task), TaskState::Ready, "nothing changes until the owner answers");
+
+    answer(&mut f, decision, RETIRE_TASK_ALLOW);
+    assert_eq!(f.state(task), TaskState::Retired);
+    let restored = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec())
+        .expect("history replays");
+    assert_eq!(restored.task(task).unwrap().state, TaskState::Retired);
+    f.reject(Command::ProposeRetire {
+        by: lead,
+        task,
+        reason: "again".into(),
+    });
+}
+
+#[test]
+fn keeping_a_task_proposed_for_retirement_leaves_it_as_it_was() {
+    use orgbot_proto::decision::RETIRE_TASK_KEEP;
+    let mut f = fixture();
+    let (lead, worker) = (f.coordinator, f.worker);
+    let task = f.start_task("try a shadow experiment for the stutter", worker);
+    let events = f.apply(Command::ProposeRetire {
+        by: lead,
+        task,
+        reason: "looks superseded".into(),
+    });
+    answer(&mut f, asked_decision(&events), RETIRE_TASK_KEEP);
+    assert_eq!(f.state(task), TaskState::InProgress);
+    assert_eq!(f.engine.task(task).unwrap().assignee, Some(worker));
+}
+
+#[test]
+fn only_a_coordinator_may_propose_retiring_a_task() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("try a shadow experiment for the stutter", None);
+    f.reject(Command::ProposeRetire {
+        by: worker,
+        task,
+        reason: "I think it is stale".into(),
+    });
+}

@@ -1468,3 +1468,31 @@ async fn a_handoff_taken_on_mid_turn_can_still_be_delivered_at_the_end_of_that_t
     assert_eq!(state(), HandoffState::Completed, "the result reaches its sender");
     assert_eq!(task_state(), TaskState::InProgress, "who picks the task back up");
 }
+
+/// While a pause is pending, a freed slot starts no new turn.
+///
+/// From the live room: with four bots always in a turn, a pause that waited
+/// for the room to go quiet never came, because every finished turn made room
+/// for another. Holding new turns is what lets the turns under way drain.
+#[tokio::test]
+async fn a_held_room_starts_no_new_turns() {
+    let provider = Arc::new(Fixed(CompletionResponse {
+        model: "test".into(),
+        content: vec![ContentBlock::text("on it")],
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    })) as Arc<dyn Provider>;
+    let mut room = Orchestrator::new(room_spec(2));
+    let bot = room.seat(worker("busy"), provider).unwrap();
+    room.start().unwrap();
+    owner_asks(&mut room, bot, "how is it going?");
+
+    let hold = room.hold_switch();
+    hold.store(true, std::sync::atomic::Ordering::SeqCst);
+    let sinks = |_| None;
+    assert!(room.step_rolling(2, &sinks).await.is_empty(), "nothing starts while held");
+    assert_eq!(room.turns_used(), 0);
+
+    hold.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(room.step_rolling(2, &sinks).await.len(), 1, "released, the waiting bot goes");
+}

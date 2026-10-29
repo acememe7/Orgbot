@@ -149,7 +149,7 @@ async fn a_stalled_model_does_not_block_snapshot_human_input_or_pause() {
     }
     assert!(
         handle
-            .send(orgbot_server::Control::Pause {
+            .send(orgbot_server::Control::StopNow {
                 reason: "cancel model".into()
             })
             .await

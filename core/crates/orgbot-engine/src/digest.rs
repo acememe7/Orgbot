@@ -118,6 +118,11 @@ pub struct PendingDecision {
     pub options: Vec<String>,
     /// The objective this decision unblocks, when it serves one.
     pub objective: Option<TaskId>,
+    /// The answer that takes an effect a stray tap should not: granting a bot
+    /// the server key or an outside tool call, or retiring a task. The app asks
+    /// the owner to confirm that answer; every other answer stays one tap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grants_with: Option<String>,
 }
 
 /// What one bot is doing, for a view of where the room's effort is going.
@@ -406,6 +411,7 @@ pub fn digest<'a>(tasks: impl Iterator<Item = &'a Task>, decisions: &DecisionLog
                 because: decision.because.clone(),
                 options: decision.options.clone(),
                 objective: held.and_then(|task| task.lineage.root_objective),
+                grants_with: granting_answer(decision),
             }
         })
         .collect();
@@ -660,6 +666,24 @@ fn chain_to(
     visiting.remove(&id);
     memo.insert(id, longest.clone());
     longest
+}
+
+/// The answer to `decision` that grants access beyond a bot's sandbox, if any.
+fn granting_answer(decision: &orgbot_proto::decision::Decision) -> Option<String> {
+    use orgbot_proto::decision::{RETIRE_TASK, RETIRE_TASK_ALLOW, SERVER_ACCESS, SERVER_ACCESS_ALLOW};
+    if decision.envelope.allowed.iter().any(|action| action == SERVER_ACCESS) {
+        return Some(SERVER_ACCESS_ALLOW.to_string());
+    }
+    // Retiring cannot be undone from the app.
+    if decision.envelope.allowed.iter().any(|action| action == RETIRE_TASK) {
+        return Some(RETIRE_TASK_ALLOW.to_string());
+    }
+    // An outside tool call held for approval (see the runtime's MCP gate).
+    decision
+        .options
+        .iter()
+        .find(|option| option.as_str() == "Allow once")
+        .cloned()
 }
 
 #[cfg(test)]

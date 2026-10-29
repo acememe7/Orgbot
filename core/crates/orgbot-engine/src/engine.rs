@@ -14,7 +14,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use orgbot_proto::agent::AgentStatus;
 use orgbot_proto::artifact::{Artifact, ArtifactBody};
 use orgbot_proto::convergence::{self, Convergence};
-use orgbot_proto::decision::{Answer, Decision, DecisionLog, Governance, Request, Settled};
+use orgbot_proto::decision::{
+    server_access_scope, task_scope, Answer, Decision, DecisionLog, Governance, Request, Settled,
+    RETIRE_TASK, RETIRE_TASK_ALLOW, RETIRE_TASK_KEEP, SERVER_ACCESS, SERVER_ACCESS_ALLOW,
+    SERVER_ACCESS_DENY,
+};
 use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope, Seq};
 use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness, TaskKind, TaskOrigin};
 use orgbot_proto::handoff::{Handoff, HandoffKind, HandoffState, HandoffTransition, Recipient};
@@ -1455,6 +1459,19 @@ impl Engine {
     }
 
     /// Handoffs `agent` could accept right now.
+    /// Handoffs `agent` accepted and has not yet delivered or given up.
+    ///
+    /// An accepted assist never makes its recipient the assignee, so without
+    /// this a bot that took one on and did not finish in that turn was never
+    /// shown it or woken for it again, and its sender waited for it to expire.
+    pub fn handoffs_accepted_by(&self, agent: AgentId) -> Vec<HandoffId> {
+        self.handoffs
+            .values()
+            .filter(|h| h.state == HandoffState::Accepted && h.accepted_by == Some(agent))
+            .map(|h| h.id)
+            .collect()
+    }
+
     pub fn offers_for(&self, agent: AgentId) -> Vec<HandoffId> {
         let Some(spec) = self.specs.get(&agent) else {
             return Vec::new();
@@ -1852,6 +1869,11 @@ impl Engine {
                 question,
                 options,
             } => self.ask_owner(by, task, question, options),
+
+            Command::RequestServerAccess { by, task, reason } => {
+                self.request_server_access(by, task, reason)
+            }
+            Command::ProposeRetire { by, task, reason } => self.propose_retire(by, task, reason),
 
             Command::AnswerDecision { decision, answer } => self.answer_decision(decision, answer),
 
@@ -2251,6 +2273,21 @@ impl Engine {
         proposed.owner_question = true;
         proposed.options = options;
         proposed.task = task;
+        self.put_to_owner(by, task, proposed)
+    }
+
+    /// Put a question to the owner on behalf of `by`, once.
+    ///
+    /// A new question is announced and, when it concerns `task`, parks that
+    /// task until it is answered. The same question already waiting gains
+    /// `by` as an asker; one already answered is answered again from the
+    /// record instead of disturbing anyone.
+    fn put_to_owner(
+        &mut self,
+        by: AgentId,
+        task: Option<TaskId>,
+        mut proposed: Decision,
+    ) -> Result<Vec<EventEnvelope>> {
         proposed.asked_by.push(by);
         proposed.governed_by = self.governance.stamp();
         match self.decisions.ask(proposed) {
@@ -2328,6 +2365,135 @@ impl Engine {
                 self.post_message(message)
             }
         }
+    }
+
+    /// Ask the owner to let `by` use the bot server key for `task`.
+    ///
+    /// From the live room: a bot installed a server release over SSH while the
+    /// rest of the room had that release on hold, because the bot server key
+    /// was in every sandbox on every turn. Now a bot holding the task asks,
+    /// says why, and the task waits on the owner's answer like any question.
+    /// The grant is the answered decision itself, so a room restored from its
+    /// history grants exactly what the owner allowed.
+    fn request_server_access(
+        &mut self,
+        by: AgentId,
+        task: TaskId,
+        reason: String,
+    ) -> Result<Vec<EventEnvelope>> {
+        let spec = self.require_agent(by)?;
+        if spec.autonomy.review_only {
+            return Err(EngineError::NotPermitted {
+                agent: by,
+                action: "use the server key as a review-only bot".into(),
+            });
+        }
+        let handle = spec.handle.clone();
+        let reason = reason.trim().to_string();
+        if reason.is_empty() || reason.chars().count() > 500 {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "say in 1–500 characters what the server is needed for".into(),
+            });
+        }
+        self.require_assignee(task, by)?;
+        if self.server_access_granted(task, by) {
+            return Ok(Vec::new());
+        }
+        let title = self.require_task(task)?.title.clone();
+        let mut proposed = Decision::ask(
+            self.room.id,
+            format!("@{handle} asks to use the bot server key for \"{title}\": {reason}"),
+        );
+        proposed.owner_question = true;
+        proposed.options = vec![SERVER_ACCESS_ALLOW.into(), SERVER_ACCESS_DENY.into()];
+        proposed.envelope.allowed = vec![SERVER_ACCESS.into()];
+        proposed.envelope.environment = server_access_scope(task);
+        proposed.task = Some(task);
+        self.put_to_owner(by, Some(task), proposed)
+    }
+
+    /// Propose to the owner that `task` be retired, on behalf of a coordinator.
+    ///
+    /// From the live room: an obsolete task stayed open and woke idle bots
+    /// every turn, and the bots could only ask the owner to archive it in an
+    /// app with no way to. The task keeps running as it is until the owner
+    /// answers; "Retire this task" retires it, anything else leaves it.
+    fn propose_retire(
+        &mut self,
+        by: AgentId,
+        task: TaskId,
+        reason: String,
+    ) -> Result<Vec<EventEnvelope>> {
+        let spec = self.require_agent(by)?;
+        if !spec.roles.iter().any(|role| role == "coordinator") {
+            return Err(EngineError::NotPermitted {
+                agent: by,
+                action: "propose retiring a task without the coordinator role".into(),
+            });
+        }
+        let handle = spec.handle.clone();
+        let reason = reason.trim().to_string();
+        if reason.is_empty() || reason.chars().count() > 500 {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "say in 1–500 characters why the task is obsolete".into(),
+            });
+        }
+        let record = self.require_task(task)?;
+        if record.state.is_permanent() {
+            return Err(EngineError::NotReady {
+                task,
+                reason: format!("the task is already {}", record.state.as_str()),
+            });
+        }
+        let title = record.title.clone();
+        let mut proposed = Decision::ask(
+            self.room.id,
+            format!("@{handle} proposes retiring \"{title}\": {reason}"),
+        );
+        proposed.owner_question = true;
+        proposed.options = vec![RETIRE_TASK_ALLOW.into(), RETIRE_TASK_KEEP.into()];
+        proposed.envelope.allowed = vec![RETIRE_TASK.into()];
+        proposed.envelope.environment = task_scope(task);
+        proposed.task = Some(task);
+        // Not parked on the answer: the task may be open and held by nobody.
+        self.put_to_owner(by, None, proposed)
+    }
+
+    /// Whether the owner has allowed `agent` the bot server key for `task`.
+    fn server_access_granted(&self, task: TaskId, agent: AgentId) -> bool {
+        let request = Request::new(SERVER_ACCESS, server_access_scope(task));
+        let now = Timestamp::now();
+        self.decisions.decisions.iter().any(|decision| {
+            decision.task == Some(task)
+                && decision.is_authoritative()
+                && decision.asked_by.contains(&agent)
+                && decision.envelope.covers(&request, now).is_ok()
+                && decision
+                    .answer
+                    .as_ref()
+                    .is_some_and(|answer| answer.chosen == SERVER_ACCESS_ALLOW)
+        })
+    }
+
+    /// Whether `agent` may have the bot server key in its sandbox right now.
+    ///
+    /// Only while it holds a task the owner allowed it the key for, that task
+    /// is under way (claimed or in progress, so not blocked, in review or
+    /// finished), nothing it depends on is unfinished, and no hold is on it.
+    /// A review-only bot never does. Computed afresh for every turn and every
+    /// command, so a release, a block or a hold takes the key away from the
+    /// next one.
+    pub fn server_access_for(&self, agent: AgentId) -> bool {
+        if self.specs.get(&agent).is_none_or(|spec| spec.autonomy.review_only) {
+            return false;
+        }
+        self.tasks.values().any(|task| {
+            task.assignee == Some(agent)
+                && matches!(task.state, TaskState::Claimed | TaskState::InProgress)
+                && task.authorization == AuthorizationState::Authorized
+                && self.first_unmet_dependency(task).is_none()
+                && self.server_access_granted(task.id, agent)
+        })
     }
 
     /// Raise the work that would settle a security hold, once.
@@ -2468,6 +2634,18 @@ impl Engine {
                 record.updated_at = Timestamp::now();
             }
             events.push(self.emit(Event::TaskAuthorized { task, decision }));
+        }
+
+        // A retirement the owner agreed to.
+        if settled.envelope.allowed.iter().any(|action| action == RETIRE_TASK)
+            && answer.chosen == RETIRE_TASK_ALLOW
+        {
+            if let Some(task) = settled.task {
+                if self.tasks.get(&task).is_some_and(|t| !t.state.is_permanent()) {
+                    let owner = self.owner_name();
+                    events.extend(self.retire_task(task, format!("retired by {owner}: {}", settled.because))?);
+                }
+            }
         }
 
         let held_questions: Vec<TaskId> = self
@@ -3258,6 +3436,18 @@ impl Engine {
     /// a bot whose sign-in expired stayed out even after the owner signed in
     /// again. A retried bot gets a single attempt: if it fails again it
     /// faults straight away and waits twice as long.
+    /// Whether a faulted bot is due its retry.
+    ///
+    /// Lets a long run apply the housekeeping tick when a retry is due rather
+    /// than only after a turn finishes: in the live room a Codex bot faulted on
+    /// a temporary capacity error and waited eleven minutes, behind other
+    /// bots' long turns, for a retry due after one.
+    pub fn retry_due(&self, now: Timestamp) -> bool {
+        self.fault_retry.iter().any(|(agent, retry)| {
+            self.status(*agent) == AgentStatus::Faulted && retry.retry_at() <= now
+        })
+    }
+
     fn retry_faulted(&mut self, now: Timestamp) -> Vec<EventEnvelope> {
         let due: Vec<AgentId> = self
             .fault_retry

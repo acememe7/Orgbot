@@ -142,6 +142,10 @@ pub struct AgentCliProvider {
     session_system_brief: Mutex<Option<String>>,
     /// The socket handed in on the last request, for diagnostics.
     last_socket: Mutex<Option<String>>,
+    /// Whether the owner allowed this turn the bot server key; set from each
+    /// request, so a sandbox only ever carries the key for the turn it was
+    /// granted for.
+    server_access: std::sync::atomic::AtomicBool,
     /// Whether the room's board is served to the agent as MCP tools.
     mcp: bool,
     /// The CLI's own effort level; empty keeps the CLI's default.
@@ -247,6 +251,7 @@ impl AgentCliProvider {
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
+            server_access: std::sync::atomic::AtomicBool::new(false),
             timeout,
             session_store: Mutex::new(None),
             effort: String::new(),
@@ -557,6 +562,8 @@ impl Provider for AgentCliProvider {
         sink: Option<mpsc::Sender<StreamEvent>>,
     ) -> Result<CompletionResponse> {
         *self.last_socket.lock().unwrap() = request.mcp_socket.clone();
+        self.server_access
+            .store(request.server_access, std::sync::atomic::Ordering::SeqCst);
         let resumed = self.session.lock().unwrap().clone();
         let situation = latest_instruction(&request.messages);
         let system_brief = antigravity_system_brief(self.cli, self.mcp, &request)?;
@@ -913,6 +920,9 @@ impl AgentCliProvider {
             if let Some(socket) = self.mcp_socket_debug() {
                 protected.arg("--mcp-socket").arg(socket);
             }
+            if self.server_access.load(std::sync::atomic::Ordering::SeqCst) {
+                protected.arg("--server-access");
+            }
             protected
                 .arg("--")
                 .arg(original.get_program())
@@ -1068,10 +1078,12 @@ impl AgentCliProvider {
                     } else {
                         tail
                     };
-                    return Err(ProviderError::Process {
-                        provider: self.cli.label().to_string(),
-                        detail: format!("exited with {exit}: {tail}"),
-                    });
+                    return Err(classify_cli_failure(self.cli, &tail).unwrap_or_else(|| {
+                        ProviderError::Process {
+                            provider: self.cli.label().to_string(),
+                            detail: format!("exited with {exit}: {tail}"),
+                        }
+                    }));
                 }
                 if self.cli == CliKind::Antigravity && !episode.antigravity_result_seen {
                     return Err(ProviderError::Process {
@@ -1108,7 +1120,7 @@ impl AgentCliProvider {
                             .and_then(Value::as_array)
                             .is_some_and(|paths| !paths.is_empty())
                         {
-                            episode.text.push_str("\nFile removals await owner approval in Workspace changes; originals are preserved.");
+                            episode.text.push_str("\nFile removals await the owner's approval: open the Project panel and choose Workspace changes. Originals are preserved.");
                         }
                     }
                 }
@@ -1836,8 +1848,23 @@ fn bounded_error_message(message: &str) -> Option<String> {
 }
 
 fn classify_cli_error(cli: CliKind, message: &str) -> ProviderError {
+    classify_cli_failure(cli, message).unwrap_or_else(|| ProviderError::Process {
+        provider: cli.label().to_string(),
+        detail: format!("CLI reported an error: {message}"),
+    })
+}
+
+/// The failures worth naming, from a CLI's error text: limits and capacity,
+/// which pass and are waited out, and a lost sign-in, which only the owner can
+/// fix and must be named as such.
+///
+/// From the live room: Codex said "Selected model is at capacity", which
+/// faulted the bot like a broken one; and an expired sign-in showed only as a
+/// failed turn, without saying which CLI to sign in to again.
+fn classify_cli_failure(cli: CliKind, message: &str) -> Option<ProviderError> {
     let normalized = message.to_ascii_lowercase();
-    let rate_limited = [
+    let has = |phrases: &[&str]| phrases.iter().any(|phrase| normalized.contains(phrase));
+    let waits = has(&[
         "rate limit",
         "rate-limit",
         "rate limited",
@@ -1846,21 +1873,43 @@ fn classify_cli_error(cli: CliKind, message: &str) -> ProviderError {
         "quota",
         "weekly limit",
         "usage limit",
-    ]
-    .iter()
-    .any(|phrase| normalized.contains(phrase));
-    if rate_limited {
-        ProviderError::RateLimited {
+        "at capacity",
+        "overloaded",
+    ]);
+    if waits {
+        return Some(ProviderError::RateLimited {
             provider: cli.label().to_string(),
             message: message.to_string(),
             retry_after_secs: None,
-        }
-    } else {
-        ProviderError::Process {
-            provider: cli.label().to_string(),
-            detail: format!("CLI reported an error: {message}"),
-        }
+        });
     }
+    let status_401 = normalized
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| word == "401");
+    let signed_out = status_401
+        || has(&[
+            "oauth session expired",
+            "oauth token has expired",
+            "token has expired",
+            "token expired",
+            "could not be refreshed",
+            "please run /login",
+            "not logged in",
+            "not signed in",
+            "not authenticated",
+            "please log in",
+            "please sign in",
+            "login required",
+            "invalid api key",
+        ]);
+    signed_out.then(|| ProviderError::MissingCredential {
+        provider: cli.label().to_string(),
+        detail: format!(
+            "{} is signed out on this computer. Sign in to `{}` again; the bot retries on its own. ({message})",
+            cli.label(),
+            cli.binary()
+        ),
+    })
 }
 
 /// Token accounting from either vocabulary. Every field is optional so an
@@ -2661,6 +2710,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
+            server_access: std::sync::atomic::AtomicBool::new(false),
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -2892,6 +2942,36 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
         ));
     }
 
+    #[test]
+    fn a_cli_at_capacity_waits_and_a_signed_out_cli_is_named() {
+        // From the live room: Codex said the model was at capacity, which
+        // faulted the bot like a broken one; and an expired sign-in showed
+        // only as a failed turn.
+        assert!(matches!(
+            classify_cli_error(
+                CliKind::Codex,
+                "Selected model is at capacity. Please try a different model."
+            ),
+            ProviderError::RateLimited { .. }
+        ));
+        for message in [
+            "OAuth session expired. Please run /login",
+            "Your access token could not be refreshed",
+            "unexpected status 401 Unauthorized",
+        ] {
+            match classify_cli_error(CliKind::Claude, message) {
+                ProviderError::MissingCredential { detail, .. } => {
+                    assert!(detail.contains("Sign in to `claude` again"), "{detail}");
+                }
+                other => panic!("{message}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            classify_cli_error(CliKind::Claude, "listening on port 4010"),
+            ProviderError::Process { .. }
+        ));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn structured_error_overrides_exit_success_and_incidental_stderr() {
@@ -2910,6 +2990,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
+            server_access: std::sync::atomic::AtomicBool::new(false),
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3222,6 +3303,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
+            server_access: std::sync::atomic::AtomicBool::new(false),
             mcp: true,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3322,6 +3404,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
+            server_access: std::sync::atomic::AtomicBool::new(false),
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3401,6 +3484,7 @@ fi
                 session: Mutex::new(None),
                 session_system_brief: Mutex::new(None),
                 last_socket: Mutex::new(None),
+                server_access: std::sync::atomic::AtomicBool::new(false),
                 mcp: false,
                 timeout: Duration::from_secs(5),
                 session_store: Mutex::new(None),
@@ -3501,6 +3585,7 @@ fi
             session: Mutex::new(Some("old-session".into())),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
+            server_access: std::sync::atomic::AtomicBool::new(false),
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3566,6 +3651,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
                 session: Mutex::new(None),
                 session_system_brief: Mutex::new(None),
                 last_socket: Mutex::new(None),
+                server_access: std::sync::atomic::AtomicBool::new(false),
                 mcp: false,
                 timeout: Duration::from_secs(5),
                 session_store: Mutex::new(None),
@@ -3762,6 +3848,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
+            server_access: std::sync::atomic::AtomicBool::new(false),
             mcp: store.mcp,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3906,6 +3993,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
+            server_access: std::sync::atomic::AtomicBool::new(false),
             mcp: store.mcp,
             timeout: Duration::from_millis(50),
             session_store: Mutex::new(Some(store.clone())),
@@ -4601,6 +4689,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
+            server_access: std::sync::atomic::AtomicBool::new(false),
             mcp: false,
             effort: String::new(),
             timeout: Duration::MAX,

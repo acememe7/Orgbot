@@ -27,6 +27,45 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{AgentId, DecisionId, RoomId, TaskId};
 use crate::time::Timestamp;
 
+/// The action class a server-access decision grants.
+///
+/// From the live room: a bot installed a server release over SSH while the
+/// rest of the room had that release on hold, because every bot sandbox
+/// carried the bot server key on every turn. The key is now mounted only for
+/// a bot the owner has allowed it, for one task, by a decision whose envelope
+/// grants this action in that task's environment ([`server_access_scope`]).
+pub const SERVER_ACCESS: &str = "server-access";
+
+/// The answer that grants a server-access request.
+pub const SERVER_ACCESS_ALLOW: &str = "Allow server access for this task";
+
+/// The answer that refuses a server-access request.
+pub const SERVER_ACCESS_DENY: &str = "Deny";
+
+/// The environment a decision about one task is scoped to.
+pub fn task_scope(task: TaskId) -> String {
+    format!("task:{task}")
+}
+
+/// The environment a server-access grant is scoped to: one task.
+pub fn server_access_scope(task: TaskId) -> String {
+    task_scope(task)
+}
+
+/// The action class a retire-task decision grants.
+///
+/// From the live room: an obsolete task stayed open, woke idle bots every turn
+/// for nothing, and the bots asked the owner to archive it in an app that had
+/// no way to. A coordinator now proposes retiring it, with the reason, and the
+/// owner's answer retires it.
+pub const RETIRE_TASK: &str = "retire-task";
+
+/// The answer that retires a task proposed for retirement.
+pub const RETIRE_TASK_ALLOW: &str = "Retire this task";
+
+/// The answer that keeps a task proposed for retirement.
+pub const RETIRE_TASK_KEEP: &str = "Keep it";
+
 /// What an approval covers.
 ///
 /// Deliberately coarse. A scope that has to enumerate every command is one

@@ -370,7 +370,37 @@ class _NeedsYouPanelState extends State<NeedsYouPanel> {
     super.dispose();
   }
 
-  void _answer(PendingDecision decision, String chosen, {String note = ''}) {
+  Future<void> _answer(
+    PendingDecision decision,
+    String chosen, {
+    String note = '',
+  }) async {
+    // An answer that takes an effect a stray tap should not (server access,
+    // an outside tool call, retiring a task) is confirmed first; every other
+    // answer stays one tap.
+    if (decision.grantsWith != null && chosen == decision.grantsWith) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Confirm this answer?'),
+          content: Text('${decision.because}\n\nThis takes effect at once.'),
+          actions: [
+            TextButton(
+              key: const ValueKey('grant-cancel'),
+              autofocus: true,
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              key: const ValueKey('grant-confirm'),
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text(chosen),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+    }
     if (!_answerState.begin(decision.id)) return;
     widget.store.answerDecision(decision.id, chosen, note: note);
   }

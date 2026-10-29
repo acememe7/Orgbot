@@ -316,6 +316,7 @@ async fn dispatch(session: &SessionHandle, message: ClientMessage) -> bool {
                 .await
         }
         ClientMessage::Pause { reason } => session.send(Control::Pause { reason }).await,
+        ClientMessage::StopNow { reason } => session.send(Control::StopNow { reason }).await,
         ClientMessage::Resume => session.send(Control::Resume).await,
     }
 }

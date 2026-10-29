@@ -1861,3 +1861,186 @@ async fn a_room_cycle_claim_work_review_submit_runs_through_the_bridge() {
         final_task.state
     );
 }
+
+/// Records whether each turn it is asked to take carries the server key.
+#[derive(Debug)]
+struct RecordsServerAccess(Arc<std::sync::Mutex<Vec<bool>>>);
+
+#[async_trait]
+impl Provider for RecordsServerAccess {
+    fn name(&self) -> &str {
+        "records-server-access"
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+        _sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> orgbot_providers::Result<CompletionResponse> {
+        self.0.lock().unwrap().push(request.server_access);
+        Ok(say("noted"))
+    }
+}
+
+#[tokio::test]
+async fn a_bot_turn_carries_the_server_key_only_once_the_owner_allows_it() {
+    // From the live room: a bot installed a server release over SSH while the
+    // room had it on hold, because every sandbox carried the bot server key.
+    use orgbot_engine::Command;
+    use orgbot_proto::decision::{Answer, SERVER_ACCESS_ALLOW};
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "release".into(),
+        goal: "deploy".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    let ops = room
+        .seat(
+            spec("ops", &["engineer"], Autonomy::default()),
+            Arc::new(RecordsServerAccess(seen.clone())),
+        )
+        .unwrap();
+    room.start().unwrap();
+    let created = room
+        .engine_mut()
+        .apply(Command::CreateTask {
+            title: "Deploy the reviewed build".into(),
+            brief: String::new(),
+            by: None,
+            required_role: None,
+            priority: orgbot_proto::task::Priority::Normal,
+            acceptance_criteria: vec![],
+            depends_on: vec![],
+            origin: TaskOrigin::plain(),
+        })
+        .unwrap();
+    let task = created
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+            _ => None,
+        })
+        .unwrap();
+    for command in [
+        Command::OpenTask { task },
+        Command::ClaimTask { task, by: ops },
+        Command::StartTask { task, by: ops },
+    ] {
+        room.engine_mut().apply(command).unwrap();
+    }
+
+    owner_asks(&room.shared_engine(), Some(ops), "@ops how is the deploy going?");
+    room.step(None).await;
+    assert_eq!(*seen.lock().unwrap(), vec![false], "no key until the owner allows it");
+
+    let asked = room
+        .engine_mut()
+        .apply(Command::RequestServerAccess {
+            by: ops,
+            task,
+            reason: "deploy the reviewed build".into(),
+        })
+        .unwrap();
+    let decision = asked
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::DecisionAsked { decision } => Some(decision.id),
+            _ => None,
+        })
+        .unwrap();
+    room.engine_mut()
+        .apply(Command::AnswerDecision {
+            decision,
+            answer: Answer {
+                chosen: SERVER_ACCESS_ALLOW.into(),
+                note: String::new(),
+                at: orgbot_proto::Timestamp::now(),
+            },
+        })
+        .unwrap();
+    owner_asks(&room.shared_engine(), Some(ops), "@ops go ahead");
+    room.step(None).await;
+    assert_eq!(seen.lock().unwrap().last(), Some(&true), "allowed, the next turn has the key");
+}
+
+#[tokio::test]
+async fn a_bot_is_woken_for_an_assist_it_accepted_and_has_not_delivered() {
+    // From the live room: a bot accepted an assist and ended its turn without
+    // delivering. An assist never makes its recipient the assignee, so it was
+    // never shown the handoff or woken for it again, and the sender waited for
+    // it to expire.
+    use orgbot_engine::Command;
+    use orgbot_proto::handoff::{HandoffKind, Recipient};
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "release".into(),
+        goal: "ship".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+    });
+    let lead = room
+        .seat(spec("lead", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    let helper = room
+        .seat(spec("helper", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    room.start().unwrap();
+    let created = room
+        .engine_mut()
+        .apply(Command::CreateTask {
+            title: "Fix the lint failure".into(),
+            brief: String::new(),
+            by: None,
+            required_role: None,
+            priority: orgbot_proto::task::Priority::Normal,
+            acceptance_criteria: vec![],
+            depends_on: vec![],
+            origin: TaskOrigin::plain(),
+        })
+        .unwrap();
+    let task = created
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+            _ => None,
+        })
+        .unwrap();
+    for command in [
+        Command::OpenTask { task },
+        Command::ClaimTask { task, by: lead },
+        Command::StartTask { task, by: lead },
+    ] {
+        room.engine_mut().apply(command).unwrap();
+    }
+    let offered = room
+        .engine_mut()
+        .apply(Command::OfferHandoff {
+            task,
+            from: lead,
+            to: Recipient::Agent { agent: helper },
+            kind: HandoffKind::Assist,
+            brief: "fix the empty catch in the QA script".into(),
+            expects: vec![],
+            context: vec![],
+            blocks_sender: None,
+            timeout_ms: None,
+        })
+        .unwrap();
+    let handoff = offered
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::HandoffOffered { handoff } => Some(handoff.id),
+            _ => None,
+        })
+        .unwrap();
+    room.engine_mut()
+        .apply(Command::AcceptHandoff { handoff, by: helper })
+        .unwrap();
+
+    assert!(room.is_actionable(helper), "the helper is woken for the work it took on");
+    let situation = orgbot_runtime::prompt::situation(&room.engine(), helper, orgbot_proto::event::Seq::ZERO);
+    assert!(situation.contains(&handoff.to_string()), "and shown it: {situation}");
+    assert!(situation.contains("fail_handoff"));
+}

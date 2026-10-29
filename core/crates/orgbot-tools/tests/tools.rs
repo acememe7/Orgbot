@@ -106,7 +106,7 @@ fn a_worker_is_not_offered_the_tools_of_other_roles() {
 
     assert!(names.contains(&"claim_task".to_string()));
     assert!(names.contains(&"offer_handoff".to_string()));
-    for withheld in ["record_review", "submit_task", "create_task"] {
+    for withheld in ["record_review", "submit_task", "create_task", "propose_retire_task"] {
         assert!(
             !names.contains(&withheld.to_string()),
             "a worker must not even see `{withheld}`"
@@ -128,6 +128,7 @@ fn each_role_sees_exactly_the_extra_tool_it_needs() {
     assert!(!inspector.contains(&"submit_task".to_string()));
 
     let lead = names(f.lead);
+    assert!(lead.contains(&"propose_retire_task".to_string()), "a coordinator can propose retiring stale work");
     assert!(lead.contains(&"submit_task".to_string()));
     assert!(lead.contains(&"create_task".to_string()));
     assert!(

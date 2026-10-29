@@ -37,6 +37,8 @@ class _Client implements RoomClient {
   @override
   void pause({String reason = ''}) {}
   @override
+  void stopNow({String reason = ''}) {}
+  @override
   void resume() {}
   @override
   void resync() {}

@@ -795,14 +795,33 @@ class RoomStore extends ChangeNotifier {
     _client.sendMessage(author, body.trim());
   }
 
+  bool _pauseAsked = false;
+
   /// Pause or resume, depending on the current phase.
+  ///
+  /// A pause lets the turns under way finish first, so the room keeps
+  /// running for a while after it is asked to pause (see [isPausing]).
   void togglePause() {
     if (canResume) {
+      _pauseAsked = false;
       _client.resume();
     } else {
+      _pauseAsked = true;
       _client.pause();
+      notifyListeners();
     }
   }
+
+  /// Pause now, cutting short any turn under way. For emergencies.
+  void stopNow({String reason = 'stopped from the app'}) {
+    _pauseAsked = true;
+    _client.stopNow(reason: reason);
+    notifyListeners();
+  }
+
+  /// Asked to pause, with turns still finishing. Once the room has paused it
+  /// is safe to close or update; until then work is still being saved.
+  bool get isPausing => _pauseAsked && isActive;
 
   /// Whether the room is paused.
   bool get isActive => _room?.phase == RoomPhase.running;
@@ -815,6 +834,7 @@ class RoomStore extends ChangeNotifier {
 
   /// Older checkpoints called exhausted budgets completed; don't claim success.
   String get runStateLabel {
+    if (isPausing) return 'Pausing after current turns';
     if (isActive) return 'Active';
     if (isCompleted && _limitReached) {
       return _closedReason == 'the room ran out of time'

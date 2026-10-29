@@ -163,7 +163,9 @@ impl LocalWorkspaceHost {
             }
             let host = Arc::clone(&self);
             if matches!(call.name.as_str(), "workspace_run" | "workspace_verify") {
-                let outcome = self.run(call.agent, &call.name, &call.arguments).await;
+                let outcome = self
+                    .run(call.agent, &call.name, &call.arguments, call.server_access)
+                    .await;
                 let _ = call.reply.send(outcome);
                 continue;
             }
@@ -285,7 +287,13 @@ impl LocalWorkspaceHost {
     }
 
     #[cfg(target_os = "linux")]
-    async fn run(&self, agent: orgbot_proto::AgentId, name: &str, args: &Value) -> ToolOutcome {
+    async fn run(
+        &self,
+        agent: orgbot_proto::AgentId,
+        name: &str,
+        args: &Value,
+        server_access: bool,
+    ) -> ToolOutcome {
         let execute = async {
             let verify = name == "workspace_verify";
             if verify && self.guard_state.is_none() {
@@ -321,6 +329,8 @@ impl LocalWorkspaceHost {
             let mut command = tokio::process::Command::from(guard.command("run")?);
             if verify {
                 command.args(["--verify", "--read-only"]);
+            } else if server_access {
+                command.arg("--server-access");
             }
             command
                 .args(["--", "/bin/sh", "-c", script])
@@ -1139,7 +1149,7 @@ mod tests {
             root.join("keep.txt").display()
         );
         let result = host
-            .run(agent, "workspace_run", &json!({"command":command}))
+            .run(agent, "workspace_run", &json!({"command":command}), false)
             .await;
         assert!(!result.is_error, "{}", result.content);
         assert_eq!(
@@ -1154,6 +1164,7 @@ mod tests {
                 agent,
                 "workspace_run",
                 &json!({"command":"sleep 20", "timeout_seconds":1}),
+                false,
             )
             .await;
         assert!(timeout.is_error);
@@ -1166,6 +1177,7 @@ mod tests {
                 agent,
                 "workspace_run",
                 &json!({"command":"head -c 100000 /dev/zero | tr '\\0' x"}),
+                false,
             )
             .await;
         assert!(!output.is_error, "{}", output.content);
@@ -1184,7 +1196,7 @@ mod tests {
         let agent = AgentId::new();
         let command = "if printf changed > check.txt; then exit 9; fi; printf verified";
         let outcome = host
-            .run(agent, "workspace_verify", &json!({"command":command}))
+            .run(agent, "workspace_verify", &json!({"command":command}), false)
             .await;
         assert!(!outcome.is_error, "{}", outcome.content);
         let value: Value = serde_json::from_str(&outcome.content).unwrap();
@@ -1250,7 +1262,7 @@ mod tests {
             "new file"
         );
         assert!(
-            host.run(agent, "workspace_run", &json!({"command":"true"}))
+            host.run(agent, "workspace_run", &json!({"command":"true"}), false)
                 .await
                 .is_error
         );
@@ -1701,6 +1713,7 @@ mod tests {
             agent: AgentId::new(),
             name: "workspace_write".into(),
             arguments: json!({"path":"cancelled.txt", "content":"must not be written"}),
+            server_access: false,
             reply,
         })
         .unwrap();

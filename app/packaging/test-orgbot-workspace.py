@@ -537,9 +537,7 @@ Path('/tmp/private.txt').write_text('temporary')
 
     @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
                          "requires Linux bubblewrap user namespaces")
-    def test_bot_runtime_cannot_read_the_owners_keys_sign_ins_or_room_tokens(self):
-        self.prepare("dev")
-        home = self._owner_home_with_secrets()
+    def _bot_server_key(self):
         xdg = self.root / "xdg"
         bot_ssh = xdg / "orgbot" / "bot-ssh"
         bot_ssh.mkdir(parents=True)
@@ -547,6 +545,12 @@ Path('/tmp/private.txt').write_text('temporary')
         for name, text in {"config": "Host hermes-vps", "hermes_ed25519": "bot key", "known_hosts": "hermes host key"}.items():
             (bot_ssh / name).write_text(text, encoding="utf-8")
             os.chmod(bot_ssh / name, 0o600)
+        return xdg, bot_ssh
+
+    def test_bot_runtime_cannot_read_the_owners_keys_sign_ins_or_room_tokens(self):
+        self.prepare("dev")
+        home = self._owner_home_with_secrets()
+        xdg, bot_ssh = self._bot_server_key()
         code = (
             "import os, sys; from pathlib import Path; h = Path(sys.argv[1])\n"
             "def unreadable(path):\n"
@@ -561,13 +565,37 @@ Path('/tmp/private.txt').write_text('temporary')
             "(h / '.codex/packages/bin/codex').read_text() == 'the codex program',"
             "not (h / '.local/share/orgbot/.services').exists(),"
             "not (h / '.config/opencode/opencode.json').exists(),"
-            "(h / 'projects/notes.txt').read_text() == 'ordinary file'];"
+            "(h / 'projects/notes.txt').read_text() == 'ordinary file',"
+            "os.listdir(sys.argv[2]) == []];"
             "raise SystemExit(0 if all(checks) else 10 + checks.index(False))"
         )
         owner = SimpleNamespace(pw_dir=os.fspath(home))
         with patch.object(workspace.pwd, "getpwuid", return_value=owner), patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg)}):
-            result = workspace._run(os.fspath(self.state), "dev", [sys.executable, "-c", code, os.fspath(home)], read_only=False, profiles=[], private_home_arg=None, mcp_socket=None)
+            result = workspace._run(os.fspath(self.state), "dev", [sys.executable, "-c", code, os.fspath(home), os.fspath(bot_ssh)], read_only=False, profiles=[], private_home_arg=None, mcp_socket=None, server_access=True)
         self.assertEqual(result, 0)
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
+                         "requires Linux bubblewrap user namespaces")
+    def test_the_bot_server_key_is_only_in_a_turn_the_owner_allowed_it(self):
+        # From the live room: a bot installed a server release over SSH while
+        # the rest of the room had it on hold, because the bot server key was
+        # in every sandbox on every turn.
+        self.prepare("dev")
+        home = self._owner_home_with_secrets()
+        xdg, bot_ssh = self._bot_server_key()
+        code = (
+            "import os, sys\n"
+            "home_ssh = os.listdir(os.path.join(sys.argv[1], '.ssh'))\n"
+            "source = os.listdir(sys.argv[2])\n"
+            "raise SystemExit(0 if home_ssh == [] and source == [] else 9)"
+        )
+        owner = SimpleNamespace(pw_dir=os.fspath(home))
+        argv = [sys.executable, "-c", code, os.fspath(home), os.fspath(bot_ssh)]
+        with patch.object(workspace.pwd, "getpwuid", return_value=owner), patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg)}):
+            not_allowed = workspace._run(os.fspath(self.state), "dev", argv, read_only=False, profiles=[], private_home_arg=None, mcp_socket=None)
+            reviewer = workspace._run(os.fspath(self.state), "dev", argv, read_only=True, profiles=[], private_home_arg=None, mcp_socket=None, server_access=True)
+        self.assertEqual(not_allowed, 0, "a turn the owner did not allow has no server key anywhere")
+        self.assertEqual(reviewer, 0, "a read-only turn never gets the server key")
 
     @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
                          "requires Linux bubblewrap user namespaces")

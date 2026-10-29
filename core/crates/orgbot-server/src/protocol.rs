@@ -111,8 +111,16 @@ pub enum ClientMessage {
         #[serde(default)]
         note: String,
     },
-    /// Pause the room.
+    /// Pause the room once the turns under way have finished. No new turn
+    /// starts meanwhile, and no work is lost.
     Pause {
+        /// Why, for the transcript.
+        #[serde(default)]
+        reason: String,
+    },
+    /// Pause the room now, cutting short any turn under way. For emergencies:
+    /// a cut-short turn's work is lost.
+    StopNow {
         /// Why, for the transcript.
         #[serde(default)]
         reason: String,
@@ -263,6 +271,9 @@ mod tests {
             },
             ClientMessage::Pause {
                 reason: "lunch".into(),
+            },
+            ClientMessage::StopNow {
+                reason: "runaway".into(),
             },
             ClientMessage::Resume,
             ClientMessage::Ping,

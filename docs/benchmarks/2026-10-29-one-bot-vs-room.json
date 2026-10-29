@@ -1,0 +1,178 @@
+{
+  "date": "2026-10-29",
+  "question": "Does a room with an independent reviewer ship fewer bugs than the same model working alone?",
+  "project": "The owner's private multiplayer battle royale browser game (TypeScript server and web client).",
+  "task": "Public party queueing for the battle royale mode: ready parties of 2 or 3 queue together and play as one squad, a public party of 4 is refused, leaving or cancelling before the match drops the whole party and releases its seats so it can queue again, leaving after a teammate joined the match must not affect that teammate, and a follower's cancel in the web client must cancel the server reservation. Both arms received the same written task.",
+  "build": "OrgBots 2.2.0 development build, headless (orgbot run).",
+  "base": "The same commit for both arms, cloned without a remote; neither arm could get a server key.",
+  "arms": {
+    "one_bot": {
+      "bots": [
+        {
+          "bot": "Sol",
+          "provider": "Codex CLI",
+          "model": "gpt-6.1-sol",
+          "role": "engineer"
+        }
+      ],
+      "outcome": "Stopped by itself after 31.5 minutes with the task submitted for review; nobody reviewed it.",
+      "minutes": 31.5,
+      "turns": 1,
+      "tokens": {
+        "uncached_input": 186043,
+        "cache_read": 9875712,
+        "cache_write": 0,
+        "output": 50527
+      },
+      "hidden_checks": {
+        "passed": 3,
+        "total": 10,
+        "new_behaviour_passed": 1,
+        "new_behaviour_total": 8,
+        "regression_guards_passed": 2,
+        "regression_guards_total": 2
+      },
+      "project_tests": {
+        "passed": 822,
+        "failed": 0,
+        "skipped": 26
+      },
+      "typecheck": "clean",
+      "defects_found_by_hidden_checks": [
+        "A member leaving a waiting public party left the rest of the party queued.",
+        "Cancelling an offered party kept its seats reserved.",
+        "A cancelled party could not queue again, and its old tickets stayed counted against the match.",
+        "Public parties still required a private launch over HTTP, contrary to the task.",
+        "The web client was not changed, so a follower's cancel never reached the server."
+      ]
+    },
+    "room": {
+      "bots": [
+        {
+          "bot": "Sol",
+          "provider": "Codex CLI",
+          "model": "gpt-6.1-sol",
+          "role": "engineer"
+        },
+        {
+          "bot": "Astra",
+          "provider": "Codex CLI",
+          "model": "gpt-6-astra",
+          "role": "independent reviewer, read-only"
+        },
+        {
+          "bot": "Lead",
+          "provider": "Claude Code",
+          "model": "claude-haiku-5-5",
+          "role": "coordinator, submits after approval"
+        }
+      ],
+      "outcome": "Delivered after independent approval: three reviews requested changes (5, 2 and 1 blocking findings), the fourth approved, and the coordinator submitted.",
+      "minutes_active": 96.4,
+      "turns": 19,
+      "turns_by_bot": {
+        "Sol": 7,
+        "Astra": 4,
+        "Lead": 8
+      },
+      "tokens": {
+        "uncached_input": 574690,
+        "cache_read": 28475926,
+        "cache_write": 42231,
+        "output": 138800
+      },
+      "tokens_by_provider": {
+        "Codex CLI": {
+          "turns": 11,
+          "uncached_input": 574656,
+          "cache_read": 27724160,
+          "output": 134183
+        },
+        "Claude Code": {
+          "turns": 8,
+          "uncached_input": 34,
+          "cache_read": 751766,
+          "cache_write": 42231,
+          "output": 4617
+        }
+      },
+      "hidden_checks": {
+        "passed": 10,
+        "total": 10,
+        "new_behaviour_passed": 8,
+        "new_behaviour_total": 8,
+        "regression_guards_passed": 2,
+        "regression_guards_total": 2
+      },
+      "project_tests": {
+        "passed": 846,
+        "failed": 0,
+        "skipped": 26
+      },
+      "typecheck": "clean",
+      "reviews": [
+        {
+          "at": "31 minutes after the start",
+          "verdict": "request_changes",
+          "blocking_findings": 5,
+          "examples": [
+            "public party of 4 accepted",
+            "leaving kept teammates queued with working tickets",
+            "cancel blocked requeue",
+            "new parties offered a match after it locked",
+            "full project suite not run"
+          ]
+        },
+        {
+          "at": "62 minutes after the start",
+          "verdict": "request_changes",
+          "blocking_findings": 2,
+          "examples": [
+            "a follower missed a cancel landing between its first reply and first poll",
+            "an expired member could not cancel the party's remaining seats or requeue"
+          ]
+        },
+        {
+          "at": "81 minutes after the start",
+          "verdict": "request_changes",
+          "blocking_findings": 1,
+          "examples": [
+            "an expired member leaving did not release teammates' seats"
+          ]
+        },
+        {
+          "at": "99 minutes after the start, including 2.6 paused minutes before the resume",
+          "verdict": "approve",
+          "blocking_findings": 0
+        }
+      ]
+    }
+  },
+  "hidden_checks": {
+    "written_by": "the evaluator, before either run; never visible to the bots",
+    "validated_on": [
+      "the base commit: the 8 new-behaviour checks fail and the 2 regression guards pass",
+      "an earlier, reviewed fix of the same feature from the owner's live room: 9 pass and the stranding guard fails, confirming a bug that fix introduced"
+    ],
+    "covers": [
+      "party sizes and the 4-player refusal",
+      "whole-party drop on leave and on cancel",
+      "seat release and immediate requeue with old tickets dead",
+      "an admitted teammate not stranded by a later leaver",
+      "non-battle-royale party behaviour unchanged",
+      "public party queueing over HTTP without a launch",
+      "follower cancel from the web client before and after an offer"
+    ],
+    "not_covered": [
+      "squad assignment inside the match",
+      "browser flows"
+    ]
+  },
+  "limits": [
+    "One task and one run of each arm; a strong result for this task, not yet a general measurement.",
+    "Both arms ran at the same time on the same Codex account while the owner's live room was also running.",
+    "The room reached its 90-minute cap with its third revision awaiting review; it was resumed from its saved board without a time limit and finished 6.5 minutes later with no further code change. The code that passed all checks is the code it had at the cap.",
+    "Token counters are as each CLI reported them; they are not invoices or quota readings.",
+    "Bot sandboxes mount the computer read-only; no log or board shows either arm reading anything outside its own copy."
+  ]
+}

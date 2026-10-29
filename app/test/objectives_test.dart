@@ -43,6 +43,8 @@ class _Silent implements RoomClient {
   @override
   void pause({String reason = ''}) {}
   @override
+  void stopNow({String reason = ''}) {}
+  @override
   void resume() {}
   @override
   void resync() {}
@@ -405,6 +407,63 @@ void _answerTests() {
         'dec_1',
         reason: 'the answer is addressed to the question, not to a task',
       );
+    });
+
+    testWidgets('an answer that grants access is confirmed, others stay one tap', (
+      tester,
+    ) async {
+      // From the live room: a bot reached a server it should not have, and
+      // the owner approved a workspace action by mistake with one tap.
+      final client = _Silent();
+      final store = RoomStore(client);
+      final digest = digestJson(needsYou: 1);
+      final pending = (digest['needs_you'] as List).single as Map<String, Object?>;
+      pending['because'] = '@ops asks to use the bot server key: deploy';
+      pending['options'] = ['Allow server access for this task', 'Deny'];
+      pending['grants_with'] = 'Allow server access for this task';
+      store.restore([
+        {'type': 'digest', 'digest': digest},
+      ]);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: ObjectivesPane(store: store)),
+        ),
+      );
+
+      await tester.tap(find.text('Allow server access for this task'));
+      await tester.pumpAndSettle();
+      expect(find.text('Confirm this answer?'), findsOneWidget);
+      expect(client.answered, isEmpty, reason: 'nothing is sent before confirming');
+      await tester.tap(find.byKey(const ValueKey('grant-cancel')));
+      await tester.pumpAndSettle();
+      expect(client.answered, isEmpty, reason: 'cancelling sends nothing');
+
+      await tester.tap(find.text('Allow server access for this task'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('grant-confirm')));
+      await tester.pumpAndSettle();
+      expect(client.answered.single.chosen, 'Allow server access for this task');
+    });
+
+    testWidgets('a refusal of access is sent at once', (tester) async {
+      final client = _Silent();
+      final store = RoomStore(client);
+      final digest = digestJson(needsYou: 1);
+      final pending = (digest['needs_you'] as List).single as Map<String, Object?>;
+      pending['options'] = ['Allow server access for this task', 'Deny'];
+      pending['grants_with'] = 'Allow server access for this task';
+      store.restore([
+        {'type': 'digest', 'digest': digest},
+      ]);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: ObjectivesPane(store: store)),
+        ),
+      );
+      await tester.tap(find.text('Deny'));
+      await tester.pump();
+      expect(find.text('Confirm this answer?'), findsNothing);
+      expect(client.answered.single.chosen, 'Deny');
     });
 
     testWidgets('a custom answer is delivered with the same decision id', (

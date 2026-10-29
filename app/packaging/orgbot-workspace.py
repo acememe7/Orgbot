@@ -814,7 +814,8 @@ def _bot_ssh_dir() -> Path | None:
     else. Anything unsafe about it means no SSH access, not a failed turn.
     """
     raw_xdg = os.environ.get("XDG_DATA_HOME")
-    data = Path(raw_xdg) if raw_xdg and Path(raw_xdg).is_absolute() else Path.home() / ".local/share"
+    account_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    data = Path(raw_xdg) if raw_xdg and Path(raw_xdg).is_absolute() else account_home / ".local/share"
     folder = data / "orgbot" / "bot-ssh"
     try:
         info = folder.lstat()
@@ -825,8 +826,18 @@ def _bot_ssh_dir() -> Path | None:
     return folder
 
 
-def _owner_secret_mask_args(owner_home: Path, bot_ssh: Path | None) -> list[str]:
-    """Hide the owner's secrets from a runtime that mounts / read-only."""
+def _inside(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _owner_secret_mask_args(owner_home: Path, bot_ssh: Path | None, hide: Path | None = None) -> list[str]:
+    """Hide the owner's secrets from a runtime that mounts / read-only.
+
+    `bot_ssh` is the bot server key folder to show as ~/.ssh, given only to a
+    turn the owner allowed it; otherwise ~/.ssh is empty. `hide` is that folder
+    wherever it lives, masked at its own path too, so a folder outside the
+    usual data directory cannot be read there instead.
+    """
     args: list[str] = []
     for relative, is_dir in [(r, True) for r in _OWNER_SECRET_DIRS] + [(r, False) for r in _OWNER_SECRET_FILES]:
         path = owner_home / relative
@@ -841,6 +852,8 @@ def _owner_secret_mask_args(owner_home: Path, bot_ssh: Path | None) -> list[str]
                 args.extend(["--size", "65536", "--tmpfs", os.fspath(path)])
         elif not is_dir and path.is_file():
             args.extend(["--ro-bind", "/dev/null", os.fspath(path)])
+    if hide is not None and not _inside(Path(os.path.realpath(hide)), Path(os.path.realpath(owner_home / ".local/share/orgbot"))):
+        args.extend(["--size", "65536", "--tmpfs", os.fspath(hide)])
     return args
 
 
@@ -1986,7 +1999,7 @@ def _agy_auth_login_inner() -> dict[str, Any]:
         os.close(lock_fd)
 
 
-def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool, profiles: list[str], private_home_arg: str | None, mcp_socket: str | None, agent_cli: str | None = None, mcp_relay: str | None = None, verify: bool = False) -> int:
+def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool, profiles: list[str], private_home_arg: str | None, mcp_socket: str | None, agent_cli: str | None = None, mcp_relay: str | None = None, verify: bool = False, server_access: bool = False) -> int:
     agent = _safe_agent(agent_arg)
     if not program:
         _fail("run requires a program after --")
@@ -2088,7 +2101,11 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
         private_cli_overlays: list[tuple[Path, str]] = []
         private_home_bind = "--ro-bind" if agent_cli == "opencode" else "--bind"
         args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--size", "1073741824", "--tmpfs", "/tmp", "--dir", "/tmp/orgbot-workspace", "--tmpfs", "/run", "--dir", "/run/user", "--dir", f"/run/user/{os.getuid()}", "--dir", private_home_mount, private_home_bind, os.fspath(supplied_home), private_home_mount, *_gpu_device_args()]
-        args.extend(_owner_secret_mask_args(Path(pwd.getpwuid(os.getuid()).pw_dir), _bot_ssh_dir()))
+        # The bot server key only for a turn the owner allowed it, and never
+        # for a read-only one: a reviewer has no business on a server.
+        bot_ssh = _bot_ssh_dir()
+        granted = bot_ssh if server_access and not read_only else None
+        args.extend(_owner_secret_mask_args(Path(pwd.getpwuid(os.getuid()).pw_dir), granted, hide=bot_ssh))
         if agent_cli == "opencode":
             for relative in (".local/share", ".local/state", ".cache"):
                 directory = supplied_home / relative
@@ -2447,6 +2464,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--profile", action="append", default=[])
     run.add_argument("--private-home")
     run.add_argument("--mcp-socket")
+    run.add_argument("--server-access", action="store_true")
     run.add_argument("--mcp-relay")
     run.add_argument("--agent-cli", choices=("opencode", "agy"))
     run.add_argument("program", nargs=argparse.REMAINDER)
@@ -2470,7 +2488,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "run":
             program = args.program[1:] if args.program and args.program[0] == "--" else args.program
-            return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket, agent_cli=args.agent_cli, mcp_relay=args.mcp_relay, verify=args.verify)
+            return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket, agent_cli=args.agent_cli, mcp_relay=args.mcp_relay, verify=args.verify, server_access=args.server_access)
         if args.command == "agy-auth":
             result = _agy_auth_login() if args.action == "login" else _agy_auth_status()
             _json(result)
