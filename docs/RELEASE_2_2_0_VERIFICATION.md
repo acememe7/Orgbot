@@ -205,6 +205,15 @@ the new settings). Signed archive revision
 `orgbots_2.2.0_amd64.deb`; the transitional package and every older package are
 byte-identical.
 [Pages run 40984234732](https://github.com/acememe7/Orgbot/actions/runs/40984234732)
+published it.
+
+An hour later they were rebuilt once more under the same version so a bot
+keeps working when its copy conflicts with the project, and so a lent sign-in
+that is not on this computer is skipped (source `95d458a`; the Flutter bundle is
+byte-identical to the previous package). Signed archive revision
+`fe2788231a8d3c06acbd3db72f7fe9e50ae2b21e` replaces only
+`orgbots_2.2.0_amd64.deb`;
+[Pages run 40991917865](https://github.com/acememe7/Orgbot/actions/runs/40991917865)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
