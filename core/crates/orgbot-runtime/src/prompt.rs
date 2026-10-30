@@ -136,12 +136,14 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            wait for the answer: you will be woken when it comes. Do not hand the wait \
            to another bot or post reminders about it. Use ask_owner only for a question \
            you need answered, never to record a status, a hold or a decision already made.\n\
+         - A parked task is the owner's to resume. Leave it alone: do not work on it, \
+           claim it, plan around it as open work, or ask the owner about it.\n\
          - Avoid repeating another bot's status or asking it to confirm a requirement already stated. \
            Contribute new evidence, a decision, or completed work.\n\
          - If you need someone to *do* something, use offer_handoff, not a chat \
            message. A message is a conversation; a handoff is tracked, routed, and \
            chased up if it goes unanswered.\n\
-         - An \"assist\" handoff parks your task until they answer. You will be woken \
+         - An \"assist\" handoff holds your task until they answer. You will be woken \
            when it settles — do not poll, and do not sit in a loop waiting.\n\
          - A \"delegate\" handoff passes on a task you hold, so keep holding it until \
            they accept. Releasing it withdraws the offer and puts the task back on \
@@ -262,6 +264,12 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
              amend the task with amend_task (the full new acceptance criteria, and why). \
              Reviewers judge against the task as written, so a waiver posted only in chat \
              leaves the old requirement in force and the work comes back again.\n",
+        );
+        out.push_str(
+            "\nWhen the owner says to hold, park or leave a task for later, park it with \
+             park_task, quoting what they said. Nobody can claim, work on or ask about a \
+             parked task, and questions waiting on it are withdrawn. Only the owner \
+             resumes it, from the app; do not ask them whether to.\n",
         );
         if spec.autonomy.review_only {
             out.push_str(
@@ -450,6 +458,21 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
              claim refused as ALREADY_CLAIMED means somebody got there ahead of \
              you — claim a different one rather than stopping.)\n",
         );
+    }
+
+    // What the owner put aside, named so nobody takes it for open work.
+    let parked: Vec<_> = engine
+        .tasks()
+        .filter(|t| t.state == TaskState::Parked)
+        .collect();
+    if !parked.is_empty() {
+        out.push_str(
+            "\nParked by the owner (leave these alone and do not ask about them; \
+             the owner resumes them):\n",
+        );
+        for task in parked.iter().take(8) {
+            out.push_str(&format!("  {} {}\n", task.id, task.title));
+        }
     }
 
     // An inspector's queue.

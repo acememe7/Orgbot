@@ -99,6 +99,14 @@ pub enum Event {
         /// What they said.
         answer: Answer,
     },
+    /// An unanswered question was taken back, so it no longer waits on the
+    /// operator: the task it was about was parked.
+    DecisionWithdrawn {
+        /// The question taken back.
+        decision: DecisionId,
+        /// Why, in readable words.
+        reason: String,
+    },
     /// A task changed state. Carries both ends so a client that missed earlier
     /// events can still render the change coherently.
     TaskTransitioned {
@@ -220,6 +228,7 @@ impl Event {
             Self::DecisionAsked { .. } => "decision_asked",
             Self::DecisionQuestionJoined { .. } => "decision_question_joined",
             Self::DecisionAnswered { .. } => "decision_answered",
+            Self::DecisionWithdrawn { .. } => "decision_withdrawn",
             Self::TaskTransitioned { .. } => "task_transitioned",
             Self::TaskAmended { .. } => "task_amended",
             Self::HandoffOffered { .. } => "handoff_offered",

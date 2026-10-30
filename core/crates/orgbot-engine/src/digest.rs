@@ -600,6 +600,7 @@ fn blocking_line(readiness: &Readiness) -> Option<String> {
         Readiness::HeldByPolicy { policy, .. } => Some(format!("held by the {policy} rule")),
         Readiness::BlockedOperator { because, .. } => Some(because.clone()),
         Readiness::Closed { .. } => None,
+        Readiness::Parked => Some("parked until you resume it".into()),
         // Worth naming on the card: this is work that stopped without anyone
         // deciding it should, and it looked finished while it sat there.
         Readiness::Recovering { state } => Some(format!(

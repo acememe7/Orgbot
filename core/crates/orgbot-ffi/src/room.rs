@@ -256,6 +256,8 @@ impl Room {
                 chosen,
                 note,
             },
+            ClientMessage::ParkTask { task, reason } => Control::ParkTask { task, reason },
+            ClientMessage::ResumeTask { task } => Control::ResumeTask { task },
             ClientMessage::Pause { reason } => Control::Pause { reason },
             ClientMessage::StopNow { reason } => Control::StopNow { reason },
             ClientMessage::Resume => Control::Resume,

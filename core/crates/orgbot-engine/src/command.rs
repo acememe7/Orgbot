@@ -248,6 +248,26 @@ pub enum Command {
         reason: String,
     },
 
+    /// Put a task aside until the owner resumes it, on the owner's own word or
+    /// a coordinator's acting on it. Nobody holds, works on, claims or asks
+    /// about a parked task, and questions waiting on it are withdrawn.
+    ParkTask {
+        /// The coordinating bot parking it on the owner's instruction, or
+        /// `None` for the owner.
+        by: Option<AgentId>,
+        /// The task to put aside.
+        task: TaskId,
+        /// Why, shown to the room.
+        reason: String,
+    },
+
+    /// The owner resumes a parked task, which returns to the pool. No bot
+    /// tool sends this: only the owner resumes what they parked.
+    ResumeTask {
+        /// The parked task.
+        task: TaskId,
+    },
+
     /// Record the operator's answer to a question, releasing whatever it
     /// unblocks. One answer clears every task waiting on that same question.
     AnswerDecision {
@@ -340,6 +360,8 @@ impl Command {
             Self::RequestAccess { .. } => "request_access",
             Self::AmendTask { .. } => "amend_task",
             Self::ProposeRetire { .. } => "propose_retire",
+            Self::ParkTask { .. } => "park_task",
+            Self::ResumeTask { .. } => "resume_task",
             Self::AnswerDecision { .. } => "answer_decision",
             Self::KeepAlive { .. } => "keep_alive",
             Self::BeginTurn { .. } => "begin_turn",
@@ -349,10 +371,6 @@ impl Command {
         }
     }
 
-    /// Whether this command is rejected while the room is not running.
-    ///
-    /// Lifecycle and housekeeping commands are exempt — otherwise a paused
-    /// room could never be resumed and a closing room could never drain.
     /// The task this command acts on, when it acts on one.
     ///
     /// Used as a heartbeat: a bot doing anything to its task is a bot that has
@@ -374,6 +392,10 @@ impl Command {
         }
     }
 
+    /// Whether this command is rejected while the room is not running.
+    ///
+    /// Lifecycle and housekeeping commands are exempt — otherwise a paused
+    /// room could never be resumed and a closing room could never drain.
     pub const fn requires_running_room(&self) -> bool {
         !matches!(
             self,
@@ -384,6 +406,9 @@ impl Command {
                 | Self::ResumeRoom
                 | Self::CloseRoom { .. }
                 | Self::CreateTask { .. }
+                // The owner may put work aside or take it back while paused.
+                | Self::ParkTask { by: None, .. }
+                | Self::ResumeTask { .. }
                 | Self::Tick { .. }
                 | Self::KeepAlive { .. }
                 | Self::BeginTurn { .. }

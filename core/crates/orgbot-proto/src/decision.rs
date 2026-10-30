@@ -323,6 +323,10 @@ pub struct Decision {
     /// A later decision that replaces this one's authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<DecisionId>,
+    /// Why an unanswered question was taken back, such as the owner parking
+    /// the task it was about. A withdrawn question no longer waits on anyone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn: Option<String>,
     /// Which standing rules were in force when this was asked.
     ///
     /// So a decision can be read against the rules that governed it rather
@@ -346,6 +350,7 @@ impl Decision {
             answer: None,
             asked_at: Timestamp::now(),
             superseded_by: None,
+            withdrawn: None,
             governed_by: String::new(),
         }
     }
@@ -360,7 +365,7 @@ impl Decision {
 
     /// Whether this is still waiting on a person.
     pub const fn is_pending(&self) -> bool {
-        self.answer.is_none() && self.superseded_by.is_none()
+        self.answer.is_none() && self.superseded_by.is_none() && self.withdrawn.is_none()
     }
 
     /// An identity for "the same question".
@@ -585,6 +590,18 @@ impl DecisionLog {
         match self.decisions.iter_mut().find(|d| d.id == earlier) {
             Some(decision) => {
                 decision.superseded_by = Some(later);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Take back a question still waiting on a person. False when it is not
+    /// pending, so an answer already given is never undone.
+    pub fn withdraw(&mut self, decision: DecisionId, reason: &str) -> bool {
+        match self.decisions.iter_mut().find(|d| d.id == decision && d.is_pending()) {
+            Some(pending) => {
+                pending.withdrawn = Some(reason.to_string());
                 true
             }
             None => false,

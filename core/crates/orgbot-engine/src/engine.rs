@@ -226,6 +226,9 @@ impl Engine {
                         }
                     }
                 }
+                Event::DecisionWithdrawn { decision, reason } => {
+                    engine.decisions.withdraw(*decision, reason);
+                }
                 Event::DecisionAnswered { decision, answer } => {
                     engine.decisions.answer(*decision, answer.clone());
                 }
@@ -821,6 +824,12 @@ impl Engine {
                 ),
             );
         }
+        if record.state == TaskState::Parked {
+            return base(
+                Reason::Parked,
+                "the owner parked it: leave it, and do not ask about it, until they resume it".into(),
+            );
+        }
 
         // 3. Permission to run, before anything about whether it could.
         match &record.authorization {
@@ -1056,6 +1065,7 @@ impl Engine {
                 }
             }
             Reason::Superseded
+            | Reason::Parked
             | Reason::PolicyHeld
             | Reason::SecurityHold
             | Reason::BlockedOperator => EngineError::NotReady {
@@ -1569,9 +1579,12 @@ impl Engine {
             .values()
             .find(|child| child.lineage.parent == Some(task) && !child.state.is_terminal())
         {
-            return Some(child.title.clone());
+            return Some(blocker_title(child));
         }
-        self.first_unmet_dependency(record).map(|unmet| unmet.title)
+        self.first_unmet_dependency(record).map(|unmet| match self.tasks.get(&unmet.task) {
+            Some(upstream) => blocker_title(upstream),
+            None => unmet.title,
+        })
     }
 
     /// Whether every dependency of `task` has been submitted.
@@ -1930,6 +1943,8 @@ impl Engine {
                 reason,
             } => self.request_access(by, task, items, action, reason),
             Command::ProposeRetire { by, task, reason } => self.propose_retire(by, task, reason),
+            Command::ParkTask { by, task, reason } => self.park_task(by, task, reason),
+            Command::ResumeTask { task } => self.resume_task(task),
             Command::AmendTask {
                 by,
                 task,
@@ -2317,6 +2332,9 @@ impl Engine {
             }
         }
         if let Some(task) = task {
+            if self.require_task(task)?.state == TaskState::Parked {
+                return Err(parked_refusal(task));
+            }
             self.require_assignee(task, by)?;
             let record = self.require_task(task)?;
             let transition = TaskTransition::Block {
@@ -2690,6 +2708,9 @@ impl Engine {
                 reason: format!("the task is already {}", record.state.as_str()),
             });
         }
+        if record.state == TaskState::Parked {
+            return Err(parked_refusal(task));
+        }
         let title = record.title.clone();
         let mut proposed = Decision::ask(
             self.room.id,
@@ -2702,6 +2723,116 @@ impl Engine {
         proposed.task = Some(task);
         // Not parked on the answer: the task may be open and held by nobody.
         self.put_to_owner(by, None, proposed)
+    }
+
+    /// Put `task` aside until the owner resumes it.
+    ///
+    /// From the live room: the owner said to leave launch work parked, and it
+    /// stayed on the board as waiting work, so a builder claimed it and the
+    /// coordinator asked the owner about it again fifteen minutes later. Bots
+    /// take any waiting job as theirs to move. Parking drops the holder, so
+    /// nothing wakes for it; takes it off every list of work; and withdraws
+    /// the questions waiting on it, so it leaves "Needs you" too. A question
+    /// another live task also waits on stays.
+    fn park_task(
+        &mut self,
+        by: Option<AgentId>,
+        task: TaskId,
+        reason: String,
+    ) -> Result<Vec<EventEnvelope>> {
+        let who = match by {
+            Some(agent) => {
+                let spec = self.require_agent(agent)?;
+                if !spec.roles.iter().any(|role| role == "coordinator") {
+                    return Err(EngineError::NotPermitted {
+                        agent,
+                        action: "park a task without the coordinator role".into(),
+                    });
+                }
+                format!("@{}", spec.handle)
+            }
+            None => "The owner".to_string(),
+        };
+        let reason = reason.trim().to_string();
+        if reason.chars().count() > 500 || (by.is_some() && reason.is_empty()) {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "say in 1–500 characters what the owner said about parking it".into(),
+            });
+        }
+        let record = self.require_task(task)?;
+        let transition = TaskTransition::Park {
+            reason: if reason.is_empty() { "parked by the owner".into() } else { reason.clone() },
+        };
+        if !record.state.can_apply(&transition) {
+            return Err(EngineError::NotReady {
+                task,
+                reason: if record.state == TaskState::Parked {
+                    "it is already parked".into()
+                } else {
+                    format!(
+                        "only work that has not reached review can be parked, and this task is {}",
+                        record.state.as_str()
+                    )
+                },
+            });
+        }
+        let title = record.title.clone();
+        let questions: Vec<DecisionId> = self
+            .decisions
+            .pending()
+            .filter(|question| {
+                question.task == Some(task)
+                    || record.blocked_on.iter().any(|reason| {
+                        matches!(reason, BlockReason::AwaitingDecision { decision } if *decision == question.id)
+                    })
+            })
+            .map(|question| question.id)
+            .collect();
+        let mut events = self.transition(task, transition, by)?;
+        for question in questions {
+            let shared = self.tasks.values().any(|other| {
+                other.id != task
+                    && other.state == TaskState::Blocked
+                    && other.blocked_on.iter().any(|reason| {
+                        matches!(reason, BlockReason::AwaitingDecision { decision } if *decision == question)
+                    })
+            });
+            let because = format!("\"{title}\" was parked");
+            if !shared && self.decisions.withdraw(question, &because) {
+                events.push(self.emit(Event::DecisionWithdrawn {
+                    decision: question,
+                    reason: because,
+                }));
+            }
+        }
+        let mut body = format!("{who} parked \"{title}\"");
+        if !reason.is_empty() {
+            body.push_str(&format!(": {reason}"));
+        }
+        body.push_str(
+            ". Nobody works on it, claims it or asks the owner about it until the owner resumes it.",
+        );
+        events.extend(self.post_message(ChatMessage::system(self.room.id, body).about_task(task))?);
+        Ok(events)
+    }
+
+    /// The owner resumes a parked task: it returns to the pool, for whoever
+    /// picks it up.
+    fn resume_task(&mut self, task: TaskId) -> Result<Vec<EventEnvelope>> {
+        let record = self.require_task(task)?;
+        if record.state != TaskState::Parked {
+            return Err(EngineError::NotReady {
+                task,
+                reason: format!("it is {}, not parked", record.state.as_str()),
+            });
+        }
+        let title = record.title.clone();
+        let mut events = self.transition(task, TaskTransition::Unpark, None)?;
+        events.extend(self.post_message(
+            ChatMessage::system(self.room.id, format!("The owner resumed \"{title}\". It is open again."))
+                .about_task(task),
+        )?);
+        Ok(events)
     }
 
     /// Whether the owner has allowed `agent` the bot server key for `task`.
@@ -3400,6 +3531,9 @@ impl Engine {
     ) -> Result<Vec<EventEnvelope>> {
         self.require_agent(author)?;
         self.require_review_only_assignment(task, author)?;
+        if self.require_task(task)?.state == TaskState::Parked {
+            return Err(parked_refusal(task));
+        }
         let revision = self.require_task(task)?.revision;
         let mut artifact = Artifact::new(task, author, name, body);
         artifact.revision = revision;
@@ -4125,7 +4259,7 @@ impl Engine {
             .expect("task presence checked immediately above");
         match &transition {
             TaskTransition::Claim { by } => record.assignee = Some(*by),
-            TaskTransition::Release { .. } | TaskTransition::Reopen => {
+            TaskTransition::Release { .. } | TaskTransition::Reopen | TaskTransition::Park { .. } => {
                 record.assignee = None;
                 record.blocked_on.clear();
                 // The claim goes with the holder. Clearing it only on the
@@ -4261,6 +4395,24 @@ impl Engine {
         let envelope = EventEnvelope::new(self.seq, self.room.id, event);
         self.log.push(envelope.clone());
         envelope
+    }
+}
+
+/// A task named as what something waits on, saying so when the owner parked
+/// it, so nobody reads it as work to chase.
+fn blocker_title(task: &Task) -> String {
+    if task.state == TaskState::Parked {
+        format!("{}, parked by the owner", task.title)
+    } else {
+        task.title.clone()
+    }
+}
+
+/// Why nobody may touch a task the owner parked, in words a bot acts on.
+fn parked_refusal(task: TaskId) -> EngineError {
+    EngineError::NotReady {
+        task,
+        reason: "the owner parked it: leave it, and do not ask about it, until they resume it".into(),
     }
 }
 

@@ -63,6 +63,8 @@ pub enum Reason {
     BlockedInternal,
     /// Created but not yet opened for claiming.
     NotOpenYet,
+    /// The owner put it aside until they resume it.
+    Parked,
     /// Someone holds it and their claim is live.
     AlreadyClaimed,
     /// Someone holds it but has stopped reporting progress.
@@ -107,6 +109,7 @@ impl Reason {
             Self::BlockedOperator => "BLOCKED_OPERATOR",
             Self::BlockedInternal => "BLOCKED_INTERNAL",
             Self::NotOpenYet => "NOT_OPEN_YET",
+            Self::Parked => "PARKED",
             Self::AlreadyClaimed => "ALREADY_CLAIMED",
             Self::LeaseExpired => "LEASE_EXPIRED",
             Self::ZombieInProgress => "ZOMBIE_IN_PROGRESS",
@@ -216,6 +219,7 @@ mod tests {
             (Reason::ZombieInProgress, "ZOMBIE_IN_PROGRESS"),
             (Reason::AlreadyClaimed, "ALREADY_CLAIMED"),
             (Reason::BotFaulted, "BOT_FAULTED"),
+            (Reason::Parked, "PARKED"),
         ] {
             assert_eq!(reason.code(), code);
             assert_eq!(

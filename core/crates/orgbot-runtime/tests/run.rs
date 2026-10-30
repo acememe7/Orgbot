@@ -2587,3 +2587,63 @@ async fn a_delivering_coordinator_is_not_woken_for_a_goal_still_waiting_on_its_s
     room.engine_mut().apply(Command::SubmitTask { task: child, by: coordinator }).unwrap();
     assert!(room.is_actionable(coordinator), "woken once the goal can go out");
 }
+
+#[tokio::test]
+async fn nobody_is_woken_for_parked_work_and_every_bot_is_told_to_leave_it() {
+    // From the live room: a builder claimed the work the owner had parked, and
+    // the coordinator asked the owner about it again.
+    use orgbot_engine::Command;
+    use orgbot_proto::graph::TaskOrigin;
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "launch".into(),
+        goal: "launch".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+        access: Default::default(),
+    });
+    let lead = room
+        .seat(spec("lead", &["coordinator"], Autonomy::coordinator()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    let builder = room
+        .seat(spec("builder", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    room.start().unwrap();
+    let created = room
+        .engine_mut()
+        .apply(Command::CreateTask {
+            title: "launch readiness: shop and ranked".into(),
+            brief: String::new(),
+            by: None,
+            required_role: None,
+            priority: orgbot_proto::task::Priority::Normal,
+            acceptance_criteria: vec![],
+            depends_on: vec![],
+            origin: TaskOrigin::plain(),
+        })
+        .unwrap();
+    let task = created
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+            _ => None,
+        })
+        .unwrap();
+    for command in [Command::OpenTask { task }, Command::ClaimTask { task, by: builder }, Command::StartTask { task, by: builder }] {
+        room.engine_mut().apply(command).unwrap();
+    }
+    assert!(room.is_actionable(builder));
+
+    room.engine_mut()
+        .apply(Command::ParkTask { by: Some(lead), task, reason: "Aece: leave it parked".into() })
+        .unwrap();
+    assert!(!room.is_actionable(builder), "the former holder is not woken for it");
+    assert!(!room.is_actionable(lead), "and nobody else is offered it");
+    let situation = orgbot_runtime::prompt::situation(&room.engine(), builder, orgbot_proto::event::Seq::ZERO);
+    assert!(situation.contains("Parked by the owner"), "{situation}");
+    assert!(situation.contains("launch readiness: shop and ranked"));
+    assert!(!situation.contains("Open tasks you could claim"));
+
+    room.engine_mut().apply(Command::ResumeTask { task }).unwrap();
+    assert!(room.is_actionable(builder), "resumed work is offered again");
+}

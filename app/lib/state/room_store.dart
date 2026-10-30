@@ -194,6 +194,15 @@ class RoomStore extends ChangeNotifier {
   void answerDecision(String decision, String chosen, {String note = ''}) =>
       _client.answerDecision(decision, chosen, note: note);
 
+  /// Put a task aside until you resume it. Nobody works on it, claims it or
+  /// asks you about it meanwhile, and questions waiting on it are withdrawn.
+  void parkTask(String task, {String reason = ''}) =>
+      _client.send({'type': 'park_task', 'task': task, 'reason': reason});
+
+  /// Resume a task you parked. It is open again for whoever picks it up.
+  void resumeTask(String task) =>
+      _client.send({'type': 'resume_task', 'task': task});
+
   /// Messages typed here but not yet confirmed by the engine.
   ///
   /// A bot turn can run for a minute, and the room applies a message between
@@ -264,7 +273,8 @@ class RoomStore extends ChangeNotifier {
         return 1;
       }
       if (s == TaskState.ready || s == TaskState.draft) return 2;
-      return 3;
+      if (s == TaskState.parked) return 3;
+      return 4;
     }
 
     list.sort((a, b) {
@@ -748,6 +758,7 @@ class RoomStore extends ChangeNotifier {
       TaskState.approved => 'approved “${task.title}”',
       TaskState.submitted => 'delivered “${task.title}”',
       TaskState.failed => 'gave up on “${task.title}”',
+      TaskState.parked => 'parked “${task.title}”',
       _ => null,
     };
     if (phrase != null) _note(actor, phrase);
@@ -785,7 +796,7 @@ class RoomStore extends ChangeNotifier {
     }
     if (kind == 'claim') {
       task.assignee = transition?['by'] as String?;
-    } else if (kind == 'release' || kind == 'reopen') {
+    } else if (kind == 'release' || kind == 'reopen' || kind == 'park') {
       task.assignee = null;
       task.blockedCount = 0;
     } else if (kind == 'unblock') {

@@ -83,6 +83,18 @@ pub enum Control {
         /// The message being replied to, when this is part of a thread.
         reply_to: Option<MessageId>,
     },
+    /// The owner puts a task aside until they resume it.
+    ParkTask {
+        /// The task.
+        task: TaskId,
+        /// Why.
+        reason: String,
+    },
+    /// The owner resumes a task they parked.
+    ResumeTask {
+        /// The task.
+        task: TaskId,
+    },
     /// A human answers a bot blocked awaiting one.
     Answer {
         /// The task that was waiting.
@@ -855,6 +867,16 @@ impl RoomSession {
                             spoke = true;
                             send_unsent(&engine, &events, alerts, &committed, &published, &mut sent_head);
                         }
+                        // Put aside now, under the engine lock the bots' room
+                        // tools also take, so no bot claims it while the
+                        // turns under way finish.
+                        Control::ParkTask { task, reason } => {
+                            let parked = engine.with(|engine| engine.apply(Command::ParkTask { by: None, task, reason }));
+                            if let Err(error) = parked {
+                                let _ = events.send(ServerMessage::Error { message: format!("Not parked: {error}") });
+                            }
+                            send_unsent(&engine, &events, alerts, &committed, &published, &mut sent_head);
+                        }
                         // Answered now, under the engine lock the bots' room
                         // tools also take, so the memory panel does not time
                         // out behind a long turn.
@@ -1071,6 +1093,12 @@ impl RoomSession {
                 self.settled = false;
                 self.broadcast_new_events();
             }
+            Control::ParkTask { task, reason } => {
+                self.owner_task_command(Command::ParkTask { by: None, task, reason }, "Not parked");
+            }
+            Control::ResumeTask { task } => {
+                self.owner_task_command(Command::ResumeTask { task }, "Not resumed");
+            }
             Control::Stop => return ControlFlow::Stop(RunOutcome::Idle),
             Control::Pause { reason } | Control::StopNow { reason } => {
                 self.orchestrator
@@ -1119,6 +1147,18 @@ impl RoomSession {
             projects: self.memory_projects.clone(),
         }
     }
+    /// Apply the owner's park or resume, telling them when it was refused.
+    fn owner_task_command(&mut self, command: Command, refused: &str) {
+        let applied = self.orchestrator.engine_mut().apply(command);
+        if let Err(error) = applied {
+            let _ = self.events.send(ServerMessage::Error { message: format!("{refused}: {error}") });
+            return;
+        }
+        self.orchestrator.wake();
+        self.settled = false;
+        self.broadcast_new_events();
+    }
+
     /// Unblock a task that was waiting on a human, recording the answer as a
     /// message so the working bot sees it on its next turn.
     fn answer_waiting_task(&mut self, task: TaskId, answer: String) {
@@ -1220,6 +1260,7 @@ fn touches_the_board(event: &orgbot_proto::event::Event) -> bool {
             | Event::DecisionAsked { .. }
             | Event::DecisionQuestionJoined { .. }
             | Event::DecisionAnswered { .. }
+            | Event::DecisionWithdrawn { .. }
             | Event::ReviewRecorded { .. }
             | Event::ArtifactAdded { .. }
             | Event::UsageRecorded { .. }

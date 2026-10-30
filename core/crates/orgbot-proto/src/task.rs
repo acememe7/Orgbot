@@ -47,6 +47,13 @@ pub enum TaskState {
     InProgress,
     /// Work is suspended pending a handoff, another task, or a human.
     Blocked,
+    /// Put aside by the owner. Nobody holds it, works on it, claims it or asks
+    /// about it until the owner resumes it.
+    ///
+    /// From the live room: work the owner said to leave alone stayed on the
+    /// board as waiting work, so one bot claimed it and the coordinator asked
+    /// the owner about it again. Bots take any waiting job as theirs to move.
+    Parked,
     /// Work is finished and awaiting inspection.
     InReview,
     /// Inspection passed; the task may be submitted.
@@ -113,6 +120,7 @@ impl TaskState {
             Self::Claimed => "claimed",
             Self::InProgress => "in_progress",
             Self::Blocked => "blocked",
+            Self::Parked => "parked",
             Self::InReview => "in_review",
             Self::Approved => "approved",
             Self::Submitted => "submitted",
@@ -144,6 +152,11 @@ impl TaskState {
             (Blocked, T::Unblock) => InProgress,
 
             (Claimed | InProgress | Blocked, T::Release { .. }) => Ready,
+
+            // Only work that has not reached review can be put aside, and it
+            // comes back open, for whoever picks it up.
+            (Draft | Ready | Claimed | InProgress | Blocked, T::Park { .. }) => Parked,
+            (Parked, T::Unpark) => Ready,
 
             (InProgress, T::SubmitForReview { .. }) => InReview,
             (InReview, T::Approve { .. }) => Approved,
@@ -235,6 +248,10 @@ pub enum TaskTransition {
     Unblock,
     /// Return the task to the pool, dropping the assignee.
     Release { reason: String },
+    /// Put the task aside on the owner's word, dropping the assignee.
+    Park { reason: String },
+    /// The owner resumes a parked task; it returns to the pool.
+    Unpark,
     /// Declare the work finished and request inspection.
     SubmitForReview { artifacts: Vec<ArtifactId> },
     /// Inspection passed.
@@ -275,6 +292,8 @@ impl TaskTransition {
             Self::Block { .. } => "block",
             Self::Unblock => "unblock",
             Self::Release { .. } => "release",
+            Self::Park { .. } => "park",
+            Self::Unpark => "unpark",
             Self::SubmitForReview { .. } => "submit_for_review",
             Self::Approve { .. } => "approve",
             Self::RequestChanges { .. } => "request_changes",
@@ -463,6 +482,12 @@ impl Task {
 
         if self.state == TaskState::Draft {
             return Readiness::NotYetOpen;
+        }
+
+        // Before every other gate: what the owner put aside stays aside, even
+        // when its dependencies land or a question about it is still open.
+        if self.state == TaskState::Parked {
+            return Readiness::Parked;
         }
 
         // 2. Dependencies. A task waiting its turn is not blocked in any sense

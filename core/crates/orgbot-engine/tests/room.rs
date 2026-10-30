@@ -3352,6 +3352,118 @@ fn only_a_coordinator_may_propose_retiring_a_task() {
     });
 }
 
+/// From the live room: the owner said to leave launch work parked, a builder
+/// claimed it anyway, and the coordinator asked the owner about it again.
+#[test]
+fn work_the_owner_parks_is_left_alone_until_they_resume_it() {
+    let mut f = fixture();
+    let (worker, worker2, lead) = (f.worker, f.worker2, f.coordinator);
+    let task = f.start_task("launch readiness: shop and ranked", worker);
+    let asked = f.apply(Command::AskOwner {
+        by: worker,
+        task: Some(task),
+        question: "Start the shop in sandbox, or keep it parked?".into(),
+        options: vec!["Start the sandbox shop".into(), "Keep parked".into()],
+    });
+    let question = asked_decision(&asked);
+    assert!(f.engine.awaiting_owner(worker));
+
+    f.apply(Command::ParkTask {
+        by: None,
+        task,
+        reason: "after the launch".into(),
+    });
+    let parked = f.engine.task(task).unwrap();
+    assert_eq!(parked.state, TaskState::Parked);
+    assert_eq!(parked.assignee, None, "nobody holds it, so nothing wakes for it");
+    assert!(parked.blocked_on.is_empty());
+    assert_eq!(f.engine.decisions().pending().count(), 0, "the question about it leaves Needs you");
+    assert!(!f.engine.awaiting_owner(worker));
+    assert!(f.engine.log().iter().any(|e| matches!(&e.event, Event::DecisionWithdrawn { decision, .. } if *decision == question)));
+
+    // Nobody touches it, and nobody asks about it.
+    for bot in [worker, worker2] {
+        assert!(!f.engine.claimable_by(bot).contains(&task));
+        let refused = f.reject(Command::ClaimTask { task, by: bot });
+        assert!(refused.to_string().contains("parked"), "{refused}");
+    }
+    f.reject(Command::StartTask { task, by: worker });
+    f.reject(Command::AddArtifact {
+        task,
+        author: worker,
+        name: "notes.md".into(),
+        body: ArtifactBody::Text { text: "still on it".into() },
+        authority_bearing: false,
+    });
+    let asking = f.reject(Command::AskOwner {
+        by: worker,
+        task: Some(task),
+        question: "Shall I start it now?".into(),
+        options: vec![],
+    });
+    assert!(asking.to_string().contains("parked"), "{asking}");
+    f.reject(Command::ProposeRetire { by: lead, task, reason: "it has waited a while".into() });
+    f.reject(Command::ParkTask { by: None, task, reason: String::new() });
+
+    // A saved room is still parked, with the question still withdrawn.
+    let restored = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec()).unwrap();
+    assert_eq!(restored.task(task).unwrap().state, TaskState::Parked);
+    assert_eq!(restored.decisions().pending().count(), 0);
+
+    // The owner resumes it: open again, for whoever picks it up.
+    f.apply(Command::ResumeTask { task });
+    assert_eq!(f.state(task), TaskState::Ready);
+    assert!(f.engine.claimable_by(worker2).contains(&task));
+    f.reject(Command::ResumeTask { task });
+}
+
+#[test]
+fn a_coordinator_parks_work_on_the_owners_word_and_only_before_review() {
+    let mut f = fixture();
+    let (worker, lead) = (f.worker, f.coordinator);
+    let task = f.open_task("ranked hosted verification", None);
+    let refused = f.reject(Command::ParkTask { by: Some(worker), task, reason: "the owner said later".into() });
+    assert!(matches!(refused, EngineError::NotPermitted { .. }), "{refused:?}");
+    let unexplained = f.reject(Command::ParkTask { by: Some(lead), task, reason: "  ".into() });
+    assert!(matches!(unexplained, EngineError::InvalidOwnerQuestion { .. }), "{unexplained:?}");
+    f.apply(Command::ParkTask { by: Some(lead), task, reason: "Aece: leave it parked".into() });
+    assert_eq!(f.state(task), TaskState::Parked);
+    assert!(f.engine.transcript().iter().any(|m| m.body.contains("@lead parked \"ranked hosted verification\": Aece: leave it parked")));
+
+    // Work already in review is not parked.
+    let reviewed = f.start_task("release notes", worker);
+    let artifact = f.add_artifact(reviewed, worker);
+    f.apply(Command::SubmitForReview { task: reviewed, by: worker, artifacts: vec![artifact] });
+    f.reject(Command::ParkTask { by: None, task: reviewed, reason: String::new() });
+
+    // The owner may park and resume while the room is paused.
+    let later = f.open_task("store screenshots", None);
+    f.apply(Command::PauseRoom { reason: "lunch".into() });
+    f.apply(Command::ParkTask { by: None, task: later, reason: String::new() });
+    f.apply(Command::ResumeTask { task: later });
+}
+
+#[test]
+fn parking_one_task_keeps_a_question_another_live_task_waits_on() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let first = f.start_task("rebuild the container", worker);
+    let second = f.start_task("rebuild the container again", worker2);
+    let question = "Rebuild on the approved VPS?";
+    for (task, by) in [(first, worker), (second, worker2)] {
+        f.apply(Command::AskOwner {
+            by,
+            task: Some(task),
+            question: question.into(),
+            options: vec!["Yes".into(), "No".into()],
+        });
+    }
+    assert_eq!(f.engine.decisions().pending().count(), 1);
+    f.apply(Command::ParkTask { by: None, task: first, reason: String::new() });
+    assert_eq!(f.engine.decisions().pending().count(), 1, "the other task still needs the answer");
+    assert!(f.engine.awaiting_owner(worker2));
+}
+
 #[test]
 fn a_coordinator_amends_what_a_task_asks_for_and_the_reviewer_sees_it() {
     // From the live room: a coordinator waived a requirement in chat, the task

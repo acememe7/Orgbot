@@ -91,7 +91,13 @@ class RoomClient implements RoomLink {
   /// stayed on screen as pending and never reached the room.
   final List<Map<String, Object?>> _outbox = [];
 
-  static const _personInput = {'send_message', 'answer_decision', 'answer_bot'};
+  static const _personInput = {
+    'send_message',
+    'answer_decision',
+    'answer_bot',
+    'park_task',
+    'resume_task',
+  };
 
   final _messages = StreamController<Map<String, Object?>>.broadcast();
   final _state = StreamController<LinkState>.broadcast();

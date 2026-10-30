@@ -589,6 +589,48 @@ void main() {
     expect(store.tasks.first.brief, 'b', reason: 'the brief stays when only the criteria change');
   });
 
+  test('a parked task drops its holder, and park and resume reach the room', () async {
+    final client = FakeClient();
+    final store = RoomStore(client);
+
+    client.emit(
+      event({
+        'event': 'task_created',
+        'task': {
+          'id': 'task_1',
+          'title': 'launch readiness',
+          'brief': 'b',
+          'state': 'in_progress',
+          'priority': 'normal',
+          'revision': 0,
+          'assignee': 'bot_b',
+        },
+      }),
+    );
+    client.emit(
+      event({
+        'event': 'task_transitioned',
+        'task': 'task_1',
+        'from': 'in_progress',
+        'to': 'parked',
+        'transition': {'transition': 'park', 'reason': 'after the launch'},
+      }, seq: 2),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    final task = store.tasks.first;
+    expect(task.state, TaskState.parked);
+    expect(task.state.label, 'parked');
+    expect(task.assignee, isNull, reason: 'nobody holds parked work');
+
+    store.resumeTask('task_1');
+    store.parkTask('task_1', reason: 'not yet');
+    expect(client.sent, [
+      {'type': 'resume_task', 'task': 'task_1'},
+      {'type': 'park_task', 'task': 'task_1', 'reason': 'not yet'},
+    ]);
+  });
+
   test('a task transition updates state and ownership', () async {
     final client = FakeClient();
     final store = RoomStore(client);

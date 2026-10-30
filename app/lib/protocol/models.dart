@@ -25,6 +25,9 @@ enum TaskState {
   claimed,
   inProgress,
   blocked,
+
+  /// Put aside by the owner until they resume it. Nobody holds it.
+  parked,
   inReview,
   approved,
   submitted,
@@ -47,6 +50,8 @@ enum TaskState {
         return TaskState.inProgress;
       case 'blocked':
         return TaskState.blocked;
+      case 'parked':
+        return TaskState.parked;
       case 'in_review':
         return TaskState.inReview;
       case 'approved':
@@ -87,6 +92,14 @@ enum TaskState {
       this == TaskState.submitted ||
       this == TaskState.failed ||
       this == TaskState.cancelled;
+
+  /// Whether the owner can park it: work that has not reached review.
+  bool get isParkable =>
+      this == TaskState.draft ||
+      this == TaskState.ready ||
+      this == TaskState.claimed ||
+      this == TaskState.inProgress ||
+      this == TaskState.blocked;
 
   bool get isActive =>
       this == TaskState.claimed ||

@@ -111,6 +111,20 @@ pub enum ClientMessage {
         #[serde(default)]
         note: String,
     },
+    /// Put a task aside until the owner resumes it. Nobody works on it,
+    /// claims it or asks about it meanwhile.
+    ParkTask {
+        /// The task to put aside.
+        task: TaskId,
+        /// Why, for the transcript.
+        #[serde(default)]
+        reason: String,
+    },
+    /// Resume a task the owner parked; it is open again.
+    ResumeTask {
+        /// The parked task.
+        task: TaskId,
+    },
     /// Pause the room once the turns under way have finished. No new turn
     /// starts meanwhile, and no work is lost.
     Pause {
@@ -277,6 +291,11 @@ mod tests {
             },
             ClientMessage::Resume,
             ClientMessage::Ping,
+            ClientMessage::ParkTask {
+                task: TaskId::new(),
+                reason: "after launch".into(),
+            },
+            ClientMessage::ResumeTask { task: TaskId::new() },
         ];
         for message in messages {
             let json = serde_json::to_string(&message).unwrap();

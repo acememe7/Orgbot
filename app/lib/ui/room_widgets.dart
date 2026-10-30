@@ -1877,6 +1877,45 @@ class BoardStrip extends StatelessWidget {
     if (answer != null) store.answer(task.id, answer);
   }
 
+  Future<void> _park(BuildContext context, Task task) async {
+    var reason = '';
+    final park = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Park this task?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Nobody will work on “${task.title}”, claim it or ask you about '
+              'it until you resume it. Questions waiting on it are withdrawn.',
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: 'Why, for the team (optional)',
+              ),
+              onChanged: (value) => reason = value,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Park task'),
+          ),
+        ],
+      ),
+    );
+    if (park == true) store.parkTask(task.id, reason: reason.trim());
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -1953,6 +1992,11 @@ class BoardStrip extends StatelessWidget {
                                     ),
                                   ),
                                 ),
+                              if (task.state == TaskState.parked && canAnswer)
+                                TextButton(
+                                  onPressed: () => store.resumeTask(task.id),
+                                  child: const Text('Resume task'),
+                                ),
                               if (task.blockReasons.any(
                                 (r) => r['kind'] == 'awaiting_human',
                               ))
@@ -1969,6 +2013,14 @@ class BoardStrip extends StatelessWidget {
                             ],
                           ),
                         ),
+                        if (canAnswer && task.state.isParkable)
+                          IconButton(
+                            tooltip: 'Park until you resume it',
+                            visualDensity: VisualDensity.compact,
+                            iconSize: 18,
+                            icon: const Icon(Icons.pause_circle_outline),
+                            onPressed: () => _park(context, task),
+                          ),
                       ],
                     ),
                   ),
@@ -1986,6 +2038,8 @@ Color taskColor(TaskState state) {
       return Colors.blue;
     case TaskState.blocked:
       return Colors.amber;
+    case TaskState.parked:
+      return Colors.brown;
     case TaskState.inReview:
       return Colors.purple;
     case TaskState.approved:

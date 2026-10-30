@@ -488,6 +488,9 @@ pub enum Readiness {
         /// The terminal state, for display.
         state: &'static str,
     },
+    /// Put aside by the owner until they resume it. Nobody's to act on it,
+    /// and nobody's to ask about it either.
+    Parked,
     /// Its state says somebody is working on it, and nobody is.
     ///
     /// Rendering this as "closed" — which is what happened before it had a
@@ -540,6 +543,7 @@ impl Readiness {
             Self::HeldByPolicy { .. } => "Held by policy",
             Self::BlockedOperator { .. } => "Needs you",
             Self::Closed { .. } => "Closed",
+            Self::Parked => "Parked",
             Self::Recovering { .. } => "Recovering",
         }
     }
@@ -575,6 +579,7 @@ impl Readiness {
                 format!("Operator decision required because: {because}")
             }
             Self::Closed { state } => format!("Closed ({state})."),
+            Self::Parked => "Parked until you resume it. No bot will work on it or ask about it.".into(),
             Self::Recovering { state } => format!(
                 "Left {state} with nobody working on it; the room is returning \
                  it to the pool. No action needed from you."

@@ -159,6 +159,8 @@ class _TaskCard extends StatelessWidget {
         return (Colors.blue, 'IN PROGRESS');
       case TaskState.blocked:
         return (Colors.amber, 'BLOCKED');
+      case TaskState.parked:
+        return (Colors.brown, 'PARKED');
       case TaskState.inReview:
         return (Colors.purple, 'IN REVIEW');
       case TaskState.approved:

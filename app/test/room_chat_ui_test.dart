@@ -382,4 +382,46 @@ void main() {
       'answer': 'SSH is connected. Verify the sources.',
     });
   });
+
+  testWidgets('the owner parks a task from the board and resumes it', (tester) async {
+    final client = FakeClient();
+    final store = seeded(client);
+    Future<void> show() async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: BoardStrip(store: store)),
+        ),
+      );
+      await tester.pump();
+    }
+
+    await show();
+    await tester.tap(find.byTooltip('Park until you resume it'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('until you resume it'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'after the launch');
+    await tester.tap(find.text('Park task'));
+    await tester.pumpAndSettle();
+    expect(client.sent.last, {
+      'type': 'park_task',
+      'task': 'task_1',
+      'reason': 'after the launch',
+    });
+
+    client.emit(
+      event({
+        'event': 'task_transitioned',
+        'task': 'task_1',
+        'from': 'in_progress',
+        'to': 'parked',
+        'transition': {'transition': 'park', 'reason': 'after the launch'},
+      }, seq: 2),
+    );
+    await show();
+    expect(find.text('parked'), findsOneWidget);
+    expect(find.text('@iris'), findsNothing, reason: 'nobody holds parked work');
+    expect(find.byTooltip('Park until you resume it'), findsNothing);
+    await tester.tap(find.text('Resume task'));
+    expect(client.sent.last, {'type': 'resume_task', 'task': 'task_1'});
+  });
 }

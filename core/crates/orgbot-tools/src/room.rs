@@ -411,6 +411,20 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             ),
         ),
         tool(
+            "park_task",
+            "Coordinators: put a task aside because the owner said to hold, park or \
+             leave it for later. Nobody can claim, work on or ask about a parked task \
+             until the owner resumes it from the app, and questions waiting on it are \
+             withdrawn. Only work that has not reached review can be parked.",
+            schema::object(
+                vec![
+                    ("task", schema::string("The task to park.")),
+                    ("reason", schema::string("What the owner said, quoted or in one sentence.")),
+                ],
+                &["task", "reason"],
+            ),
+        ),
+        tool(
             "propose_retire_task",
             "Coordinators: propose to the owner that a task nobody should work on be \
              retired, for example one a later owner decision or another task superseded. \
@@ -427,7 +441,7 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
         ),
         tool(
             "block_on",
-            "Park your task because it cannot proceed. Prefer this over waiting in \
+            "Put your task on hold because it cannot proceed. Prefer this over waiting in \
              silence: the engine tracks who is waiting on whom and will detect a \
              circular wait rather than letting the room hang. A blocking handoff \
              already parks you, so you do not need this after offer_handoff.",
@@ -604,7 +618,7 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
     }
 
     if !spec.roles.iter().any(|role| role == "coordinator") {
-        tools.retain(|tool| tool.name != "propose_retire_task" && tool.name != "amend_task");
+        tools.retain(|tool| !matches!(tool.name.as_str(), "propose_retire_task" | "amend_task" | "park_task"));
     }
     if spec.autonomy.review_only {
         tools.retain(|tool| review_only_tool_allowed(spec, &tool.name));
@@ -618,7 +632,7 @@ fn review_only_tool_allowed(spec: &AgentSpec, name: &str) -> bool {
         && match name {
             "create_task" => spec.autonomy.may_create_tasks,
             "submit_task" => spec.autonomy.may_submit,
-            "propose_retire_task" | "amend_task" => true,
+            "propose_retire_task" | "amend_task" | "park_task" => true,
             _ => false,
         })
         || matches!(
@@ -693,6 +707,7 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
         "fail_handoff" => fail_handoff(engine, actor, input),
         "propose_retire_task" => propose_retire_task(engine, actor, input),
         "amend_task" => amend_task(engine, actor, input),
+        "park_task" => park_task(engine, actor, input),
         "block_on" => block_on(engine, actor, input),
         "release_task" => release_task(engine, actor, input),
         "create_task" => create_task(engine, actor, input),
@@ -1789,6 +1804,27 @@ fn amend_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome
     }) {
         Ok(_) => ToolOutcome::ok(
             "Amended. Reviewers now judge the task against what it asks for now, and its holder has been told.",
+        ),
+        Err(error) => explain(error),
+    }
+}
+
+fn park_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
+    let task = match task_arg(input, "task") {
+        Ok(task) => task,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    let reason = match required_str(input, "reason") {
+        Ok(reason) => reason.to_string(),
+        Err(message) => return ToolOutcome::error(message),
+    };
+    match engine.apply(Command::ParkTask {
+        by: Some(actor),
+        task,
+        reason,
+    }) {
+        Ok(_) => ToolOutcome::ok(
+            "Parked. Nobody will claim, work on or ask about it until the owner resumes it.",
         ),
         Err(error) => explain(error),
     }
