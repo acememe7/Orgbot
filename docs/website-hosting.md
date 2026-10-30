@@ -85,8 +85,9 @@ The shared SSH exposure and TLS 1.2 support remain pre-existing open items;
 this scoped change is not a complete shared-server security certification.
 
 
-Current release: `6b6ee9d`, activated on 29 October 2026 for OrgBots 2.2.0
-and the reviewed-room evidence. The previous `8a4227d` release and matching
-vhost are retained. Public file/configuration identity, responsive browser
+Current release: `ce3c7ce`, activated on 30 October 2026 with the daily log
+of the live room (`/evidence/`). The previous `6b6ee9d` release and its vhost
+are retained for rollback. Earlier: `6b6ee9d`, activated on 29 October 2026 for
+OrgBots 2.2.0 and the reviewed-room evidence. Public file/configuration identity, responsive browser
 checks and a snapshot restore check passed; see
 [the release record](RELEASE_2_2_0_VERIFICATION.md).

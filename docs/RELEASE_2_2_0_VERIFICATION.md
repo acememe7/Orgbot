@@ -82,6 +82,19 @@ handoff fix prepared as 2.1.1, which was never published.
   now ready to deliver once nothing under it is unfinished and everything it
   depends on has landed; until then coordinators see what it waits on and are
   woken when it is ready.
+- **Parked work stays parked.** In the live room the owner said to leave
+  launch work parked; it stayed on the board as waiting work, so a builder
+  claimed it and the coordinator asked the owner about it again fifteen minutes
+  later. Tasks now have a parked state. You park a task from its card, or a
+  coordinator does on your word with `park_task`; only you resume it. A parked
+  task has no holder, is never offered, claimed or worked, and no bot may ask
+  you about it. Questions waiting on it are withdrawn from Needs you, unless
+  another live task waits on the same question.
+- **A lent GitHub CLI signs in from the keyring.** The GitHub CLI keeps its
+  token in the desktop keyring, which a sandbox cannot reach, so in the live
+  room a bot lent it got a 401 on push. The launcher now asks your `gh` for the
+  token outside the sandbox and gives only that turn `GH_TOKEN`, with git set to
+  use it. The token never appears on a command line or in a file.
 - **Leftover copies are cleaned up.** When a room starts, working copies of
   bots no longer in it are removed if they hold no unmerged work; copies that
   might hold unsaved work are kept and named in the room. In the live room such
@@ -140,31 +153,31 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 949 passed, zero failures, three ignored.
-  New tests cover when approved work is ready to deliver, amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
+- Full Rust workspace (`--locked`): 952 passed, zero failures, three ignored.
+  New tests cover parking and resuming a task, withdrawing the questions waiting on it, when approved work is ready to deliver, amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
   through the sandbox launcher, the lend list's limits,
   outside tool calls by mode, the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
   pause and held rooms, retiring tasks and leftover-copy cleanup; each was checked to fail without
   its fix.
-- Full Flutter tests: 372 passed, five skipped. Flutter analysis: no issues.
-- Workspace sandbox helper: 72 passed, including setting a bot's conflicting files aside without a link redirecting them, including real bubblewrap checks that a
+- Full Flutter tests: 374 passed, five skipped. Flutter analysis: no issues.
+- Workspace sandbox helper: 73 passed, including a GitHub CLI token from the keyring reaching gh and git in the sandbox and never a command line, and setting a bot's conflicting files aside without a link redirecting them, including real bubblewrap checks that a
   turn the owner did not allow, or a read-only turn, has no server key anywhere,
   that lent sign-ins are hidden unless lent and then appear only in the bot's
   home, and that a once read-only workspace never gets the key. Trash helper: 30
   passed.
 - Linux acceptance: 17 passed, zero failed or skipped.
-- Package build test, website checks (6 pages) and website consent test passed.
+- Package build test, website checks (8 pages) and website consent test passed.
 - Dependencies are unchanged from 2.1.0 (`Cargo.lock` is identical).
 - The owner's real sign-in files were fingerprinted before and after every test
   run and were unchanged.
 
 Final engine SHA-256:
-`4ac62b4c5fe85eac6f5a98f6d8359089e7af73d6ed613ebb01730180828cf154`.
+`427c009f41cf811a50f7d9634bbc5375458ab2b645f8e49c8411508236de9dbe`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `2b3434ddbe77acb81a71a83c816240f446ad16e0bc930b9e458ce92a4020d6f2` |
+| orgbots_2.2.0_amd64.deb | `37de7eaa9f01dc33c18d583802df2fa26383f83237f217326fd2724b6bb61955` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
@@ -262,7 +275,17 @@ byte-identical to the previous package). Signed archive revision
 `c7851effefd747695a03fa0a937b2ce749368857` replaces only
 `orgbots_2.2.0_amd64.deb`;
 [Pages run 41131413062](https://github.com/acememe7/Orgbot/actions/runs/41131413062)
-published it, and the public archive serves the hashes in the table above.
+published it.
+
+Late on 30 October they were rebuilt again so parked work stays parked and a
+lent GitHub CLI signs in from the keyring (source `1e3c268`; the Flutter bundle
+was rebuilt to show, park and resume tasks). Signed archive revision
+`686065df77400532e8bfdcf57328fd909db4f0db` replaces only
+`orgbots_2.2.0_amd64.deb`;
+[Pages run 41141310237](https://github.com/acememe7/Orgbot/actions/runs/41141310237)
+published it, and the public archive serves the hashes in the table above. A
+real sandboxed turn lent the GitHub CLI was signed in to the owner's account
+from the keyring; one not lent was signed out.
 
 The release commits passed secret scanning with no findings.
 
