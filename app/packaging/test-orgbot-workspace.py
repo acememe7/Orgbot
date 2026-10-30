@@ -651,6 +651,53 @@ Path('/tmp/private.txt').write_text('temporary')
                 run("lent", lend=["../escape"])
         self.assertEqual((home / ".config/.wrangler/config/renewed").read_text(encoding="utf-8"), "renewed token", "a renewed sign-in reaches the owner")
 
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap") and workspace.shutil.which("git"),
+                         "requires Linux bubblewrap user namespaces and git")
+    def test_a_lent_github_cli_signs_in_from_the_keyring_for_the_turn_only(self):
+        # From the live room: the owner's GitHub CLI keeps its token in the
+        # desktop keyring, so a bot lent ~/.config/gh pushed as nobody (401).
+        self.prepare("dev")
+        home = self._owner_home_with_secrets()
+        (home / ".config/gh").mkdir(parents=True, exist_ok=True)
+        hosts = home / ".config/gh/hosts.yml"
+        hosts.write_text("github.com:\n    user: owner\n    git_protocol: https\n", encoding="utf-8")
+        fake_bin = self.root / "bin"
+        fake_bin.mkdir()
+        token = "gho_" + "synthetic0" * 4
+        gh = fake_bin / "gh"
+        gh.write_text(f"#!/bin/sh\nif [ \"$1 $2\" = 'auth token' ] && [ ! -e '{self.root}/signed-out' ]; then echo {token}; exit 0; fi\nexit 1\n", encoding="utf-8")
+        os.chmod(gh, 0o755)
+        code = (
+            "import hashlib, os, subprocess, sys\n"
+            "helpers = subprocess.run(['git', 'config', '--get-all', 'credential.https://github.com.helper'], capture_output=True, text=True).stdout.splitlines()\n"
+            "expected = sys.argv[1]\n"
+            "if expected:\n"
+            "    ok = hashlib.sha256(os.environ.get('GH_TOKEN', '').encode()).hexdigest() == expected and helpers[0] == '' and helpers[-1].endswith('/gh auth git-credential')\n"
+            "else:\n"
+            "    ok = 'GH_TOKEN' not in os.environ and helpers == []\n"
+            "raise SystemExit(0 if ok else 3)"
+        )
+        launched = []
+        real_run = workspace.subprocess.run
+        def spy(args, *rest, **kwargs):
+            if args and args[0] == "bwrap":
+                launched.append(list(args))
+            return real_run(args, *rest, **kwargs)
+        def run(expected, read_only=False, lend=(".config/gh",)):
+            return workspace._run(os.fspath(self.state), "dev", [sys.executable, "-c", code, expected], read_only=read_only, profiles=[], private_home_arg=None, mcp_socket=None, hide=[".config/gh"], lend=list(lend))
+        owner = SimpleNamespace(pw_dir=os.fspath(home))
+        with patch.object(workspace.pwd, "getpwuid", return_value=owner), patch.object(workspace.subprocess, "run", spy), \
+                patch.dict(os.environ, {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}"}):
+            self.assertEqual(run(hashlib.sha256(token.encode()).hexdigest()), 0, "lent: gh and git in the sandbox use the keyring token")
+            self.assertFalse(any(token in arg for args in launched for arg in args), "the token never appears on a command line")
+            self.assertEqual(run("", lend=()), 0, "not lent: no token")
+            self.assertEqual(run("", read_only=True), 0, "never for a read-only turn")
+            (self.root / "signed-out").touch()
+            self.assertEqual(run(""), 0, "no keyring sign-in: the bot is signed out and keeps its turn")
+            (self.root / "signed-out").unlink()
+            hosts.write_text("github.com:\n    oauth_token: in-the-folder\n", encoding="utf-8")
+            self.assertEqual(run(""), 0, "a token kept in the lent folder needs nothing from the keyring")
+
     @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
                          "requires Linux bubblewrap user namespaces")
     def test_a_workspace_that_was_read_only_never_gets_the_server_key(self):

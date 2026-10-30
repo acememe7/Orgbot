@@ -145,6 +145,15 @@ OpenCode or Antigravity bots, whose private homes are built differently. A lent
 sign-in is usable over the network from the sandbox, so lend tokens scoped to
 what the work needs where the provider allows it.
 
+The GitHub CLI usually keeps its token in the desktop keyring, not in
+`~/.config/gh`, and a sandbox cannot reach the keyring. When `~/.config/gh` is
+lent and its `hosts.yml` holds no token, the launcher asks the owner's `gh auth
+token` outside the sandbox and gives that turn `GH_TOKEN`, with git's GitHub
+credential helper set to `gh auth git-credential`. The values reach bubblewrap
+through a pipe (`--args`), never a command line or a file, and the keyring is
+never opened to the bot. With no keyring sign-in the bot is signed out and keeps
+its turn.
+
 ## Independent reviewer tests
 
 Protected local rooms with command execution enabled expose `workspace_verify`

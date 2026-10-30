@@ -1022,6 +1022,49 @@ def _lent_args(owner_home: Path, private_home: Path, private_home_mount: str, le
     return args
 
 
+def _keyring_sign_in_args(owner_home: Path, lent: list[str], sandbox_path: list[str]) -> list[str]:
+    """Environment for a lent GitHub CLI whose token lives in the keyring.
+
+    From the live room: the owner's GitHub CLI keeps its token in the desktop
+    keyring, which a sandbox cannot reach, so a bot lent ~/.config/gh pushed
+    as nobody and got a 401. The owner's gh is asked for the token outside
+    the sandbox, for this turn only, and gh and git inside use it; the
+    keyring itself is never opened to the bot. Nothing found leaves the bot
+    signed out, as with a tool the owner has not signed in to. The values go
+    to bubblewrap through a pipe, never on a command line.
+    """
+    if ".config/gh" not in lent:
+        return []
+    hosts = owner_home / ".config/gh/hosts.yml"
+    try:
+        if "oauth_token:" in hosts.read_text(encoding="utf-8", errors="replace"):
+            return []
+    except OSError:
+        return []
+    gh = shutil.which("gh")
+    if gh is None:
+        return []
+    try:
+        result = subprocess.run([gh, "auth", "token", "--hostname", "github.com"], check=False, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
+    token = result.stdout.strip() if result is not None and result.returncode == 0 else ""
+    if not re.fullmatch(r"[A-Za-z0-9_]{20,255}", token):
+        print("orgbot-workspace: the lent GitHub CLI has no sign-in in the keyring; continuing without it", file=sys.stderr)
+        return []
+    args = ["--setenv", "GH_TOKEN", token]
+    inside = shutil.which("gh", path=os.pathsep.join(sandbox_path))
+    if inside is not None:
+        # git asks gh, which answers with GH_TOKEN; the empty helper first
+        # drops any other helper configured for GitHub.
+        args.extend([
+            "--setenv", "GIT_CONFIG_COUNT", "2",
+            "--setenv", "GIT_CONFIG_KEY_0", "credential.https://github.com.helper", "--setenv", "GIT_CONFIG_VALUE_0", "",
+            "--setenv", "GIT_CONFIG_KEY_1", "credential.https://github.com.helper", "--setenv", "GIT_CONFIG_VALUE_1", f"!{os.path.realpath(inside)} auth git-credential",
+        ])
+    return args
+
+
 def _packaged_trash_args(path_dirs: list[str], packaged: Path = Path("/usr/lib/orgbot/orgbot-trash.py")) -> list[str]:
     """Make `orgbot-trash` in a bot's sandbox the packaged helper.
 
@@ -2432,6 +2475,15 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
             args.extend(["--dir", f"/run/user/{os.getuid()}", "--bind", os.fspath(socket_path), socket_dest])
             env_args.extend(["--setenv", "ORGBOT_ROOM_MCP_SOCKET", socket_dest])
         args.extend(env_args)
+        secret_args = _keyring_sign_in_args(owner_home, lend, safe_path) if lend and not ro and agent_cli is None else []
+        secret_fd = None
+        if secret_args:
+            secret_fd, writer = os.pipe()
+            try:
+                os.write(writer, b"".join(arg.encode() + b"\0" for arg in secret_args))
+            finally:
+                os.close(writer)
+            args.extend(["--args", str(secret_fd)])
         launch_program = list(program)
         first = Path(launch_program[0])
         if first.is_absolute():
@@ -2453,9 +2505,12 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
         os.close(lock_fd)
         lock_fd = None
         try:
-            result = subprocess.run(args, check=False, preexec_fn=_set_process_limits)
+            result = subprocess.run(args, check=False, preexec_fn=_set_process_limits, pass_fds=(secret_fd,) if secret_fd is not None else ())
         except OSError as exc:
             _fail(f"bubblewrap failed to start: {exc}")
+        finally:
+            if secret_fd is not None:
+                os.close(secret_fd)
         return result.returncode
     finally:
         if lock_fd is not None:
