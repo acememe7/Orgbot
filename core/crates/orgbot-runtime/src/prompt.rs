@@ -12,7 +12,7 @@
 
 use orgbot_engine::Engine;
 use orgbot_proto::task::Task;
-use orgbot_proto::{AgentId, AgentSpec, Seq, TaskState};
+use orgbot_proto::{AgentId, AgentSpec, Seq, TaskId, TaskState};
 
 /// Build the stable system prompt for a bot.
 pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
@@ -494,12 +494,30 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
     // it, since for anyone else it is noise they cannot do anything about.
     if let Some(spec) = engine.agent(agent) {
         if spec.autonomy.may_submit {
-            let ready = engine.awaiting_delivery();
+            let ready = engine.ready_for_delivery();
             if !ready.is_empty() {
                 out.push_str("\nApproved and waiting for you to deliver:\n");
                 for id in ready {
                     if let Some(task) = engine.task(id) {
                         out.push_str(&format!("  {} {}\n", task.id, task.title));
+                    }
+                }
+            }
+            let waiting: Vec<(TaskId, String)> = engine
+                .awaiting_delivery()
+                .into_iter()
+                .filter_map(|id| engine.delivery_blocker(id).map(|blocker| (id, blocker)))
+                .collect();
+            if !waiting.is_empty() {
+                out.push_str(
+                    "\nApproved, but not ready to deliver yet (you will be woken when it is):\n",
+                );
+                for (id, blocker) in waiting {
+                    if let Some(task) = engine.task(id) {
+                        out.push_str(&format!(
+                            "  {} {} (waiting on \"{blocker}\")\n",
+                            task.id, task.title
+                        ));
                     }
                 }
             }

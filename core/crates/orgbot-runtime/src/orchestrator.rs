@@ -456,7 +456,7 @@ impl Orchestrator {
         if engine
             .agent(agent)
             .is_some_and(|spec| spec.autonomy.may_submit)
-            && !engine.awaiting_delivery().is_empty()
+            && !engine.ready_for_delivery().is_empty()
         {
             return Some(Wake::Delivery);
         }
@@ -632,7 +632,7 @@ impl Orchestrator {
                 _ => None,
             })
             .collect();
-        let mut deliveries = engine.awaiting_delivery().len().saturating_sub(
+        let mut deliveries = engine.ready_for_delivery().len().saturating_sub(
             reserved
                 .values()
                 .filter(|held| matches!(held, Reserved::Delivery))

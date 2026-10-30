@@ -75,6 +75,13 @@ handoff fix prepared as 2.1.1, which was never published.
   `amend_task` and the reason: the change is recorded in the room log, survives
   a restore, is shown on the task card at once, and the task's holder is told.
   Reviewers judge against the task as it stands.
+- **Coordinators are woken to deliver only what can go out.** In the live room
+  an approved goal waited on one subtask still in progress, and the
+  coordinators who deliver were woken every few minutes, five times in twelve
+  minutes for one of them, only to say nothing needed doing. Approved work is
+  now ready to deliver once nothing under it is unfinished and everything it
+  depends on has landed; until then coordinators see what it waits on and are
+  woken when it is ready.
 - **Leftover copies are cleaned up.** When a room starts, working copies of
   bots no longer in it are removed if they hold no unmerged work; copies that
   might hold unsaved work are kept and named in the room. In the live room such
@@ -133,8 +140,8 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 947 passed, zero failures, three ignored.
-  New tests cover amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
+- Full Rust workspace (`--locked`): 949 passed, zero failures, three ignored.
+  New tests cover when approved work is ready to deliver, amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
   through the sandbox launcher, the lend list's limits,
   outside tool calls by mode, the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
@@ -153,11 +160,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`644ae1a25c72f8ceef7d48575ed6ea685249a63b116fb03954f44b3f8b3ebc84`.
+`4ac62b4c5fe85eac6f5a98f6d8359089e7af73d6ed613ebb01730180828cf154`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `a6bb1ea8c9befb067787b2342659757dcb718929bcaca05bbe9156fe17357b83` |
+| orgbots_2.2.0_amd64.deb | `2b3434ddbe77acb81a71a83c816240f446ad16e0bc930b9e458ce92a4020d6f2` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication

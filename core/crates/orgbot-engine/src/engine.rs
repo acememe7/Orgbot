@@ -1546,6 +1546,34 @@ impl Engine {
             .collect()
     }
 
+    /// Approved work that can be delivered now: nothing under it is
+    /// unfinished and everything it depends on has landed.
+    ///
+    /// From the live room: an approved goal waited on one subtask still in
+    /// progress, and the coordinators who can deliver were woken for it every
+    /// few minutes, each turn only to say nothing needed doing. They are woken
+    /// for delivery once it can actually go out.
+    pub fn ready_for_delivery(&self) -> Vec<TaskId> {
+        self.awaiting_delivery()
+            .into_iter()
+            .filter(|task| self.delivery_blocker(*task).is_none())
+            .collect()
+    }
+
+    /// What approved `task` still waits on before it should be delivered: the
+    /// title of an unfinished subtask or of a dependency that has not landed.
+    pub fn delivery_blocker(&self, task: TaskId) -> Option<String> {
+        let record = self.tasks.get(&task)?;
+        if let Some(child) = self
+            .tasks
+            .values()
+            .find(|child| child.lineage.parent == Some(task) && !child.state.is_terminal())
+        {
+            return Some(child.title.clone());
+        }
+        self.first_unmet_dependency(record).map(|unmet| unmet.title)
+    }
+
     /// Whether every dependency of `task` has been submitted.
     /// Which objective a new task ultimately serves.
     ///

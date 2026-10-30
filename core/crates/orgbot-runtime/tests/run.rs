@@ -2501,3 +2501,89 @@ async fn a_bot_that_keeps_talking_instead_of_acting_is_rested_and_the_coordinato
     owner_asks(&room.shared_engine(), Some(worker), "@worker are you stuck on the squad count?");
     assert!(room.is_actionable(worker));
 }
+
+#[tokio::test]
+async fn a_delivering_coordinator_is_not_woken_for_a_goal_still_waiting_on_its_subtask() {
+    // From the live room: the coordinator was woken five times in twelve
+    // minutes for an approved goal it could not yet deliver.
+    use orgbot_engine::Command;
+    use orgbot_proto::graph::{TaskKind, TaskOrigin};
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "release".into(),
+        goal: "ship".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+        access: Default::default(),
+    });
+    let coordinator = room
+        .seat(spec("lead", &["coordinator"], Autonomy::coordinator()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    let worker = room
+        .seat(spec("worker", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    let inspector = room
+        .seat(spec("qa", &["reviewer"], Autonomy::inspector()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    room.start().unwrap();
+    let mut create = |room: &mut Orchestrator, title: &str, origin: TaskOrigin| {
+        let created = room
+            .engine_mut()
+            .apply(Command::CreateTask {
+                title: title.into(),
+                brief: String::new(),
+                by: None,
+                required_role: None,
+                priority: orgbot_proto::task::Priority::Normal,
+                acceptance_criteria: vec![],
+                depends_on: vec![],
+                origin,
+            })
+            .unwrap();
+        created
+            .iter()
+            .find_map(|event| match &event.event {
+                orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let goal = create(&mut room, "finish the web game", TaskOrigin::plain());
+    let child = create(&mut room, "Release 2", TaskOrigin::under(TaskKind::Subtask, goal));
+    let finish = |room: &mut Orchestrator, task| {
+        for command in [
+            Command::OpenTask { task },
+            Command::ClaimTask { task, by: worker },
+            Command::StartTask { task, by: worker },
+            Command::SubmitForReview { task, by: worker, artifacts: vec![] },
+            Command::RecordReview {
+                task,
+                inspector,
+                findings: vec![],
+                summary: "fine".into(),
+                criteria_met: vec![],
+                criteria_failed: vec![],
+            },
+        ] {
+            let _ = room.engine_mut().apply(command);
+        }
+    };
+    finish(&mut room, goal);
+    assert_eq!(room.engine().task(goal).unwrap().state, TaskState::Approved);
+    let _ = room.engine_mut().apply(Command::OpenTask { task: child });
+    let _ = room.engine_mut().apply(Command::ClaimTask { task: child, by: worker });
+    let _ = room.engine_mut().apply(Command::StartTask { task: child, by: worker });
+    assert!(!room.is_actionable(coordinator), "not woken while the goal waits on its subtask");
+
+    let _ = room.engine_mut().apply(Command::SubmitForReview { task: child, by: worker, artifacts: vec![] });
+    let _ = room.engine_mut().apply(Command::RecordReview {
+        task: child,
+        inspector,
+        findings: vec![],
+        summary: "fine".into(),
+        criteria_met: vec![],
+        criteria_failed: vec![],
+    });
+    room.engine_mut().apply(Command::SubmitTask { task: child, by: coordinator }).unwrap();
+    assert!(room.is_actionable(coordinator), "woken once the goal can go out");
+}

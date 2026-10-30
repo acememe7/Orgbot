@@ -3401,3 +3401,61 @@ fn a_coordinator_amends_what_a_task_asks_for_and_the_reviewer_sees_it() {
     });
     assert!(matches!(empty, EngineError::InvalidOwnerQuestion { .. }), "{empty:?}");
 }
+
+#[test]
+fn an_approved_goal_is_ready_to_deliver_only_once_nothing_under_it_is_unfinished() {
+    // From the live room: an approved goal waited on one subtask still in
+    // progress, and the delivering coordinators were woken every few minutes
+    // only to say nothing needed doing.
+    use orgbot_proto::graph::{TaskKind, TaskOrigin};
+    let mut f = fixture();
+    let (worker, worker2, inspector, lead) = (f.worker, f.worker2, f.inspector, f.coordinator);
+    let goal = f.start_task("finish the web game", worker);
+
+    let created = f.apply(Command::CreateTask {
+        title: "Release 2".into(),
+        brief: String::new(),
+        by: None,
+        required_role: None,
+        priority: orgbot_proto::task::Priority::Normal,
+        acceptance_criteria: vec![],
+        depends_on: vec![],
+        origin: TaskOrigin::under(TaskKind::Subtask, goal),
+    });
+    let child = created
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::TaskCreated { task } => Some(task.id),
+            _ => None,
+        })
+        .unwrap();
+    for command in [
+        Command::OpenTask { task: child },
+        Command::ClaimTask { task: child, by: worker2 },
+        Command::StartTask { task: child, by: worker2 },
+    ] {
+        f.apply(command);
+    }
+
+    let approve = |f: &mut Fixture, task, by| {
+        let artifact = f.add_artifact(task, by);
+        f.apply(Command::SubmitForReview { task, by, artifacts: vec![artifact] });
+        f.apply(Command::RecordReview {
+            task,
+            inspector,
+            findings: vec![],
+            summary: "matches the criteria".into(),
+            criteria_met: vec!["it is correct".into()],
+            criteria_failed: vec![],
+        });
+    };
+    approve(&mut f, goal, worker);
+    assert_eq!(f.state(goal), TaskState::Approved);
+    assert_eq!(f.engine.awaiting_delivery(), vec![goal]);
+    assert!(f.engine.ready_for_delivery().is_empty(), "not while its subtask is unfinished");
+    assert_eq!(f.engine.delivery_blocker(goal).as_deref(), Some("Release 2"));
+
+    approve(&mut f, child, worker2);
+    f.apply(Command::SubmitTask { task: child, by: lead });
+    assert_eq!(f.engine.ready_for_delivery(), vec![goal], "ready once its subtask has landed");
+}
