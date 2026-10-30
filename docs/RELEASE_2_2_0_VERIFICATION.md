@@ -225,6 +225,14 @@ byte-identical to the previous package). Signed archive revision
 `fe2788231a8d3c06acbd3db72f7fe9e50ae2b21e` replaces only
 `orgbots_2.2.0_amd64.deb`;
 [Pages run 40991917865](https://github.com/acememe7/Orgbot/actions/runs/40991917865)
+published it.
+
+The next morning they were rebuilt again under the same version so a bot that
+only talks is rested and a tick that frees work wakes the room (source
+`0b128f3`; the Flutter bundle is byte-identical to the previous package).
+Signed archive revision `9b09534a5b15a8bfe11b149e06a3763b303de30b` replaces
+only `orgbots_2.2.0_amd64.deb`;
+[Pages run 41030440577](https://github.com/acememe7/Orgbot/actions/runs/41030440577)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
