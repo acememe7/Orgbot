@@ -254,6 +254,14 @@ amend a task (source `6c69cdf`; the Flutter bundle was rebuilt to show amended
 tasks). Signed archive revision `fc5a74366ed4c3a7bae00e0646b41f295a74c1b0`
 replaces only `orgbots_2.2.0_amd64.deb`;
 [Pages run 41102385617](https://github.com/acememe7/Orgbot/actions/runs/41102385617)
+published it.
+
+Later that night they were rebuilt again so coordinators are woken to deliver
+only work that can go out (source `d1dacc8`; the Flutter bundle is
+byte-identical to the previous package). Signed archive revision
+`c7851effefd747695a03fa0a937b2ce749368857` replaces only
+`orgbots_2.2.0_amd64.deb`;
+[Pages run 41131413062](https://github.com/acememe7/Orgbot/actions/runs/41131413062)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
