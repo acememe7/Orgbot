@@ -188,6 +188,15 @@ bounded catch-up, after the Grok bot faulted on "Argument list too long"
 `d0666190ec45466f27f0bdade3ccf9711770ce98` again replaces only
 `orgbots_2.2.0_amd64.deb`;
 [Pages run 40966749910](https://github.com/acememe7/Orgbot/actions/runs/40966749910)
+published it.
+
+The next morning they were rebuilt under the same version with room access
+modes and lent sign-ins (source `d25e9f3`; the Flutter bundle was rebuilt for
+the new settings). Signed archive revision
+`86893ae21a4fadafbcfbe9d7cc69437c4233ac05` replaces only
+`orgbots_2.2.0_amd64.deb`; the transitional package and every older package are
+byte-identical.
+[Pages run 40984234732](https://github.com/acememe7/Orgbot/actions/runs/40984234732)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
