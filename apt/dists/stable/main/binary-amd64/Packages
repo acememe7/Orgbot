@@ -17,15 +17,15 @@ Package: orgbots
 Version: 2.2.0
 Architecture: amd64
 Maintainer: OrgBot <theaeceme@gmail.com>
-Installed-Size: 45200
+Installed-Size: 45208
 Depends: libatk1.0-0t64 (>= 2.7.91), libc6 (>= 2.39), libcairo-gobject2 (>= 1.10.0), libcairo2 (>= 1.14.0), libepoxy0 (>= 1.0), libfontconfig1 (>= 2.12.6), libgcc-s1 (>= 4.2), libgdk-pixbuf-2.0-0 (>= 2.22.0), libglib2.0-0t64 (>= 2.79.0), libgtk-3-0t64 (>= 3.21.4), libharfbuzz0b (>= 0.6.0), libjavascriptcoregtk-4.1-0, libpango-1.0-0 (>= 1.29.4), libpangocairo-1.0-0 (>= 1.14.0), libsecret-1-0 (>= 0.7), libsoup-3.0-0 (>= 2.4.0), libstdc++6 (>= 11), libvte-2.91-0 (>= 0.47.90), libwebkit2gtk-4.1-0 (>= 2.15.4), zlib1g (>= 1:1.1.4), python3, bubblewrap, dbus-daemon, gnome-keyring, libnotify-bin, libsecret-tools, ffmpeg, gstreamer1.0-libav, gstreamer1.0-plugins-good
 Breaks: orgbot (<< 2.2.0)
 Replaces: orgbot (<< 2.2.0)
 Filename: pool/main/o/orgbots/orgbots_2.2.0_amd64.deb
-Size: 15807894
-MD5sum: 5069cbb25356634b4c2bbcc05f7ae90d
-SHA1: d1b04e94c9d45321703cd254af6d4af5ef13913b
-SHA256: 38b4a42df25e264762ab01b447b6e4fd896da98284ad7ddcf8c6dea246b58c30
+Size: 15809702
+MD5sum: 0828ad3ac7f59257d265fd239f3d339e
+SHA1: 621a23145d8f201c89038db5ba265da8bf654ff8
+SHA256: a46f030a0fc9cd3b8fb5b79a67289aeb6e45319e3866ada8be28b1bc459214f8
 Section: devel
 Priority: optional
 Description: CLI and API agents working together in shared rooms
