@@ -1,0 +1,111 @@
+{
+  "day": "2026-10-29",
+  "utc_offset_hours": 1.0,
+  "bots": [
+    [
+      "astra",
+      "codex",
+      "gpt-6-astra"
+    ],
+    [
+      "deepseek-builder",
+      "deep_seek",
+      "deepseek-flash"
+    ],
+    [
+      "ellis",
+      "claude",
+      "claude-haiku-5-5"
+    ],
+    [
+      "grok",
+      "grok",
+      "grok-4.7"
+    ],
+    [
+      "grok-quick",
+      "grok",
+      "grok-4.7"
+    ],
+    [
+      "mira",
+      "codex",
+      "gpt-6-luna"
+    ],
+    [
+      "ollama-deepseek",
+      "open_ai_compatible",
+      "deepseek-v4.1-flash:1017"
+    ],
+    [
+      "ollama-glm",
+      "open_ai_compatible",
+      "glm-5.3-flash"
+    ],
+    [
+      "opus",
+      "claude",
+      "claude-opus-5-5"
+    ],
+    [
+      "sol",
+      "codex",
+      "gpt-6.1-sol"
+    ]
+  ],
+  "turns": 467,
+  "turns_by_bot": {
+    "opus": 110,
+    "mira": 77,
+    "sol": 73,
+    "grok-quick": 66,
+    "deepseek-builder": 52,
+    "astra": 30,
+    "ollama-glm": 27,
+    "ellis": 25,
+    "grok": 7
+  },
+  "output_tokens": 4639307,
+  "tasks_created": 12,
+  "tasks_delivered": 12,
+  "delivered": [
+    "Correct the studio FAQ's \"no analytics\" line on Hermes (owner decision)",
+    "Remove the dead GitHub Pages workflow (owner decision) and tidy docs",
+    "Public Curfew party queuing (whole parties, 4-seat ceiling)",
+    "Contain party coordinator release installed during the review hold",
+    "Curfew gas: drifting tear gas at the cordon edge, haze inside, measured cost",
+    "Resolve the full-server CORS test's configuration import order",
+    "Fix public Curfew squad splitting and cancellation before release",
+    "Curfew on Halden misses 120 fps before the gas change: profile and cut frame time",
+    "Close late-roster squad split and partially admitted party-drop defects before release",
+    "Run the UNRUN mode paths from the acceptance matrix in local Chrome",
+    "Correct the measured baseline in the freeze acceptance amendment",
+    "Find and remove the 0.6 s in-match freezes on Halden (no quality change)"
+  ],
+  "reviews": 22,
+  "approved": 12,
+  "sent_back": 10,
+  "findings_by_severity": {
+    "major": 19,
+    "minor": 22,
+    "note": 13
+  },
+  "most_review_rounds": [
+    {
+      "task": "Curfew gas: drifting tear gas at the cordon edge, haze inside, measured cost",
+      "reviews": 4
+    },
+    {
+      "task": "Fix public Curfew squad splitting and cancellation before release",
+      "reviews": 3
+    },
+    {
+      "task": "Close late-roster squad split and partially admitted party-drop defects before release",
+      "reviews": 3
+    }
+  ],
+  "owner_questions": 20,
+  "owner_messages": 28,
+  "task_amendments": 0,
+  "errors": 2
+}

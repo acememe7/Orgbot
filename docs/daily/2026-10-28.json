@@ -1,0 +1,103 @@
+{
+  "day": "2026-10-28",
+  "utc_offset_hours": 1.0,
+  "bots": [
+    [
+      "astra",
+      "codex",
+      "gpt-6-astra"
+    ],
+    [
+      "deepseek-builder",
+      "deep_seek",
+      "deepseek-flash"
+    ],
+    [
+      "ellis",
+      "claude",
+      "claude-haiku-5-5"
+    ],
+    [
+      "grok",
+      "grok",
+      "grok-4.7"
+    ],
+    [
+      "grok-quick",
+      "grok",
+      "grok-4.7"
+    ],
+    [
+      "mira",
+      "codex",
+      "gpt-6-luna"
+    ],
+    [
+      "ollama-deepseek",
+      "open_ai_compatible",
+      "deepseek-v4.1-flash:1017"
+    ],
+    [
+      "ollama-glm",
+      "open_ai_compatible",
+      "glm-5.3-flash"
+    ],
+    [
+      "opus",
+      "claude",
+      "claude-opus-5-5"
+    ],
+    [
+      "sol",
+      "codex",
+      "gpt-6.1-sol"
+    ]
+  ],
+  "turns": 45,
+  "turns_by_bot": {
+    "opus": 11,
+    "ollama-glm": 8,
+    "sol": 8,
+    "deepseek-builder": 6,
+    "astra": 3,
+    "grok": 3,
+    "mira": 2,
+    "grok-quick": 2,
+    "ellis": 2
+  },
+  "output_tokens": 287486,
+  "tasks_created": 10,
+  "tasks_delivered": 4,
+  "delivered": [
+    "Audit Protest\u2019s game, repository, and release path",
+    "Reconcile the next work plan with updated progress.md",
+    "QA: revision-bound baseline and acceptance matrix (modes + Curfew)",
+    "Docs: reconcile protocol/hosting status before any release gate"
+  ],
+  "reviews": 5,
+  "approved": 4,
+  "sent_back": 1,
+  "findings_by_severity": {
+    "note": 4,
+    "minor": 5,
+    "major": 4
+  },
+  "most_review_rounds": [
+    {
+      "task": "QA: revision-bound baseline and acceptance matrix (modes + Curfew)",
+      "reviews": 2
+    },
+    {
+      "task": "Audit Protest\u2019s game, repository, and release path",
+      "reviews": 1
+    },
+    {
+      "task": "Reconcile the next work plan with updated progress.md",
+      "reviews": 1
+    }
+  ],
+  "owner_questions": 7,
+  "owner_messages": 14,
+  "task_amendments": 0,
+  "errors": 10
+}

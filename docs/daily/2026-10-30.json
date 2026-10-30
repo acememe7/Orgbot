@@ -1,0 +1,111 @@
+{
+  "day": "2026-10-30",
+  "utc_offset_hours": 1.0,
+  "bots": [
+    [
+      "astra",
+      "codex",
+      "gpt-6-astra"
+    ],
+    [
+      "deepseek-builder",
+      "deep_seek",
+      "deepseek-flash"
+    ],
+    [
+      "ellis",
+      "claude",
+      "claude-haiku-5-5"
+    ],
+    [
+      "grok",
+      "grok",
+      "grok-4.7"
+    ],
+    [
+      "grok-quick",
+      "grok",
+      "grok-4.7"
+    ],
+    [
+      "mira",
+      "codex",
+      "gpt-6-luna"
+    ],
+    [
+      "ollama-deepseek",
+      "open_ai_compatible",
+      "deepseek-v4.1-flash:1017"
+    ],
+    [
+      "ollama-glm",
+      "open_ai_compatible",
+      "glm-5.3-flash"
+    ],
+    [
+      "opus",
+      "claude",
+      "claude-opus-5-5"
+    ],
+    [
+      "sol",
+      "codex",
+      "gpt-6.1-sol"
+    ]
+  ],
+  "turns": 378,
+  "turns_by_bot": {
+    "deepseek-builder": 74,
+    "sol": 72,
+    "opus": 69,
+    "grok-quick": 59,
+    "astra": 33,
+    "mira": 31,
+    "ellis": 19,
+    "ollama-glm": 18,
+    "grok": 3
+  },
+  "output_tokens": 3425669,
+  "tasks_created": 11,
+  "tasks_delivered": 12,
+  "delivered": [
+    "Stabilize the load-sensitive Halden map-build/nav timing assertions (test-only)",
+    "Squad fix v3: record amended last-resort rule + add the last-resort donor test, resubmit",
+    "Hosted Curfew recovery acceptance (party, reconnect, results, cleanup)",
+    "Investigate \"The update could not be installed\" banner on the live site (PWA update path)",
+    "Release: party-queue-only build to Hermes + Cloudflare Pages (owner-approved)",
+    "PWA install: retry failed precache fetches and fix the \"update could not be installed\" banner",
+    "Shop on the custom domain: is checkout broken by the CSP blocking an inline script?",
+    "Fix the Curfew party-join runtime test that fails only inside the full suite (MatchMakeError fetch failed)",
+    "Apply the min-of-N timing fix to the Borderline map test (load-sensitive wall-clock assertion)",
+    "Existing players: \"Apply update\" prompt sometimes never appears after a new release",
+    "Release 2: web-only build with Curfew gas visuals + Halden freeze fix (after party release)",
+    "finish the web game"
+  ],
+  "reviews": 25,
+  "approved": 12,
+  "sent_back": 12,
+  "findings_by_severity": {
+    "note": 13,
+    "major": 29,
+    "minor": 16
+  },
+  "most_review_rounds": [
+    {
+      "task": "Fix late party squad admission at small match capacity (match server, live defect)",
+      "reviews": 4
+    },
+    {
+      "task": "Release: party-queue-only build to Hermes + Cloudflare Pages (owner-approved)",
+      "reviews": 3
+    },
+    {
+      "task": "finish the web game",
+      "reviews": 3
+    }
+  ],
+  "owner_questions": 21,
+  "owner_messages": 26,
+  "task_amendments": 4,
+  "errors": 0
+}

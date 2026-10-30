@@ -282,3 +282,24 @@ images or console errors. GitHub website checks `40911820438` and
 `40911821485` passed. A new Lighthouse or field-performance audit was not run.
 Analytics remains off.
 
+
+## Daily log
+
+`website/evidence/` holds one page per day the owner's live room runs, newest
+first in `website/evidence/index.html`. For each day:
+
+1. Run `scripts/room-evidence.py` for the day and save it under `docs/daily/`
+   (see `docs/daily/README.md`).
+2. Read the day's events and record, with a time and event number for each
+   claim: what shipped, every game defect and how it was caught and proved
+   fixed, every review that sent work back and why, false alarms, what slipped
+   through, and the OrgBots problems the room exposed with their fix commits.
+   Say when the log does not show who found something.
+3. Copy the latest day page to `website/evidence/YYYY-MM-DD/index.html`, add a
+   row to the index table, add both URLs to `sitemap.xml`, and add each page's
+   JSON-LD hash to both nginx configurations.
+4. Run `python3 scripts/check-website.py`, inspect at 375 and 1440 pixels, and
+   deploy as below.
+
+The room's own log stays private: it holds chat, file paths and the project's
+code. Publish only the counts and the findings drawn from it.

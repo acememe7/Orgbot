@@ -69,6 +69,7 @@ main{overflow:hidden}
 .page-heading{padding:clamp(4rem,9vw,7rem) 0 3rem;border-bottom:1px solid var(--line)}
 .page-heading h1{font-size:clamp(3rem,6vw,5.5rem);max-width:14ch}
 .page-heading>p:not(.eyebrow){max-width:42rem;margin-bottom:0}
+.page-heading .actions{margin-top:2rem}
 .content-grid{display:grid;grid-template-columns:minmax(0,1fr) 16rem;gap:clamp(2rem,8vw,7rem);padding:3.5rem 0 6rem}
 .article{max-width:49rem}
 .article h2{font:400 clamp(1.75rem,3vw,2.35rem)/1.14 var(--serif);letter-spacing:-.025em;margin:2.8rem 0 .9rem}
@@ -104,6 +105,8 @@ main{overflow:hidden}
 .table-scroll thead th{font-size:.88rem;color:var(--muted);font-weight:600}
 .table-scroll tbody th{font-weight:600}
 .table-scroll .total-row{font-weight:650;background:var(--paper-deep)}
+.table-scroll .text-table{min-width:36rem}
+.table-scroll .text-table th,.table-scroll .text-table td{text-align:left;white-space:normal;vertical-align:top}
 .table-scroll:focus-visible{outline:3px solid #a15a35;outline-offset:4px}
 .install-note{background:var(--paper-deep);padding:1.3rem 1.5rem;margin:1.5rem 0}
 .install-note p{margin:.2rem 0}
