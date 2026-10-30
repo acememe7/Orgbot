@@ -109,6 +109,7 @@ fn room_spec() -> RoomSpec {
         roster: vec![],
         completion: CompletionRule::AllTasksTerminal,
         limits: RoomLimits::default(),
+        access: Default::default(),
     }
 }
 

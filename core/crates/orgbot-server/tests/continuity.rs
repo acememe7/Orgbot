@@ -23,6 +23,7 @@ fn legacy_journal_keeps_messages_and_rejects_missing_events() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let agent = AgentSpec::new(
         "iris",
@@ -254,6 +255,7 @@ fn a_deliverable_lives_beside_the_board_and_comes_back_whole() {
         roster: vec![],
         completion: orgbot_proto::room::CompletionRule::AllTasksTerminal,
         limits: orgbot_proto::room::RoomLimits::default(),
+        access: Default::default(),
     });
     let author = orgbot_proto::AgentSpec::new(
         "w1",

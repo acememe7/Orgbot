@@ -755,6 +755,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::AllTasksTerminal,
             limits: RoomLimits::default(),
+            access: Default::default(),
         });
         engine.set_skills(vec![
             Skill {

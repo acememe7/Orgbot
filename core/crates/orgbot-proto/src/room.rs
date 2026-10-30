@@ -152,6 +152,118 @@ pub struct RoomSpec {
     pub roster: Vec<AgentId>,
     pub completion: CompletionRule,
     pub limits: RoomLimits,
+    /// What bots may use of the owner's, and how much of it needs asking.
+    #[serde(default)]
+    pub access: RoomAccess,
+}
+
+/// How much of what bots ask to use the owner approves by hand.
+///
+/// Requests are rated [`Risk`]; each mode approves some ratings on its own and
+/// brings the rest to the owner. Questions about the work itself (`ask_owner`)
+/// always reach the owner, in every mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessMode {
+    /// Every request is asked.
+    #[default]
+    Approval,
+    /// Regular requests are approved on their own; risky and critical ones are
+    /// asked.
+    HalfApproval,
+    /// Everything is approved on its own except critical requests.
+    Auto,
+    /// Every request is approved on its own. Bots still write only inside their
+    /// own copy of the project.
+    FullWrite,
+}
+
+impl AccessMode {
+    /// Whether a request rated `risk` is approved without asking.
+    pub const fn approves(self, risk: Risk) -> bool {
+        match self {
+            Self::Approval => false,
+            Self::HalfApproval => matches!(risk, Risk::Regular),
+            Self::Auto => !matches!(risk, Risk::Critical),
+            Self::FullWrite => true,
+        }
+    }
+
+    /// The name the owner sees for this mode.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Approval => "Approval",
+            Self::HalfApproval => "Half approval",
+            Self::Auto => "Auto",
+            Self::FullWrite => "Full write",
+        }
+    }
+}
+
+/// How much harm a request could do if it went wrong.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Risk {
+    /// Reading, building, testing, or changes that are easy to undo.
+    Regular,
+    /// Changes to live services or shared accounts.
+    #[default]
+    Risky,
+    /// Deleting data, spending money, publishing, or changing credentials.
+    Critical,
+}
+
+impl Risk {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Regular => "regular",
+            Self::Risky => "risky",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+/// One of the owner's sign-ins they are willing to lend a bot for a task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LendItem {
+    /// The short name bots ask for, such as `wrangler`.
+    pub name: String,
+    /// What the owner calls it, such as "Cloudflare (Wrangler)".
+    #[serde(default)]
+    pub label: String,
+    /// Folders or files under the owner's home that hold the sign-in, such as
+    /// `.config/.wrangler`. Hidden from every bot unless lent.
+    pub paths: Vec<String>,
+    /// How much harm using it could do.
+    #[serde(default)]
+    pub risk: Risk,
+}
+
+/// What a room's bots may use of the owner's, and how much needs asking.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoomAccess {
+    pub mode: AccessMode,
+    /// Sign-ins the owner lends, each only for a task it is approved for.
+    pub lend: Vec<LendItem>,
+}
+
+impl RoomAccess {
+    pub fn item(&self, name: &str) -> Option<&LendItem> {
+        self.lend.iter().find(|item| item.name == name)
+    }
+
+    /// Every path the owner lends, lent or not: hidden unless granted.
+    pub fn all_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self
+            .lend
+            .iter()
+            .flat_map(|item| item.paths.iter().cloned())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
 }
 
 /// A live group chat.
@@ -215,6 +327,7 @@ mod limit_tests {
                 max_total_turns: max_turns,
                 ..Default::default()
             },
+            access: Default::default(),
         });
         room.phase = RoomPhase::Running;
         room
@@ -260,6 +373,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::AllTasksTerminal,
             limits: RoomLimits::default(),
+            access: Default::default(),
         })
     }
 

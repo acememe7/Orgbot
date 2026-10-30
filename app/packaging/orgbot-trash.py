@@ -1524,6 +1524,15 @@ def _cli() -> int:
                 return 0
             if any(inside):
                 _fail("Trash working-copy files and other files in separate commands")
+            # From the live room: a bot passed the original project's path,
+            # the helper went on to the owner's trash, which a sandbox cannot
+            # reach, and the bot was told to configure storage it does not need.
+            _fail(
+                f"Pass paths inside your working copy ({workspace}), relative to your current "
+                "directory. The original project is read-only here; removing a file from your "
+                "copy is how its removal reaches the owner, who approves it and keeps the "
+                "original in their trash."
+            )
         mutating = args.command in ("move", "restore") or (args.command == "cleanup" and not args.dry_run)
         with _selected_root_locked(persist_selection=mutating) as root:
             if args.command == "move":

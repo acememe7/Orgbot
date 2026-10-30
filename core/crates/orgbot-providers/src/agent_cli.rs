@@ -142,10 +142,10 @@ pub struct AgentCliProvider {
     session_system_brief: Mutex<Option<String>>,
     /// The socket handed in on the last request, for diagnostics.
     last_socket: Mutex<Option<String>>,
-    /// Whether the owner allowed this turn the bot server key; set from each
-    /// request, so a sandbox only ever carries the key for the turn it was
-    /// granted for.
-    server_access: std::sync::atomic::AtomicBool,
+    /// What the owner allowed this turn's sandbox (the bot server key, lent
+    /// sign-ins); set from each request, so a sandbox only ever carries them
+    /// for the turn they were granted for.
+    grants: Mutex<crate::types::SandboxGrants>,
     /// Whether the room's board is served to the agent as MCP tools.
     mcp: bool,
     /// The CLI's own effort level; empty keeps the CLI's default.
@@ -251,7 +251,7 @@ impl AgentCliProvider {
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
-            server_access: std::sync::atomic::AtomicBool::new(false),
+            grants: Mutex::new(crate::types::SandboxGrants::default()),
             timeout,
             session_store: Mutex::new(None),
             effort: String::new(),
@@ -562,8 +562,7 @@ impl Provider for AgentCliProvider {
         sink: Option<mpsc::Sender<StreamEvent>>,
     ) -> Result<CompletionResponse> {
         *self.last_socket.lock().unwrap() = request.mcp_socket.clone();
-        self.server_access
-            .store(request.server_access, std::sync::atomic::Ordering::SeqCst);
+        *self.grants.lock().unwrap() = request.grants();
         let resumed = self.session.lock().unwrap().clone();
         let situation = latest_instruction(&request.messages);
         let system_brief = antigravity_system_brief(self.cli, self.mcp, &request)?;
@@ -920,9 +919,7 @@ impl AgentCliProvider {
             if let Some(socket) = self.mcp_socket_debug() {
                 protected.arg("--mcp-socket").arg(socket);
             }
-            if self.server_access.load(std::sync::atomic::Ordering::SeqCst) {
-                protected.arg("--server-access");
-            }
+            protected.args(self.grants.lock().unwrap().launcher_args());
             protected
                 .arg("--")
                 .arg(original.get_program())
@@ -2710,7 +2707,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
-            server_access: std::sync::atomic::AtomicBool::new(false),
+            grants: Mutex::new(crate::types::SandboxGrants::default()),
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -2990,7 +2987,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
-            server_access: std::sync::atomic::AtomicBool::new(false),
+            grants: Mutex::new(crate::types::SandboxGrants::default()),
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3303,7 +3300,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
-            server_access: std::sync::atomic::AtomicBool::new(false),
+            grants: Mutex::new(crate::types::SandboxGrants::default()),
             mcp: true,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3404,7 +3401,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
-            server_access: std::sync::atomic::AtomicBool::new(false),
+            grants: Mutex::new(crate::types::SandboxGrants::default()),
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3484,7 +3481,7 @@ fi
                 session: Mutex::new(None),
                 session_system_brief: Mutex::new(None),
                 last_socket: Mutex::new(None),
-                server_access: std::sync::atomic::AtomicBool::new(false),
+                grants: Mutex::new(crate::types::SandboxGrants::default()),
                 mcp: false,
                 timeout: Duration::from_secs(5),
                 session_store: Mutex::new(None),
@@ -3585,7 +3582,7 @@ fi
             session: Mutex::new(Some("old-session".into())),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
-            server_access: std::sync::atomic::AtomicBool::new(false),
+            grants: Mutex::new(crate::types::SandboxGrants::default()),
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3651,7 +3648,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
                 session: Mutex::new(None),
                 session_system_brief: Mutex::new(None),
                 last_socket: Mutex::new(None),
-                server_access: std::sync::atomic::AtomicBool::new(false),
+                grants: Mutex::new(crate::types::SandboxGrants::default()),
                 mcp: false,
                 timeout: Duration::from_secs(5),
                 session_store: Mutex::new(None),
@@ -3848,7 +3845,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
-            server_access: std::sync::atomic::AtomicBool::new(false),
+            grants: Mutex::new(crate::types::SandboxGrants::default()),
             mcp: store.mcp,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3993,7 +3990,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
-            server_access: std::sync::atomic::AtomicBool::new(false),
+            grants: Mutex::new(crate::types::SandboxGrants::default()),
             mcp: store.mcp,
             timeout: Duration::from_millis(50),
             session_store: Mutex::new(Some(store.clone())),
@@ -4034,6 +4031,83 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             Some("session-before-timeout")
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_lent_sign_in_reaches_a_real_cli_turn_and_an_unlent_one_does_not() {
+        // From the live room: the owner's Cloudflare sign-in was readable by
+        // every bot, and the bot that needed it for a release had none.
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        );
+        let root = std::env::temp_dir().join(format!("orgbot-lend-cli-{unique}"));
+        let source = root.join("original-home");
+        let project = root.join("project");
+        let state = root.join("state/workspaces");
+        std::fs::create_dir_all(source.join(".codex")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(source.join(".codex/auth.json"), "fixture-auth").unwrap();
+
+        // The launcher lends and hides paths under the account's own home.
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+        let lent_top = format!("orgbot-lend-test-{unique}");
+        let lent = format!("{lent_top}/config");
+        let hidden = format!("orgbot-hide-test-{unique}");
+        std::fs::create_dir_all(home.join(&lent)).unwrap();
+        std::fs::create_dir_all(home.join(&hidden)).unwrap();
+        std::fs::write(home.join(&lent).join("token"), "lent token").unwrap();
+        std::fs::write(home.join(&hidden).join("token"), "hidden token").unwrap();
+
+        let owner = home.to_string_lossy();
+        let binary = project.join("fake-codex");
+        let script = format!(
+            "#!/bin/sh\n\
+             [ \"$(cat \"$HOME/{lent}/token\")\" = 'lent token' ] || exit 51\n\
+             [ -z \"$(ls -A '{owner}/{lent}')\" ] || exit 52\n\
+             [ ! -e \"$HOME/{hidden}\" ] || exit 53\n\
+             [ -z \"$(ls -A '{owner}/{hidden}')\" ] || exit 54\n\
+             printf renewed > \"$HOME/{lent}/renewed\"\n\
+             printf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"lend-session\"}}'\n\
+             printf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"lend-ok\"}}}}'\n"
+        );
+        write_executable_fixture(&binary, script.as_str()).unwrap();
+
+        let mut provider = AgentCliProvider::new(
+            CliKind::Codex,
+            "fixture-model",
+            project.to_string_lossy(),
+            AgentPolicy::WorkspaceWrite,
+            false,
+        )
+        .unwrap();
+        provider.bin = binary.to_string_lossy().into_owned();
+        provider.timeout = Duration::from_secs(10);
+        provider = provider.with_workspace_guard_project(state.clone(), "fake-agent".into(), project.clone());
+        provider.guard.as_mut().unwrap().profile_source = Some(source.clone());
+        *provider.grants.lock().unwrap() = crate::types::SandboxGrants {
+            server_access: false,
+            lend: vec![lent.clone()],
+            hide: vec![lent.clone(), hidden.clone()],
+        };
+
+        let mut episode = Episode::default();
+        let outcome = provider
+            .run_episode("lend", None, &None, &mut episode, None, None)
+            .await;
+        let renewed = std::fs::read_to_string(home.join(&lent).join("renewed")).ok();
+        let _ = std::fs::remove_dir_all(home.join(&lent_top));
+        let _ = std::fs::remove_dir_all(home.join(&hidden));
+        let _ = std::fs::remove_dir_all(&root);
+        outcome.unwrap();
+        assert_eq!(episode.text.trim(), "lend-ok");
+        assert_eq!(renewed.as_deref(), Some("renewed"), "a renewed sign-in reaches the owner's copy");
     }
 
     #[cfg(target_os = "linux")]
@@ -4689,7 +4763,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             session: Mutex::new(None),
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
-            server_access: std::sync::atomic::AtomicBool::new(false),
+            grants: Mutex::new(crate::types::SandboxGrants::default()),
             mcp: false,
             effort: String::new(),
             timeout: Duration::MAX,

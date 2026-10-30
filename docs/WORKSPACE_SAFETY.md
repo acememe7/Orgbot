@@ -27,8 +27,12 @@ files into `private_home`; `HOME` inside the sandbox points to a private mount
 under `/run/user/<uid>/orgbot-home`. The host home remains visible through the
 read-only root so installed CLI binaries resolve, with known secrets hidden:
 SSH and GPG keys, every CLI's sign-in file, cloud, registry and Git
-credentials, browser profiles, shell histories, and OrgBots' own data, which
-holds every room's access token. A folder is covered with an empty tmpfs where
+credentials, deploy and hosting tools' sign-ins (Wrangler, `cloudflared`,
+Vercel, Netlify, Fly.io, DigitalOcean, Supabase, Stripe, Railway, and the
+`configstore` folder Firebase uses), browser profiles, shell histories, the app's
+own support folder (tool approvals and the allowance ledger), and OrgBots' own
+data, which holds every room's access token, also where `XDG_DATA_HOME` puts it
+outside the home's `.local/share`. A folder is covered with an empty tmpfs where
 no program lives in it; where a CLI keeps its program beside its sign-in (Codex,
 Grok), only the sign-in file is covered and reads as permission denied. This is
 a list of known locations (`_OWNER_SECRET_DIRS` and `_OWNER_SECRET_FILES`), not
@@ -53,6 +57,9 @@ those servers and no others. Revoke a server by deleting the bot key from its
 ends, so a hold placed mid-turn applies from the next turn; restrict the bot
 key in `authorized_keys` (for example `restrict,from=...`) for a server-side
 limit as well.
+A workspace that was ever read-only never gets the key, even when the room-tool
+path does not repeat `--read-only`.
+
 Optional `--profile` binds accept only that agent’s private
 `private_home/.codex`, `private_home/.claude`, or `private_home/.grok` directory.
 
@@ -91,6 +98,52 @@ with writable data, state and cache directories. OAuth credential reuse is
 blocked. `--agent-cli agy` fails before starting a child process because
 isolated Antigravity authentication has not been verified. See
 [native CLI integration status](NATIVE_CLI_INTEGRATIONS.md).
+
+## Access modes and lent sign-ins
+
+Each room has an access mode that decides which requests for the owner's
+things are approved on their own and which ask the owner. Requests are rated
+regular, risky or critical:
+
+| Mode | Regular | Risky | Critical |
+|---|---|---|---|
+| Approval (default) | asks | asks | asks |
+| Half approval | approved | asks | asks |
+| Auto | approved | approved | asks |
+| Full write | approved | approved | approved |
+
+Questions about the work itself (`ask_owner`) always reach the owner, in every
+mode. Full write still confines bots to their own project copy.
+
+A bot asks with `request_access`: the task, what it will use (`server` for the
+bot server key, or the name of a lent sign-in), what it will do (`inspect`,
+`change`, `release`, `destroy` or `spend`) and why. The request is rated the
+higher of the action's rating (inspect and change are regular, release is
+risky, destroy and spend are critical) and the risk the owner gave each thing
+asked for (the server key is risky). When the mode approves the rating, the
+request is recorded as a decision answered on the spot, with a note saying so;
+otherwise it is asked like any question and the task waits on it. Either way
+the grant is the answered decision, so a restored room grants exactly what was
+allowed. `request_server_access` remains and asks for `server`.
+
+Outside tool calls through MCP servers count as risky: Auto and Full write let
+them through, Approval and Half approval ask for each call.
+
+The owner lists the sign-ins they will lend in **Connections & tools → Sign-ins
+bots may use** (saved in `$XDG_DATA_HOME/orgbot/lending.json`, which bots cannot
+read). Every tool there is off until turned on. A room passes the enabled ones
+to its engine when it starts, as `[[room.lend]]` tables in its room file. Every
+listed path is hidden from every sandbox where it lives. A sign-in lent to a bot
+for its task is mounted read-write into that bot's private home at the same
+relative path, so the tool finds it under `HOME` and a renewed token reaches the
+owner's copy. The same terms as the server key apply: only that bot, only while
+the task is under way, never a read-only or review-only turn. The room service
+and the launcher both refuse paths outside the home, through links out of it,
+or into what is never lent: OrgBots' data, `~/.ssh`, `~/.gnupg`, and the model
+CLIs' sign-ins, which bots get their own copies of. Lending is not available to
+OpenCode or Antigravity bots, whose private homes are built differently. A lent
+sign-in is usable over the network from the sandbox, so lend tokens scoped to
+what the work needs where the provider allows it.
 
 ## Independent reviewer tests
 

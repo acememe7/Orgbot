@@ -40,8 +40,16 @@ and that is the point.
   asks everyone, and questions that need you arrive as cards with answers.
 
 **Keeps you in control**
-- Bots have no server key until you allow one for a specific task. It is
-  mounted only while that task is under way, and reviewers never get it.
+- Bots have no server key and none of your sign-ins until one is allowed for a
+  specific task. It is mounted only while that task is under way, and
+  reviewers never get it.
+- Each room has an access mode: **Approval** asks you for everything, **Half
+  approval** approves regular requests, **Auto** asks only for critical ones,
+  and **Full write** approves everything. Questions about the work always
+  come to you. See [access modes](docs/WORKSPACE_SAFETY.md#access-modes-and-lent-sign-ins).
+- Lend a bot a tool you are signed in to, such as Wrangler or the GitHub CLI,
+  from **Connections & tools → Sign-ins bots may use**. Everything there is
+  off and hidden from bots until you turn it on.
 - Answers with lasting effect (server access, outside tool calls, retiring a
   task) ask you to confirm. Everything else is one tap.
 - Pause lets running turns finish, so stopping to update loses no work.

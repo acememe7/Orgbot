@@ -17,6 +17,7 @@ import 'dart:io';
 
 import '../engine/agent_cli.dart';
 import 'credentials.dart';
+import 'lend_settings.dart';
 import 'models.dart';
 import 'room_check.dart';
 import 'roles.dart';
@@ -50,6 +51,7 @@ RoomFile buildRoomFile(
   String? skillsPath,
   List<String> priorBoards = const [],
   DesktopIntegrationSnapshot? desktopIntegrations,
+  List<LendEntry> lend = const [],
 }) {
   // A CLI can only run where the binary exists. Everywhere else — a phone,
   // most obviously — the same subscription is reached through its API with
@@ -68,6 +70,9 @@ RoomFile buildRoomFile(
     ..writeln('name = ' + _s(room.name))
     ..writeln('goal = ' + _s(room.goal))
     ..writeln('completion = "all_tasks_terminal"')
+    // What bots may use without asking you; questions about the work
+    // itself always come to you.
+    ..writeln('access = ' + _s(room.access.wire))
     ..writeln();
 
   if (statePath != null) buffer.writeln('state_path = ${_s(statePath)}\n');
@@ -105,6 +110,19 @@ RoomFile buildRoomFile(
     ..writeln('max_total_turns = ' + room.maxTurns.toString())
     ..writeln('max_parallel_turns = ' + room.parallelTurns.toString())
     ..writeln();
+
+  // Your sign-ins bots may ask to use, each only for a task it is approved
+  // for. Every path listed is hidden from bots unless lent.
+  for (final entry in lend) {
+    if (!entry.enabled || entry.paths.isEmpty) continue;
+    buffer
+      ..writeln('[[room.lend]]')
+      ..writeln('name = ' + _s(entry.name))
+      ..writeln('label = ' + _s(entry.label))
+      ..writeln('paths = [' + entry.paths.map(_s).join(', ') + ']')
+      ..writeln('risk = ' + _s(entry.risk.wire))
+      ..writeln();
+  }
 
   if (workspace != null) {
     buffer

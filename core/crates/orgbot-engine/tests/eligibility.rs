@@ -57,6 +57,7 @@ fn room() -> Room {
         roster: vec![],
         completion: CompletionRule::AllTasksTerminal,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let lead = AgentSpec::new("lead", "Lead", provider())
         .with_roles(["coordinator"])

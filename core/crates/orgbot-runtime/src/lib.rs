@@ -17,6 +17,7 @@
 //!     roster: vec![],
 //!     completion: CompletionRule::AllTasksTerminal,
 //!     limits: RoomLimits::default(),
+//!     access: Default::default(),
 //! });
 //!
 //! let spec = AgentSpec::new("w1", "Worker", ProviderRef::Scripted { script: "s".into() });

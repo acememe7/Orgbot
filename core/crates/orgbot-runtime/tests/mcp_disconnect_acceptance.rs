@@ -141,6 +141,7 @@ async fn an_mcp_disconnect_during_exchange_allows_reconnect() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let spec = orgbot_proto::AgentSpec::new(
         "coordinator",

@@ -42,6 +42,69 @@ pub const SERVER_ACCESS_ALLOW: &str = "Allow server access for this task";
 /// The answer that refuses a server-access request.
 pub const SERVER_ACCESS_DENY: &str = "Deny";
 
+/// The action class a decision lending the owner's sign-in `name` grants.
+pub fn lend_action(name: &str) -> String {
+    format!("access:{name}")
+}
+
+/// The answer that grants a request including one of the owner's sign-ins.
+pub const ACCESS_ALLOW: &str = "Allow for this task";
+
+/// The name a bot asks for the bot server key by, beside the owner's sign-ins.
+pub const SERVER_ITEM: &str = "server";
+
+/// What a bot says it will do with what it asks to use.
+///
+/// The bot's word only ever raises how carefully a request is treated: a
+/// request is rated the higher of this and the risk the owner gave each thing
+/// asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessAction {
+    /// Read or check something.
+    Inspect,
+    /// Build, test or make changes that are easy to undo.
+    Change,
+    /// Release to production or change a live service.
+    Release,
+    /// Delete data or change credentials.
+    Destroy,
+    /// Spend money.
+    Spend,
+}
+
+impl AccessAction {
+    pub const fn risk(self) -> crate::room::Risk {
+        use crate::room::Risk;
+        match self {
+            Self::Inspect | Self::Change => Risk::Regular,
+            Self::Release => Risk::Risky,
+            Self::Destroy | Self::Spend => Risk::Critical,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inspect => "inspect",
+            Self::Change => "change",
+            Self::Release => "release",
+            Self::Destroy => "destroy",
+            Self::Spend => "spend",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(match raw.trim() {
+            "inspect" => Self::Inspect,
+            "change" => Self::Change,
+            "release" => Self::Release,
+            "destroy" => Self::Destroy,
+            "spend" => Self::Spend,
+            _ => return None,
+        })
+    }
+}
+
 /// The environment a decision about one task is scoped to.
 pub fn task_scope(task: TaskId) -> String {
     format!("task:{task}")

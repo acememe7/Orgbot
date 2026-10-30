@@ -180,6 +180,7 @@ fn invalid_review_and_unowned_delegation_are_atomic_rejections() {
         roster: vec![],
         completion: CompletionRule::AllTasksTerminal,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let bots: Vec<_> = ["owner", "unrelated", "recipient", "qa"]
         .iter()

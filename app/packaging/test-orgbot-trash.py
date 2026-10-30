@@ -166,6 +166,15 @@ class TrashTests(unittest.TestCase):
             self.assertEqual(trash._cli(), 2)
         self.assertTrue(outside.exists())
 
+        # From the live room: a bot gave only the original project's path and
+        # was sent to configure the owner's trash. It is told where to look.
+        err = io.StringIO()
+        with patch.dict(os.environ, env), patch.object(sys, "argv", [str(MODULE_PATH), "move", "--project", "Protest", str(outside)]), redirect_stdout(io.StringIO()), patch("sys.stderr", err):
+            self.assertEqual(trash._cli(), 2)
+        self.assertIn("inside your working copy", err.getvalue())
+        self.assertNotIn("configure", err.getvalue())
+        self.assertTrue(outside.exists())
+
     def test_config_switch_waits_for_shared_root_lock(self):
         import threading
 

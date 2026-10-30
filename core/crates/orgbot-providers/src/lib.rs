@@ -53,8 +53,8 @@ pub use openai::OpenAiProvider;
 pub use provider::Provider;
 pub use scripted::ScriptedProvider;
 pub use types::{
-    CompletionRequest, CompletionResponse, ContentBlock, Effort, Role, StopReason, StreamEvent,
-    ToolDef, Turn, Usage,
+    CompletionRequest, CompletionResponse, ContentBlock, Effort, Role, SandboxGrants, StopReason,
+    StreamEvent, ToolDef, Turn, Usage,
 };
 
 /// Build a live provider for a bot's configured backend.

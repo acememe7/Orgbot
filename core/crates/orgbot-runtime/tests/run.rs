@@ -164,6 +164,7 @@ fn room(goal: &str) -> Orchestrator {
         roster: vec![],
         completion: CompletionRule::AllTasksTerminal,
         limits: RoomLimits::default(),
+        access: Default::default(),
     })
 }
 
@@ -477,6 +478,7 @@ async fn the_turn_budget_stops_a_room_that_will_not_settle() {
             max_total_turns: 5,
             ..RoomLimits::default()
         },
+        access: Default::default(),
     });
     // A bot that always has something to say never looks stalled, so only the
     // budget stops it.
@@ -591,6 +593,7 @@ async fn a_bot_is_scheduled_to_answer_a_question_addressed_to_it() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let worker = room
         .seat(
@@ -651,6 +654,7 @@ async fn an_ask_to_everyone_is_answered_by_every_bot() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let handles = ["ada", "bo", "cy"];
     let mut seats = Vec::new();
@@ -792,6 +796,7 @@ async fn a_bot_asked_by_the_owner_answers_while_a_slower_turn_runs() {
             max_parallel_turns: 2,
             ..RoomLimits::default()
         },
+        access: Default::default(),
     });
     let release = Arc::new(tokio::sync::Notify::new());
     room.seat(
@@ -898,6 +903,7 @@ async fn an_image_a_bot_generates_is_shown_in_the_room() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let artist = room
         .seat(spec("artist", &["designer"], Autonomy::default()), Arc::new(Draws(drawn.clone())))
@@ -932,6 +938,7 @@ async fn a_bot_working_past_its_claim_window_keeps_its_task() {
             max_parallel_turns: 2,
             ..RoomLimits::default()
         },
+        access: Default::default(),
     });
     let release = Arc::new(tokio::sync::Notify::new());
     let slow = room
@@ -1024,6 +1031,7 @@ async fn a_bot_waiting_for_a_slot_keeps_its_task() {
             max_parallel_per_backend: 1,
             ..RoomLimits::default()
         },
+        access: Default::default(),
     });
     let same_account = |handle: &str| {
         AgentSpec::new(
@@ -1111,6 +1119,7 @@ async fn a_rolling_run_cut_short_loses_no_bot() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let release = Arc::new(tokio::sync::Notify::new());
     let slow = room
@@ -1178,6 +1187,7 @@ async fn a_batch_streams_the_bot_its_stream_is_labelled_with() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let mut seats = Vec::new();
     for handle in ["ada", "bo", "cy", "di", "ed", "fi"] {
@@ -1235,6 +1245,7 @@ async fn an_ordinary_broadcast_statement_does_not_wake_the_room() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     room.seat(
         spec("helper", &["writer"], Autonomy::default()),
@@ -1449,6 +1460,7 @@ async fn a_cli_bot_that_posted_through_the_room_tool_is_not_echoed() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     room.seat(bot_spec, Arc::new(McpPosterProvider)).unwrap();
     room.start().unwrap();
@@ -1511,6 +1523,7 @@ async fn an_mcp_agent_bot_claims_a_seeded_task_in_band() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     room.seat(bot_spec.clone(), provider).unwrap();
     room.start().unwrap();
@@ -1612,6 +1625,7 @@ async fn a_real_codex_bot_claims_a_task_through_the_room_bridge() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     room.seat(bot_spec.clone(), provider).unwrap();
     room.start().unwrap();
@@ -1817,6 +1831,7 @@ async fn a_room_cycle_claim_work_review_submit_runs_through_the_bridge() {
         roster: vec![],
         completion: CompletionRule::AllTasksTerminal,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     room.seat(worker_spec.clone(), worker).unwrap();
     room.seat(reviewer_spec.clone(), reviewer).unwrap();
@@ -1895,6 +1910,7 @@ async fn a_bot_turn_carries_the_server_key_only_once_the_owner_allows_it() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let ops = room
         .seat(
@@ -1979,6 +1995,7 @@ async fn a_bot_is_woken_for_an_assist_it_accepted_and_has_not_delivered() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let lead = room
         .seat(spec("lead", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
@@ -2059,6 +2076,7 @@ async fn an_accepted_assist_waits_without_rerunning_while_its_bot_waits_on_the_o
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let lead = room
         .seat(spec("lead", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
@@ -2172,6 +2190,7 @@ async fn a_bot_back_after_a_long_absence_gets_a_bounded_catch_up() {
         roster: vec![],
         completion: CompletionRule::Manual,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let lead = room
         .seat(spec("lead", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
@@ -2213,4 +2232,171 @@ async fn a_bot_back_after_a_long_absence_gets_a_bounded_catch_up() {
     assert!(situation.contains("status 257:"), "the latest is kept");
     assert!(!situation.contains("status 0:"), "the oldest chatter is left out");
     assert!(situation.contains("earlier updates are left out"), "and says so");
+}
+
+/// A room in `mode` lending Wrangler (risky) and a read-only docs sign-in
+/// (regular), with `lead` holding a task under way.
+fn access_room(
+    mode: orgbot_proto::room::AccessMode,
+) -> (Orchestrator, orgbot_proto::AgentId, orgbot_proto::TaskId) {
+    use orgbot_engine::Command;
+    use orgbot_proto::room::{LendItem, Risk, RoomAccess};
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "release".into(),
+        goal: "ship".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+        access: RoomAccess {
+            mode,
+            lend: vec![
+                LendItem {
+                    name: "wrangler".into(),
+                    label: "Cloudflare (Wrangler)".into(),
+                    paths: vec![".config/.wrangler".into()],
+                    risk: Risk::Risky,
+                },
+                LendItem {
+                    name: "docs".into(),
+                    label: "Docs reader".into(),
+                    paths: vec![".config/docs-reader".into()],
+                    risk: Risk::Regular,
+                },
+            ],
+        },
+    });
+    let lead = room
+        .seat(spec("lead", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    room.start().unwrap();
+    let created = room
+        .engine_mut()
+        .apply(Command::CreateTask {
+            title: "Publish the website".into(),
+            brief: String::new(),
+            by: None,
+            required_role: None,
+            priority: orgbot_proto::task::Priority::Normal,
+            acceptance_criteria: vec![],
+            depends_on: vec![],
+            origin: TaskOrigin::plain(),
+        })
+        .unwrap();
+    let task = created
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+            _ => None,
+        })
+        .unwrap();
+    for command in [
+        Command::OpenTask { task },
+        Command::ClaimTask { task, by: lead },
+        Command::StartTask { task, by: lead },
+    ] {
+        room.engine_mut().apply(command).unwrap();
+    }
+    (room, lead, task)
+}
+
+fn ask_access(
+    room: &mut Orchestrator,
+    by: orgbot_proto::AgentId,
+    task: orgbot_proto::TaskId,
+    items: &[&str],
+    action: orgbot_proto::decision::AccessAction,
+) -> Result<Vec<orgbot_proto::EventEnvelope>, orgbot_engine::EngineError> {
+    room.engine_mut().apply(orgbot_engine::Command::RequestAccess {
+        by,
+        task,
+        items: items.iter().map(|item| item.to_string()).collect(),
+        action,
+        reason: "publish the verified build".into(),
+    })
+}
+
+fn pending_count(room: &Orchestrator) -> usize {
+    room.engine().decisions().pending().count()
+}
+
+#[tokio::test]
+async fn each_access_mode_approves_what_it_should_and_asks_the_rest() {
+    use orgbot_proto::decision::AccessAction::*;
+    use orgbot_proto::room::AccessMode;
+
+    // Approval: everything is asked, and the task waits on it.
+    let (mut room, lead, task) = access_room(AccessMode::Approval);
+    ask_access(&mut room, lead, task, &["docs"], Inspect).unwrap();
+    assert_eq!(pending_count(&room), 1, "approval mode asks even for regular requests");
+    assert!(room.engine().lent_paths_for(lead).is_empty());
+
+    // Half approval: regular at once, risky asked.
+    let (mut room, lead, task) = access_room(AccessMode::HalfApproval);
+    ask_access(&mut room, lead, task, &["docs"], Inspect).unwrap();
+    assert_eq!(pending_count(&room), 0, "a regular request is approved at once");
+    assert_eq!(room.engine().lent_paths_for(lead), vec![".config/docs-reader".to_string()]);
+    assert!(room.engine().decisions().decisions.iter().any(|d| d
+        .answer
+        .as_ref()
+        .is_some_and(|a| a.note.starts_with("Approved automatically"))), "and recorded as an answered decision");
+    ask_access(&mut room, lead, task, &["wrangler"], Change).unwrap();
+    assert_eq!(pending_count(&room), 1, "a risky sign-in is asked");
+
+    // Auto: risky at once, critical asked, whatever the sign-in's own rating.
+    let (mut room, lead, task) = access_room(AccessMode::Auto);
+    ask_access(&mut room, lead, task, &["wrangler"], Release).unwrap();
+    assert_eq!(pending_count(&room), 0, "auto approves a risky release");
+    assert!(room.engine().lent_paths_for(lead).contains(&".config/.wrangler".to_string()));
+    ask_access(&mut room, lead, task, &["docs"], Destroy).unwrap();
+    assert_eq!(pending_count(&room), 1, "a critical action is asked even with a regular sign-in");
+    let (mut room, lead, task) = access_room(AccessMode::Auto);
+    ask_access(&mut room, lead, task, &["server"], Change).unwrap();
+    assert!(room.engine().server_access_for(lead), "the server key is lent like a sign-in");
+
+    // Full write: even critical requests are approved.
+    let (mut room, lead, task) = access_room(AccessMode::FullWrite);
+    ask_access(&mut room, lead, task, &["wrangler"], Destroy).unwrap();
+    assert_eq!(pending_count(&room), 0);
+    assert!(!room.engine().lent_paths_for(lead).is_empty());
+
+    // Lent only while the task is under way.
+    room.engine_mut()
+        .apply(orgbot_engine::Command::ReleaseTask { task, by: lead, reason: "done for now".into() })
+        .unwrap();
+    assert!(room.engine().lent_paths_for(lead).is_empty(), "a released task takes the loan away");
+
+    // Asking for something the owner does not lend says what is lent.
+    let (mut room, lead, task) = access_room(AccessMode::FullWrite);
+    let refused = ask_access(&mut room, lead, task, &["aws"], Inspect).unwrap_err();
+    assert!(refused.to_string().contains("wrangler"), "{refused}");
+}
+
+#[tokio::test]
+async fn an_owner_answer_lends_a_sign_in_for_the_task() {
+    use orgbot_proto::decision::{AccessAction, ACCESS_ALLOW};
+    let (mut room, lead, task) = access_room(orgbot_proto::room::AccessMode::Approval);
+    let asked = ask_access(&mut room, lead, task, &["wrangler"], AccessAction::Release).unwrap();
+    let decision = asked
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::DecisionAsked { decision } => Some(decision.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(decision.options.contains(&ACCESS_ALLOW.to_string()));
+    assert!(decision.because.contains("rated risky"), "{}", decision.because);
+    room.engine_mut()
+        .apply(orgbot_engine::Command::AnswerDecision {
+            decision: decision.id,
+            answer: orgbot_proto::decision::Answer {
+                chosen: ACCESS_ALLOW.into(),
+                note: String::new(),
+                at: orgbot_proto::Timestamp::now(),
+            },
+        })
+        .unwrap();
+    assert_eq!(room.engine().lent_paths_for(lead), vec![".config/.wrangler".to_string()]);
+    assert_eq!(room.engine().lendable_paths().len(), 2, "every lent path stays hidden from other turns");
+    let situation = orgbot_runtime::prompt::situation(&room.engine(), lead, orgbot_proto::event::Seq::ZERO);
+    assert!(situation.contains("Cloudflare (Wrangler) (in ~/.config/.wrangler)"), "{situation}");
 }

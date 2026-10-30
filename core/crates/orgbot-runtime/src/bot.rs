@@ -378,9 +378,8 @@ impl Bot {
                     .map(|path| path.to_string_lossy().into_owned()),
             );
             // Decided afresh each step: a release, block or hold since the
-            // last one takes the server key away from this one.
-            request =
-                request.with_server_access(engine.with(|engine| engine.server_access_for(self.spec.id)));
+            // last one takes the server key and lent sign-ins away from this one.
+            request = request.with_grants(engine.with(|engine| sandbox_grants(engine, self.spec.id)));
 
             if let Some(tx) = &sink {
                 let _ = tx.send(StreamEvent::Thinking).await;
@@ -544,10 +543,10 @@ impl Bot {
                     } else {
                         match &self.workspace {
                             Some(workspace) => {
-                                let server_access = engine
-                                    .with(|engine| engine.server_access_for(self.spec.id));
+                                let grants = engine
+                                    .with(|engine| sandbox_grants(engine, self.spec.id));
                                 workspace
-                                    .call_as(self.spec.id, name, input, server_access)
+                                    .call_as(self.spec.id, name, input, grants)
                                     .await
                             }
                             None => orgbot_tools::ToolOutcome {
@@ -1039,9 +1038,9 @@ async fn dispatch_room_mcp(
         )
     } else if let Some(workspace) = workspace {
         // A CLI bot's room workspace tools arrive here mid-episode; the
-        // owner's server-access grant applies to them as to an API bot's.
-        let server_access = engine.with(|engine| engine.server_access_for(actor));
-        workspace.call_as(actor, &name, &args, server_access).await
+        // owner's grants apply to them as to an API bot's.
+        let grants = engine.with(|engine| sandbox_grants(engine, actor));
+        workspace.call_as(actor, &name, &args, grants).await
     } else {
         orgbot_tools::ToolOutcome::error("No workspace attached")
     };
@@ -1083,6 +1082,17 @@ const MAX_HISTORY_CHARS: usize = 240_000;
 const COMPACTED_HISTORY_MARKER: &str = "[OrgBots local conversation summary v1]";
 /// Bound the summary so recent work retains most of the context budget.
 const MAX_COMPACTED_SUMMARY_CHARS: usize = 8_000;
+
+/// What `agent`'s sandbox may carry of the owner's right now: the bot server
+/// key and lent sign-ins it was granted for the work under way, with every
+/// other lendable path hidden.
+pub fn sandbox_grants(engine: &orgbot_engine::Engine, agent: AgentId) -> orgbot_providers::SandboxGrants {
+    orgbot_providers::SandboxGrants {
+        server_access: engine.server_access_for(agent),
+        lend: engine.lent_paths_for(agent),
+        hide: engine.lendable_paths(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1261,6 +1271,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::Manual,
             limits: RoomLimits::default(),
+            access: Default::default(),
         });
         room.apply(Command::JoinAgent {
             spec: Box::new(agent.clone()),
@@ -1316,6 +1327,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::Manual,
             limits: RoomLimits::default(),
+            access: Default::default(),
         });
         room.apply(Command::JoinAgent {
             spec: Box::new(agent.clone()),
@@ -1380,6 +1392,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::Manual,
             limits: RoomLimits::default(),
+            access: Default::default(),
         });
         room.apply(Command::JoinAgent {
             spec: Box::new(agent.clone()),
@@ -1524,6 +1537,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::Manual,
             limits: RoomLimits::default(),
+            access: Default::default(),
         });
         room.apply(Command::JoinAgent {
             spec: Box::new(spec.clone()),
@@ -1676,6 +1690,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::Manual,
             limits: RoomLimits::default(),
+            access: Default::default(),
         });
         room.apply(Command::JoinAgent {
             spec: Box::new(spec.clone()),
@@ -2075,7 +2090,7 @@ mod tests {
         let mut capabilities = crate::capabilities::Capabilities::default();
         let host = async {
             let call = calls.recv().await.unwrap();
-            let access = call.server_access;
+            let access = call.grants.server_access;
             call.reply.send(orgbot_tools::ToolOutcome::ok("ran")).unwrap();
             access
         };
@@ -2117,7 +2132,7 @@ mod tests {
         let _ = decision;
         let host = async {
             let call = calls.recv().await.unwrap();
-            let access = call.server_access;
+            let access = call.grants.server_access;
             call.reply.send(orgbot_tools::ToolOutcome::ok("ran")).unwrap();
             access
         };
@@ -2484,6 +2499,7 @@ mod mcp_tests {
             roster: vec![],
             completion: CompletionRule::Manual,
             limits: RoomLimits::default(),
+            access: Default::default(),
         });
         engine
             .apply(Command::JoinAgent {

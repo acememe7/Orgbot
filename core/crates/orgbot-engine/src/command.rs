@@ -205,6 +205,23 @@ pub enum Command {
         reason: String,
     },
 
+    /// Ask to use some of what the owner lends (the bot server key and the
+    /// sign-ins they list) for a task the bot holds. Depending on the room's
+    /// access mode and how the request is rated, it is approved on the spot or
+    /// asked like any question (see `Engine::request_access`).
+    RequestAccess {
+        /// The bot asking, which must hold the task.
+        by: AgentId,
+        /// The task the access is for.
+        task: TaskId,
+        /// What it asks for: `server` and the names of lent sign-ins.
+        items: Vec<String>,
+        /// What it says it will do, which can only raise the rating.
+        action: orgbot_proto::decision::AccessAction,
+        /// Why, shown to the owner.
+        reason: String,
+    },
+
     /// Propose to the owner that a task nobody should work on be retired. The
     /// owner's "Retire this task" answer retires it.
     ProposeRetire {
@@ -305,6 +322,7 @@ impl Command {
             Self::SetAuthorization { .. } => "set_authorization",
             Self::AskOwner { .. } => "ask_owner",
             Self::RequestServerAccess { .. } => "request_server_access",
+            Self::RequestAccess { .. } => "request_access",
             Self::ProposeRetire { .. } => "propose_retire",
             Self::AnswerDecision { .. } => "answer_decision",
             Self::KeepAlive { .. } => "keep_alive",
@@ -334,6 +352,7 @@ impl Command {
             | Self::RecordReview { task, .. } => Some(*task),
             Self::AskOwner { task: Some(task), .. } => Some(*task),
             Self::RequestServerAccess { task, .. } => Some(*task),
+            Self::RequestAccess { task, .. } => Some(*task),
             _ => None,
         }
     }

@@ -576,6 +576,64 @@ Path('/tmp/private.txt').write_text('temporary')
 
     @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
                          "requires Linux bubblewrap user namespaces")
+    def test_lent_sign_ins_are_hidden_unless_lent_and_then_in_the_bots_home(self):
+        # From the live room: the owner's Cloudflare sign-in was readable by
+        # every bot, while the bot that needed it for a release had none.
+        self.prepare("dev")
+        home = self._owner_home_with_secrets()
+        for relative, text in {
+            ".config/.wrangler/config/default.toml": "cloudflare token",
+            ".config/custom-tool/token": "custom token",
+            ".local/share/com.orgbot.app/allowances/policies.json": "tool approvals",
+        }.items():
+            (home / relative).parent.mkdir(parents=True, exist_ok=True)
+            (home / relative).write_text(text, encoding="utf-8")
+        code = (
+            "import os, sys; from pathlib import Path; owner = Path(sys.argv[1]); bot = Path(os.environ['HOME'])\n"
+            "lent = sys.argv[2] == 'lent'\n"
+            "checks = ["
+            "os.listdir(owner / '.config/.wrangler') == [],"
+            "os.listdir(owner / '.config/custom-tool') == [],"
+            "not (owner / '.local/share/com.orgbot.app/allowances').exists(),"
+            "(bot / '.config/.wrangler/config/default.toml').exists() == lent,"
+            "not (bot / '.config/custom-tool').exists()]\n"
+            "if lent:\n"
+            "    checks.append((bot / '.config/.wrangler/config/default.toml').read_text() == 'cloudflare token')\n"
+            "    (bot / '.config/.wrangler/config/renewed').write_text('renewed token')\n"
+            "raise SystemExit(0 if all(checks) else 10 + checks.index(False))"
+        )
+        owner = SimpleNamespace(pw_dir=os.fspath(home))
+        hide = [".config/.wrangler", ".config/custom-tool"]
+        def run(state, read_only=False, lend=None):
+            return workspace._run(os.fspath(self.state), "dev", [sys.executable, "-c", code, os.fspath(home), state], read_only=read_only, profiles=[], private_home_arg=None, mcp_socket=None, hide=hide, lend=lend)
+        with patch.object(workspace.pwd, "getpwuid", return_value=owner):
+            self.assertEqual(run("hidden"), 0, "nothing the owner lends is visible unless lent")
+            self.assertEqual(run("hidden", read_only=True, lend=[".config/.wrangler"]), 0, "never lent to a read-only turn")
+            self.assertEqual(run("lent", lend=[".config/.wrangler"]), 0, "lent: in the bot's own home")
+            with self.assertRaises(workspace.WorkspaceError):
+                run("lent", lend=[".ssh"])
+            with self.assertRaises(workspace.WorkspaceError):
+                run("lent", lend=[".config/missing-tool"])
+            with self.assertRaises(workspace.WorkspaceError):
+                run("lent", lend=["../escape"])
+        self.assertEqual((home / ".config/.wrangler/config/renewed").read_text(encoding="utf-8"), "renewed token", "a renewed sign-in reaches the owner")
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
+                         "requires Linux bubblewrap user namespaces")
+    def test_a_workspace_that_was_read_only_never_gets_the_server_key(self):
+        # The grant tested the --read-only flag, not the workspace's own
+        # lasting read-only state, which the room-tool path does not repeat.
+        self.prepare("dev", read_only=True)
+        home = self._owner_home_with_secrets()
+        xdg, bot_ssh = self._bot_server_key()
+        code = "import os, sys; raise SystemExit(0 if os.listdir(os.path.join(sys.argv[1], '.ssh')) == [] else 9)"
+        owner = SimpleNamespace(pw_dir=os.fspath(home))
+        with patch.object(workspace.pwd, "getpwuid", return_value=owner), patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg)}):
+            result = workspace._run(os.fspath(self.state), "dev", [sys.executable, "-c", code, os.fspath(home)], read_only=False, profiles=[], private_home_arg=None, mcp_socket=None, server_access=True)
+        self.assertEqual(result, 0)
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
+                         "requires Linux bubblewrap user namespaces")
     def test_the_bot_server_key_is_only_in_a_turn_the_owner_allowed_it(self):
         # From the live room: a bot installed a server release over SSH while
         # the rest of the room had it on hold, because the bot server key was

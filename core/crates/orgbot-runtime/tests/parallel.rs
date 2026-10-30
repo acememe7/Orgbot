@@ -140,6 +140,7 @@ fn room_spec(parallel: u32) -> RoomSpec {
             max_parallel_turns: parallel,
             ..RoomLimits::default()
         },
+        access: Default::default(),
     }
 }
 

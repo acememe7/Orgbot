@@ -49,6 +49,7 @@ fn room() -> Room {
         roster: vec![],
         completion: CompletionRule::AllTasksTerminal,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
 
     // Roles that can cover for one another, as a sixteen-bot room needs.

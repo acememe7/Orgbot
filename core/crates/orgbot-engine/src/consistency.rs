@@ -330,6 +330,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::AllTasksTerminal,
             limits: RoomLimits::default(),
+            access: Default::default(),
         });
         let lead = AgentSpec::new("lead", "Lead", ProviderRef::Scripted { script: "x".into() })
             .with_roles(["coordinator"])

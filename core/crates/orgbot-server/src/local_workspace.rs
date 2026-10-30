@@ -164,7 +164,7 @@ impl LocalWorkspaceHost {
             let host = Arc::clone(&self);
             if matches!(call.name.as_str(), "workspace_run" | "workspace_verify") {
                 let outcome = self
-                    .run(call.agent, &call.name, &call.arguments, call.server_access)
+                    .run(call.agent, &call.name, &call.arguments, call.grants)
                     .await;
                 let _ = call.reply.send(outcome);
                 continue;
@@ -292,8 +292,9 @@ impl LocalWorkspaceHost {
         agent: orgbot_proto::AgentId,
         name: &str,
         args: &Value,
-        server_access: bool,
+        grants: impl Into<orgbot_providers::SandboxGrants>,
     ) -> ToolOutcome {
+        let grants = grants.into();
         let execute = async {
             let verify = name == "workspace_verify";
             if verify && self.guard_state.is_none() {
@@ -329,8 +330,8 @@ impl LocalWorkspaceHost {
             let mut command = tokio::process::Command::from(guard.command("run")?);
             if verify {
                 command.args(["--verify", "--read-only"]);
-            } else if server_access {
-                command.arg("--server-access");
+            } else {
+                command.args(grants.launcher_args());
             }
             command
                 .args(["--", "/bin/sh", "-c", script])
@@ -1713,7 +1714,7 @@ mod tests {
             agent: AgentId::new(),
             name: "workspace_write".into(),
             arguments: json!({"path":"cancelled.txt", "content":"must not be written"}),
-            server_access: false,
+            grants: Default::default(),
             reply,
         })
         .unwrap();

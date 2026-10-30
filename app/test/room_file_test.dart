@@ -9,6 +9,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:orgbot_app/orgbot/credentials.dart';
+import 'package:orgbot_app/orgbot/lend_settings.dart';
 import 'package:orgbot_app/orgbot/models.dart';
 import 'package:orgbot_app/orgbot/model_catalog.dart';
 import 'package:orgbot_app/orgbot/room_file.dart';
@@ -134,6 +135,37 @@ void main() {
       canRunClis: false,
     ).toml;
     expect(toml, contains('max_parallel_turns = 1'));
+  });
+
+  test('the room file carries the access mode and only the sign-ins you lend', () {
+    final bot = BotDef(name: 'Demo', provider: ProviderKind.scripted);
+    final lent = LendEntry(
+      name: 'wrangler',
+      label: 'Cloudflare (Wrangler)',
+      paths: ['.config/.wrangler'],
+      enabled: true,
+    );
+    final off = LendEntry(name: 'gh', label: 'GitHub CLI', paths: ['.config/gh']);
+    final toml = buildRoomFile(
+      RoomDef(name: 'Release', goal: 'ship it', access: AccessMode.halfApproval),
+      [bot],
+      canRunClis: false,
+      lend: [lent, off],
+    ).toml;
+    expect(toml, contains('access = "half_approval"'));
+    expect(toml, contains('[[room.lend]]\nname = "wrangler"'));
+    expect(toml, contains('paths = [".config/.wrangler"]'));
+    expect(toml, contains('risk = "risky"'));
+    expect(toml, isNot(contains('"gh"')), reason: 'a sign-in you did not turn on is not offered');
+  });
+
+  test('a room saved before access modes existed asks for everything', () {
+    final restored = RoomDef.fromJson({'id': 'room_old', 'name': 'Existing'});
+    expect(restored.access, AccessMode.approval);
+    final saved = RoomDef.fromJson(
+      RoomDef(name: 'Busy', access: AccessMode.auto).toJson(),
+    );
+    expect(saved.access, AccessMode.auto);
   });
 
   test('a room saved before the setting existed gets the default', () {

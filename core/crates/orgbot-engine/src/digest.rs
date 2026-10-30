@@ -670,9 +670,20 @@ fn chain_to(
 
 /// The answer to `decision` that grants access beyond a bot's sandbox, if any.
 fn granting_answer(decision: &orgbot_proto::decision::Decision) -> Option<String> {
-    use orgbot_proto::decision::{RETIRE_TASK, RETIRE_TASK_ALLOW, SERVER_ACCESS, SERVER_ACCESS_ALLOW};
-    if decision.envelope.allowed.iter().any(|action| action == SERVER_ACCESS) {
-        return Some(SERVER_ACCESS_ALLOW.to_string());
+    use orgbot_proto::decision::{
+        ACCESS_ALLOW, RETIRE_TASK, RETIRE_TASK_ALLOW, SERVER_ACCESS, SERVER_ACCESS_ALLOW,
+    };
+    if decision
+        .envelope
+        .allowed
+        .iter()
+        .any(|action| action == SERVER_ACCESS || action.starts_with("access:"))
+    {
+        return decision
+            .options
+            .iter()
+            .find(|option| option.as_str() == SERVER_ACCESS_ALLOW || option.as_str() == ACCESS_ALLOW)
+            .cloned();
     }
     // Retiring cannot be undone from the app.
     if decision.envelope.allowed.iter().any(|action| action == RETIRE_TASK) {

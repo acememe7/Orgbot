@@ -24,9 +24,10 @@ pub struct WorkspaceCall {
     pub agent: AgentId,
     pub name: String,
     pub arguments: Value,
-    /// Whether the owner has allowed this bot the bot server key for the work
-    /// it is doing now. Set by the room, never from the model's arguments.
-    pub server_access: bool,
+    /// What the owner has allowed this bot's sandbox for the work it is doing
+    /// now (the bot server key, lent sign-ins). Set by the room, never from
+    /// the model's arguments.
+    pub grants: orgbot_providers::SandboxGrants,
     pub reply: oneshot::Sender<ToolOutcome>,
 }
 
@@ -163,8 +164,9 @@ impl Workspace {
         agent: AgentId,
         name: &str,
         arguments: &Value,
-        server_access: bool,
+        grants: impl Into<orgbot_providers::SandboxGrants>,
     ) -> ToolOutcome {
+        let grants = grants.into();
         if !self.definitions().iter().any(|tool| tool.name == name) {
             return failure("This workspace does not permit that tool.");
         }
@@ -186,7 +188,7 @@ impl Workspace {
             agent,
             name: name.into(),
             arguments: arguments.clone(),
-            server_access,
+            grants,
             reply,
         };
         match tokio::time::timeout(
@@ -361,6 +363,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::Manual,
             limits: RoomLimits::default(),
+            access: Default::default(),
         });
         let spec = AgentSpec::new(
             "worker",

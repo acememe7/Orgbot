@@ -134,7 +134,8 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            configured tool or filesystem permissions. Continue from the answer instead \
            of asking the same question again. While it waits in the owner's queue, \
            wait for the answer: you will be woken when it comes. Do not hand the wait \
-           to another bot or post reminders about it.\n\
+           to another bot or post reminders about it. Use ask_owner only for a question \
+           you need answered, never to record a status, a hold or a decision already made.\n\
          - Avoid repeating another bot's status or asking it to confirm a requirement already stated. \
            Contribute new evidence, a decision, or completed work.\n\
          - If you need someone to *do* something, use offer_handoff, not a chat \
@@ -226,7 +227,9 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
         "\nFile retention: never permanently delete project files without explicit \
          owner permission. For recoverable removal use the installed shell command \
          `orgbot-trash move --project PROJECT -- PATH...`, with each argument safely \
-         quoted. It moves files to the owner's configured trash by project. In your working copy it \
+         quoted and each PATH inside your working copy (relative to your current directory), \
+         never the original project's path, which is read-only to you. The original then goes \
+         to the owner's trash when the owner approves the removal. In your working copy it \
          needs no setup: do not configure trash storage or ask the owner to choose one. Do not use rm, unlink, \
          deletion patches, git clean, or other deletion shortcuts. If the command or \
          selected storage is unavailable, preserve the files and ask the owner. The independent \
@@ -236,15 +239,7 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
     );
 
     if !spec.autonomy.review_only {
-        out.push_str(
-            "\nServers: your sandbox has no server key. If a task you hold needs a \
-             server (deploying, reading server logs, restarting a service), call \
-             request_server_access with that task and what you will do; the owner \
-             decides. Once allowed, the bot server key is in ~/.ssh only while you \
-             work that task, and not while it is blocked, waiting on unfinished work, \
-             on hold, in review or done. Never deploy or change a server for work \
-             that has not passed review, and never for a task someone else holds.\n",
-        );
+        out.push_str(&access_rules(&engine.room().spec.access));
     }
 
     if spec.roles.iter().any(|role| role == "coordinator") {
@@ -370,11 +365,20 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
         out.push('\n');
     }
 
+    let mut lent = Vec::new();
     if engine.server_access_for(agent) {
-        out.push_str(
-            "Server access: the owner allowed you the bot server key for your current \
-             task. It is in ~/.ssh for this turn only.\n\n",
-        );
+        lent.push("the bot server key (in ~/.ssh)".to_string());
+    }
+    for item in engine.lent_to(agent) {
+        let label = if item.label.is_empty() { &item.name } else { &item.label };
+        let paths: Vec<String> = item.paths.iter().map(|path| format!("~/{path}")).collect();
+        lent.push(format!("{label} (in {})", paths.join(", ")));
+    }
+    if !lent.is_empty() {
+        out.push_str(&format!(
+            "Lent to you for your current task, for this turn only: {}.\n\n",
+            lent.join("; ")
+        ));
     }
 
     // Then this bot's own work.
@@ -628,6 +632,39 @@ fn owner_name_note(name: &str) -> String {
     )
 }
 
+/// How a bot gets the server key or one of the owner's sign-ins in this room.
+fn access_rules(access: &orgbot_proto::room::RoomAccess) -> String {
+    use orgbot_proto::room::AccessMode;
+    let mut offered = vec!["server (the bot server key, risky)".to_string()];
+    for item in &access.lend {
+        let label = if item.label.is_empty() { &item.name } else { &item.label };
+        offered.push(format!("{} ({label}, {})", item.name, item.risk.as_str()));
+    }
+    let mode = match access.mode {
+        AccessMode::Approval => "In this room the owner approves every request.",
+        AccessMode::HalfApproval => {
+            "In this room regular requests are approved at once; risky and critical ones wait for the owner."
+        }
+        AccessMode::Auto => {
+            "In this room requests are approved at once unless rated critical, which wait for the owner."
+        }
+        AccessMode::FullWrite => "In this room every request is approved at once.",
+    };
+    format!(
+        "\nServers and the owner's sign-ins: your sandbox has no server key and none of the \
+         owner's sign-ins. If a task you hold needs one (deploying, reading server logs, \
+         publishing with a tool the owner is signed in to), call request_access with that \
+         task, what you will use, what you will do (inspect, change, release, destroy or \
+         spend: say it honestly, it decides who approves) and why. The owner lends: {}. {mode} \
+         A request is rated the higher of what you will do and what you use. Once allowed, it \
+         is in your sandbox only while you work that task, and not while it is blocked, \
+         waiting on unfinished work, on hold, in review or done. Never deploy or change a live \
+         service for work that has not passed review, and never for a task someone else \
+         holds.\n",
+        offered.join(", ")
+    )
+}
+
 /// The most of what it missed a bot is shown, in bytes.
 ///
 /// From the live room: @grok sat out eight hours while the room posted 258
@@ -792,6 +829,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::Manual,
             limits: RoomLimits::default(),
+            access: Default::default(),
         });
         let spec = AgentSpec::new(
             "dev",
@@ -816,6 +854,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::Manual,
             limits: RoomLimits::default(),
+            access: Default::default(),
         });
         let spec = AgentSpec::new(
             "lead",

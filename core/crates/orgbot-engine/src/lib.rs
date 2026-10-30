@@ -17,6 +17,7 @@
 //!     roster: vec![],
 //!     completion: CompletionRule::AllTasksTerminal,
 //!     limits: RoomLimits::default(),
+//!     access: Default::default(),
 //! });
 //! engine.apply(Command::StartRoom).unwrap();
 //! ```

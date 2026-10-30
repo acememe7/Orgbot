@@ -194,6 +194,12 @@ pub struct RoomSection {
     /// Safety rails.
     #[serde(default)]
     pub limits: Option<RoomLimits>,
+    /// How much of what bots ask to use the owner approves by hand.
+    #[serde(default)]
+    pub access: orgbot_proto::room::AccessMode,
+    /// The owner's sign-ins they lend bots, each for one approved task.
+    #[serde(default)]
+    pub lend: Vec<orgbot_proto::room::LendItem>,
 }
 
 /// The completion rule, as a friendly string in TOML.
@@ -566,7 +572,7 @@ impl RoomConfig {
         )
     }
 
-    #[cfg(test)]
+#[cfg(test)]
     fn resolve_using(
         &self,
         build: impl Fn(&ProviderRef) -> orgbot_providers::Result<Arc<dyn Provider>>,
@@ -689,12 +695,17 @@ impl RoomConfig {
             })
             .collect();
 
+        validate_lend(&self.room.lend)?;
         let spec = RoomSpec {
             name: self.room.name.clone(),
             goal: self.room.goal.clone(),
             roster: bots.iter().map(|b| b.spec.id).collect(),
             completion: self.room.completion.into(),
             limits: self.room.limits.clone().unwrap_or_default(),
+            access: orgbot_proto::room::RoomAccess {
+                mode: self.room.access,
+                lend: self.room.lend.clone(),
+            },
         };
 
         Ok(ResolvedRoom {
@@ -794,6 +805,60 @@ impl RoomConfig {
 #[allow(dead_code)]
 type SeedTaskId = TaskId;
 
+/// Check the owner's lend list before any sandbox is built from it.
+///
+/// Names are what bots ask for; paths are relative to the owner's home and may
+/// not reach outside it or into what OrgBots never lends (its own data, SSH
+/// and GnuPG keys, and the model CLIs' sign-ins, which bots get their own
+/// copies of). The sandbox launcher checks paths again before mounting them.
+fn validate_lend(lend: &[orgbot_proto::room::LendItem]) -> Result<(), ConfigError> {
+    const NEVER: &[&str] = &[
+        ".local/share/orgbot", ".config/orgbot", ".local/share/com.orgbot.app",
+        ".ssh", ".gnupg", ".codex", ".claude", ".claude.json", ".grok",
+        ".gemini", ".config/opencode", ".local/share/opencode",
+    ];
+    let mut names = std::collections::BTreeSet::new();
+    for item in lend {
+        let name = item.name.as_str();
+        let valid_name = !name.is_empty()
+            && name.len() <= 40
+            && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+        if !valid_name || name == orgbot_proto::decision::SERVER_ITEM {
+            return Err(ConfigError::Invalid(format!(
+                "lent sign-in name `{name}` must be 1-40 lowercase letters, digits, - or _, and not `server`"
+            )));
+        }
+        if !names.insert(name) {
+            return Err(ConfigError::Invalid(format!("lent sign-in `{name}` is listed twice")));
+        }
+        if item.paths.is_empty() {
+            return Err(ConfigError::Invalid(format!("lent sign-in `{name}` names no paths")));
+        }
+        for path in &item.paths {
+            let parts: Vec<&str> = path.split('/').collect();
+            let clean = !path.is_empty()
+                && !path.starts_with('/')
+                && parts.iter().all(|part| !part.is_empty() && *part != "." && *part != "..");
+            if !clean {
+                return Err(ConfigError::Invalid(format!(
+                    "lent sign-in `{name}` path `{path}` must be a plain path relative to your home"
+                )));
+            }
+            let forbidden = NEVER.iter().any(|never| {
+                path == never
+                    || path.starts_with(&format!("{never}/"))
+                    || never.starts_with(&format!("{path}/"))
+            });
+            if forbidden {
+                return Err(ConfigError::Invalid(format!(
+                    "lent sign-in `{name}` path `{path}` is never lent to bots"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,6 +894,40 @@ mod tests {
         required_role = "writer"
         priority = "high"
     "#;
+
+    #[test]
+    fn a_room_carries_its_access_mode_and_the_owners_lend_list() {
+        let toml = SAMPLE.replace(
+            "completion = \"all_tasks_terminal\"",
+            "completion = \"all_tasks_terminal\"\naccess = \"half_approval\"\n\n[[room.lend]]\nname = \"wrangler\"\nlabel = \"Cloudflare (Wrangler)\"\npaths = [\".config/.wrangler\"]\nrisk = \"risky\"",
+        );
+        let resolved = RoomConfig::parse(&toml, "access.toml").unwrap().resolve().unwrap();
+        assert_eq!(resolved.spec.access.mode, orgbot_proto::room::AccessMode::HalfApproval);
+        assert_eq!(resolved.spec.access.lend[0].paths, vec![".config/.wrangler".to_string()]);
+        // Older room files have neither and keep asking for everything.
+        let older = RoomConfig::parse(SAMPLE, "sample.toml").unwrap().resolve().unwrap();
+        assert_eq!(older.spec.access, orgbot_proto::room::RoomAccess::default());
+    }
+
+    #[test]
+    fn the_lend_list_never_reaches_keys_orgbots_data_or_outside_the_home() {
+        for (name, path) in [
+            ("keys", ".ssh"),
+            ("orgbot", ".local/share/orgbot/.services"),
+            ("codex", ".codex/auth.json"),
+            ("escape", "../other-user"),
+            ("absolute", "/etc/shadow"),
+            ("server", ".config/fine"),
+            ("Bad Name", ".config/fine"),
+        ] {
+            let toml = SAMPLE.replace(
+                "completion = \"all_tasks_terminal\"",
+                &format!("completion = \"all_tasks_terminal\"\n\n[[room.lend]]\nname = \"{name}\"\npaths = [\"{path}\"]"),
+            );
+            let error = RoomConfig::parse(&toml, "lend.toml").unwrap().resolve().err();
+            assert!(error.is_some(), "{name} {path} must be refused");
+        }
+    }
 
     #[test]
     fn a_sample_room_parses_and_resolves() {

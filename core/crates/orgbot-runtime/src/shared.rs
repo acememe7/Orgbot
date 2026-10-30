@@ -173,6 +173,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::AllTasksTerminal,
             limits: RoomLimits::default(),
+            access: Default::default(),
         })
     }
 

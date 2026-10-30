@@ -20,6 +20,22 @@ handoff fix prepared as 2.1.1, which was never published.
   sends through the room bridge still ran without it. The republished package
   passes the grant on that path too, with a test that fails without the fix;
   installations of the first 2.2.0 package need `apt install --reinstall`.
+- **Access modes and lent sign-ins.** Each room has an access mode: Approval
+  (the default) asks you for everything, Half approval approves regular
+  requests, Auto approves everything but critical requests, and Full write
+  approves everything while bots still write only in their own copy.
+  Questions about the work always reach you. Bots ask with `request_access`,
+  saying what they will use and do; a request is rated the higher of the action
+  (release is risky, deleting or spending critical) and the risk you gave the
+  tool. Approvals by mode are recorded as answered decisions. Outside tool calls
+  count as risky. **Connections & tools → Sign-ins bots may use** lists tools
+  such as Wrangler, the GitHub CLI and Vercel, all off until you turn them on;
+  a lent sign-in is mounted into the bot's own home for that task only. In the
+  live room every bot could read the owner's Cloudflare sign-in while the bot
+  that needed it for a release had none. Deploy tools' sign-ins and the app's
+  own support folder are now hidden from bots, and so is OrgBots' data where
+  `XDG_DATA_HOME` moves it. A workspace that was ever read-only never gets the
+  server key.
 - **Pausing loses no work.** Pause now stops new turns and lets the bots already
   in a turn finish it, then pauses; the room shows "Pausing after current turns"
   until it is safe to close or update. "Stop turns now" in the room menu cuts
@@ -30,6 +46,9 @@ handoff fix prepared as 2.1.1, which was never published.
   and it is retired, so it stops waking bots. In the live room an obsolete task
   woke idle bots every turn while the bots asked you to archive it in an app
   that had no way to.
+- **Removing files from a working copy.** Bots are told to pass paths inside
+  their working copy to `orgbot-trash`, and the helper says so when given the
+  original project's path instead of sending the bot to configure your trash.
 - **Leftover copies are cleaned up.** When a room starts, working copies of
   bots no longer in it are removed if they hold no unmerged work; copies that
   might hold unsaved work are kept and named in the room. In the live room such
@@ -52,7 +71,8 @@ handoff fix prepared as 2.1.1, which was never published.
   is waited out instead of faulting the bot. A lost sign-in names the CLI to
   sign in to again.
 - **Less noise.** A question from one bot to another no longer pages you, and
-  bots post at most one short room message per turn. A bot returning after a
+  bots post at most one short room message per turn. Bots may not put a status
+  or a hold in your queue as if it were a question. A bot returning after a
   long absence is shown the newest 32 KB of what it missed, messages to it and
   from you first, with a count of what was left out. In the live room a bot
   away for eight hours was due 133 KB of catch-up, more than Linux allows in
@@ -87,15 +107,19 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 935 passed, zero failures, three ignored.
-  New tests cover the server-key grant and its sandbox mount, per-turn access,
+- Full Rust workspace (`--locked`): 942 passed, zero failures, three ignored.
+  New tests cover the four access modes, a lent sign-in reaching a real CLI turn
+  through the sandbox launcher, the lend list's limits,
+  outside tool calls by mode, the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
   pause and held rooms, retiring tasks and leftover-copy cleanup; each was checked to fail without
   its fix.
-- Full Flutter tests: 366 passed, five skipped. Flutter analysis: no issues.
-- Workspace sandbox helper: 68 passed, including real bubblewrap checks that a
-  turn the owner did not allow, or a read-only turn, has no server key anywhere.
-  Trash helper: 30 passed.
+- Full Flutter tests: 371 passed, five skipped. Flutter analysis: no issues.
+- Workspace sandbox helper: 70 passed, including real bubblewrap checks that a
+  turn the owner did not allow, or a read-only turn, has no server key anywhere,
+  that lent sign-ins are hidden unless lent and then appear only in the bot's
+  home, and that a once read-only workspace never gets the key. Trash helper: 30
+  passed.
 - Linux acceptance: 17 passed, zero failed or skipped.
 - Package build test, website checks (6 pages) and website consent test passed.
 - Dependencies are unchanged from 2.1.0 (`Cargo.lock` is identical).
@@ -103,11 +127,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`f6e4337073700fc535c16f74919ac5a121378a1b5a4a91be303610507c5083f4`.
+`ff07d0bebba149e8024b988a61548a09d821ee2a391bebe1a2ee9b7897131168`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `666bf3f6904d7296196e7507d5b7e6a727ff2216b17c7a9b9e59b365d0d68596` |
+| orgbots_2.2.0_amd64.deb | `38b4a42df25e264762ab01b447b6e4fd896da98284ad7ddcf8c6dea246b58c30` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication

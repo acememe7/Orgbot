@@ -15,9 +15,9 @@ use orgbot_proto::agent::AgentStatus;
 use orgbot_proto::artifact::{Artifact, ArtifactBody};
 use orgbot_proto::convergence::{self, Convergence};
 use orgbot_proto::decision::{
-    server_access_scope, task_scope, Answer, Decision, DecisionLog, Governance, Request, Settled,
-    RETIRE_TASK, RETIRE_TASK_ALLOW, RETIRE_TASK_KEEP, SERVER_ACCESS, SERVER_ACCESS_ALLOW,
-    SERVER_ACCESS_DENY,
+    lend_action, server_access_scope, task_scope, AccessAction, Answer, Decision, DecisionLog,
+    Governance, Request, Settled, ACCESS_ALLOW, RETIRE_TASK, RETIRE_TASK_ALLOW, RETIRE_TASK_KEEP,
+    SERVER_ACCESS, SERVER_ACCESS_ALLOW, SERVER_ACCESS_DENY, SERVER_ITEM,
 };
 use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope, Seq};
 use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness, TaskKind, TaskOrigin};
@@ -1880,6 +1880,13 @@ impl Engine {
             Command::RequestServerAccess { by, task, reason } => {
                 self.request_server_access(by, task, reason)
             }
+            Command::RequestAccess {
+                by,
+                task,
+                items,
+                action,
+                reason,
+            } => self.request_access(by, task, items, action, reason),
             Command::ProposeRetire { by, task, reason } => self.propose_retire(by, task, reason),
 
             Command::AnswerDecision { decision, answer } => self.answer_decision(decision, answer),
@@ -2388,35 +2395,125 @@ impl Engine {
         task: TaskId,
         reason: String,
     ) -> Result<Vec<EventEnvelope>> {
+        self.request_access(by, task, vec![SERVER_ITEM.into()], AccessAction::Change, reason)
+    }
+
+    /// Ask to use some of what the owner lends for `task`.
+    ///
+    /// The request is rated the higher of what the bot says it will do and the
+    /// risk of each thing asked for (the server key counts as risky). When the
+    /// room's access mode approves that rating, the request is recorded as a
+    /// decision answered on the spot, so the grant is still an answered decision
+    /// the owner can see in the log and a restored room replays. Otherwise it
+    /// is asked, and the task waits on the answer.
+    fn request_access(
+        &mut self,
+        by: AgentId,
+        task: TaskId,
+        items: Vec<String>,
+        action: AccessAction,
+        reason: String,
+    ) -> Result<Vec<EventEnvelope>> {
+        use orgbot_proto::room::Risk;
         let spec = self.require_agent(by)?;
         if spec.autonomy.review_only {
             return Err(EngineError::NotPermitted {
                 agent: by,
-                action: "use the server key as a review-only bot".into(),
+                action: "use the owner's server key or sign-ins as a review-only bot".into(),
             });
         }
         let handle = spec.handle.clone();
         let reason = reason.trim().to_string();
         if reason.is_empty() || reason.chars().count() > 500 {
             return Err(EngineError::InvalidOwnerQuestion {
-                reason: "say in 1–500 characters what the server is needed for".into(),
+                reason: "say in 1–500 characters what you will do with it".into(),
             });
         }
+        let mut items: Vec<String> = items.iter().map(|item| item.trim().to_string()).collect();
+        items.sort();
+        items.dedup();
+        items.retain(|item| !item.is_empty());
+        if items.is_empty() {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "name at least one thing to use".into(),
+            });
+        }
+        let access = &self.room.spec.access;
+        let mut risk = action.risk();
+        let mut labels = Vec::new();
+        for item in &items {
+            if item == SERVER_ITEM {
+                risk = risk.max(Risk::Risky);
+                labels.push("the bot server key".to_string());
+            } else if let Some(lent) = access.item(item) {
+                risk = risk.max(lent.risk);
+                labels.push(if lent.label.is_empty() { lent.name.clone() } else { lent.label.clone() });
+            } else {
+                let mut offered = vec![SERVER_ITEM.to_string()];
+                offered.extend(access.lend.iter().map(|lent| lent.name.clone()));
+                return Err(EngineError::InvalidOwnerQuestion {
+                    reason: format!(
+                        "the owner does not lend \"{item}\"; ask for one of: {}",
+                        offered.join(", ")
+                    ),
+                });
+            }
+        }
         self.require_assignee(task, by)?;
-        if self.server_access_granted(task, by) {
+        let actions: Vec<String> = items
+            .iter()
+            .map(|item| if item == SERVER_ITEM { SERVER_ACCESS.into() } else { lend_action(item) })
+            .collect();
+        if actions.iter().all(|action| self.access_granted(task, by, action)) {
             return Ok(Vec::new());
         }
+        let mode = access.mode;
         let title = self.require_task(task)?.title.clone();
+        let allow = if items == [SERVER_ITEM] { SERVER_ACCESS_ALLOW } else { ACCESS_ALLOW };
         let mut proposed = Decision::ask(
             self.room.id,
-            format!("@{handle} asks to use the bot server key for \"{title}\": {reason}"),
+            format!(
+                "@{handle} asks to use {} for \"{title}\" ({}, rated {}): {reason}",
+                labels.join(" and "),
+                action.as_str(),
+                risk.as_str()
+            ),
         );
         proposed.owner_question = true;
-        proposed.options = vec![SERVER_ACCESS_ALLOW.into(), SERVER_ACCESS_DENY.into()];
-        proposed.envelope.allowed = vec![SERVER_ACCESS.into()];
+        proposed.options = vec![allow.into(), SERVER_ACCESS_DENY.into()];
+        proposed.envelope.allowed = actions;
         proposed.envelope.environment = server_access_scope(task);
         proposed.task = Some(task);
-        self.put_to_owner(by, Some(task), proposed)
+        if !mode.approves(risk) {
+            return self.put_to_owner(by, Some(task), proposed);
+        }
+        // Approved by the room's mode: not parked, answered at once.
+        let mut events = self.put_to_owner(by, None, proposed)?;
+        let asked = events.iter().find_map(|envelope| match &envelope.event {
+            Event::DecisionAsked { decision } => Some(decision.id),
+            _ => None,
+        });
+        let Some(decision) = asked else {
+            return Ok(events);
+        };
+        let answer = Answer {
+            chosen: allow.into(),
+            note: format!(
+                "Approved automatically: this room is in {} mode and the request is rated {}.",
+                mode.label(),
+                risk.as_str()
+            ),
+            at: Timestamp::now(),
+        };
+        if self.decisions.answer(decision, answer.clone()) {
+            let note = answer.note.clone();
+            events.push(self.emit(Event::DecisionAnswered { decision, answer }));
+            let message = ChatMessage::system(self.room.id, format!("{note} Granted for \"{title}\"."))
+                .to_agents(vec![by])
+                .with_intent(orgbot_proto::chat::MessageIntent::Answer);
+            events.extend(self.post_message(message)?);
+        }
+        Ok(events)
     }
 
     /// Propose to the owner that `task` be retired, on behalf of a coordinator.
@@ -2468,39 +2565,83 @@ impl Engine {
 
     /// Whether the owner has allowed `agent` the bot server key for `task`.
     fn server_access_granted(&self, task: TaskId, agent: AgentId) -> bool {
-        let request = Request::new(SERVER_ACCESS, server_access_scope(task));
+        self.access_granted(task, agent, SERVER_ACCESS)
+    }
+
+    /// Whether an answered decision allows `agent` the action class `action`
+    /// (the server key, or `access:<name>` for a lent sign-in) for `task`.
+    fn access_granted(&self, task: TaskId, agent: AgentId, action: &str) -> bool {
+        let request = Request::new(action, server_access_scope(task));
         let now = Timestamp::now();
         self.decisions.decisions.iter().any(|decision| {
             decision.task == Some(task)
                 && decision.is_authoritative()
                 && decision.asked_by.contains(&agent)
                 && decision.envelope.covers(&request, now).is_ok()
-                && decision
-                    .answer
-                    .as_ref()
-                    .is_some_and(|answer| answer.chosen == SERVER_ACCESS_ALLOW)
+                && decision.answer.as_ref().is_some_and(|answer| {
+                    answer.chosen == SERVER_ACCESS_ALLOW || answer.chosen == ACCESS_ALLOW
+                })
+        })
+    }
+
+    /// Tasks `agent` may use what it was lent for right now: held by it, under
+    /// way (claimed or in progress, so not blocked, in review or finished),
+    /// nothing it depends on unfinished, and no hold on it. None for a
+    /// review-only bot.
+    fn tasks_open_to_access(&self, agent: AgentId) -> impl Iterator<Item = &Task> {
+        let allowed = self.specs.get(&agent).is_some_and(|spec| !spec.autonomy.review_only);
+        self.tasks.values().filter(move |task| {
+            allowed
+                && task.assignee == Some(agent)
+                && matches!(task.state, TaskState::Claimed | TaskState::InProgress)
+                && task.authorization == AuthorizationState::Authorized
+                && self.first_unmet_dependency(task).is_none()
         })
     }
 
     /// Whether `agent` may have the bot server key in its sandbox right now.
     ///
-    /// Only while it holds a task the owner allowed it the key for, that task
-    /// is under way (claimed or in progress, so not blocked, in review or
-    /// finished), nothing it depends on is unfinished, and no hold is on it.
-    /// A review-only bot never does. Computed afresh for every turn and every
-    /// command, so a release, a block or a hold takes the key away from the
-    /// next one.
+    /// Only while it holds a task the owner allowed it the key for and that
+    /// task is open to access (see `tasks_open_to_access`). Computed afresh
+    /// for every turn and every command, so a release, a block or a hold takes
+    /// the key away from the next one.
     pub fn server_access_for(&self, agent: AgentId) -> bool {
-        if self.specs.get(&agent).is_none_or(|spec| spec.autonomy.review_only) {
-            return false;
-        }
-        self.tasks.values().any(|task| {
-            task.assignee == Some(agent)
-                && matches!(task.state, TaskState::Claimed | TaskState::InProgress)
-                && task.authorization == AuthorizationState::Authorized
-                && self.first_unmet_dependency(task).is_none()
-                && self.server_access_granted(task.id, agent)
-        })
+        self.tasks_open_to_access(agent)
+            .any(|task| self.server_access_granted(task.id, agent))
+    }
+
+    /// The owner's sign-ins lent to `agent` right now, on the same terms as
+    /// the server key.
+    pub fn lent_to(&self, agent: AgentId) -> Vec<&orgbot_proto::room::LendItem> {
+        self.room
+            .spec
+            .access
+            .lend
+            .iter()
+            .filter(|item| {
+                let action = lend_action(&item.name);
+                self.tasks_open_to_access(agent)
+                    .any(|task| self.access_granted(task.id, agent, &action))
+            })
+            .collect()
+    }
+
+    /// The paths of the owner's sign-ins lent to `agent` right now, for its
+    /// sandbox to mount.
+    pub fn lent_paths_for(&self, agent: AgentId) -> Vec<String> {
+        let mut paths: Vec<String> = self
+            .lent_to(agent)
+            .into_iter()
+            .flat_map(|item| item.paths.iter().cloned())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// Every path the owner lends, which every sandbox hides unless lent.
+    pub fn lendable_paths(&self) -> Vec<String> {
+        self.room.spec.access.all_paths()
     }
 
     /// Raise the work that would settle a security hold, once.

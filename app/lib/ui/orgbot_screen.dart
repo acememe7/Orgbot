@@ -8,6 +8,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'allowances_view.dart';
+import 'lend_settings_view.dart';
 import 'polish.dart';
 import '../orgbot/credentials.dart';
 import 'sign_in_screen.dart';
@@ -17,6 +18,7 @@ import '../workspace/workspace_screen.dart';
 
 import '../engine/agent_cli.dart';
 import '../orgbot/library.dart';
+import '../engine/core_server.dart' show stopLinuxRoomService;
 import '../orgbot/models.dart';
 import '../orgbot/model_catalog.dart';
 import 'brand.dart';
@@ -1373,6 +1375,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
         : defaultParallelTurns;
     var maxTurns = existing?.maxTurns ?? defaultTurns;
     var parallelTurns = existing?.parallelTurns ?? defaultParallel;
+    var access = existing?.access ?? AccessMode.approval;
     final turnChoices = desktopRoom
         ? desktopTurnBudgetChoices
         : turnBudgetChoices;
@@ -1471,6 +1474,28 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                         onChanged: (value) => setLocal(
                           () => parallelTurns = value ?? defaultParallel,
                         ),
+                      ),
+                      const SizedBox(height: 12),
+                      // What bots may use without asking: your server key,
+                      // the sign-ins you lend, and outside tools. Questions
+                      // about the work itself always come to you.
+                      DropdownButtonFormField<AccessMode>(
+                        initialValue: access,
+                        isExpanded: true,
+                        decoration: InputDecoration(
+                          labelText: 'Access',
+                          helperText: access.description,
+                          helperMaxLines: 3,
+                        ),
+                        items: [
+                          for (final mode in AccessMode.values)
+                            DropdownMenuItem(
+                              value: mode,
+                              child: Text(mode.label),
+                            ),
+                        ],
+                        onChanged: (value) =>
+                            setLocal(() => access = value ?? access),
                       ),
                       const SizedBox(height: 12),
                     ],
@@ -1643,6 +1668,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                   path: path.text.trim(),
                   maxTurns: maxTurns,
                   parallelTurns: parallelTurns,
+                  access: access,
                   tasks: [goal.text.trim()].where((t) => t.isNotEmpty).toList(),
                   bots: selected.keys.map(RoomSlot.new).toList(),
                 );
@@ -1650,6 +1676,10 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                   widget.library.addRoom(room);
                 } else {
                   await widget.library.stopRoom(existing.id);
+                  // Also a background service this app run never opened:
+                  // otherwise it keeps running on the old settings, and the
+                  // next open reuses it without reading the new ones.
+                  await stopLinuxRoomService(existing.id);
                   final index = widget.library.rooms.indexWhere(
                     (r) => r.id == existing.id,
                   );
@@ -1812,6 +1842,7 @@ class _CliSetupState extends State<_CliSetup> {
           ),
         const DesktopIntegrationsView(),
         const AllowancesView(),
+        if (Platform.isLinux) const LendSettingsView(),
         const SizedBox(height: 24),
         const AppearancePicker(),
         if (Platform.isLinux) ...[

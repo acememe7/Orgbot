@@ -43,6 +43,7 @@ fn fixture() -> Fixture {
         roster: vec![],
         completion: CompletionRule::AllTasksTerminal,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
 
     let coordinator = AgentSpec::new("lead", "Lead", provider())

@@ -29,6 +29,7 @@ fn fixture() -> Fixture {
         roster: vec![],
         completion: CompletionRule::AllTasksTerminal,
         limits: RoomLimits::default(),
+        access: Default::default(),
     });
     let provider = || ProviderRef::Scripted {
         script: "test".into(),

@@ -222,6 +222,23 @@ const int desktopDefaultParallelTurns = 4;
 /// rate-limit errors is slower than one that waited its turn.
 const List<int> parallelTurnChoices = [1, 2, 4, 6, 8];
 
+/// How much of what bots ask to use the owner approves by hand. The values
+/// are the room file's `access` names.
+enum AccessMode {
+  approval('approval', 'Approval', 'Every request for your server key, sign-ins or outside tools asks you.'),
+  halfApproval('half_approval', 'Half approval', 'Regular requests are approved on their own; risky and critical ones ask you.'),
+  auto('auto', 'Auto', 'Everything is approved on its own except critical requests, which ask you.'),
+  fullWrite('full_write', 'Full write', 'Everything is approved on its own. Bots still write only in their own project copy.');
+
+  const AccessMode(this.wire, this.label, this.description);
+  final String wire;
+  final String label;
+  final String description;
+
+  static AccessMode parse(Object? raw) =>
+      values.firstWhere((mode) => mode.wire == raw, orElse: () => approval);
+}
+
 class RoomDef {
   final String id;
   String name;
@@ -247,6 +264,10 @@ class RoomDef {
   /// so what this actually spends is provider rate limit, not correctness.
   int parallelTurns;
 
+  /// How much of what bots ask to use you approve by hand. Questions about
+  /// the work itself always come to you.
+  AccessMode access;
+
   RoomDef({
     String? id,
     required this.name,
@@ -255,6 +276,7 @@ class RoomDef {
     this.memory = '',
     this.maxTurns = defaultMaxTurns,
     this.parallelTurns = defaultParallelTurns,
+    this.access = AccessMode.approval,
     WorkspaceConfig? workspace,
     List<String>? tasks,
     List<RoomSlot>? bots,
@@ -273,6 +295,7 @@ class RoomDef {
     'tasks': tasks,
     'max_turns': maxTurns,
     'parallel_turns': parallelTurns,
+    'access': access.wire,
     'bots': bots.map((b) => b.toJson()).toList(),
   };
 
@@ -291,6 +314,7 @@ class RoomDef {
     maxTurns: (json['max_turns'] as num?)?.toInt() ?? defaultMaxTurns,
     parallelTurns:
         (json['parallel_turns'] as num?)?.toInt() ?? defaultParallelTurns,
+    access: AccessMode.parse(json['access']),
     bots: (json['bots'] as List? ?? [])
         .map((b) => RoomSlot.fromJson((b as Map).cast<String, Object?>()))
         .toList(),

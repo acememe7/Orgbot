@@ -207,6 +207,54 @@ pub struct CompletionRequest {
     /// without it the sandbox has no server key.
     #[serde(default)]
     pub server_access: bool,
+    /// Paths under the owner's home holding sign-ins lent to this bot for the
+    /// work it is doing now, mounted into its private home. Decided by the
+    /// room for each turn, never by the model.
+    #[serde(default)]
+    pub lend: Vec<String>,
+    /// Every path the owner lends, hidden from the sandbox unless lent.
+    #[serde(default)]
+    pub hide: Vec<String>,
+}
+
+/// What a bot's sandbox may carry of the owner's for one turn or command:
+/// decided by the room, never by the model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SandboxGrants {
+    /// The bot server key.
+    pub server_access: bool,
+    /// Paths of the owner's sign-ins lent for the work under way.
+    pub lend: Vec<String>,
+    /// Every path the owner lends, hidden unless lent.
+    pub hide: Vec<String>,
+}
+
+impl From<bool> for SandboxGrants {
+    fn from(server_access: bool) -> Self {
+        Self {
+            server_access,
+            ..Self::default()
+        }
+    }
+}
+
+impl SandboxGrants {
+    /// The launcher arguments that carry these grants.
+    pub fn launcher_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if self.server_access {
+            args.push("--server-access".to_string());
+        }
+        for path in &self.hide {
+            args.push("--hide".to_string());
+            args.push(path.clone());
+        }
+        for path in &self.lend {
+            args.push("--lend".to_string());
+            args.push(path.clone());
+        }
+        args
+    }
 }
 
 impl CompletionRequest {
@@ -224,6 +272,8 @@ impl CompletionRequest {
             stream: true,
             mcp_socket: None,
             server_access: false,
+            lend: Vec::new(),
+            hide: Vec::new(),
         }
     }
 
@@ -249,6 +299,23 @@ impl CompletionRequest {
     pub fn with_server_access(mut self, allowed: bool) -> Self {
         self.server_access = allowed;
         self
+    }
+
+    /// Builder: what this turn's sandbox carries of the owner's.
+    pub fn with_grants(mut self, grants: SandboxGrants) -> Self {
+        self.server_access = grants.server_access;
+        self.lend = grants.lend;
+        self.hide = grants.hide;
+        self
+    }
+
+    /// What this turn's sandbox carries of the owner's.
+    pub fn grants(&self) -> SandboxGrants {
+        SandboxGrants {
+            server_access: self.server_access,
+            lend: self.lend.clone(),
+            hide: self.hide.clone(),
+        }
     }
 }
 
@@ -375,6 +442,24 @@ pub enum StreamEvent {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn sandbox_grants_hide_every_lent_path_and_lend_only_the_granted_ones() {
+        let grants = SandboxGrants {
+            server_access: true,
+            lend: vec![".config/.wrangler".into()],
+            hide: vec![".config/.wrangler".into(), ".config/gh".into()],
+        };
+        assert_eq!(
+            grants.launcher_args(),
+            vec![
+                "--server-access", "--hide", ".config/.wrangler", "--hide", ".config/gh",
+                "--lend", ".config/.wrangler",
+            ]
+        );
+        assert!(SandboxGrants::from(false).launcher_args().is_empty());
+    }
+
     use super::*;
 
     #[test]

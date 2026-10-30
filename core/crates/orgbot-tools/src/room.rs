@@ -371,6 +371,30 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             ),
         ),
         tool(
+            "request_access",
+            "Ask to use what the owner lends for a task you hold: \"server\" for the bot \
+             server key (SSH), or one of the owner's sign-ins listed in your situation, such \
+             as Wrangler for Cloudflare. Depending on the room's access mode and how risky the \
+             request is, it is approved at once or waits for the owner, and your task waits \
+             with it. Once allowed, it is in your sandbox only while you work that task: not \
+             while it is blocked, waiting on unfinished work, on hold, in review or done.",
+            schema::object(
+                vec![
+                    ("task", schema::string("Your task that needs it.")),
+                    ("items", schema::string_array("What to use: \"server\" and/or names of lent sign-ins.")),
+                    (
+                        "action",
+                        schema::enumerated(
+                            "What you will do: inspect (read or check), change (build, test or easily undone changes), release (production or a live service), destroy (delete data or change credentials), spend (money). Say it honestly; it decides who approves.",
+                            &["inspect", "change", "release", "destroy", "spend"],
+                        ),
+                    ),
+                    ("reason", schema::string("What you will do with it, in one or two sentences.")),
+                ],
+                &["task", "items", "action", "reason"],
+            ),
+        ),
+        tool(
             "propose_retire_task",
             "Coordinators: propose to the owner that a task nobody should work on be \
              retired, for example one a later owner decision or another task superseded. \
@@ -649,6 +673,7 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
         "complete_handoff" => complete_handoff(engine, actor, input),
         "ask_owner" => ask_owner(engine, actor, input),
         "request_server_access" => request_server_access(engine, actor, input),
+        "request_access" => request_access(engine, actor, input),
         "fail_handoff" => fail_handoff(engine, actor, input),
         "propose_retire_task" => propose_retire_task(engine, actor, input),
         "block_on" => block_on(engine, actor, input),
@@ -1766,37 +1791,86 @@ fn request_server_access(engine: &mut Engine, actor: AgentId, input: &Value) -> 
         Ok(reason) => reason.to_string(),
         Err(message) => return ToolOutcome::error(message),
     };
-    match engine.apply(Command::RequestServerAccess {
+    let outcome = engine.apply(Command::RequestServerAccess {
         by: actor,
         task,
         reason,
-    }) {
-        Ok(events) => {
-            for event in &events {
-                match &event.event {
-                    orgbot_proto::Event::DecisionAsked { decision } => {
-                        return ToolOutcome::ok(format!(
-                            "Server access request {} is waiting for the owner. Your task \
-                             waits for the answer; continue with other work.",
-                            decision.id
-                        ));
-                    }
-                    orgbot_proto::Event::MessagePosted { message } => {
-                        return ToolOutcome::ok(message.body.clone());
-                    }
-                    _ => {}
-                }
-            }
-            if engine.server_access_for(actor) {
-                ToolOutcome::ok("You already have server access for this task.")
-            } else {
-                ToolOutcome::ok(
-                    "That request is already waiting for the owner, or the owner has allowed it \
-                     and the task is not under way yet. Continue with other work.",
-                )
-            }
+    });
+    access_outcome(engine, actor, outcome)
+}
+
+fn request_access(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
+    let task = match task_arg(input, "task") {
+        Ok(task) => task,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    let reason = match required_str(input, "reason") {
+        Ok(reason) => reason.to_string(),
+        Err(message) => return ToolOutcome::error(message),
+    };
+    let items = string_list(input, "items");
+    let action = match required_str(input, "action")
+        .ok()
+        .and_then(orgbot_proto::decision::AccessAction::parse)
+    {
+        Some(action) => action,
+        None => {
+            return ToolOutcome::error(
+                "action must be one of inspect, change, release, destroy, spend",
+            )
         }
-        Err(error) => explain(error),
+    };
+    let outcome = engine.apply(Command::RequestAccess {
+        by: actor,
+        task,
+        items,
+        action,
+        reason,
+    });
+    access_outcome(engine, actor, outcome)
+}
+
+/// What a bot is told after asking for access, approved on the spot or not.
+fn access_outcome(
+    engine: &Engine,
+    actor: AgentId,
+    outcome: Result<Vec<orgbot_proto::EventEnvelope>, orgbot_engine::EngineError>,
+) -> ToolOutcome {
+    let events = match outcome {
+        Ok(events) => events,
+        Err(error) => return explain(error),
+    };
+    let approved = events.iter().find_map(|event| match &event.event {
+        orgbot_proto::Event::DecisionAnswered { answer, .. } => Some(answer.note.clone()),
+        _ => None,
+    });
+    if let Some(note) = approved {
+        return ToolOutcome::ok(format!(
+            "{note} It is in your sandbox from your next command or turn, while the task is under way."
+        ));
+    }
+    for event in &events {
+        match &event.event {
+            orgbot_proto::Event::DecisionAsked { decision } => {
+                return ToolOutcome::ok(format!(
+                    "Access request {} is waiting for the owner. Your task waits for the \
+                     answer; continue with other work.",
+                    decision.id
+                ));
+            }
+            orgbot_proto::Event::MessagePosted { message } => {
+                return ToolOutcome::ok(message.body.clone());
+            }
+            _ => {}
+        }
+    }
+    if events.is_empty() && (engine.server_access_for(actor) || !engine.lent_to(actor).is_empty()) {
+        ToolOutcome::ok("You already have that for this task.")
+    } else {
+        ToolOutcome::ok(
+            "That request is already waiting for the owner, or the owner has allowed it \
+             and the task is not under way yet. Continue with other work.",
+        )
     }
 }
 

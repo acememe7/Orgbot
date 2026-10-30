@@ -443,6 +443,13 @@ impl McpClient {
         let Some(state_dir) = self.approval_state.as_deref() else {
             return call_connected(server, tool, arguments, redact_errors).await;
         };
+        // An outside tool call can do anything its server can, so the room's
+        // access mode rates it risky: Auto and Full write let it through
+        // without asking; Approval and Half approval ask for each call.
+        let mode = engine.with(|room| room.room().spec.access.mode);
+        if mode.approves(orgbot_proto::room::Risk::Risky) {
+            return call_connected(server, tool, arguments, redact_errors).await;
+        }
         let args = crate::mcp_approval::canonical_json(arguments);
         let state_identity = match crate::mcp_approval::canonical_state_identity(
             state_dir.to_path_buf(),
@@ -1127,6 +1134,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::AllTasksTerminal,
             limits: RoomLimits::default(),
+            access: Default::default(),
         }));
         for (index, id) in agents.into_iter().enumerate() {
             let mut spec = orgbot_proto::AgentSpec::new(
@@ -1544,6 +1552,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::AllTasksTerminal,
             limits: RoomLimits::default(),
+            access: Default::default(),
         }));
         let mut agent = orgbot_proto::AgentSpec::new(
             "approval-agent",
@@ -1612,6 +1621,75 @@ mod tests {
         assert!(after_restart.content.contains("Waiting for owner approval"));
         assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 1);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn auto_and_full_write_rooms_let_outside_calls_through_and_half_approval_asks() {
+        use orgbot_engine::Command;
+        use orgbot_proto::room::{AccessMode, CompletionRule, RoomAccess, RoomLimits, RoomSpec};
+
+        for (mode, asks) in [
+            (AccessMode::Approval, true),
+            (AccessMode::HalfApproval, true),
+            (AccessMode::Auto, false),
+            (AccessMode::FullWrite, false),
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "orgbot-approval-mode-test-{}-{}",
+                std::process::id(),
+                DecisionId::new()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let script = root.join("fake-mcp.py");
+            let marker = root.join("called");
+            std::fs::write(
+                &script,
+                format!(
+                    "import json,sys\nfor line in sys.stdin:\n m=json.loads(line)\n method=m.get('method')\n if method == 'initialize': r={{'protocolVersion':'2025-06-18','capabilities':{{}},'serverInfo':{{'name':'fake','version':'1'}}}}\n elif method == 'tools/list': r={{'tools':[{{'name':'lookup','inputSchema':{{'type':'object'}}}}]}}\n elif method == 'tools/call':\n  open({:?},'a').write('called\\n')\n  r={{'content':[{{'type':'text','text':'ok'}}]}}\n else: r={{}}\n if 'id' in m: print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':r}}),flush=True)\n",
+                    marker.to_string_lossy()
+                ),
+            )
+            .unwrap();
+            let actor = AgentId::new();
+            let engine = crate::SharedEngine::new(orgbot_engine::Engine::new(RoomSpec {
+                name: "approval-mode".into(),
+                goal: "test the room's access mode".into(),
+                roster: vec![],
+                completion: CompletionRule::AllTasksTerminal,
+                limits: RoomLimits::default(),
+                access: RoomAccess { mode, lend: vec![] },
+            }));
+            let mut agent = orgbot_proto::AgentSpec::new(
+                "mode-agent",
+                "Mode Agent",
+                orgbot_proto::ProviderRef::Scripted {
+                    script: "test".into(),
+                },
+            );
+            agent.id = actor;
+            engine.with(|room| room.apply(Command::JoinAgent { spec: Box::new(agent) }).unwrap());
+            engine.with(|room| room.apply(Command::StartRoom).unwrap());
+            let spec = McpServerSpec {
+                name: "fake".into(),
+                transport: McpTransport::Stdio {
+                    command: "python3".into(),
+                    args: vec![script.to_string_lossy().into_owned()],
+                    env: BTreeMap::new(),
+                },
+            };
+            let client = McpClient::connect(&[spec]).await.with_owner_approval(root.clone());
+            let outcome = client
+                .call_for(&engine, actor, "fake__lookup", &json!({"query":"mode"}))
+                .await;
+            assert_eq!(
+                outcome.content.contains("Waiting for owner approval"),
+                asks,
+                "{mode:?}: {}",
+                outcome.content
+            );
+            assert_eq!(marker.exists(), !asks, "{mode:?}");
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]

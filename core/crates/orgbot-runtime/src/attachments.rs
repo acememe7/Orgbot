@@ -262,6 +262,7 @@ mod tests {
             roster: vec![],
             completion: CompletionRule::Manual,
             limits: RoomLimits::default(),
+            access: Default::default(),
         });
         let agent = AgentSpec::new(
             "worker",

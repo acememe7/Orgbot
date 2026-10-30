@@ -11,6 +11,7 @@ import 'dart:async';
 import 'dart:convert';
 import '../workspace/workspace.dart';
 import '../workspace/attachments.dart';
+import '../orgbot/lend_settings.dart';
 import '../orgbot/desktop_integrations.dart';
 import '../orgbot/allowances.dart';
 import '../protocol/models.dart' show ChatFile;
@@ -265,6 +266,8 @@ class EngineRoomController extends ChangeNotifier {
         desktopIntegrations: !runsInProcess
             ? await DesktopIntegrations.discover()
             : null,
+        // Desktop rooms only: a phone has no home folder of yours to lend.
+        lend: !runsInProcess ? LendSettings.load().lent : const [],
       );
       if (!runsInProcess) {
         file.environment.addAll(

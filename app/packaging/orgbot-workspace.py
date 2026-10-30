@@ -876,6 +876,21 @@ _OWNER_SECRET_DIRS = (
     ".config/gh", ".config/hub",
     ".mozilla", ".config/google-chrome", ".config/chromium", ".config/BraveSoftware",
     ".config/Claude", ".local/share/orgbot", ".config/orgbot",
+    # The app's own support folder: tool approvals, the allowance ledger and
+    # the registry of outside tools.
+    ".local/share/com.orgbot.app",
+    # Deploy and hosting tools that keep a sign-in in the home folder.
+    ".config/.wrangler", ".wrangler", ".cloudflared", ".config/netlify", ".netlify",
+    ".vercel", ".local/share/com.vercel.cli", ".fly", ".config/doctl", ".supabase",
+    ".config/stripe", ".railway", ".config/configstore",
+)
+
+# Never lent, whatever the owner lists: OrgBots' own data, private keys, and
+# the model CLIs' sign-ins (bots get their own copies of those).
+_NEVER_LENT = (
+    ".local/share/orgbot", ".config/orgbot", ".local/share/com.orgbot.app",
+    ".ssh", ".gnupg", ".codex", ".claude", ".claude.json", ".grok",
+    ".gemini", ".config/opencode", ".local/share/opencode",
 )
 _OWNER_SECRET_FILES = (
     ".codex/auth.json", ".grok/auth.json", ".claude/.credentials.json",
@@ -932,8 +947,75 @@ def _owner_secret_mask_args(owner_home: Path, bot_ssh: Path | None, hide: Path |
                 args.extend(["--size", "65536", "--tmpfs", os.fspath(path)])
         elif not is_dir and path.is_file():
             args.extend(["--ro-bind", "/dev/null", os.fspath(path)])
+    # OrgBots' data follows XDG_DATA_HOME, which can sit outside the home's
+    # .local/share: every room's tokens and every bot's private home are there.
+    # Before the key folder's own mask, which then shows empty inside it.
+    raw_xdg = os.environ.get("XDG_DATA_HOME")
+    if raw_xdg and os.path.isabs(raw_xdg):
+        data = Path(os.path.realpath(Path(raw_xdg) / "orgbot"))
+        if data.is_dir() and data != Path(os.path.realpath(owner_home / ".local/share/orgbot")):
+            args.extend(["--size", "65536", "--tmpfs", os.fspath(data)])
     if hide is not None and not _inside(Path(os.path.realpath(hide)), Path(os.path.realpath(owner_home / ".local/share/orgbot"))):
         args.extend(["--size", "65536", "--tmpfs", os.fspath(hide)])
+    return args
+
+
+def _owner_relative(raw: str) -> Path:
+    """A path the owner lends, as given: plain and relative to their home."""
+    parts = raw.split("/")
+    if not raw or raw.startswith("/") or any(part in ("", ".", "..") for part in parts):
+        _fail(f"Lent path must be a plain path relative to the home folder: {raw!r}")
+    if any(raw == never or raw.startswith(never + "/") or never.startswith(raw + "/") for never in _NEVER_LENT):
+        _fail(f"This path is never lent to bots: {raw}")
+    return Path(raw)
+
+
+def _owner_hidden_args(owner_home: Path, hidden: list[str]) -> list[str]:
+    """Hide each path the owner lends where it lives, like the built-in secrets."""
+    args: list[str] = []
+    home = Path(os.path.realpath(owner_home))
+    for raw in hidden:
+        path = owner_home / _owner_relative(raw)
+        real = Path(os.path.realpath(path))
+        if not _inside(real, home):
+            continue
+        if real.is_dir():
+            args.extend(["--size", "65536", "--tmpfs", os.fspath(real)])
+        elif real.is_file():
+            args.extend(["--ro-bind", "/dev/null", os.fspath(real)])
+    return args
+
+
+def _lent_args(owner_home: Path, private_home: Path, private_home_mount: str, lent: list[str]) -> list[str]:
+    """Mount what the owner lent this turn into the bot's home, read-write.
+
+    Read-write so a tool can renew its sign-in; the owner's own copy is the
+    one mounted, so a renewal reaches them too. A path that is missing, leaves
+    the home folder by a link, or reaches what is never lent stops the turn
+    with a reason rather than starting it without what was granted.
+    """
+    args: list[str] = []
+    home = Path(os.path.realpath(owner_home))
+    for raw in lent:
+        relative = _owner_relative(raw)
+        source = Path(os.path.realpath(owner_home / relative))
+        if not _inside(source, home) or source == home:
+            _fail(f"Lent path leaves the home folder: {raw}")
+        real_relative = source.relative_to(home).as_posix()
+        _owner_relative(real_relative)
+        if not (source.is_dir() or source.is_file()):
+            _fail(f"Lent path does not exist: ~/{raw}")
+        # Mount points in the bot's home, created on its private disk folder.
+        target = Path(private_home_mount) / relative
+        for depth in range(1, len(relative.parts)):
+            partial = relative.parts[:depth]
+            on_disk = private_home.joinpath(*partial)
+            if on_disk.is_symlink():
+                _fail(f"Bot home path is a link: {'/'.join(partial)}")
+            args.extend(["--dir", os.fspath(Path(private_home_mount).joinpath(*partial))])
+        if source.is_dir():
+            args.extend(["--dir", os.fspath(target)])
+        args.extend(["--bind", os.fspath(source), os.fspath(target)])
     return args
 
 
@@ -2079,7 +2161,7 @@ def _agy_auth_login_inner() -> dict[str, Any]:
         os.close(lock_fd)
 
 
-def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool, profiles: list[str], private_home_arg: str | None, mcp_socket: str | None, agent_cli: str | None = None, mcp_relay: str | None = None, verify: bool = False, server_access: bool = False) -> int:
+def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool, profiles: list[str], private_home_arg: str | None, mcp_socket: str | None, agent_cli: str | None = None, mcp_relay: str | None = None, verify: bool = False, server_access: bool = False, hide: list[str] | None = None, lend: list[str] | None = None) -> int:
     agent = _safe_agent(agent_arg)
     if not program:
         _fail("run requires a program after --")
@@ -2184,8 +2266,19 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
         # The bot server key only for a turn the owner allowed it, and never
         # for a read-only one: a reviewer has no business on a server.
         bot_ssh = _bot_ssh_dir()
-        granted = bot_ssh if server_access and not read_only else None
-        args.extend(_owner_secret_mask_args(Path(pwd.getpwuid(os.getuid()).pw_dir), granted, hide=bot_ssh))
+        # `ro` and not the flag: a workspace that was ever read-only stays so.
+        granted = bot_ssh if server_access and not ro else None
+        owner_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        args.extend(_owner_secret_mask_args(owner_home, granted, hide=bot_ssh))
+        # Everything the owner lends is hidden where it lives; what is lent to
+        # this turn appears in the bot's own home instead, never for a
+        # read-only turn, and not for CLIs whose private home is read-only.
+        args.extend(_owner_hidden_args(owner_home, hide or []))
+        if lend and not ro:
+            if agent_cli is not None:
+                print(f"orgbot-workspace: lending is not available to {agent_cli}; continuing without it", file=sys.stderr)
+            else:
+                args.extend(_lent_args(owner_home, supplied_home, private_home_mount, lend))
         if agent_cli == "opencode":
             for relative in (".local/share", ".local/state", ".cache"):
                 directory = supplied_home / relative
@@ -2545,6 +2638,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--private-home")
     run.add_argument("--mcp-socket")
     run.add_argument("--server-access", action="store_true")
+    run.add_argument("--hide", action="append", default=[], help="A path under the owner's home the owner lends, hidden unless lent")
+    run.add_argument("--lend", action="append", default=[], help="A path under the owner's home lent to this turn, mounted in the bot's home")
     run.add_argument("--mcp-relay")
     run.add_argument("--agent-cli", choices=("opencode", "agy"))
     run.add_argument("program", nargs=argparse.REMAINDER)
@@ -2572,7 +2667,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "run":
             program = args.program[1:] if args.program and args.program[0] == "--" else args.program
-            return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket, agent_cli=args.agent_cli, mcp_relay=args.mcp_relay, verify=args.verify, server_access=args.server_access)
+            return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket, agent_cli=args.agent_cli, mcp_relay=args.mcp_relay, verify=args.verify, server_access=args.server_access, hide=args.hide, lend=args.lend)
         if args.command == "prune":
             _json(_prune(args.state, args.keep, args.dry_run))
             return 0
