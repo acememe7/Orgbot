@@ -240,6 +240,13 @@ only talks is rested and a tick that frees work wakes the room (source
 Signed archive revision `9b09534a5b15a8bfe11b149e06a3763b303de30b` replaces
 only `orgbots_2.2.0_amd64.deb`;
 [Pages run 41030440577](https://github.com/acememe7/Orgbot/actions/runs/41030440577)
+published it.
+
+That evening they were rebuilt again under the same version so coordinators can
+amend a task (source `6c69cdf`; the Flutter bundle was rebuilt to show amended
+tasks). Signed archive revision `fc5a74366ed4c3a7bae00e0646b41f295a74c1b0`
+replaces only `orgbots_2.2.0_amd64.deb`;
+[Pages run 41102385617](https://github.com/acememe7/Orgbot/actions/runs/41102385617)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
