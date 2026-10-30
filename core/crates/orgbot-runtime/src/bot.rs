@@ -47,6 +47,9 @@ pub struct TurnReport {
     pub usage: Usage,
     /// Why the last model call stopped.
     pub stop_reason: StopReason,
+    /// What an agent CLI did on its own: tool uses inside it and files it
+    /// changed, which the room sees only through this count.
+    pub own_activity: usize,
 }
 
 /// Keeps usage from completed provider responses if a later call in the same
@@ -102,6 +105,20 @@ impl TurnReport {
     /// nowhere, which is otherwise indistinguishable from one that is working.
     pub fn made_progress(&self) -> bool {
         self.tool_calls > self.tool_errors || self.said.is_some()
+    }
+
+    /// Whether the bot did anything at all, as opposed to only talking: a
+    /// board tool that went through, or a tool or edit inside its CLI.
+    pub fn acted(&self) -> bool {
+        self.tool_calls > self.tool_errors || self.own_activity > 0
+    }
+}
+
+impl Bot {
+    /// Start this bot's next turn in a fresh session (see
+    /// `Provider::start_fresh_session`).
+    pub fn start_fresh_session(&self) {
+        self.provider.start_fresh_session();
     }
 }
 
@@ -356,6 +373,7 @@ impl Bot {
             steps: 0,
             usage: Usage::default(),
             stop_reason: StopReason::EndTurn,
+            own_activity: 0,
         };
         let mut usage_checkpoint = UsageCheckpoint::new(engine, self.spec.id);
         let mut posted_to_chat = false;
@@ -431,6 +449,7 @@ impl Bot {
                 }
                 None => self.provider.complete(request, sink.clone()).await,
             };
+            report.own_activity += self.provider.last_turn_activity().unwrap_or(0);
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
@@ -2410,8 +2429,11 @@ mod tests {
             steps: 1,
             usage: Usage::default(),
             stop_reason: StopReason::EndTurn,
+            own_activity: 0,
         };
         assert!(!base.made_progress(), "an empty turn is not progress");
+        assert!(!TurnReport { said: Some("I'm changing it".into()), ..base.clone() }.acted(), "talking is not acting");
+        assert!(TurnReport { own_activity: 2, ..base.clone() }.acted(), "edits inside a CLI are");
 
         assert!(TurnReport {
             said: Some("done".into()),

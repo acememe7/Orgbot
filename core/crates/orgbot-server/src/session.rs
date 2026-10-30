@@ -609,9 +609,9 @@ impl RoomSession {
                     None => return self.close(RunOutcome::Idle),
                 },
                 _ = ticker.tick() => {
-                    let _ = self.orchestrator.engine_mut().apply(Command::Tick {
-                        now: Timestamp::now(),
-                    });
+                    // A tick that frees work (a lapsed claim, an expired
+                    // handoff) wakes the room so someone takes it.
+                    self.orchestrator.tick(Timestamp::now());
                     self.broadcast_new_events();
                 }
             }

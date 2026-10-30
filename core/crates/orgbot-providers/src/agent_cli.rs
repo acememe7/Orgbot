@@ -146,6 +146,9 @@ pub struct AgentCliProvider {
     /// sign-ins); set from each request, so a sandbox only ever carries them
     /// for the turn they were granted for.
     grants: Mutex<crate::types::SandboxGrants>,
+    /// Tool uses and file changes in the last turn, for the room to tell a
+    /// bot working on its own from one going round in circles.
+    last_activity: std::sync::atomic::AtomicUsize,
     /// Whether the room's board is served to the agent as MCP tools.
     mcp: bool,
     /// The CLI's own effort level; empty keeps the CLI's default.
@@ -252,6 +255,7 @@ impl AgentCliProvider {
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
+            last_activity: std::sync::atomic::AtomicUsize::new(0),
             timeout,
             session_store: Mutex::new(None),
             effort: String::new(),
@@ -548,12 +552,25 @@ struct Episode {
     antigravity_result_seen: bool,
     /// Images the CLI generated this turn, in its private home.
     generated: Vec<PathBuf>,
+    /// Tools the CLI used on its own this turn: commands, edits, searches,
+    /// room and other connected tools.
+    tool_uses: usize,
+    /// Files this turn merged into the project or set aside.
+    workspace_changes: usize,
 }
 
 #[async_trait]
 impl Provider for AgentCliProvider {
     fn name(&self) -> &str {
         self.cli.label()
+    }
+
+    fn last_turn_activity(&self) -> Option<usize> {
+        Some(self.last_activity.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    fn start_fresh_session(&self) {
+        self.forget_session();
     }
 
     async fn complete(
@@ -649,6 +666,10 @@ impl Provider for AgentCliProvider {
         if let Some(dir) = &codex_home {
             let _ = std::fs::remove_dir_all(dir);
         }
+        self.last_activity.store(
+            episode.tool_uses + episode.workspace_changes,
+            std::sync::atomic::Ordering::SeqCst,
+        );
         result?;
 
         if matches!(self.cli, CliKind::Codex | CliKind::Antigravity) && episode.usage.reported {
@@ -1116,6 +1137,11 @@ impl AgentCliProvider {
                         // would only be retried into the same conflict.
                         match guard.apply_setting_aside_conflicts() {
                             Ok(integration) => {
+                                episode.workspace_changes = ["applied", "set_aside"]
+                                    .iter()
+                                    .filter_map(|key| integration.get(*key).and_then(Value::as_array))
+                                    .map(Vec::len)
+                                    .sum();
                                 if integration
                                     .get("deleted")
                                     .and_then(Value::as_array)
@@ -1322,6 +1348,7 @@ fn ingest_opencode_line(
             let state = part.get("state");
             if !id.is_empty() && episode.opencode_tool_parts.insert(id.to_string()) {
                 let name = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
+                episode.tool_uses += 1;
                 send_activity(
                     sink,
                     StreamEvent::ToolUseStart {
@@ -1474,6 +1501,7 @@ fn ingest_antigravity_line(
                     })
                     .unwrap_or_else(|| name.to_string());
                 if episode.opencode_tool_parts.insert(id.clone()) {
+                    episode.tool_uses += 1;
                     send_activity(
                         sink,
                         StreamEvent::ToolUseStart {
@@ -1598,6 +1626,7 @@ fn ingest_codex_line(
                 return;
             };
             let id = item.get("id").and_then(Value::as_str).unwrap_or(item_type);
+            episode.tool_uses += 1;
             send_activity(
                 sink,
                 StreamEvent::ToolUseStart {
@@ -1692,6 +1721,7 @@ fn ingest_messages_line(
                         .and_then(|block| block.get("name"))
                         .and_then(Value::as_str);
                     if let (Some(id), Some(name)) = (id, name) {
+                        episode.tool_uses += 1;
                         send_activity(
                             sink,
                             StreamEvent::ToolUseStart {
@@ -1721,6 +1751,7 @@ fn ingest_messages_line(
                     block.get("id").and_then(Value::as_str),
                     block.get("name").and_then(Value::as_str),
                 ) {
+                    episode.tool_uses += 1;
                     send_activity(
                         sink,
                         StreamEvent::ToolUseStart {
@@ -2722,6 +2753,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
+            last_activity: std::sync::atomic::AtomicUsize::new(0),
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -2854,6 +2886,32 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
 
         assert_eq!(generated_images(&home, since), vec![folder.join("exec-1.png")]);
         std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_turn_counts_the_tools_a_cli_used_and_a_reply_alone_counts_none() {
+        // The room tells a bot working inside its CLI from one only talking by
+        // this count: from the live room, a bot's turns were each one reply.
+        for (cli, tool_line, text_line) in [
+            (
+                CliKind::Codex,
+                r#"{"type":"item.started","item":{"id":"item-1","type":"command_execution","command":"cargo test"}}"#,
+                r#"{"type":"item.completed","item":{"type":"agent_message","text":"I'm changing that count now."}}"#,
+            ),
+            (
+                CliKind::Claude,
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Edit","input":{}}]}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"I'm changing that count now."}]}}"#,
+            ),
+        ] {
+            let (sink, _events) = mpsc::channel(8);
+            let mut acted = Episode::default();
+            ingest_line(cli, tool_line, &Some(sink.clone()), &mut acted);
+            assert_eq!(acted.tool_uses, 1, "{cli:?} tool use counted");
+            let mut talked = Episode::default();
+            ingest_line(cli, text_line, &Some(sink), &mut talked);
+            assert_eq!(talked.tool_uses, 0, "{cli:?} a reply alone is not activity");
+        }
     }
 
     #[tokio::test]
@@ -3002,6 +3060,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
+            last_activity: std::sync::atomic::AtomicUsize::new(0),
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3315,6 +3374,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
+            last_activity: std::sync::atomic::AtomicUsize::new(0),
             mcp: true,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3416,6 +3476,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
+            last_activity: std::sync::atomic::AtomicUsize::new(0),
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3496,6 +3557,7 @@ fi
                 session_system_brief: Mutex::new(None),
                 last_socket: Mutex::new(None),
                 grants: Mutex::new(crate::types::SandboxGrants::default()),
+            last_activity: std::sync::atomic::AtomicUsize::new(0),
                 mcp: false,
                 timeout: Duration::from_secs(5),
                 session_store: Mutex::new(None),
@@ -3597,6 +3659,7 @@ fi
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
+            last_activity: std::sync::atomic::AtomicUsize::new(0),
             mcp: false,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -3663,6 +3726,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
                 session_system_brief: Mutex::new(None),
                 last_socket: Mutex::new(None),
                 grants: Mutex::new(crate::types::SandboxGrants::default()),
+            last_activity: std::sync::atomic::AtomicUsize::new(0),
                 mcp: false,
                 timeout: Duration::from_secs(5),
                 session_store: Mutex::new(None),
@@ -3860,6 +3924,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
+            last_activity: std::sync::atomic::AtomicUsize::new(0),
             mcp: store.mcp,
             timeout: Duration::from_secs(5),
             session_store: Mutex::new(None),
@@ -4005,6 +4070,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
+            last_activity: std::sync::atomic::AtomicUsize::new(0),
             mcp: store.mcp,
             timeout: Duration::from_millis(50),
             session_store: Mutex::new(Some(store.clone())),
@@ -4778,6 +4844,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             session_system_brief: Mutex::new(None),
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
+            last_activity: std::sync::atomic::AtomicUsize::new(0),
             mcp: false,
             effort: String::new(),
             timeout: Duration::MAX,

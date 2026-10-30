@@ -2400,3 +2400,104 @@ async fn an_owner_answer_lends_a_sign_in_for_the_task() {
     let situation = orgbot_runtime::prompt::situation(&room.engine(), lead, orgbot_proto::event::Seq::ZERO);
     assert!(situation.contains("Cloudflare (Wrangler) (in ~/.config/.wrangler)"), "{situation}");
 }
+
+/// Says it is about to change the code, every turn, and changes nothing: the
+/// live room's looping bot. Counts the fresh sessions it is asked to start.
+#[derive(Debug)]
+struct TalksInsteadOfActing {
+    fresh_sessions: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for TalksInsteadOfActing {
+    fn name(&self) -> &str {
+        "talks"
+    }
+
+    async fn complete(
+        &self,
+        _request: orgbot_providers::CompletionRequest,
+        _sink: Option<mpsc::Sender<orgbot_providers::StreamEvent>>,
+    ) -> orgbot_providers::Result<orgbot_providers::CompletionResponse> {
+        Ok(orgbot_providers::scripted::says(
+            "The late-party path still floors the roster. I'm changing that count now.",
+        ))
+    }
+
+    fn last_turn_activity(&self) -> Option<usize> {
+        Some(0)
+    }
+
+    fn start_fresh_session(&self) {
+        self.fresh_sessions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn a_bot_that_keeps_talking_instead_of_acting_is_rested_and_the_coordinators_told() {
+    // From the live room: a bot holding an urgent fix took 26 turns in an
+    // hour saying it was about to change the code, and changed nothing.
+    use orgbot_engine::Command;
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "release".into(),
+        goal: "ship".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+        access: Default::default(),
+    });
+    room.seat(spec("lead", &["coordinator"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    let fresh_sessions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let worker = room
+        .seat(
+            spec("worker", &["engineer"], Autonomy::default()),
+            Arc::new(TalksInsteadOfActing { fresh_sessions: fresh_sessions.clone() }),
+        )
+        .unwrap();
+    room.start().unwrap();
+    let created = room
+        .engine_mut()
+        .apply(Command::CreateTask {
+            title: "Fix late party squad admission".into(),
+            brief: String::new(),
+            by: None,
+            required_role: None,
+            priority: orgbot_proto::task::Priority::Urgent,
+            acceptance_criteria: vec![],
+            depends_on: vec![],
+            origin: TaskOrigin::plain(),
+        })
+        .unwrap();
+    let task = created
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+            _ => None,
+        })
+        .unwrap();
+    for command in [
+        Command::OpenTask { task },
+        Command::ClaimTask { task, by: worker },
+        Command::StartTask { task, by: worker },
+    ] {
+        room.engine_mut().apply(command).unwrap();
+    }
+
+    for turn in 1..=3 {
+        assert!(room.is_actionable(worker), "woken for its work on turn {turn}");
+        let report = room.step(None).await.expect("the worker takes a turn");
+        assert_eq!(report.agent, worker);
+    }
+    assert!(!room.is_actionable(worker), "after three turns of talk it is not woken for that work again");
+    assert_eq!(fresh_sessions.load(std::sync::atomic::Ordering::SeqCst), 1, "its next turn starts fresh");
+    let told = room.engine().transcript().iter().any(|message| {
+        message.body.contains("@worker has ended 3 turns in a row")
+            && matches!(&message.audience, orgbot_proto::Audience::Roles { roles } if roles.iter().any(|role| role == "coordinator"))
+    });
+    assert!(told, "the coordinators are told");
+
+    // Talking to it wakes it again.
+    owner_asks(&room.shared_engine(), Some(worker), "@worker are you stuck on the squad count?");
+    assert!(room.is_actionable(worker));
+}

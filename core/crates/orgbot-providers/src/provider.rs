@@ -83,6 +83,18 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
         request: CompletionRequest,
         sink: Option<mpsc::Sender<StreamEvent>>,
     ) -> Result<CompletionResponse>;
+
+    /// For an agent CLI, how much its last turn did on its own: tool uses
+    /// inside the CLI and files it changed. The room cannot see these, only
+    /// the board tools it calls. `None` for providers whose every action is a
+    /// room tool call.
+    fn last_turn_activity(&self) -> Option<usize> {
+        None
+    }
+
+    /// Start the next turn in a fresh session instead of resuming the last
+    /// one. For a bot that has gone round in circles in a long session.
+    fn start_fresh_session(&self) {}
 }
 
 /// Emit a stream event, ignoring a closed receiver.

@@ -99,6 +99,11 @@ pub struct Orchestrator {
     /// Set when the owner pauses mid-run: start no new turns, and let the
     /// ones under way finish, so pausing loses no work.
     holding: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Turns in a row each bot ended on its work without doing anything.
+    fruitless: BTreeMap<AgentId, u32>,
+    /// Bots no longer woken for the work they went round in circles on, with
+    /// that work as it was: the rest ends when it changes or the bot acts.
+    resting: BTreeMap<AgentId, Vec<TaskId>>,
 }
 
 /// Saves the room's checkpoint. A run lasts as long as its slowest turn, and
@@ -227,6 +232,8 @@ impl Orchestrator {
             rotation: vec![],
             cursor: value["cursor"].as_u64().unwrap_or(0) as usize,
             idle_rounds: 0,
+            fruitless: BTreeMap::new(),
+            resting: BTreeMap::new(),
             last_said: BTreeMap::new(),
             workspace: None,
             allowances: None,
@@ -274,6 +281,8 @@ impl Orchestrator {
             rotation: Vec::new(),
             cursor: 0,
             idle_rounds: 0,
+            fruitless: BTreeMap::new(),
+            resting: BTreeMap::new(),
             last_said: BTreeMap::new(),
             workspace: None,
             allowances: None,
@@ -417,7 +426,8 @@ impl Orchestrator {
         // Work it took on for someone who is waiting for the result, unless it
         // is waiting on the owner itself: rerunning it then cannot deliver,
         // and in the live room only spent turns until the owner answered.
-        if !engine.handoffs_accepted_by(agent).is_empty() && !engine.awaiting_owner(agent) {
+        let resting = self.resting_on(engine, agent);
+        if !engine.handoffs_accepted_by(agent).is_empty() && !engine.awaiting_owner(agent) && !resting {
             return Some(Wake::HeldWork);
         }
         // A question addressed to this bot that it has not answered yet. This
@@ -433,7 +443,7 @@ impl Orchestrator {
                 .task(*id)
                 .is_some_and(|task| !task.state.is_waiting())
         });
-        if has_live_work {
+        if has_live_work && !resting {
             return Some(Wake::HeldWork);
         }
         // Something to inspect.
@@ -929,6 +939,9 @@ impl Orchestrator {
                     self.bots.insert(agent, bot);
                     self.leased_memory.remove(&agent);
                     reserved.remove(&agent);
+                    if let Ok(report) = &result {
+                        self.note_turn_activity(report);
+                    }
                     if matches!(&result, Ok(report) if report.tool_calls > report.tool_errors) {
                         productive.insert(agent);
                     }
@@ -945,27 +958,36 @@ impl Orchestrator {
                     // handoffs waiting on them since their turn began are
                     // held open, as are those of bots waiting for a slot.
                     let waiting = self.waiting_for_a_slot();
-                    self.engine.with(|engine| {
+                    let freed = self.engine.with(|engine| {
                         for agent in running_backend.keys().chain(&waiting) {
                             let _ = engine.apply(Command::KeepAlive { agent: *agent });
                         }
-                        let _ = engine.apply(Command::Tick { now: Timestamp::now() });
+                        engine
+                            .apply(Command::Tick { now: Timestamp::now() })
+                            .is_ok_and(|events| tick_frees_work(&events))
                     });
+                    if freed {
+                        self.wake();
+                    }
                     finished.push((agent, result));
                 }
                 _ = poll.tick() => {
                     let waiting = self.waiting_for_a_slot();
-                    self.engine.with(|engine| {
+                    let freed = self.engine.with(|engine| {
                         for agent in running_backend.keys().chain(&waiting) {
                             let _ = engine.apply(Command::KeepAlive { agent: *agent });
                         }
                         // A faulted bot's retry is due on its own schedule, not
                         // whenever another turn happens to finish.
                         let now = Timestamp::now();
-                        if engine.retry_due(now) {
-                            let _ = engine.apply(Command::Tick { now });
-                        }
+                        engine.retry_due(now)
+                            && engine
+                                .apply(Command::Tick { now })
+                                .is_ok_and(|events| tick_frees_work(&events))
                     });
+                    if freed {
+                        self.wake();
+                    }
                     if last_save.elapsed() >= AUTOSAVE_EVERY {
                         last_save = tokio::time::Instant::now();
                         if let Some(Autosave(save)) = self.autosave.clone() {
@@ -1098,6 +1120,7 @@ impl Orchestrator {
                         steps: 0,
                         usage: Default::default(),
                         stop_reason: orgbot_providers::StopReason::Other("provider_error".into()),
+                        own_activity: 0,
                     }
                 }
             });
@@ -1267,6 +1290,103 @@ impl Orchestrator {
         }
     }
 
+    /// The work `agent` holds that is not waiting on anything, sorted.
+    fn live_work_of(engine: &Engine, agent: AgentId) -> Vec<TaskId> {
+        let mut live: Vec<TaskId> = engine
+            .active_tasks_of(agent)
+            .into_iter()
+            .filter(|id| engine.task(*id).is_some_and(|task| !task.state.is_waiting()))
+            .collect();
+        live.sort();
+        live
+    }
+
+    /// Whether `agent` is resting on the work it holds now (see
+    /// `note_turn_activity`): it is not woken for that work, though it still
+    /// is for a message, a handoff, a review, or anything else.
+    fn resting_on(&self, engine: &Engine, agent: AgentId) -> bool {
+        self.resting
+            .get(&agent)
+            .is_some_and(|work| *work == Self::live_work_of(engine, agent))
+    }
+
+    /// Rest a bot that keeps ending turns on its work without doing anything.
+    ///
+    /// From the live room: a bot holding an urgent fix took 26 turns in an
+    /// hour, each one a single model reply resuming a 140,000-token session,
+    /// saying it was about to change the code and changing nothing. The room
+    /// woke it again the moment each turn ended, and its repeats then put the
+    /// whole room to sleep. After [`FRUITLESS_TURNS`] such turns it is no
+    /// longer woken for that work, its next turn starts a fresh session, and
+    /// the coordinators are told, so the work can move to someone who acts.
+    fn note_turn_activity(&mut self, report: &TurnReport) {
+        let agent = report.agent;
+        // A failed or deferred turn says nothing about the bot.
+        if matches!(report.stop_reason, orgbot_providers::StopReason::Other(_)) {
+            return;
+        }
+        let (live, titles, handle, room) = {
+            let engine = self.engine.borrow();
+            let live = Self::live_work_of(&engine, agent);
+            let titles: Vec<String> = live
+                .iter()
+                .filter_map(|id| engine.task(*id).map(|task| task.title.clone()))
+                .collect();
+            let handle = engine
+                .agent(agent)
+                .map(|spec| spec.handle.clone())
+                .unwrap_or_else(|| agent.short());
+            (live, titles, handle, engine.room_id())
+        };
+        if report.acted() || live.is_empty() {
+            self.fruitless.remove(&agent);
+            self.resting.remove(&agent);
+            return;
+        }
+        if self.resting.get(&agent).is_some_and(|work| *work != live) {
+            self.resting.remove(&agent);
+        }
+        let count = self.fruitless.entry(agent).or_insert(0);
+        *count += 1;
+        if *count < FRUITLESS_TURNS || self.resting.contains_key(&agent) {
+            return;
+        }
+        let turns = *count;
+        self.resting.insert(agent, live);
+        if let Some(bot) = self.bots.get(&agent) {
+            bot.start_fresh_session();
+        }
+        let mut message = orgbot_proto::ChatMessage::system(
+            room,
+            format!(
+                "@{handle} has ended {turns} turns in a row on \"{}\" without using a tool or \
+                 changing a file. It will not be woken for that work again until someone talks \
+                 to it or the work changes, and its next turn starts a fresh session. \
+                 Coordinators: check on it, or have it release the task so another bot can take it.",
+                titles.join("\", \"")
+            ),
+        );
+        message.audience = orgbot_proto::Audience::Roles {
+            roles: vec!["coordinator".into()],
+        };
+        let _ = self
+            .engine
+            .with(|engine| engine.apply(Command::PostMessage { message: Box::new(message) }));
+        // Someone has to read that: the bot's repeats may have run the stall
+        // counter up already.
+        self.wake();
+    }
+
+    /// Run the room's housekeeping tick, and wake the room if it freed work.
+    pub fn tick(&mut self, now: Timestamp) {
+        let freed = self
+            .engine
+            .with(|engine| engine.apply(Command::Tick { now }).is_ok_and(|events| tick_frees_work(&events)));
+        if freed {
+            self.wake();
+        }
+    }
+
     /// Clear the stall counter, because something new has happened.
     ///
     /// A room that ran out of things to do is resting, not finished — when a
@@ -1385,8 +1505,97 @@ enum Wake {
     },
 }
 
+/// Turns in a row a bot may end on its work without doing anything before it
+/// is rested on that work (see `Orchestrator::note_turn_activity`).
+const FRUITLESS_TURNS: u32 = 3;
+
+/// Whether a housekeeping tick changed something a bot may now act on: a task
+/// back on the board after a claim lapsed, a handoff that expired, a bot back
+/// from a fault. From the live room: a lapsed claim put an urgent fix back on
+/// the board while the room was resting, and nobody was woken to take it
+/// until a person happened to speak.
+pub fn tick_frees_work(events: &[orgbot_proto::EventEnvelope]) -> bool {
+    events.iter().any(|envelope| {
+        matches!(
+            &envelope.event,
+            Event::TaskTransitioned { .. } | Event::HandoffTransitioned { .. }
+        ) || matches!(
+            &envelope.event,
+            Event::AgentStatusChanged { from: orgbot_proto::AgentStatus::Faulted, .. }
+        )
+    })
+}
+
 /// Consecutive fruitless rounds before the run is called stalled.
 ///
 /// One or two are normal — a bot checks the board and finds nothing. A run of
 /// them means the bots are talking past each other.
 const MAX_IDLE_ROUNDS: u32 = 6;
+
+#[cfg(test)]
+mod tick_tests {
+    use super::*;
+    use orgbot_proto::graph::TaskOrigin;
+    use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+
+    #[test]
+    fn a_tick_that_frees_work_wakes_a_resting_room() {
+        // From the live room: a lapsed claim put an urgent fix back on the
+        // board while the room rested, and nobody took it until a person spoke.
+        let mut room = Orchestrator::new(RoomSpec {
+            name: "release".into(),
+            goal: "ship".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        let spec = orgbot_proto::AgentSpec::new(
+            "worker",
+            "Worker",
+            orgbot_proto::ProviderRef::Scripted { script: "test".into() },
+        );
+        let worker = room
+            .seat(spec, Arc::new(orgbot_providers::ScriptedProvider::new(vec![])))
+            .unwrap();
+        room.start().unwrap();
+        let created = room
+            .engine_mut()
+            .apply(Command::CreateTask {
+                title: "Fix the squad count".into(),
+                brief: String::new(),
+                by: None,
+                required_role: None,
+                priority: orgbot_proto::task::Priority::Urgent,
+                acceptance_criteria: vec![],
+                depends_on: vec![],
+                origin: TaskOrigin::plain(),
+            })
+            .unwrap();
+        let task = created
+            .iter()
+            .find_map(|event| match &event.event {
+                Event::TaskCreated { task } => Some(task.id),
+                _ => None,
+            })
+            .unwrap();
+        for command in [
+            Command::OpenTask { task },
+            Command::ClaimTask { task, by: worker },
+            Command::StartTask { task, by: worker },
+        ] {
+            room.engine_mut().apply(command).unwrap();
+        }
+
+        // A tick that changes nothing leaves a resting room resting.
+        room.idle_rounds = MAX_IDLE_ROUNDS;
+        room.tick(Timestamp::now());
+        assert!(matches!(room.stop_condition(), Some(RunOutcome::Stalled { .. })));
+
+        // A day later the claim has lapsed: the task is back on the board,
+        // and the room wakes so someone takes it.
+        room.tick(Timestamp::now().plus_millis(24 * 60 * 60 * 1000));
+        assert_eq!(room.engine().task(task).unwrap().state, orgbot_proto::TaskState::Ready);
+        assert!(room.stop_condition().is_none(), "the room is awake again");
+    }
+}

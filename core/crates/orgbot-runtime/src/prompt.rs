@@ -154,7 +154,10 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            Someone is blocked on your answer. If you accepted one and cannot finish \
            it, use fail_handoff with the reason instead of leaving it to run out.\n\
          - Post at most one room message per turn, a few sentences long. Put long \
-           detail in an artifact or the verification note and refer to it.\n\n",
+           detail in an artifact or the verification note and refer to it.\n\
+         - Do the work in the turn you describe it. A turn that only says what you will \
+           do next changes nothing; after three such turns in a row on your work you are \
+           no longer woken for it, and the coordinators are told.\n\n",
     );
 
     // An agent CLI reaches the board through MCP, and every MCP client

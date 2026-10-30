@@ -564,6 +564,12 @@ impl Provider for GuardedProvider {
     fn name(&self) -> &str {
         self.inner.name()
     }
+    fn last_turn_activity(&self) -> Option<usize> {
+        self.inner.last_turn_activity()
+    }
+    fn start_fresh_session(&self) {
+        self.inner.start_fresh_session()
+    }
     async fn complete(
         &self,
         mut request: CompletionRequest,

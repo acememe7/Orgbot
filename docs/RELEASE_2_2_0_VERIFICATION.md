@@ -57,6 +57,17 @@ handoff fix prepared as 2.1.1, which was never published.
   merges, and the command's output always reaches it. A CLI turn reports a
   merge problem instead of failing. A lent sign-in that is not on this computer
   is skipped rather than stopping the turn.
+- **A bot going round in circles is rested, and freed work is picked up.** In
+  the live room a bot holding an urgent fix took 26 turns in an hour, each a
+  single reply resuming a 140,000-token session, saying it was about to change
+  the code and changing nothing. Its repeats put the room to sleep, and when
+  the claim lapsed nobody was woken to take the fix until a person spoke. A bot
+  that ends 3 turns in a row on its work without using a tool or changing a
+  file (counting tools used inside an agent CLI) is no longer woken for that
+  work until someone talks to it or the work changes; its next turn starts a
+  fresh session, and the coordinators are told. A housekeeping tick that frees
+  work (a lapsed claim, an expired handoff, a bot back from a fault) wakes a
+  resting room.
 - **Leftover copies are cleaned up.** When a room starts, working copies of
   bots no longer in it are removed if they hold no unmerged work; copies that
   might hold unsaved work are kept and named in the room. In the live room such
@@ -115,8 +126,8 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 943 passed, zero failures, three ignored.
-  New tests cover a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
+- Full Rust workspace (`--locked`): 946 passed, zero failures, three ignored.
+  New tests cover a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
   through the sandbox launcher, the lend list's limits,
   outside tool calls by mode, the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
@@ -135,11 +146,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`2ea726fc6702620026b19f35f46960a9f51cbb84996c98faea449b4b6f55fd98`.
+`e8bf52a2304abc4ffba2e86b24c55a7142ab3aaf757f9c07a1c8007ab54b1f8f`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `a46f030a0fc9cd3b8fb5b79a67289aeb6e45319e3866ada8be28b1bc459214f8` |
+| orgbots_2.2.0_amd64.deb | `2310be50c6ceb5a0f43c100a6abf9f264d2430a87c53c0e8af7078cff420f2c1` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
