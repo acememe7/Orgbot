@@ -990,9 +990,11 @@ def _lent_args(owner_home: Path, private_home: Path, private_home_mount: str, le
     """Mount what the owner lent this turn into the bot's home, read-write.
 
     Read-write so a tool can renew its sign-in; the owner's own copy is the
-    one mounted, so a renewal reaches them too. A path that is missing, leaves
-    the home folder by a link, or reaches what is never lent stops the turn
-    with a reason rather than starting it without what was granted.
+    one mounted, so a renewal reaches them too. A path that leaves the home
+    folder by a link or reaches what is never lent stops the turn with a
+    reason. One that is not on this computer is skipped with a note: the owner
+    may lend a tool they have not signed in to yet, and the bot then finds it
+    signed out rather than losing its turn.
     """
     args: list[str] = []
     home = Path(os.path.realpath(owner_home))
@@ -1004,7 +1006,8 @@ def _lent_args(owner_home: Path, private_home: Path, private_home_mount: str, le
         real_relative = source.relative_to(home).as_posix()
         _owner_relative(real_relative)
         if not (source.is_dir() or source.is_file()):
-            _fail(f"Lent path does not exist: ~/{raw}")
+            print(f"orgbot-workspace: lent ~/{raw} is not on this computer; continuing without it", file=sys.stderr)
+            continue
         # Mount points in the bot's home, created on its private disk folder.
         target = Path(private_home_mount) / relative
         for depth in range(1, len(relative.parts)):

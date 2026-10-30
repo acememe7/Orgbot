@@ -612,8 +612,7 @@ Path('/tmp/private.txt').write_text('temporary')
             self.assertEqual(run("lent", lend=[".config/.wrangler"]), 0, "lent: in the bot's own home")
             with self.assertRaises(workspace.WorkspaceError):
                 run("lent", lend=[".ssh"])
-            with self.assertRaises(workspace.WorkspaceError):
-                run("lent", lend=[".config/missing-tool"])
+            self.assertEqual(run("lent", lend=[".config/.wrangler", ".config/missing-tool"]), 0, "a lent tool not on this computer is skipped, not fatal")
             with self.assertRaises(workspace.WorkspaceError):
                 run("lent", lend=["../escape"])
         self.assertEqual((home / ".config/.wrangler/config/renewed").read_text(encoding="utf-8"), "renewed token", "a renewed sign-in reaches the owner")
