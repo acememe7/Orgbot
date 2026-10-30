@@ -126,7 +126,7 @@ impl Workspace {
                 json!(["path"]),
             ));
             if self.spec.commands {
-                tools.push(tool("workspace_run", "Run a POSIX shell command in the selected workspace. Linux local commands use an isolated working copy: original project files are read-only, non-conflicting edits integrate after success, and removals await owner approval. SSH commands retain the SSH account's permissions. Output is bounded to 64 KiB. Timeout defaults to 300 seconds (1–1800 allowed). Inspect partial effects after interruption; do not start background processes.", json!({"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":1800}}), json!(["command"])));
+                tools.push(tool("workspace_run", "Run a POSIX shell command in the selected workspace. Linux local commands use an isolated working copy: original project files are read-only, edits integrate after success, and removals await owner approval. A file that changed in the project since your copy was made is not overwritten: your version is kept under ~/orgbot-conflicts/ and your copy takes the project's, so redo the change on top if it is still needed. SSH commands retain the SSH account's permissions. Output is bounded to 64 KiB. Timeout defaults to 300 seconds (1–1800 allowed). Inspect partial effects after interruption; do not start background processes.", json!({"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":1800}}), json!(["command"])));
             }
         }
         if self.capabilities.verification {

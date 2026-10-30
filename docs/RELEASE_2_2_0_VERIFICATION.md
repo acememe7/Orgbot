@@ -49,6 +49,14 @@ handoff fix prepared as 2.1.1, which was never published.
 - **Removing files from a working copy.** Bots are told to pass paths inside
   their working copy to `orgbot-trash`, and the helper says so when given the
   original project's path instead of sending the bot to configure your trash.
+- **A conflicting copy no longer stops a bot.** In the live room a bot whose
+  copy conflicted with files others had changed was told every command had
+  failed, with its output thrown away, though each one had run. Its version
+  of each conflicting file is now kept in its private home under
+  `~/orgbot-conflicts/`, its copy takes the project's newer version, the rest
+  merges, and the command's output always reaches it. A CLI turn reports a
+  merge problem instead of failing. A lent sign-in that is not on this computer
+  is skipped rather than stopping the turn.
 - **Leftover copies are cleaned up.** When a room starts, working copies of
   bots no longer in it are removed if they hold no unmerged work; copies that
   might hold unsaved work are kept and named in the room. In the live room such
@@ -107,15 +115,15 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 942 passed, zero failures, three ignored.
-  New tests cover the four access modes, a lent sign-in reaching a real CLI turn
+- Full Rust workspace (`--locked`): 943 passed, zero failures, three ignored.
+  New tests cover a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
   through the sandbox launcher, the lend list's limits,
   outside tool calls by mode, the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
   pause and held rooms, retiring tasks and leftover-copy cleanup; each was checked to fail without
   its fix.
 - Full Flutter tests: 371 passed, five skipped. Flutter analysis: no issues.
-- Workspace sandbox helper: 70 passed, including real bubblewrap checks that a
+- Workspace sandbox helper: 72 passed, including setting a bot's conflicting files aside without a link redirecting them, including real bubblewrap checks that a
   turn the owner did not allow, or a read-only turn, has no server key anywhere,
   that lent sign-ins are hidden unless lent and then appear only in the bot's
   home, and that a once read-only workspace never gets the key. Trash helper: 30
@@ -127,11 +135,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`ff07d0bebba149e8024b988a61548a09d821ee2a391bebe1a2ee9b7897131168`.
+`2ea726fc6702620026b19f35f46960a9f51cbb84996c98faea449b4b6f55fd98`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `38b4a42df25e264762ab01b447b6e4fd896da98284ad7ddcf8c6dea246b58c30` |
+| orgbots_2.2.0_amd64.deb | `a46f030a0fc9cd3b8fb5b79a67289aeb6e45319e3866ada8be28b1bc459214f8` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication

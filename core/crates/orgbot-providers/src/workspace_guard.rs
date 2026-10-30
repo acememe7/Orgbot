@@ -955,7 +955,22 @@ impl WorkspaceGuard {
     }
 
     pub fn apply(&self) -> Result<serde_json::Value, String> {
+        self.apply_inner(false)
+    }
+
+    /// Merge a bot's own changes, setting aside any file that conflicts with
+    /// a newer version in the project: the bot's version is kept in its
+    /// private home and its copy takes the project's, so the rest merges and
+    /// the bot can keep working. The result's `note` says what was set aside.
+    pub fn apply_setting_aside_conflicts(&self) -> Result<serde_json::Value, String> {
+        self.apply_inner(true)
+    }
+
+    fn apply_inner(&self, set_aside: bool) -> Result<serde_json::Value, String> {
         let mut command = self.command("apply")?;
+        if set_aside {
+            command.arg("--set-aside-conflicts");
+        }
         let output = command
             .output()
             .map_err(|e| format!("workspace integration failed: {e}"))?;

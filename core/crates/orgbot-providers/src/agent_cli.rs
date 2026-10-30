@@ -1111,13 +1111,27 @@ impl AgentCliProvider {
                             .as_ref()
                             .is_some_and(|workspace| workspace.read_only)
                     {
-                        let integration = guard.apply().map_err(ProviderError::Unsupported)?;
-                        if integration
-                            .get("deleted")
-                            .and_then(Value::as_array)
-                            .is_some_and(|paths| !paths.is_empty())
-                        {
-                            episode.text.push_str("\nFile removals await the owner's approval: open the Project panel and choose Workspace changes. Originals are preserved.");
+                        // A merge problem is reported in the turn, not made the
+                        // turn's failure: the work happened, and a failed turn
+                        // would only be retried into the same conflict.
+                        match guard.apply_setting_aside_conflicts() {
+                            Ok(integration) => {
+                                if integration
+                                    .get("deleted")
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|paths| !paths.is_empty())
+                                {
+                                    episode.text.push_str("\nFile removals await the owner's approval: open the Project panel and choose Workspace changes. Originals are preserved.");
+                                }
+                                if let Some(note) = integration.get("note").and_then(Value::as_str) {
+                                    episode.text.push('\n');
+                                    episode.text.push_str(note);
+                                }
+                            }
+                            Err(error) => {
+                                episode.text.push_str("\nYour file changes were not merged into the project: ");
+                                episode.text.push_str(&error.chars().take(1000).collect::<String>());
+                            }
                         }
                     }
                 }

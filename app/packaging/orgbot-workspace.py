@@ -2504,7 +2504,47 @@ def _trash_replacement(project: Path, target: Path, expected_sha256: str) -> str
     return result.stdout.strip()[-200:]
 
 
-def _apply(state_arg: str, agent_arg: str, review_token: str | None) -> dict[str, Any]:
+def _set_aside_conflicts(project: Path, workspace: Path, conflicts: list[str], current: dict[str, dict[str, Any]], agent_entries: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the bot's version of each conflicting file and take the project's.
+
+    From the live room: a bot whose copy conflicted with files others had
+    changed could run no command at all, because every command ends by
+    merging, and the merge refused. The project's newer version is never
+    overwritten: the bot's version is copied into its private home under
+    `~/orgbot-conflicts/<time>/`, where it can compare and redo its change, and
+    its copy takes the project's version so everything else merges.
+    """
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime()) + f"-{os.getpid()}"
+    home = workspace.parent / "profiles" / "home"
+    kept_root = home / "orgbot-conflicts" / stamp
+    set_aside: list[dict[str, Any]] = []
+    for name in conflicts:
+        ours = agent_entries.get(name)
+        kept = None
+        if ours is not None:
+            source = _file_at(workspace, name)
+            destination = kept_root / name
+            _mkdir_chain_no_symlinks(destination.parent)
+            fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            try:
+                with open(source, "rb") as handle:
+                    while chunk := handle.read(1 << 20):
+                        os.write(fd, chunk)
+            finally:
+                os.close(fd)
+            kept = f"~/orgbot-conflicts/{stamp}/{name}"
+        if name in current:
+            _copy_from_project(project, workspace, name)
+        else:
+            try:
+                _remove_file(_file_at(workspace, name))
+            except FileNotFoundError:
+                pass
+        set_aside.append({"path": name, "kept_at": kept, "project_has": "a newer version" if name in current else "no such file"})
+    return set_aside
+
+
+def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: bool = False) -> dict[str, Any]:
     agent = _safe_agent(agent_arg)
     state = _canonical_directory(state_arg, "state")
     _check_private_dir(state)
@@ -2536,22 +2576,42 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None) -> dict[str
             _fail("Review token must be a 64-character lowercase SHA-256 value")
         if review_token is not None and review_token != approval_token:
             return {"ok": False, "workspace": os.fspath(workspace), **diffs, "pending_delete": sorted(diffs["deleted"]), "review_token": approval_token, "error": "Workspace changed after deletion review; refresh the changes and approve the current deletion list"}
-        conflicts = set(diffs["conflicts"])
         deletions_approved = review_token == approval_token
-        pending_delete = sorted(name for name in diffs["deleted"] if not deletions_approved)
-        operations: list[tuple[str, str]] = []
-        for name in sorted(set(base) | set(current) | set(agent_entries)):
-            before, now, ours = base.get(name), current.get(name), agent_entries.get(name)
-            if ours == before or ours == now:
-                continue
-            if now != before and now != ours:
-                conflicts.add(name)
-                continue
-            if ours is None:
-                if deletions_approved:
-                    operations.append((name, "delete"))
-            else:
-                operations.append((name, "write"))
+
+        def plan() -> tuple[set[str], list[str], list[tuple[str, str]]]:
+            conflicts = set(diffs["conflicts"])
+            pending_delete = sorted(name for name in diffs["deleted"] if not deletions_approved)
+            operations: list[tuple[str, str]] = []
+            for name in sorted(set(base) | set(current) | set(agent_entries)):
+                before, now, ours = base.get(name), current.get(name), agent_entries.get(name)
+                if ours == before or ours == now:
+                    continue
+                if now != before and now != ours:
+                    conflicts.add(name)
+                    continue
+                if ours is None:
+                    if deletions_approved:
+                        operations.append((name, "delete"))
+                else:
+                    operations.append((name, "write"))
+            return conflicts, pending_delete, operations
+
+        conflicts, pending_delete, operations = plan()
+        set_aside_files: list[dict[str, Any]] = []
+        # Only for the bot's own merges: an owner's deletion approval is for
+        # the exact list they saw, which setting files aside would change.
+        if conflicts and set_aside and review_token is None:
+            set_aside_files = _set_aside_conflicts(project, workspace, sorted(conflicts), current, agent_entries)
+            for name in conflicts:
+                if name in current:
+                    base[name] = current[name]
+                else:
+                    base.pop(name, None)
+            data["entries"] = base
+            _atomic_json(manifest_path, data)
+            agent_entries = _scan_workspace(workspace, base)
+            diffs = _changes(base, current, agent_entries)
+            conflicts, pending_delete, operations = plan()
         if conflicts:
             diffs["conflicts"] = sorted(conflicts)
             return {"ok": False, "workspace": os.fspath(workspace), **diffs, "pending_delete": pending_delete, "review_token": approval_token, "error": "Conflicts must be resolved before applying any change"}
@@ -2616,7 +2676,16 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None) -> dict[str
         journal["phase"] = "complete"
         journal["completed_at"] = int(time.time())
         _atomic_json(journal_path, journal)
-        return {"ok": True, "workspace": os.fspath(workspace), "changed": diffs["changed"], "added": diffs["added"], "deleted": diffs["deleted"], "applied": [name for name, _ in operations], "pending_delete": pending_delete, "conflicts": [], "review_token": final_review_token}
+        result = {"ok": True, "workspace": os.fspath(workspace), "changed": diffs["changed"], "added": diffs["added"], "deleted": diffs["deleted"], "applied": [name for name, _ in operations], "pending_delete": pending_delete, "conflicts": [], "review_token": final_review_token}
+        if set_aside_files:
+            result["set_aside"] = set_aside_files
+            result["note"] = (
+                "These files changed in the project after your copy was made, so your versions were not merged: "
+                + ", ".join(item["path"] for item in set_aside_files)
+                + ". Your copy now has the project's version; yours are kept under ~/orgbot-conflicts/ "
+                "(read them with workspace_run). Redo your change on top of the project's version if it is still needed."
+            )
+        return result
     finally:
         os.close(lock_fd)
 
@@ -2654,6 +2723,7 @@ def _parser() -> argparse.ArgumentParser:
     apply.add_argument("--state", required=True)
     apply.add_argument("--agent", required=True)
     apply.add_argument("--review-token")
+    apply.add_argument("--set-aside-conflicts", action="store_true", help="Keep the bot's version of each conflicting file in its private home and take the project's")
     agy_auth = sub.add_parser("agy-auth")
     agy_auth.add_argument("action", choices=("login", "status"))
     return parser
@@ -2678,7 +2748,7 @@ def main(argv: list[str] | None = None) -> int:
             result = _agy_auth_login() if args.action == "login" else _agy_auth_status()
             _json(result)
             return 0 if result.get("ok") else 2
-        result = _apply(args.state, args.agent, args.review_token)
+        result = _apply(args.state, args.agent, args.review_token, set_aside=args.set_aside_conflicts)
         _json(result)
         return 0 if result.get("ok") else 1
     except (WorkspaceError, OSError, ValueError, json.JSONDecodeError) as exc:

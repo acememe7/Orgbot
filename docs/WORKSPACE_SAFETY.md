@@ -187,6 +187,18 @@ files and preserves agent-only changes, even if another path conflicts.
 Conflicting files remain untouched in both trees and are reported until a human
 or trusted integration resolves them.
 
+A bot's own merges (after a successful room command, a room file write, or a
+CLI turn) use `apply --set-aside-conflicts`: the project's newer version is
+never overwritten; the bot's version of each conflicting file is copied into its
+private home under `~/orgbot-conflicts/<time>/`, its copy takes the project's
+version, and every other change merges as usual. The result's `note` names the
+files set aside, and the bot is told to redo its change on top. The folder is
+created fresh and refuses links, so a bot cannot steer the copy elsewhere. A
+command's output always reaches the bot: a merge problem is reported beside it,
+and in a CLI turn it is reported in the turn rather than failing it. An owner's
+deletion approval never sets files aside, because it covers the exact list the
+owner saw.
+
 `apply` performs a three-way comparison of the trusted baseline, current
 project, and agent worktree before writing anything. If any conflict exists,
 the whole batch is rejected before mutation. New and changed files are written

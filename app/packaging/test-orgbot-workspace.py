@@ -220,6 +220,40 @@ class WorkspaceTests(unittest.TestCase):
         self.assertFalse((self.project / "new file.txt").exists())
         self.assertFalse((self.root / "synthetic-trash").exists())
 
+    def test_a_bots_conflicting_files_are_set_aside_and_the_rest_merges(self):
+        # From the live room: a bot whose copy conflicted with files others had
+        # changed could run no command at all, because every command ended in
+        # a merge that refused.
+        work = self.prepare()
+        (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")
+        (work / "new file.txt").write_text("new\n", encoding="utf-8")
+        (self.project / "src/main.py").write_text("owner edit\n", encoding="utf-8")
+        with patch.object(workspace, "_trash_replacement", self._fake_trash):
+            result = workspace._apply(os.fspath(self.state), "dev", review_token=None, set_aside=True)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual((self.project / "src/main.py").read_text(encoding="utf-8"), "owner edit\n", "the project's newer version is kept")
+        self.assertEqual((self.project / "new file.txt").read_text(encoding="utf-8"), "new\n", "everything else merges")
+        self.assertEqual((work / "src/main.py").read_text(encoding="utf-8"), "owner edit\n", "the copy takes the project's version")
+        [item] = result["set_aside"]
+        self.assertEqual(item["path"], "src/main.py")
+        kept = list((work.parent / "profiles/home/orgbot-conflicts").rglob("main.py"))
+        self.assertEqual([path.read_text(encoding="utf-8") for path in kept], ["agent edit\n"], "and the bot's version is kept for it")
+        self.assertIn("~/orgbot-conflicts/", result["note"])
+        again = workspace._apply(os.fspath(self.state), "dev", review_token=None)
+        self.assertTrue(again["ok"], "no conflict is left behind")
+
+    def test_setting_conflicts_aside_cannot_be_redirected_by_a_link_in_the_bots_home(self):
+        work = self.prepare()
+        (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")
+        (self.project / "src/main.py").write_text("owner edit\n", encoding="utf-8")
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (work.parent / "profiles/home/orgbot-conflicts").symlink_to(elsewhere)
+        with self.assertRaises(workspace.WorkspaceError):
+            workspace._apply(os.fspath(self.state), "dev", review_token=None, set_aside=True)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertEqual((self.project / "src/main.py").read_text(encoding="utf-8"), "owner edit\n")
+
     def test_interrupted_replacement_keeps_original_recoverable_and_journaled(self):
         work = self.prepare()
         (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")

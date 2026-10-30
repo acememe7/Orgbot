@@ -267,15 +267,28 @@ impl LocalWorkspaceHost {
             if !outcome.is_error
                 && matches!(name, "workspace_write" | "workspace_import_attachment")
             {
-                let status = guard.apply()?;
-                if status
-                    .get("deleted")
-                    .and_then(Value::as_array)
-                    .is_some_and(|v| !v.is_empty())
-                {
-                    outcome
-                        .content
-                        .push_str("\nOriginal file removals await owner approval.");
+                match guard.apply_setting_aside_conflicts() {
+                    Ok(status) => {
+                        if status
+                            .get("deleted")
+                            .and_then(Value::as_array)
+                            .is_some_and(|v| !v.is_empty())
+                        {
+                            outcome
+                                .content
+                                .push_str("\nOriginal file removals await owner approval.");
+                        }
+                        if let Some(note) = status.get("note").and_then(Value::as_str) {
+                            outcome.content.push('\n');
+                            outcome.content.push_str(note);
+                        }
+                    }
+                    // The file is in the working copy either way; say why it
+                    // has not reached the project rather than hide the write.
+                    Err(error) => {
+                        outcome.content.push_str("\nWritten to your working copy, but not merged into the project: ");
+                        outcome.content.push_str(&error);
+                    }
                 }
             }
             Ok(outcome)
@@ -362,11 +375,23 @@ impl LocalWorkspaceHost {
             let output = out.await.map_err(|e| e.to_string())??;
             let error = err.await.map_err(|e| e.to_string())??;
             let success = matches!(status, Ok(Ok(code)) if code.success());
+            // The command has run whatever the merge says: its output and its
+            // effects are the bot's to know about. From the live room: a bot
+            // whose copy conflicted was told every command had failed, with
+            // the output thrown away, though each one had run.
             let integration = if success && !verify {
                 Some(
-                    tokio::task::spawn_blocking(move || guard.apply())
+                    match tokio::task::spawn_blocking(move || guard.apply_setting_aside_conflicts())
                         .await
-                        .map_err(|e| e.to_string())??,
+                        .map_err(|e| e.to_string())?
+                    {
+                        Ok(status) => status,
+                        Err(error) => serde_json::json!({
+                            "ok": false,
+                            "error": error,
+                            "note": "Your command ran, but its file changes were not merged into the project.",
+                        }),
+                    },
                 )
             } else {
                 None
@@ -1136,6 +1161,40 @@ mod tests {
         host.guard_state = Some(state.to_path_buf());
         host.commands = commands;
         host
+    }
+
+    #[tokio::test]
+    async fn a_command_in_a_conflicting_copy_still_runs_reports_its_output_and_merges_the_rest() {
+        // From the live room: a bot whose copy conflicted with files others
+        // had changed was told every command had failed, output thrown away,
+        // though each one had run.
+        let root = temp_dir();
+        let state = temp_dir();
+        fs::write(root.join("shared.txt"), "original").unwrap();
+        let host = protected_host(&root, &state, true);
+        let agent = AgentId::new();
+        let first = host
+            .run(agent, "workspace_run", &json!({"command":"printf mine > shared.txt"}), false)
+            .await;
+        assert!(!first.is_error, "{}", first.content);
+        // Its copy is now behind: another change reaches the project, and the
+        // bot edits the same file again in its copy.
+        fs::write(root.join("shared.txt"), "someone else's").unwrap();
+        let second = host
+            .run(
+                agent,
+                "workspace_run",
+                &json!({"command":"printf again > shared.txt; printf fresh > other.txt; printf health-ok"}),
+                false,
+            )
+            .await;
+        assert!(!second.is_error, "{}", second.content);
+        assert!(second.content.contains("health-ok"), "the output reaches the bot: {}", second.content);
+        assert!(second.content.contains("orgbot-conflicts"), "{}", second.content);
+        assert_eq!(fs::read_to_string(root.join("shared.txt")).unwrap(), "someone else's", "the newer version is kept");
+        assert_eq!(fs::read_to_string(root.join("other.txt")).unwrap(), "fresh", "the rest merges");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&state);
     }
 
     #[tokio::test]
