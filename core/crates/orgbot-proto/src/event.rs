@@ -120,6 +120,23 @@ pub enum Event {
         actor: Option<AgentId>,
     },
 
+    /// A coordinator changed what a task asks for (its brief, its acceptance
+    /// criteria, or both) and said why. Reviewers judge against the task as
+    /// it stands, so a requirement waived in chat lands on the task itself.
+    TaskAmended {
+        task: TaskId,
+        #[serde(default)]
+        title: String,
+        by: AgentId,
+        /// The new brief, when it changed.
+        #[serde(default)]
+        brief: Option<String>,
+        /// The new acceptance criteria, in full, when they changed.
+        #[serde(default)]
+        acceptance_criteria: Option<Vec<String>>,
+        reason: String,
+    },
+
     /// A handoff was offered.
     HandoffOffered { handoff: Box<Handoff> },
     /// A handoff changed state.
@@ -204,6 +221,7 @@ impl Event {
             Self::DecisionQuestionJoined { .. } => "decision_question_joined",
             Self::DecisionAnswered { .. } => "decision_answered",
             Self::TaskTransitioned { .. } => "task_transitioned",
+            Self::TaskAmended { .. } => "task_amended",
             Self::HandoffOffered { .. } => "handoff_offered",
             Self::HandoffTransitioned { .. } => "handoff_transitioned",
             Self::ArtifactAdded { .. } => "artifact_added",
@@ -220,6 +238,7 @@ impl Event {
         match self {
             Self::TaskCreated { task } => Some(task.id),
             Self::TaskTransitioned { task, .. } => Some(*task),
+            Self::TaskAmended { task, .. } => Some(*task),
             Self::HandoffOffered { handoff } => Some(handoff.task),
             Self::ArtifactAdded { artifact } => Some(artifact.task),
             Self::ReviewRecorded { review } => Some(review.task),

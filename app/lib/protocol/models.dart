@@ -222,13 +222,14 @@ class Task {
 
   final String id;
   final String title;
-  final String brief;
+  // Not final: a coordinator can amend what a task asks for (`task_amended`).
+  String brief;
   TaskState state;
   final Priority priority;
   String? assignee;
   int blockedCount;
   int revision;
-  final List<String> acceptanceCriteria;
+  List<String> acceptanceCriteria;
   final String? requiredRole;
 
   /// Tasks that must land before this one can start. The edges of the graph.

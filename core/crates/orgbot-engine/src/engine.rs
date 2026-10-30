@@ -194,6 +194,20 @@ impl Engine {
                 Event::TaskCreated { task } => {
                     engine.tasks.insert(task.id, *task.clone());
                 }
+                Event::TaskAmended {
+                    task,
+                    brief,
+                    acceptance_criteria,
+                    ..
+                } => {
+                    let record = engine.tasks.get_mut(task).ok_or("Missing saved task")?;
+                    if let Some(brief) = brief {
+                        record.brief = brief.clone();
+                    }
+                    if let Some(criteria) = acceptance_criteria {
+                        record.acceptance_criteria = criteria.clone();
+                    }
+                }
                 Event::DecisionAsked { decision } => {
                     engine.decisions.decisions.push(*decision.clone());
                 }
@@ -1888,6 +1902,13 @@ impl Engine {
                 reason,
             } => self.request_access(by, task, items, action, reason),
             Command::ProposeRetire { by, task, reason } => self.propose_retire(by, task, reason),
+            Command::AmendTask {
+                by,
+                task,
+                brief,
+                acceptance_criteria,
+                reason,
+            } => self.amend_task(by, task, brief, acceptance_criteria, reason),
 
             Command::AnswerDecision { decision, answer } => self.answer_decision(decision, answer),
 
@@ -2513,6 +2534,98 @@ impl Engine {
                 .with_intent(orgbot_proto::chat::MessageIntent::Answer);
             events.extend(self.post_message(message)?);
         }
+        Ok(events)
+    }
+
+    /// Change what `task` asks for, on a coordinator's decision.
+    ///
+    /// From the live room: a coordinator waived a requirement in chat, the
+    /// task still listed it, and the reviewer, judging against the task as
+    /// written, sent the work back for it again. The task itself now changes,
+    /// with the reason in the log, and its holder is told.
+    fn amend_task(
+        &mut self,
+        by: AgentId,
+        task: TaskId,
+        brief: Option<String>,
+        acceptance_criteria: Option<Vec<String>>,
+        reason: String,
+    ) -> Result<Vec<EventEnvelope>> {
+        let spec = self.require_agent(by)?;
+        if !spec.roles.iter().any(|role| role == "coordinator") {
+            return Err(EngineError::NotPermitted {
+                agent: by,
+                action: "amend a task without the coordinator role".into(),
+            });
+        }
+        let handle = spec.handle.clone();
+        let reason = reason.trim().to_string();
+        if reason.is_empty() || reason.chars().count() > 500 {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "say in 1–500 characters why the task changes".into(),
+            });
+        }
+        let brief = brief.map(|brief| brief.trim().to_string());
+        let acceptance_criteria = acceptance_criteria.map(|criteria| {
+            criteria
+                .into_iter()
+                .map(|criterion| criterion.trim().to_string())
+                .filter(|criterion| !criterion.is_empty())
+                .collect::<Vec<_>>()
+        });
+        if brief.is_none() && acceptance_criteria.is_none() {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "give a new brief, new acceptance criteria, or both".into(),
+            });
+        }
+        if brief.as_ref().is_some_and(|brief| brief.chars().count() > 8_000)
+            || acceptance_criteria.as_ref().is_some_and(|criteria| {
+                criteria.len() > 30 || criteria.iter().any(|c| c.chars().count() > 1_000)
+            })
+        {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "keep the brief under 8000 characters and at most 30 criteria of up to 1000 characters".into(),
+            });
+        }
+        let record = self.require_task(task)?;
+        if record.state.is_permanent() {
+            return Err(EngineError::NotReady {
+                task,
+                reason: format!("the task is already {}", record.state.as_str()),
+            });
+        }
+        let title = record.title.clone();
+        let assignee = record.assignee;
+        let record = self.tasks.get_mut(&task).expect("task exists");
+        if let Some(brief) = &brief {
+            record.brief = brief.clone();
+        }
+        if let Some(criteria) = &acceptance_criteria {
+            record.acceptance_criteria = criteria.clone();
+        }
+        let mut events = vec![self.emit(Event::TaskAmended {
+            task,
+            title: title.clone(),
+            by,
+            brief: brief.clone(),
+            acceptance_criteria: acceptance_criteria.clone(),
+            reason: reason.clone(),
+        })];
+        let mut body = format!("@{handle} amended \"{title}\": {reason}");
+        if let Some(criteria) = &acceptance_criteria {
+            body.push_str("\nAcceptance criteria now:");
+            for (index, criterion) in criteria.iter().enumerate() {
+                body.push_str(&format!("\n{}. {criterion}", index + 1));
+            }
+        }
+        if brief.is_some() {
+            body.push_str("\nThe brief was also updated.");
+        }
+        let mut message = ChatMessage::system(self.room.id, body);
+        if let Some(assignee) = assignee.filter(|assignee| *assignee != by) {
+            message = message.to_agents(vec![assignee]);
+        }
+        events.extend(self.post_message(message)?);
         Ok(events)
     }
 

@@ -3351,3 +3351,53 @@ fn only_a_coordinator_may_propose_retiring_a_task() {
         reason: "I think it is stale".into(),
     });
 }
+
+#[test]
+fn a_coordinator_amends_what_a_task_asks_for_and_the_reviewer_sees_it() {
+    // From the live room: a coordinator waived a requirement in chat, the task
+    // still listed it, and the reviewer sent the work back for it again.
+    let mut f = fixture();
+    let task = f.start_task("fix the squad count", f.worker);
+    f.apply(Command::AmendTask {
+        by: f.coordinator,
+        task,
+        brief: None,
+        acceptance_criteria: Some(vec![
+            "late parties are seated".into(),
+            "a direct test covers the last-resort donor".into(),
+        ]),
+        reason: "the join-level test is waived: the branch cannot be reached by a real join".into(),
+    });
+    assert_eq!(
+        f.engine.task(task).unwrap().acceptance_criteria,
+        vec!["late parties are seated".to_string(), "a direct test covers the last-resort donor".to_string()]
+    );
+    let told = f.engine.transcript().iter().any(|message| {
+        message.body.contains("amended \"fix the squad count\"")
+            && message.body.contains("2. a direct test covers the last-resort donor")
+            && matches!(&message.audience, orgbot_proto::Audience::Agents { agents } if agents.contains(&f.worker))
+    });
+    assert!(told, "the holder is told what the task asks for now");
+
+    // A saved room replays the amendment.
+    let restored = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec()).unwrap();
+    assert_eq!(restored.task(task).unwrap().acceptance_criteria.len(), 2);
+
+    // Only a coordinator may, and only with a reason and something to change.
+    let refused = f.reject(Command::AmendTask {
+        by: f.worker,
+        task,
+        brief: None,
+        acceptance_criteria: Some(vec!["anything goes".into()]),
+        reason: "I would like an easier bar".into(),
+    });
+    assert!(matches!(refused, EngineError::NotPermitted { .. }), "{refused:?}");
+    let empty = f.reject(Command::AmendTask {
+        by: f.coordinator,
+        task,
+        brief: None,
+        acceptance_criteria: None,
+        reason: "nothing really".into(),
+    });
+    assert!(matches!(empty, EngineError::InvalidOwnerQuestion { .. }), "{empty:?}");
+}

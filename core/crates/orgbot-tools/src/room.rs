@@ -395,6 +395,22 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             ),
         ),
         tool(
+            "amend_task",
+            "Coordinators: change what a task asks for when you have decided it should \
+             change: give the full new acceptance criteria, a new brief, or both, and why. \
+             Reviewers judge against the task as it stands, so a requirement you waive or \
+             change in chat alone still holds until you amend the task. The holder is told.",
+            schema::object(
+                vec![
+                    ("task", schema::string("The task to amend.")),
+                    ("acceptance_criteria", schema::string_array("The complete new list of acceptance criteria, replacing the old one.")),
+                    ("brief", schema::string("The new brief, if it changes.")),
+                    ("reason", schema::string("Why, in one or two sentences, for the log.")),
+                ],
+                &["task", "reason"],
+            ),
+        ),
+        tool(
             "propose_retire_task",
             "Coordinators: propose to the owner that a task nobody should work on be \
              retired, for example one a later owner decision or another task superseded. \
@@ -588,7 +604,7 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
     }
 
     if !spec.roles.iter().any(|role| role == "coordinator") {
-        tools.retain(|tool| tool.name != "propose_retire_task");
+        tools.retain(|tool| tool.name != "propose_retire_task" && tool.name != "amend_task");
     }
     if spec.autonomy.review_only {
         tools.retain(|tool| review_only_tool_allowed(spec, &tool.name));
@@ -602,7 +618,7 @@ fn review_only_tool_allowed(spec: &AgentSpec, name: &str) -> bool {
         && match name {
             "create_task" => spec.autonomy.may_create_tasks,
             "submit_task" => spec.autonomy.may_submit,
-            "propose_retire_task" => true,
+            "propose_retire_task" | "amend_task" => true,
             _ => false,
         })
         || matches!(
@@ -676,6 +692,7 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
         "request_access" => request_access(engine, actor, input),
         "fail_handoff" => fail_handoff(engine, actor, input),
         "propose_retire_task" => propose_retire_task(engine, actor, input),
+        "amend_task" => amend_task(engine, actor, input),
         "block_on" => block_on(engine, actor, input),
         "release_task" => release_task(engine, actor, input),
         "create_task" => create_task(engine, actor, input),
@@ -1742,6 +1759,37 @@ fn ask_owner(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome 
                     }),
             }
         }
+        Err(error) => explain(error),
+    }
+}
+
+fn amend_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
+    let task = match task_arg(input, "task") {
+        Ok(task) => task,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    let reason = match required_str(input, "reason") {
+        Ok(reason) => reason.to_string(),
+        Err(message) => return ToolOutcome::error(message),
+    };
+    let acceptance_criteria = input
+        .get("acceptance_criteria")
+        .filter(|value| value.is_array())
+        .map(|_| string_list(input, "acceptance_criteria"));
+    let brief = input
+        .get("brief")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    match engine.apply(Command::AmendTask {
+        by: actor,
+        task,
+        brief,
+        acceptance_criteria,
+        reason,
+    }) {
+        Ok(_) => ToolOutcome::ok(
+            "Amended. Reviewers now judge the task against what it asks for now, and its holder has been told.",
+        ),
         Err(error) => explain(error),
     }
 }

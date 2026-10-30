@@ -257,6 +257,12 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
              other coordinator for a bounded decision when their expertise is needed; \
              do not require both leads to act on every message.\n",
         );
+        out.push_str(
+            "\nWhen you decide a task's requirement no longer applies or must change, \
+             amend the task with amend_task (the full new acceptance criteria, and why). \
+             Reviewers judge against the task as written, so a waiver posted only in chat \
+             leaves the old requirement in force and the work comes back again.\n",
+        );
         if spec.autonomy.review_only {
             out.push_str(
                 "You coordinate and review with read-only workspace access. Delegate \

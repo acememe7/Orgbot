@@ -555,6 +555,40 @@ void main() {
     expect(store.messages.first.author.isAgent, isTrue);
   });
 
+  test('an amended task shows what it asks for now', () async {
+    final client = FakeClient();
+    final store = RoomStore(client);
+
+    client.emit(
+      event({
+        'event': 'task_created',
+        'task': {
+          'id': 'task_1',
+          'title': 'fix the squad count',
+          'brief': 'b',
+          'state': 'in_review',
+          'priority': 'urgent',
+          'revision': 0,
+          'acceptance_criteria': ['a join-level test covers the last resort'],
+        },
+      }),
+    );
+    client.emit(
+      event({
+        'event': 'task_amended',
+        'task': 'task_1',
+        'title': 'fix the squad count',
+        'by': 'bot_lead',
+        'acceptance_criteria': ['late parties are seated', 'a direct test covers the last resort'],
+        'reason': 'the join-level test is waived',
+      }, seq: 2),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(store.tasks.first.acceptanceCriteria, ['late parties are seated', 'a direct test covers the last resort']);
+    expect(store.tasks.first.brief, 'b', reason: 'the brief stays when only the criteria change');
+  });
+
   test('a task transition updates state and ownership', () async {
     final client = FakeClient();
     final store = RoomStore(client);

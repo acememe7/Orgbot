@@ -233,6 +233,21 @@ pub enum Command {
         reason: String,
     },
 
+    /// Change what a task asks for, on a coordinator's decision: its brief,
+    /// its acceptance criteria, or both, with the reason recorded.
+    AmendTask {
+        /// The coordinating bot amending it.
+        by: AgentId,
+        /// The task to amend.
+        task: TaskId,
+        /// A new brief, if it changes.
+        brief: Option<String>,
+        /// The full new acceptance criteria, if they change.
+        acceptance_criteria: Option<Vec<String>>,
+        /// Why, recorded on the task and shown to the room.
+        reason: String,
+    },
+
     /// Record the operator's answer to a question, releasing whatever it
     /// unblocks. One answer clears every task waiting on that same question.
     AnswerDecision {
@@ -323,6 +338,7 @@ impl Command {
             Self::AskOwner { .. } => "ask_owner",
             Self::RequestServerAccess { .. } => "request_server_access",
             Self::RequestAccess { .. } => "request_access",
+            Self::AmendTask { .. } => "amend_task",
             Self::ProposeRetire { .. } => "propose_retire",
             Self::AnswerDecision { .. } => "answer_decision",
             Self::KeepAlive { .. } => "keep_alive",
@@ -353,6 +369,7 @@ impl Command {
             Self::AskOwner { task: Some(task), .. } => Some(*task),
             Self::RequestServerAccess { task, .. } => Some(*task),
             Self::RequestAccess { task, .. } => Some(*task),
+            Self::AmendTask { task, .. } => Some(*task),
             _ => None,
         }
     }

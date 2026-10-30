@@ -68,6 +68,13 @@ handoff fix prepared as 2.1.1, which was never published.
   fresh session, and the coordinators are told. A housekeeping tick that frees
   work (a lapsed claim, an expired handoff, a bot back from a fault) wakes a
   resting room.
+- **Coordinators can amend a task.** In the live room a coordinator waived a
+  requirement in chat, the task still listed it, and the reviewer sent the work
+  back for it again; the fix went through four review rounds partly for that. A
+  coordinator now changes a task's acceptance criteria or brief with
+  `amend_task` and the reason: the change is recorded in the room log, survives
+  a restore, is shown on the task card at once, and the task's holder is told.
+  Reviewers judge against the task as it stands.
 - **Leftover copies are cleaned up.** When a room starts, working copies of
   bots no longer in it are removed if they hold no unmerged work; copies that
   might hold unsaved work are kept and named in the room. In the live room such
@@ -126,14 +133,14 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 946 passed, zero failures, three ignored.
-  New tests cover a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
+- Full Rust workspace (`--locked`): 947 passed, zero failures, three ignored.
+  New tests cover amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
   through the sandbox launcher, the lend list's limits,
   outside tool calls by mode, the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
   pause and held rooms, retiring tasks and leftover-copy cleanup; each was checked to fail without
   its fix.
-- Full Flutter tests: 371 passed, five skipped. Flutter analysis: no issues.
+- Full Flutter tests: 372 passed, five skipped. Flutter analysis: no issues.
 - Workspace sandbox helper: 72 passed, including setting a bot's conflicting files aside without a link redirecting them, including real bubblewrap checks that a
   turn the owner did not allow, or a read-only turn, has no server key anywhere,
   that lent sign-ins are hidden unless lent and then appear only in the bot's
@@ -146,11 +153,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`e8bf52a2304abc4ffba2e86b24c55a7142ab3aaf757f9c07a1c8007ab54b1f8f`.
+`644ae1a25c72f8ceef7d48575ed6ea685249a63b116fb03954f44b3f8b3ebc84`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `2310be50c6ceb5a0f43c100a6abf9f264d2430a87c53c0e8af7078cff420f2c1` |
+| orgbots_2.2.0_amd64.deb | `a6bb1ea8c9befb067787b2342659757dcb718929bcaca05bbe9156fe17357b83` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication

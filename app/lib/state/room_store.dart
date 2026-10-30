@@ -620,6 +620,18 @@ class RoomStore extends ChangeNotifier {
         }
       case 'task_transitioned':
         _applyTaskTransition(event);
+      case 'task_amended':
+        // A coordinator changed what the task asks for; reviewers judge
+        // against this, so the card shows it as soon as it changes.
+        final task = _tasks[event['task'] as String?];
+        if (task != null) {
+          final brief = event['brief'];
+          if (brief is String) task.brief = brief;
+          final criteria = event['acceptance_criteria'];
+          if (criteria is List) {
+            task.acceptanceCriteria = criteria.whereType<String>().toList();
+          }
+        }
       case 'agent_status_changed':
         // Leaving the faulted state (a resume, or the room retrying the bot)
         // clears the failure shown for it. Done for replayed events too: the
