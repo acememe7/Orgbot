@@ -9,10 +9,17 @@ typedef WorkspaceProcessRunner =
     Future<ProcessResult> Function(String executable, List<String> arguments);
 
 class WorkspaceAgentLabel {
-  const WorkspaceAgentLabel({required this.id, required this.label});
+  const WorkspaceAgentLabel({
+    required this.id,
+    required this.label,
+    this.removals = 0,
+  });
 
   final String id;
   final String label;
+
+  /// File removals the room last counted in this copy.
+  final int removals;
 }
 
 /// Owner review of isolated agent changes. Status is read-only; apply is a
@@ -47,6 +54,15 @@ class WorkspaceChangesDialog extends StatefulWidget {
 
 class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
   String? _agentId;
+
+  /// Removals per copy, as last counted, shown beside each copy's name.
+  ///
+  /// From the live room: the badge said 2,177 and the owner could not tell
+  /// which bot they belonged to; 1,588 of them were in a copy that no longer
+  /// had any, because a count only changed when that bot ran.
+  late final Map<String, int> _counts = {
+    for (final agent in widget.agents) agent.id: agent.removals,
+  };
   Map<String, dynamic>? _status;
   String? _error;
   bool _busy = false;
@@ -55,8 +71,11 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
   @override
   void initState() {
     super.initState();
-    _agentId = widget.agents.isEmpty ? null : widget.agents.first.id;
-    if (_agentId != null) _refresh();
+    // Open on the copy with the most removals waiting.
+    final sorted = [...widget.agents]
+      ..sort((a, b) => b.removals.compareTo(a.removals));
+    _agentId = sorted.isEmpty ? null : sorted.first.id;
+    if (_agentId != null) _refresh().then((_) => _recount());
   }
 
   Future<String?> _helper() async {
@@ -66,8 +85,9 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
   Future<Map<String, dynamic>> _invoke(
     String command, {
     String? reviewToken,
+    String? agentId,
   }) async {
-    final agent = _agentId;
+    final agent = agentId ?? _agentId;
     if (agent == null ||
         !RegExp(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$').hasMatch(agent)) {
       throw const FormatException(
@@ -153,8 +173,13 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
     });
     try {
       final value = await _invoke('status');
-      if (mounted) setState(() => _status = value);
       final agent = _agentId;
+      if (mounted) {
+        setState(() {
+          _status = value;
+          if (agent != null) _counts[agent] = _paths(value['deleted']).length;
+        });
+      }
       if (agent != null) {
         widget.onStatus?.call(agent, _paths(value['deleted']).length);
       }
@@ -167,6 +192,27 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
       }
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Check again every other copy the room counts removals in, one at a
+  /// time, so a count left over from before is corrected. Read-only.
+  Future<void> _recount() async {
+    final stale = [
+      for (final agent in widget.agents)
+        if (agent.id != _agentId && (_counts[agent.id] ?? 0) > 0) agent.id,
+    ];
+    for (final id in stale) {
+      if (!mounted) return;
+      try {
+        final value = await _invoke('status', agentId: id);
+        final deleted = _paths(value['deleted']).length;
+        if (!mounted) return;
+        setState(() => _counts[id] = deleted);
+        widget.onStatus?.call(id, deleted);
+      } catch (_) {
+        // Left as it was; opening that copy shows why.
+      }
     }
   }
 
@@ -339,11 +385,19 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
               const Text('No live room agents are available to inspect.')
             else
               DropdownButtonFormField<String>(
+                isExpanded: true,
                 initialValue: _agentId,
                 decoration: const InputDecoration(labelText: 'Agent'),
                 items: [
                   for (final agent in widget.agents)
-                    DropdownMenuItem(value: agent.id, child: Text(agent.label)),
+                    DropdownMenuItem(
+                      value: agent.id,
+                      child: Text(
+                        workspaceCopyLabel(agent.label, _counts[agent.id] ?? 0),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
                 ],
                 onChanged: _busy
                     ? null
@@ -584,3 +638,8 @@ String? workspaceProgressText(String line) {
     return null;
   }
 }
+
+/// A copy's name in the review list, with its waiting removals.
+String workspaceCopyLabel(String label, int removals) => removals <= 0
+    ? label
+    : '$label · $removals ${removals == 1 ? 'removal' : 'removals'}';

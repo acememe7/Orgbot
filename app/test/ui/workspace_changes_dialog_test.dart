@@ -153,77 +153,90 @@ void main() {
     },
   );
 
-  testWidgets('a review of 1,570 removals stays responsive and says where they are', (
-    tester,
-  ) async {
-    // From the live room: 1,570 removals built as one column of selectable
-    // text froze the app when the owner pressed apply.
-    final removals = [
-      for (var i = 0; i < 759; i++) '.failwith/src/file$i.ts',
-      for (var i = 0; i < 759; i++) '.ng/src/file$i.ts',
-      for (var i = 0; i < 42; i++) '.nongas/file$i.ts',
-      for (var i = 0; i < 10; i++) 'lint$i.out',
-    ];
-    final calls = <List<String>>[];
-    await tester.pumpWidget(
-      _host(
-        runner: (executable, arguments) async {
-          calls.add(arguments);
-          return _result({
-            'ok': true,
-            'changed': [],
-            'added': [],
-            'deleted': removals,
-            'review_token': 'b' * 64,
-            'conflicts': [],
-          });
-        },
-      ),
-    );
-    await tester.tap(find.text('Open'));
-    await tester.pumpAndSettle();
-    expect(find.text('Deleted (1570)'), findsOneWidget);
-    expect(find.text('759 files in .failwith/'), findsOneWidget);
-    expect(
-      find
-          .byWidgetPredicate(
-            (widget) =>
-                widget.key is ValueKey<String> &&
-                (widget.key! as ValueKey<String>).value.startsWith('workspace-path-'),
-            skipOffstage: false,
-          )
-          .evaluate()
-          .length,
-      lessThan(200),
-      reason: 'only the rows on screen are built',
-    );
+  testWidgets(
+    'a review of 1,570 removals stays responsive and says where they are',
+    (tester) async {
+      // From the live room: 1,570 removals built as one column of selectable
+      // text froze the app when the owner pressed apply.
+      final removals = [
+        for (var i = 0; i < 759; i++) '.failwith/src/file$i.ts',
+        for (var i = 0; i < 759; i++) '.ng/src/file$i.ts',
+        for (var i = 0; i < 42; i++) '.nongas/file$i.ts',
+        for (var i = 0; i < 10; i++) 'lint$i.out',
+      ];
+      final calls = <List<String>>[];
+      await tester.pumpWidget(
+        _host(
+          runner: (executable, arguments) async {
+            calls.add(arguments);
+            return _result({
+              'ok': true,
+              'changed': [],
+              'added': [],
+              'deleted': removals,
+              'review_token': 'b' * 64,
+              'conflicts': [],
+            });
+          },
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      expect(find.text('Deleted (1570)'), findsOneWidget);
+      expect(find.text('759 files in .failwith/'), findsOneWidget);
+      expect(
+        find
+            .byWidgetPredicate(
+              (widget) =>
+                  widget.key is ValueKey<String> &&
+                  (widget.key! as ValueKey<String>).value.startsWith(
+                    'workspace-path-',
+                  ),
+              skipOffstage: false,
+            )
+            .evaluate()
+            .length,
+        lessThan(200),
+        reason: 'only the rows on screen are built',
+      );
 
-    final started = DateTime.now();
-    await tester.tap(find.text('Apply changes'));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('These 1570 project files'), findsOneWidget);
-    expect(find.text('759 files in .ng/'), findsWidgets);
-    await tester.tap(find.text('Move listed files to Trash and apply'));
-    await tester.pumpAndSettle();
-    expect(
-      DateTime.now().difference(started),
-      lessThan(const Duration(seconds: 5)),
-    );
-    expect(calls.where((arguments) => arguments[1] == 'apply'), hasLength(1));
-  });
+      final started = DateTime.now();
+      await tester.tap(find.text('Apply changes'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('These 1570 project files'), findsOneWidget);
+      expect(find.text('759 files in .ng/'), findsWidgets);
+      await tester.tap(find.text('Move listed files to Trash and apply'));
+      await tester.pumpAndSettle();
+      expect(
+        DateTime.now().difference(started),
+        lessThan(const Duration(seconds: 5)),
+      );
+      expect(calls.where((arguments) => arguments[1] == 'apply'), hasLength(1));
+    },
+  );
 
-  test('the helper\'s progress lines read as counts, and other lines are left alone', () {
-    expect(
-      workspaceProgressText('{"progress": {"stage": "trash", "done": 820, "total": 1549}}'),
-      'Moved 820 of 1549 to the trash',
-    );
-    expect(
-      workspaceProgressText('{"progress": {"stage": "apply", "done": 3, "total": 9}}'),
-      'Applied 3 of 9 changes',
-    );
-    expect(workspaceProgressText('orgbot-trash refused to preserve x'), isNull);
-    expect(workspaceProgressText('{"progress": "broken"'), isNull);
-  });
+  test(
+    'the helper\'s progress lines read as counts, and other lines are left alone',
+    () {
+      expect(
+        workspaceProgressText(
+          '{"progress": {"stage": "trash", "done": 820, "total": 1549}}',
+        ),
+        'Moved 820 of 1549 to the trash',
+      );
+      expect(
+        workspaceProgressText(
+          '{"progress": {"stage": "apply", "done": 3, "total": 9}}',
+        ),
+        'Applied 3 of 9 changes',
+      );
+      expect(
+        workspaceProgressText('orgbot-trash refused to preserve x'),
+        isNull,
+      );
+      expect(workspaceProgressText('{"progress": "broken"'), isNull);
+    },
+  );
 
   testWidgets('helper failures are visible and do not enable apply', (
     tester,
@@ -251,6 +264,77 @@ void main() {
       isNull,
     );
   });
+  testWidgets(
+    'opens on the copy with the most removals and corrects stale counts',
+    (tester) async {
+      // From the live room: the badge said 2,177 and nobody could tell which
+      // bot owned them; 1,588 were in a copy that had none left.
+      final asked = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () => showDialog<void>(
+                  context: context,
+                  builder: (_) => WorkspaceChangesDialog(
+                    stateDirectory: Directory('/tmp/room/workspaces'),
+                    helperPath: '/test/orgbot-workspace.py',
+                    agents: const [
+                      WorkspaceAgentLabel(
+                        id: 'bot_mira',
+                        label: '@mira · room tools',
+                      ),
+                      WorkspaceAgentLabel(
+                        id: 'bot_quinn',
+                        label: '@ollama-glm · room tools',
+                        removals: 1588,
+                      ),
+                      WorkspaceAgentLabel(
+                        id: 'bot_finn',
+                        label: '@grok-quick · room tools',
+                        removals: 562,
+                      ),
+                    ],
+                    processRunner: (executable, arguments) async {
+                      final agent = arguments[arguments.indexOf('--agent') + 1];
+                      asked.add(agent);
+                      return _result({
+                        'ok': true,
+                        'changed': [],
+                        'added': [],
+                        'deleted': agent == 'bot_finn'
+                            ? ['.freeze-probe/a', '.freeze-probe/b']
+                            : [],
+                        'conflicts': [],
+                      });
+                    },
+                  ),
+                ),
+                child: const Text('Open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      expect(
+        asked,
+        ['bot_quinn', 'bot_finn'],
+        reason:
+            'the largest count first, then the other non-zero one; never the copy with none',
+      );
+      expect(
+        find.text('@ollama-glm · room tools'),
+        findsOneWidget,
+        reason: 'the stale 1,588 is corrected to none',
+      );
+      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.pumpAndSettle();
+      expect(find.text('@grok-quick · room tools · 2 removals'), findsWidgets);
+    },
+  );
 }
 
 Widget _host({required WorkspaceProcessRunner runner}) => MaterialApp(
@@ -263,7 +347,10 @@ Widget _host({required WorkspaceProcessRunner runner}) => MaterialApp(
             stateDirectory: Directory('/tmp/room/workspaces'),
             helperPath: '/test/orgbot-workspace.py',
             agents: const [
-              WorkspaceAgentLabel(id: 'agent-uuid', label: '@astra · room tools'),
+              WorkspaceAgentLabel(
+                id: 'agent-uuid',
+                label: '@astra · room tools',
+              ),
             ],
             processRunner: runner,
           ),

@@ -519,9 +519,16 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
           : agent.displayName.isNotEmpty
           ? agent.displayName
           : agent.id;
+      int removals(String copy) => store.digest.pendingRemovals
+          .where((row) => row.agent == agent.id && row.copy == copy)
+          .fold(0, (sum, row) => sum + row.count);
       if (seen.add(agent.id)) {
         agents.add(
-          WorkspaceAgentLabel(id: agent.id, label: '$label · room tools'),
+          WorkspaceAgentLabel(
+            id: agent.id,
+            label: '$label · room tools',
+            removals: removals('room tools'),
+          ),
         );
       }
       if (agent.handle.isNotEmpty) {
@@ -531,7 +538,11 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
             .join();
         if (seen.add(nativeId)) {
           agents.add(
-            WorkspaceAgentLabel(id: nativeId, label: '$label · its own CLI'),
+            WorkspaceAgentLabel(
+              id: nativeId,
+              label: '$label · its own CLI',
+              removals: removals('its own CLI'),
+            ),
           );
         }
       }
