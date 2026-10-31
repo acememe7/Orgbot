@@ -108,7 +108,7 @@ main{overflow:hidden}
 .table-scroll .text-table{min-width:36rem}
 .table-scroll .text-table th,.table-scroll .text-table td{text-align:left;white-space:normal;vertical-align:top}
 .table-scroll:focus-visible{outline:3px solid #a15a35;outline-offset:4px}
-.install-note{background:var(--paper-deep);padding:1.3rem 1.5rem;margin:1.5rem 0}
+.install-note{background:var(--paper-deep);padding:1.3rem 1.5rem;margin-block:1.5rem}
 .install-note p{margin:.2rem 0}
 .copy-row{display:flex;justify-content:space-between;gap:1rem;align-items:center;margin:.4rem 0}
 .copy-button{border:1px solid #aab5ac;background:transparent;color:var(--paper);padding:.4rem .7rem;cursor:pointer;white-space:nowrap}
