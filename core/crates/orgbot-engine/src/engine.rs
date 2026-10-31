@@ -2633,7 +2633,28 @@ impl Engine {
     ) -> Result<Vec<EventEnvelope>> {
         let mode = self.room.spec.access.mode;
         if !mode.approves(risk) {
-            return self.put_to_owner(by, Some(task), proposed);
+            // From the live room: a bot asked to land commits for a task it had
+            // claimed and not started. The card reached the owner, the task
+            // could not wait on it, and the bot was told the request failed, so
+            // it was woken eleven times while the owner had the card. Asking
+            // for something to do the task with is starting it; a task that
+            // cannot wait at all is refused before anyone is asked.
+            let state = self.require_task(task)?.state;
+            let wait = TaskTransition::Block {
+                reason: BlockReason::AwaitingDecision { decision: proposed.id },
+            };
+            if state != TaskState::Claimed && !state.can_apply(&wait) {
+                return Err(EngineError::NotReady {
+                    task,
+                    reason: format!("cannot ask while the task is {}", state.as_str()),
+                });
+            }
+            let mut events = Vec::new();
+            if state == TaskState::Claimed {
+                events.extend(self.transition(task, TaskTransition::Start, Some(by))?);
+            }
+            events.extend(self.put_to_owner(by, Some(task), proposed)?);
+            return Ok(events);
         }
         // Approved by the room's mode: not parked, answered at once.
         let mut events = self.put_to_owner(by, None, proposed)?;

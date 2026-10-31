@@ -3398,6 +3398,46 @@ fn landing_commits_needs_the_owners_yes_for_exactly_those_commits() {
     f.reject(request(worker, "main", &base));
 }
 
+/// From the live room: a bot asked to land commits for a task it had claimed
+/// and not started. The card reached the owner, the task could not wait on it,
+/// and the bot was told the request failed and was woken eleven times.
+#[test]
+fn asking_for_something_on_a_claimed_task_starts_it_and_waits_for_the_answer() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.open_task("commit the release in separate commits", None);
+    f.apply(Command::ClaimTask { task, by: worker });
+    f.apply(Command::RequestLanding {
+        by: worker,
+        task,
+        branch: "main".into(),
+        base: "a".repeat(40),
+        head: "b".repeat(40),
+        commits: vec!["bbbbbbb docs: record the commit set [skip ci]".into()],
+        changes: "1 file changed".into(),
+        reason: "the owner asked for separate commits".into(),
+    });
+    assert_eq!(f.state(task), TaskState::Blocked, "it waits on the owner, so nothing wakes it meanwhile");
+    assert!(f.engine.awaiting_owner(worker));
+    assert_eq!(f.engine.decisions().pending().count(), 1);
+
+    // Work that cannot wait is refused before the owner is asked anything.
+    let reviewed = f.start_task("release notes", worker);
+    let artifact = f.add_artifact(reviewed, worker);
+    f.apply(Command::SubmitForReview { task: reviewed, by: worker, artifacts: vec![artifact] });
+    f.reject(Command::RequestLanding {
+        by: worker,
+        task: reviewed,
+        branch: "main".into(),
+        base: "a".repeat(40),
+        head: "c".repeat(40),
+        commits: vec!["ccccccc notes [skip ci]".into()],
+        changes: "1 file changed".into(),
+        reason: "notes".into(),
+    });
+    assert_eq!(f.engine.decisions().pending().count(), 1, "no orphan question");
+}
+
 /// From the live room: two coordinators woke to the same owner message, and
 /// the one whose turn began first created five duplicates of the other's tasks
 /// fifteen minutes later; two bots then took the same job.
