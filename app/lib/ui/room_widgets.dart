@@ -1888,7 +1888,7 @@ class MessageText extends StatelessWidget {
 }
 
 /// A compact board across the top of the chat.
-class BoardStrip extends StatelessWidget {
+class BoardStrip extends StatefulWidget {
   const BoardStrip({
     super.key,
     required this.store,
@@ -1900,6 +1900,24 @@ class BoardStrip extends StatelessWidget {
 
   final RoomStore store;
   final bool canAnswer;
+
+  @override
+  State<BoardStrip> createState() => _BoardStripState();
+}
+
+/// Each task folds to its state and a one-line title.
+///
+/// From the live room: the owner asked for collapsible task cards, with 48
+/// tasks of up to five lines each in the list. A task that needs the owner
+/// (waiting on their reply, or parked) starts open, so its buttons show.
+class _BoardStripState extends State<BoardStrip> {
+  final Map<String, bool> _open = {};
+
+  bool _needsOwner(Task task) =>
+      task.state == TaskState.parked ||
+      task.blockReasons.any((r) => r['kind'] == 'awaiting_human');
+
+  bool _isOpen(Task task) => _open[task.id] ?? _needsOwner(task);
 
   Future<void> _answer(BuildContext context, Task task) async {
     var reply = '';
@@ -1930,7 +1948,7 @@ class BoardStrip extends StatelessWidget {
         ],
       ),
     );
-    if (answer != null) store.answer(task.id, answer);
+    if (answer != null) widget.store.answer(task.id, answer);
   }
 
   Future<void> _park(BuildContext context, Task task) async {
@@ -1969,15 +1987,17 @@ class BoardStrip extends StatelessWidget {
         ],
       ),
     );
-    if (park == true) store.parkTask(task.id, reason: reason.trim());
+    if (park == true) widget.store.parkTask(task.id, reason: reason.trim());
   }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final tasks = store.tasks;
+    final tasks = widget.store.tasks;
     return Container(
-      constraints: embedded ? null : const BoxConstraints(maxHeight: 210),
+      constraints: widget.embedded
+          ? null
+          : const BoxConstraints(maxHeight: 210),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerLow,
         border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
@@ -1991,15 +2011,39 @@ class BoardStrip extends StatelessWidget {
               ),
             )
           : ListView(
-              physics: embedded ? const NeverScrollableScrollPhysics() : null,
+              physics: widget.embedded
+                  ? const NeverScrollableScrollPhysics()
+                  : null,
               shrinkWrap: true,
               padding: const EdgeInsets.all(12),
               children: [
                 Padding(
                   padding: const EdgeInsets.only(bottom: 18, top: 4),
-                  child: Text(
-                    'Tasks · ${tasks.length}',
-                    style: Theme.of(context).textTheme.titleMedium,
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Tasks · ${tasks.length}',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                      ),
+                      Builder(
+                        builder: (context) {
+                          final anyOpen = tasks.any(_isOpen);
+                          return TextButton(
+                            key: const ValueKey('tasks-fold-all'),
+                            onPressed: () => setState(() {
+                              for (final task in tasks) {
+                                _open[task.id] = !anyOpen;
+                              }
+                            }),
+                            child: Text(
+                              anyOpen ? 'Collapse all' : 'Expand all',
+                            ),
+                          );
+                        },
+                      ),
+                    ],
                   ),
                 ),
                 for (final task in tasks)
@@ -2017,51 +2061,82 @@ class BoardStrip extends StatelessWidget {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(
-                                task.title,
-                                style: const TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
+                              InkWell(
+                                key: ValueKey('task-fold-${task.id}'),
+                                onTap: () => setState(
+                                  () => _open[task.id] = !_isOpen(task),
+                                ),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        task.title,
+                                        maxLines: _isOpen(task) ? null : 1,
+                                        overflow: _isOpen(task)
+                                            ? null
+                                            : TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                    Icon(
+                                      _isOpen(task)
+                                          ? Icons.expand_less
+                                          : Icons.expand_more,
+                                      size: 16,
+                                      semanticLabel: _isOpen(task)
+                                          ? 'Collapse task'
+                                          : 'Expand task',
+                                    ),
+                                  ],
                                 ),
                               ),
                               if (task.assignee != null)
                                 Text(
-                                  '@' + store.handleFor(task.assignee),
+                                  '@' + widget.store.handleFor(task.assignee),
                                   style: TextStyle(
                                     fontSize: 11,
                                     color: scheme.onSurfaceVariant,
                                   ),
                                 ),
-                              for (final reason in task.blockReasons)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 6),
-                                  child: Text(
-                                    (reason['prompt'] ??
-                                            reason['description'] ??
-                                            reason['detail'] ??
-                                            reason['kind'] ??
-                                            'Waiting for input')
-                                        .toString(),
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: scheme.onSurfaceVariant,
+                              if (_isOpen(task))
+                                for (final reason in task.blockReasons)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 6),
+                                    child: Text(
+                                      (reason['prompt'] ??
+                                              reason['description'] ??
+                                              reason['detail'] ??
+                                              reason['kind'] ??
+                                              'Waiting for input')
+                                          .toString(),
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: scheme.onSurfaceVariant,
+                                      ),
                                     ),
                                   ),
-                                ),
-                              if (task.state == TaskState.parked && canAnswer)
+                              if (_isOpen(task) &&
+                                  task.state == TaskState.parked &&
+                                  widget.canAnswer)
                                 TextButton(
-                                  onPressed: () => store.resumeTask(task.id),
+                                  onPressed: () =>
+                                      widget.store.resumeTask(task.id),
                                   child: const Text('Resume task'),
                                 ),
-                              if (task.blockReasons.any(
-                                (r) => r['kind'] == 'awaiting_human',
-                              ))
+                              if (_isOpen(task) &&
+                                  task.blockReasons.any(
+                                    (r) => r['kind'] == 'awaiting_human',
+                                  ))
                                 TextButton(
-                                  onPressed: canAnswer
+                                  onPressed: widget.canAnswer
                                       ? () => _answer(context, task)
                                       : null,
                                   child: Text(
-                                    canAnswer
+                                    widget.canAnswer
                                         ? 'Reply to unblock'
                                         : 'Open the room to reply',
                                   ),
@@ -2069,7 +2144,7 @@ class BoardStrip extends StatelessWidget {
                             ],
                           ),
                         ),
-                        if (canAnswer && task.state.isParkable)
+                        if (widget.canAnswer && task.state.isParkable)
                           IconButton(
                             tooltip: 'Park until you resume it',
                             visualDensity: VisualDensity.compact,

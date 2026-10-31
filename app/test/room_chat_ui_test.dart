@@ -383,7 +383,53 @@ void main() {
     });
   });
 
-  testWidgets('the owner parks a task from the board and resumes it', (tester) async {
+  testWidgets('task cards fold to one line and open with a tap', (
+    tester,
+  ) async {
+    // From the live room: 48 tasks of up to five lines each.
+    final client = FakeClient();
+    final store = seeded(client);
+    client.emit(
+      event({
+        'event': 'task_transitioned',
+        'task': 'task_1',
+        'from': 'in_progress',
+        'to': 'blocked',
+        'actor': 'bot_a',
+        'transition': {
+          'transition': 'block',
+          'reason': {
+            'kind': 'awaiting_handoff',
+            'prompt': 'Waiting on Sol for the haze diagnosis.',
+          },
+        },
+      }, seq: 2),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: BoardStrip(store: store)),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Write the notes'), findsOneWidget);
+    expect(
+      find.text('@iris'),
+      findsOneWidget,
+      reason: 'the owner still shows when folded',
+    );
+    expect(find.text('Waiting on Sol for the haze diagnosis.'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('task-fold-task_1')));
+    await tester.pump();
+    expect(find.text('Waiting on Sol for the haze diagnosis.'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('tasks-fold-all')));
+    await tester.pump();
+    expect(find.text('Waiting on Sol for the haze diagnosis.'), findsNothing);
+    expect(find.text('Expand all'), findsOneWidget);
+  });
+
+  testWidgets('the owner parks a task from the board and resumes it', (
+    tester,
+  ) async {
     final client = FakeClient();
     final store = seeded(client);
     Future<void> show() async {
@@ -419,7 +465,11 @@ void main() {
     );
     await show();
     expect(find.text('parked'), findsOneWidget);
-    expect(find.text('@iris'), findsNothing, reason: 'nobody holds parked work');
+    expect(
+      find.text('@iris'),
+      findsNothing,
+      reason: 'nobody holds parked work',
+    );
     expect(find.byTooltip('Park until you resume it'), findsNothing);
     await tester.tap(find.text('Resume task'));
     expect(client.sent.last, {'type': 'resume_task', 'task': 'task_1'});
