@@ -154,6 +154,16 @@ through a pipe (`--args`), never a command line or a file, and the keyring is
 never opened to the bot. With no keyring sign-in the bot is signed out and keeps
 its turn.
 
+## Network inside agent CLIs
+
+Codex runs its own sandbox inside OrgBots' one. In workspace-write mode that
+sandbox refuses every socket, so a Codex bot could not start the local server a
+browser test needs, though bots on other CLIs and its own room commands had the
+network. A Codex bot allowed to write now runs with
+`sandbox_workspace_write.network_access=true`; Codex still refuses writes outside
+the project, and read-only Codex bots are unchanged. OrgBots does not confine the
+network for any bot (see Known limits in the release notes).
+
 ## Landing a bot's commits
 
 A bot's copy keeps its own git history, so commits made there never reach the

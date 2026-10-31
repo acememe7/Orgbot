@@ -2300,6 +2300,19 @@ fn latest_instruction(messages: &[Turn]) -> Option<String> {
         .filter(|text| !text.trim().is_empty())
 }
 
+/// Let a Codex bot that may write use the network inside its CLI sandbox.
+///
+/// From the live room: Codex's own sandbox, inside OrgBots' one, refuses every
+/// socket, so a Codex bot could not start the local server a browser test
+/// needs and its captures failed with EPERM, while bots on other CLIs, and
+/// its own room commands, had the network all along. Files outside the
+/// project stay refused; read-only bots are unchanged.
+fn codex_network(cmd: &mut Command, policy: AgentPolicy) {
+    if policy == AgentPolicy::WorkspaceWrite {
+        cmd.arg("-c").arg("sandbox_workspace_write.network_access=true");
+    }
+}
+
 /// Lay out the CLI invocation for one turn.
 #[allow(clippy::too_many_arguments)]
 fn build_args(
@@ -2355,6 +2368,7 @@ fn build_args(
                 .arg(policy_value)
                 .arg("-c")
                 .arg("approval_policy=\"never\"");
+            codex_network(cmd, policy);
         }
         (CliKind::Codex, Some(_session)) => {
             // `codex exec resume` does not take a sandbox flag (the resumed
@@ -2366,6 +2380,7 @@ fn build_args(
                 .arg("--skip-git-repo-check")
                 .arg("-c")
                 .arg("approval_policy=\"never\"");
+            codex_network(cmd, policy);
         }
         (CliKind::Claude, None) => {
             // `-p` only switches on print mode; the prompt is positional and
@@ -3791,6 +3806,11 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
                 .windows(2)
                 .any(|pair| pair == ["-c", "approval_policy=\"never\""]));
             assert!(!args.iter().any(|arg| arg == "--approve-for-me"));
+            assert_eq!(
+                args.windows(2).any(|pair| pair == ["-c", "sandbox_workspace_write.network_access=true"]),
+                policy == AgentPolicy::WorkspaceWrite,
+                "a Codex bot that may write can start a local server; a read-only one is unchanged"
+            );
         }
     }
 
