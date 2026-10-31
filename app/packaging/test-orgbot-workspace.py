@@ -519,6 +519,35 @@ class WorkspaceTests(unittest.TestCase):
         cache = next(self.state.glob("agents/*/dev/.hashes.json"))
         self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
 
+    def test_approved_removals_take_the_folders_they_empty_with_them(self):
+        # From the live room: approving the cleanup left .ng/ as 87 empty
+        # folders, and two records disagreed about whether it was gone.
+        for name in (".ng/a/b/one.txt", ".ng/a/two.txt", "keep/stays.txt", "keep/sub/gone.txt"):
+            path = self.project / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name, encoding="utf-8")
+        (self.project / "empty-before").mkdir()
+        work = self.prepare()
+        for name in (".ng/a/b/one.txt", ".ng/a/two.txt", "keep/sub/gone.txt"):
+            (work / name).unlink()
+        reviewed = workspace._status(os.fspath(self.state), "dev")
+        with patch.object(workspace, "_trash_replacements", side_effect=self._fake_trash_batch):
+            workspace._apply(os.fspath(self.state), "dev", review_token=reviewed["review_token"])
+        self.assertFalse((self.project / ".ng").exists(), "the emptied tree is gone")
+        self.assertFalse((self.project / "keep/sub").exists())
+        self.assertTrue((self.project / "keep/stays.txt").exists(), "a folder that still holds a file stays")
+        self.assertTrue((self.project / "empty-before").is_dir(), "a folder that was already empty is left alone")
+        self.assertFalse((work / ".ng").exists(), "the bot's copy is tidied too")
+
+    def test_a_copy_drops_folders_the_project_emptied(self):
+        (self.project / "probe/b8").mkdir(parents=True)
+        (self.project / "probe/b8/a.js").write_text("a", encoding="utf-8")
+        work = self.prepare()
+        self.assertTrue((work / "probe/b8/a.js").exists())
+        (self.project / "probe/b8/a.js").unlink()
+        workspace._prepare(os.fspath(self.project), os.fspath(self.state), "dev", False)
+        self.assertFalse((work / "probe").exists())
+
     def test_deletion_requires_explicit_owner_approval(self):
         work = self.prepare()
         (work / "README.md").unlink()

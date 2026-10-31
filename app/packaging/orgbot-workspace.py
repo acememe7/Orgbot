@@ -24,7 +24,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterable
 
 
 FORMAT_VERSION = 1
@@ -661,6 +661,35 @@ def _remove_file(path: Path) -> None:
     path.unlink()
 
 
+def _prune_empty_parents(root: Path, removed: Iterable[str]) -> int:
+    """Remove the folders that removing `removed` left empty, deepest first.
+
+    From the live room: approving 2,000-odd removals moved the files to the
+    trash but left `.ng/` (87 folders), `.nongas/` and `.freeze-probe/` behind
+    with nothing in them, and two records disagreed about whether the folders
+    were gone. Only a folder that held a removed file, or such a folder, is
+    tried, so none was empty before; `rmdir` leaves any that still hold
+    something, and symlinks are never followed.
+    """
+    parents: set[str] = set()
+    for name in removed:
+        parent = PurePosixPath(name).parent
+        while parent.as_posix() not in (".", ""):
+            parents.add(parent.as_posix())
+            parent = parent.parent
+    pruned = 0
+    for name in sorted(parents, key=lambda value: value.count("/"), reverse=True):
+        path = root / name
+        try:
+            if not stat.S_ISDIR(path.lstat().st_mode):
+                continue
+            os.rmdir(path)
+            pruned += 1
+        except OSError:
+            continue
+    return pruned
+
+
 def _copy_from_project(project: Path, workspace: Path, relative: str) -> None:
     row = _entry(_file_at(project, relative), project)
     _atomic_copy_file(project, relative, workspace, relative, row["mode"] | 0o200, create_parents=True, replace_existing=True)
@@ -1038,6 +1067,7 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) 
             diffs = _changes(data["entries"], source_entries, agent_entries)
             conflicts = set(diffs["conflicts"])
             merged = dict(data["entries"])
+            removed_here: list[str] = []
             for name in sorted(set(data["entries"]) | set(source_entries) | set(agent_entries)):
                 if name in conflicts:
                     continue
@@ -1051,6 +1081,7 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) 
                     target = _file_at(workspace, name)
                     if now is None:
                         _remove_file(target)
+                        removed_here.append(name)
                         merged.pop(name, None)
                     else:
                         _copy_from_project(project, workspace, name)
@@ -1059,6 +1090,7 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) 
                     merged[name] = before or ours
             data["entries"] = merged
             data["read_only"] = data["read_only"] or read_only
+            _prune_empty_parents(workspace, removed_here)
             history = None
             if not conflicts:
                 try:
@@ -3233,6 +3265,8 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
                 journal["updated_at"] = int(time.time())
                 _atomic_json(journal_path, journal)
                 _progress("apply", index + 1, len(operations))
+        _prune_empty_parents(project, [name for name, action in operations if action == "delete"])
+        removed_here: list[str] = []
         final_entries = _scan(project)
         # Advance the baseline only after clean paths have also been refreshed
         # in this agent's copy. Otherwise another agent's applied change can
@@ -3246,6 +3280,11 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
                 _copy_from_project(project, workspace, name)
             else:
                 _remove_file(_file_at(workspace, name))
+                removed_here.append(name)
+        # The bot removed these itself; once approved, its copy loses the
+        # folders they leave empty too.
+        removed_here.extend(name for name, action in operations if action == "delete")
+        _prune_empty_parents(workspace, removed_here)
         data["entries"] = final_entries
         data.pop("refresh_conflicts", None)
         _atomic_json(manifest_path, data)
