@@ -649,6 +649,193 @@ def _review_token(project: Path, agent: str, base: dict[str, dict[str, Any]], cu
     return hashlib.sha256(encoded).hexdigest()
 
 
+GIT_SHA_RE = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
+
+
+def _owner_git(project: Path, *args: str, index: Path | None = None) -> subprocess.CompletedProcess:
+    """Run git in the owner's project with no hooks, monitors or user config."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0"})
+    if index is not None:
+        env["GIT_INDEX_FILE"] = os.fspath(index)
+    return subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.splitIndex=false",
+         "-C", os.fspath(project), *args],
+        env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300, check=False,
+    )
+
+
+def _project_head(project: Path) -> tuple[str | None, str] | None:
+    """The project's branch (None when detached) and commit, or None without git."""
+    git_dir = project / ".git"
+    if git_dir.is_symlink() or not git_dir.is_dir() or not shutil.which("git"):
+        return None
+    commit = _owner_git(project, "rev-parse", "--verify", "-q", "HEAD^{commit}")
+    sha = commit.stdout.strip()
+    if commit.returncode != 0 or not GIT_SHA_RE.fullmatch(sha):
+        return None
+    ref = _owner_git(project, "symbolic-ref", "-q", "HEAD").stdout.strip()
+    branch = ref.removeprefix("refs/heads/") if ref.startswith("refs/heads/") else None
+    if branch is not None:
+        try:
+            _relative(branch)
+        except WorkspaceError:
+            branch = None
+    return branch, sha
+
+
+def _read_inside(root: Path, relative: str, limit: int = 4096) -> str | None:
+    """Read a small file under root without following any symlink."""
+    try:
+        parent, name = _open_parent_fd(root, relative, create=False, directory_mode=0o700)
+    except (WorkspaceError, OSError):
+        return None
+    try:
+        fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+    except OSError:
+        return None
+    finally:
+        os.close(parent)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, limit).decode("utf-8", errors="replace")
+    finally:
+        os.close(fd)
+
+
+def _write_inside(root: Path, relative: str, content: bytes, mode: int = 0o644) -> None:
+    """Replace a file under root atomically, never through a symlink."""
+    parent, name = _open_parent_fd(root, relative, create=True, directory_mode=0o700)
+    temp = f".{name}.orgbot-{secrets.token_hex(6)}"
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=parent)
+        try:
+            view = memoryview(content)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fchmod(fd, mode)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(temp, dir_fd=parent)
+        raise
+    finally:
+        os.close(parent)
+
+
+def _copy_head(copy_git: Path) -> tuple[str | None, str | None]:
+    """A copy's branch and commit, read as files: a bot can change the
+    copy's git config, so git itself is never run inside it."""
+    head = (_read_inside(copy_git, "HEAD") or "").strip()
+    if GIT_SHA_RE.fullmatch(head):
+        return None, head
+    if not head.startswith("ref: refs/heads/"):
+        return None, None
+    ref = head.removeprefix("ref: ")
+    try:
+        _relative(ref)
+    except WorkspaceError:
+        return None, None
+    branch = ref.removeprefix("refs/heads/")
+    loose = (_read_inside(copy_git, ref) or "").strip()
+    if GIT_SHA_RE.fullmatch(loose):
+        return branch, loose
+    packed = _read_inside(copy_git, "packed-refs", limit=8 * 1024 * 1024) or ""
+    for line in packed.splitlines():
+        value, _, name = line.partition(" ")
+        if name == ref and GIT_SHA_RE.fullmatch(value):
+            return branch, value
+    return branch, None
+
+
+def _copy_missing_objects(project_git: Path, copy_git: Path) -> int:
+    """Give a copy every object file of the project's that it lacks."""
+    source = project_git / "objects"
+    wanted: list[str] = []
+    for current, dirs, files in os.walk(source, topdown=True, followlinks=False):
+        base = Path(current)
+        relative_dir = base.relative_to(source).as_posix()
+        if relative_dir == ".":
+            dirs[:] = [d for d in dirs if re.fullmatch(r"[0-9a-f]{2}|pack", d)]
+            continue
+        dirs[:] = []
+        for name in files:
+            if relative_dir == "pack":
+                if not re.fullmatch(r"pack-[0-9a-f]+\.(pack|idx|rev)", name):
+                    continue
+            elif not re.fullmatch(r"[0-9a-f]{38}([0-9a-f]{24})?", name):
+                continue
+            wanted.append(f"objects/{relative_dir}/{name}")
+    # A pack's data goes in before its index, so git never finds an index
+    # without the pack it describes.
+    order = {"pack": 0, "rev": 1, "idx": 2}
+    wanted.sort(key=lambda rel: order.get(rel.rsplit(".", 1)[-1], 0))
+    copied = 0
+    for relative in wanted:
+        target = copy_git / relative
+        try:
+            target.lstat()
+            continue
+        except FileNotFoundError:
+            pass
+        except OSError:
+            continue
+        path = project_git / relative
+        if path.is_symlink() or not path.is_file():
+            continue
+        _write_inside(copy_git, relative, path.read_bytes(), mode=0o444)
+        copied += 1
+    return copied
+
+
+def _catch_up_history(project: Path, workspace: Path, data: dict[str, Any], scratch: Path) -> str | None:
+    """Bring a copy's git history up to the project's.
+
+    From the live room: a copy's files followed the project but its history
+    stayed where the copy was made, so `git status` in the copy listed the
+    project's newer work as the bot's own changes. When the bot has made no
+    commits of its own, its branch now moves to the project's commit and its
+    index is rebuilt to match. When it has, its branch is left alone and the
+    project's commit is offered as `project/<branch>` to rebase onto.
+    """
+    head = _project_head(project)
+    copy_git = workspace / ".git"
+    if head is None or copy_git.is_symlink() or not copy_git.is_dir():
+        return None
+    branch, sha = head
+    copy_branch, copy_sha = _copy_head(copy_git)
+    if copy_sha == sha:
+        data["git_head"] = sha
+        return None
+    baseline = data.get("git_head")
+    behind = copy_sha is not None and copy_sha == baseline and copy_branch == branch and branch is not None
+    offered = branch is not None and (_read_inside(copy_git, f"refs/remotes/project/{branch}") or "").strip() == sha
+    if offered and not behind:
+        return "kept"
+    _copy_missing_objects(project / ".git", copy_git)
+    if branch is not None:
+        _write_inside(copy_git, f"refs/remotes/project/{branch}", f"{sha}\n".encode())
+    if not behind:
+        return "kept"
+    index = scratch / f"index-{secrets.token_hex(6)}"
+    try:
+        built = _owner_git(project, "read-tree", sha, index=index)
+        if built.returncode != 0 or not index.is_file():
+            return "kept"
+        _write_inside(copy_git, f"refs/heads/{branch}", f"{sha}\n".encode())
+        # No stat data: git in the copy re-reads each file once, so files the
+        # bot edited still show as its changes.
+        _write_inside(copy_git, "index", index.read_bytes())
+    finally:
+        index.unlink(missing_ok=True)
+    data["git_head"] = sha
+    return "caught up"
+
+
 def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) -> dict[str, Any]:
     agent = _safe_agent(agent_arg)
     project = _canonical_directory(project_arg, "project")
@@ -688,6 +875,10 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) 
             if _scan_workspace(workspace, source_entries) != source_entries or _scan(project) != source_entries:
                 _fail("Project changed during workspace preparation; no baseline was written")
             data = {"format_version": FORMAT_VERSION, "project": os.fspath(project), "agent": agent, "read_only": read_only, "created_at": int(time.time()), "entries": source_entries}
+            head = _project_head(project)
+            if head is not None and _copy_head(workspace / ".git")[1] == head[1]:
+                data["git_head"] = head[1]
+            history = None
             _atomic_json(manifest_path, data)
         else:
             data = _manifest_read(manifest_path, project, agent)
@@ -719,12 +910,18 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) 
                     merged[name] = before or ours
             data["entries"] = merged
             data["read_only"] = data["read_only"] or read_only
+            history = None
+            if not conflicts:
+                try:
+                    history = _catch_up_history(project, workspace, data, agent_root)
+                except (WorkspaceError, OSError, subprocess.SubprocessError):
+                    history = None
             if conflicts:
                 data["refresh_conflicts"] = sorted(conflicts)
             else:
                 data.pop("refresh_conflicts", None)
             _atomic_json(manifest_path, data)
-        return {"ok": True, "workspace": os.fspath(workspace), "profile_root": os.fspath(agent_root / "profiles"), "private_home": os.fspath(private_home), "private_home_mount": f"/run/user/{os.getuid()}/orgbot-home", "mcp_socket_mount": f"/run/user/{os.getuid()}/orgbot-room-mcp.sock", "read_only": data["read_only"], "conflicts": data.get("refresh_conflicts", []), "project_id": _project_id(project)}
+        return {"ok": True, "workspace": os.fspath(workspace), "profile_root": os.fspath(agent_root / "profiles"), "private_home": os.fspath(private_home), "private_home_mount": f"/run/user/{os.getuid()}/orgbot-home", "mcp_socket_mount": f"/run/user/{os.getuid()}/orgbot-room-mcp.sock", "read_only": data["read_only"], "conflicts": data.get("refresh_conflicts", []), "project_id": _project_id(project), "history": history}
     finally:
         os.close(lock_fd)
 
@@ -889,14 +1086,8 @@ def _unlanded_commits(copy: Path, project: Path | None) -> bool:
         return False
     if project is None or not (project / ".git").exists():
         return True
-    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0"}
     for tip in sorted(tips):
-        found = subprocess.run(
-            ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", os.fspath(project),
-             "cat-file", "-e", f"{tip}^{{commit}}"],
-            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-        )
-        if found.returncode != 0:
+        if _owner_git(project, "cat-file", "-e", f"{tip}^{{commit}}").returncode != 0:
             return True
     return False
 

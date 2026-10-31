@@ -138,6 +138,10 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            you need answered, never to record a status, a hold or a decision already made.\n\
          - File removals waiting for the owner's review are shown to them in the app, \
            with a count per bot. Do not mention them in your messages.\n\
+         - Your copy's history follows the project: with no commits of your own, \
+           your branch moves to the project's commit by itself. With commits of \
+           your own, the project's latest is at `project/<branch>`; to build on it, \
+           run `git stash`, `git rebase project/<branch>`, then `git stash pop`.\n\
          - A parked task is the owner's to resume. Leave it alone: do not work on it, \
            claim it, plan around it as open work, or ask the owner about it.\n\
          - Avoid repeating another bot's status or asking it to confirm a requirement already stated. \

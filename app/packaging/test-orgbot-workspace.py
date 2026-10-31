@@ -330,6 +330,77 @@ class WorkspaceTests(unittest.TestCase):
         self.assertFalse(work.parent.exists(), "the copy is gone")
         self.assertGreater(result["freed_bytes"], 0)
 
+    def _git_env(self):
+        return {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+
+    def git(self, where, *args):
+        return subprocess.run(["git", "-C", os.fspath(where), *args], env=self._git_env(),
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def _git_project(self):
+        self.git(self.project, "init", "-q", "-b", "main")
+        self.git(self.project, "add", "-A")
+        self.git(self.project, "commit", "-q", "-m", "start")
+
+    @unittest.skipUnless(workspace.shutil.which("git"), "needs git")
+    def test_a_copy_without_its_own_commits_follows_the_project_history(self):
+        # From the live room: a copy's files followed the project but its
+        # history did not, so git status listed the project's work as the
+        # bot's own changes.
+        self._git_project()
+        work = self.prepare()
+        (work / "notes.txt").write_text("bot draft\n", encoding="utf-8")
+        (self.project / "README.md").write_text("owner moved on\n", encoding="utf-8")
+        self.git(self.project, "commit", "-q", "-am", "owner work")
+        result = workspace._prepare(os.fspath(self.project), os.fspath(self.state), "dev", False)
+        self.assertEqual(result["history"], "caught up")
+        self.assertEqual(self.git(work, "rev-parse", "HEAD"), self.git(self.project, "rev-parse", "HEAD"))
+        self.assertEqual(self.git(work, "status", "--porcelain"), "?? notes.txt",
+                         "only the bot's own file shows as its change")
+        again = workspace._prepare(os.fspath(self.project), os.fspath(self.state), "dev", False)
+        self.assertIsNone(again["history"])
+
+    @unittest.skipUnless(workspace.shutil.which("git"), "needs git")
+    def test_a_copy_with_its_own_commits_keeps_them_and_is_offered_the_project(self):
+        self._git_project()
+        work = self.prepare()
+        (work / "src/main.py").write_text("bot work\n", encoding="utf-8")
+        self.git(work, "commit", "-q", "-am", "bot work")
+        bot_head = self.git(work, "rev-parse", "HEAD")
+        (self.project / "README.md").write_text("owner moved on\n", encoding="utf-8")
+        self.git(self.project, "commit", "-q", "-am", "owner work")
+        result = workspace._prepare(os.fspath(self.project), os.fspath(self.state), "dev", False)
+        self.assertEqual(result["history"], "kept")
+        self.assertEqual(self.git(work, "rev-parse", "HEAD"), bot_head)
+        self.assertEqual(self.git(work, "rev-parse", "project/main"), self.git(self.project, "rev-parse", "HEAD"))
+        # The project's newer files are already in the copy, so they are set
+        # aside for the rebase and come back without a conflict.
+        self.git(work, "stash", "-q")
+        self.git(work, "rebase", "-q", "project/main")
+        self.git(work, "stash", "pop", "-q")
+        self.assertEqual(self.git(work, "log", "-2", "--format=%s").splitlines(), ["bot work", "owner work"])
+        self.assertEqual(self.git(work, "status", "--porcelain"), "")
+
+    @unittest.skipUnless(workspace.shutil.which("git"), "needs git")
+    def test_catching_up_never_writes_through_a_symlink_in_the_copy(self):
+        self._git_project()
+        work = self.prepare()
+        outside = self.root / "outside"
+        outside.mkdir()
+        refs = work / ".git/refs/remotes"
+        refs.mkdir(parents=True, exist_ok=True)
+        refs.rmdir()
+        refs.symlink_to(outside, target_is_directory=True)
+        (work / "src/main.py").write_text("bot work\n", encoding="utf-8")
+        self.git(work, "commit", "-q", "-am", "bot work")
+        (self.project / "README.md").write_text("owner moved on\n", encoding="utf-8")
+        self.git(self.project, "commit", "-q", "-am", "owner work")
+        result = workspace._prepare(os.fspath(self.project), os.fspath(self.state), "dev", False)
+        self.assertIsNone(result["history"])
+        self.assertEqual(list(outside.iterdir()), [])
+
     @unittest.skipUnless(workspace.shutil.which("git"), "needs git")
     def test_a_discarded_copy_keeps_its_history_only_when_commits_never_landed(self):
         env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
