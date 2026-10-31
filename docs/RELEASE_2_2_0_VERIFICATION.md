@@ -115,6 +115,11 @@ handoff fix prepared as 2.1.1, which was never published.
   in the live room, and the app froze on apply: every path was built at once.
   The review and the delete confirmation now build only the rows on screen and
   open with how many files sit in each top-level folder.
+- **No more project copy at every room start.** To inherit the computer's MCP
+  servers, the room ran a settings lookup through the workspace under a fresh
+  bot id at each start; in a protected local room that copied the whole
+  project (4.6 GB in the live room) to read a file the sandbox hides, and the
+  startup cleanup deleted it. The lookup now runs only on remote computers.
 - **A lent GitHub CLI signs in from the keyring.** The GitHub CLI keeps its
   token in the desktop keyring, which a sandbox cannot reach, so in the live
   room a bot lent it got a 401 on push. The launcher now asks your `gh` for the
@@ -178,7 +183,7 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 960 passed, zero failures, three ignored.
+- Full Rust workspace (`--locked`): 961 passed, zero failures, three ignored.
   New tests cover landing a real bundle in a real repository (refused before the project holds the files, refused off the approval, for diverged commits, links and path-like branches; staged work kept), the approval covering exactly those commits, landing under each access mode, showing a bot the tasks others added during its turn, parking and resuming a task, withdrawing the questions waiting on it, when approved work is ready to deliver, amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
   through the sandbox launcher, the lend list's limits,
   outside tool calls by mode, the server-key grant and its sandbox mount, per-turn access,
@@ -198,11 +203,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`5a6f1537fe82abdb7091cc68cb507704f5394de6e1448d0a9c7cdb01120c5ef0`.
+`422168eb388d0f936bd90421f44e1b69c4d27e6c5277f2c5bd1daf23c1d13c0a`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `ee283a23d6808f8d4f71b3011c18c64019362ccd0bfa22bde3bef0bef4b00eec` |
+| orgbots_2.2.0_amd64.deb | `e5eaf9878dca7017df31ce73bc50667615e3aa81ccf17b0e8cd9332f58e48365` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
@@ -360,6 +365,14 @@ responsive (source `0903ec5`; the engine is unchanged). Signed archive revision
 `bbf1f1bd86db798bae2de8ca6bfa8da74bce37c0` replaces only
 `orgbots_2.2.0_amd64.deb`;
 [Pages run 41223113034](https://github.com/acememe7/Orgbot/actions/runs/41223113034)
+published it.
+
+Then the engine was rebuilt so a room start no longer copies the project to
+look for settings (source `ae36218`; the Flutter bundle is unchanged from the
+previous package). Signed archive revision
+`878a7adec112248aaeedec15fbba58102e31d998` replaces only
+`orgbots_2.2.0_amd64.deb`;
+[Pages run 41224108972](https://github.com/acememe7/Orgbot/actions/runs/41224108972)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
