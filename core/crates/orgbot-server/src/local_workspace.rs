@@ -1625,8 +1625,11 @@ mod tests {
             .run(agent, "workspace_run", &json!({"command":"printf mine > shared.txt"}), false)
             .await;
         assert!(!first.is_error, "{}", first.content);
-        // Its copy is now behind: another change reaches the project, and the
-        // bot edits the same file again in its copy.
+        // The bot has an edit in its copy that has not merged, another change
+        // reaches the project, and the bot edits the same file again.
+        let copy: Value = serde_json::from_str(&first.content).unwrap();
+        let copy = PathBuf::from(copy["integration"]["workspace"].as_str().unwrap());
+        fs::write(copy.join("shared.txt"), "mine, not merged yet").unwrap();
         fs::write(root.join("shared.txt"), "someone else's").unwrap();
         let second = host
             .run(

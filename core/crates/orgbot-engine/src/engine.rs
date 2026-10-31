@@ -2473,7 +2473,33 @@ impl Engine {
         proposed.owner_question = true;
         proposed.options = options;
         proposed.task = task;
+        if let Some(task) = task {
+            self.refuse_second_question(by, task, &proposed.because)?;
+        }
         self.put_to_owner(by, task, proposed)
+    }
+
+    /// One question per task in the owner's queue from each bot.
+    ///
+    /// From the live room: one release reached the owner as three cards in a
+    /// row (publish now? approve the checks? lend Wrangler?), each a separate
+    /// tap for one decision. The same question again is left to join the one
+    /// already asked; a different one waits for that answer.
+    fn refuse_second_question(&self, by: AgentId, task: TaskId, question: &str) -> Result<()> {
+        let waiting = self
+            .decisions
+            .pending()
+            .find(|decision| decision.task == Some(task) && decision.asked_by.contains(&by) && decision.because != question);
+        match waiting {
+            Some(decision) => Err(EngineError::NotReady {
+                task,
+                reason: format!(
+                    "you already have a question about this task with the owner (\"{}\"). Wait for that answer, or put everything the step needs in one question",
+                    decision.because.chars().take(160).collect::<String>()
+                ),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Put a question to the owner on behalf of `by`, once.
@@ -2685,6 +2711,7 @@ impl Engine {
     ) -> Result<Vec<EventEnvelope>> {
         let mode = self.room.spec.access.mode;
         if !mode.approves(risk) {
+            self.refuse_second_question(by, task, &proposed.because)?;
             // From the live room: a bot asked to land commits for a task it had
             // claimed and not started. The card reached the owner, the task
             // could not wait on it, and the bot was told the request failed, so

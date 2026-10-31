@@ -3398,6 +3398,28 @@ fn landing_commits_needs_the_owners_yes_for_exactly_those_commits() {
     f.reject(request(worker, "main", &base));
 }
 
+/// From the live room: one release reached the owner as three cards in a row.
+#[test]
+fn a_bot_asks_one_question_per_task_at_a_time() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("publish Release 2", worker);
+    let ask = |question: &str| Command::AskOwner {
+        by: worker,
+        task: Some(task),
+        question: question.into(),
+        options: vec!["Yes".into(), "Not yet".into()],
+    };
+    let first = asked_decision(&f.apply(ask("Publish Release 2 now?")));
+    let refused = f.reject(ask("Approve the publication checks?"));
+    assert!(refused.to_string().contains("already have a question about this task"), "{refused}");
+    f.apply(ask("Publish Release 2 now?"));
+    assert_eq!(f.engine.decisions().pending().count(), 1, "the same question joins the one asked");
+
+    answer(&mut f, first, "Yes");
+    asked_decision(&f.apply(ask("Approve the publication checks?")));
+}
+
 /// From the live room: a gate written into a brief held nothing back, so a
 /// bot claimed the task, could not start it, and was woken eleven times.
 #[test]

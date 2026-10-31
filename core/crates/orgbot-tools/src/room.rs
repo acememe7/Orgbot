@@ -377,7 +377,10 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
              as Wrangler for Cloudflare. Depending on the room's access mode and how risky the \
              request is, it is approved at once or waits for the owner, and your task waits \
              with it. Once allowed, it is in your sandbox only while you work that task: not \
-             while it is blocked, waiting on unfinished work, on hold, in review or done.",
+             while it is blocked, waiting on unfinished work, on hold, in review or done. \
+             Ask once for everything a step needs (every sign-in and the server key in one \
+             request) with the whole plan as the reason: the owner's approval is their \
+             go-ahead for that plan, so do not also ask them whether to proceed.",
             schema::object(
                 vec![
                     ("task", schema::string("Your task that needs it.")),
