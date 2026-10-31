@@ -428,6 +428,43 @@ class WorkspaceTests(unittest.TestCase):
                              env=env, check=True, capture_output=True, text=True).stdout.strip()
         self.assertEqual(log, "bot work")
 
+    def test_verify_copies_share_large_identical_files_and_stay_independent(self):
+        # From the live room: eight verify copies of one project held 33 GB
+        # of the same files.
+        big = os.urandom(100 * 1024)
+        (self.project / "media.bin").write_bytes(big)
+        first = self.prepare("a-verify", read_only=True)
+        writable = self.prepare("dev")
+        second_result = workspace._prepare(os.fspath(self.project), os.fspath(self.state), "b-verify", True)
+        second = Path(second_result["workspace"])
+        self.assertEqual(second_result["shared_bytes"], len(big))
+        self.assertEqual((first / "media.bin").stat().st_ino, (second / "media.bin").stat().st_ino)
+        self.assertNotEqual((first / "README.md").stat().st_ino, (second / "README.md").stat().st_ino,
+                            "small files are not worth sharing")
+        self.assertNotEqual((writable / "media.bin").stat().st_ino, (first / "media.bin").stat().st_ino,
+                            "a copy a bot can write is never shared")
+
+        changed = os.urandom(100 * 1024)
+        (self.project / "media.bin").write_bytes(changed)
+        workspace._prepare(os.fspath(self.project), os.fspath(self.state), "b-verify", True)
+        self.assertEqual((second / "media.bin").read_bytes(), changed)
+        self.assertEqual((first / "media.bin").read_bytes(), big, "refreshing one copy leaves the other alone")
+        workspace._prepare(os.fspath(self.project), os.fspath(self.state), "a-verify", True)
+        self.assertEqual((first / "media.bin").stat().st_ino, (second / "media.bin").stat().st_ino)
+
+        pruned = workspace._prune(os.fspath(self.state), keep=["dev", "a-verify"])
+        self.assertEqual([row["agent"] for row in pruned["removed"]], ["b-verify"], pruned)
+        self.assertEqual(pruned["removed"][0]["bytes"] < len(big), True, "shared bytes are not counted as freed")
+        self.assertEqual((first / "media.bin").read_bytes(), changed)
+
+    def test_a_verify_copy_is_not_linked_to_a_file_that_differs_from_its_baseline(self):
+        (self.project / "media.bin").write_bytes(b"a" * (100 * 1024))
+        first = self.prepare("a-verify", read_only=True)
+        (first / "media.bin").write_bytes(b"b" * (100 * 1024))
+        second = self.prepare("b-verify", read_only=True)
+        self.assertNotEqual((first / "media.bin").stat().st_ino, (second / "media.bin").stat().st_ino)
+        self.assertEqual((second / "media.bin").read_bytes(), b"a" * (100 * 1024))
+
     def test_deletion_requires_explicit_owner_approval(self):
         work = self.prepare()
         (work / "README.md").unlink()

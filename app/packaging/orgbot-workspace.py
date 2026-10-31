@@ -836,6 +836,85 @@ def _catch_up_history(project: Path, workspace: Path, data: dict[str, Any], scra
     return "caught up"
 
 
+SHARE_MIN_BYTES = 64 * 1024
+
+
+def _is_shared_copy(agent: str, data: dict[str, Any]) -> bool:
+    """A reviewer's verify copy: read-only to every bot and changed only by
+    this helper, which always replaces files and never writes into them, so
+    its files can be shared with the other verify copies of the project."""
+    return agent.endswith("-verify") and data.get("read_only") is True
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _share_with_siblings(state: Path, project: Path, agent: str, workspace: Path, entries: dict[str, dict[str, Any]]) -> int:
+    """Hard-link this verify copy's large files to identical ones in the
+    project's other verify copies, and return the bytes that freed.
+
+    From the live room: eight verify copies of one project held 33 GB of
+    the same files. A sibling's file is linked only after its contents hash
+    to what this copy's baseline records.
+    """
+    project_id = _project_id(project)
+    siblings: list[tuple[Path, dict[str, dict[str, Any]]]] = []
+    for path in sorted((state / "manifests" / project_id).glob("*-verify.json")):
+        other = path.name[: -len(".json")]
+        if other == agent or not AGENT_RE.fullmatch(other):
+            continue
+        try:
+            raw = _manifest_read(path, project, other)
+        except (WorkspaceError, OSError, ValueError):
+            continue
+        other_workspace = state / "agents" / project_id / other / "project"
+        if not _is_shared_copy(other, raw) or other_workspace.is_symlink() or not other_workspace.is_dir():
+            continue
+        siblings.append((other_workspace, raw["entries"]))
+    freed = 0
+    for name, row in sorted(entries.items()):
+        if row["size"] < SHARE_MIN_BYTES or not siblings:
+            continue
+        try:
+            ours_path = _file_at(workspace, name)
+            ours = ours_path.lstat()
+        except (WorkspaceError, OSError):
+            continue
+        for other_workspace, other_entries in siblings:
+            if other_entries.get(name) != row:
+                continue
+            try:
+                theirs_path = _file_at(other_workspace, name)
+                theirs = theirs_path.lstat()
+            except (WorkspaceError, OSError):
+                continue
+            if (theirs.st_dev, theirs.st_ino) == (ours.st_dev, ours.st_ino):
+                break
+            if (not stat.S_ISREG(theirs.st_mode) or theirs.st_size != row["size"]
+                    or stat.S_IMODE(theirs.st_mode) != stat.S_IMODE(ours.st_mode)
+                    or theirs.st_dev != ours.st_dev or _sha256_file(theirs_path) != row["sha256"]):
+                continue
+            parent, leaf = _open_parent_fd(workspace, name, create=False, directory_mode=0o700)
+            temp = f".orgbot-share-{secrets.token_hex(6)}"
+            try:
+                os.link(theirs_path, temp, dst_dir_fd=parent, follow_symlinks=False)
+                os.replace(temp, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+                if ours.st_nlink == 1:
+                    freed += ours.st_size
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(temp, dir_fd=parent)
+                os.close(parent)
+            break
+    return freed
+
+
 def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) -> dict[str, Any]:
     agent = _safe_agent(agent_arg)
     project = _canonical_directory(project_arg, "project")
@@ -885,7 +964,10 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) 
             if not workspace.is_dir() or workspace.is_symlink():
                 _fail("Workspace path is missing or unsafe")
             _check_private_dir(workspace)
-            agent_entries = _scan_workspace(workspace, data["entries"])
+            # Nothing but this helper changes a verify copy, so its baseline
+            # is what it holds; its shared files would also fail a scan,
+            # which refuses multiply-linked files.
+            agent_entries = data["entries"] if _is_shared_copy(agent, data) else _scan_workspace(workspace, data["entries"])
             diffs = _changes(data["entries"], source_entries, agent_entries)
             conflicts = set(diffs["conflicts"])
             merged = dict(data["entries"])
@@ -921,7 +1003,8 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) 
             else:
                 data.pop("refresh_conflicts", None)
             _atomic_json(manifest_path, data)
-        return {"ok": True, "workspace": os.fspath(workspace), "profile_root": os.fspath(agent_root / "profiles"), "private_home": os.fspath(private_home), "private_home_mount": f"/run/user/{os.getuid()}/orgbot-home", "mcp_socket_mount": f"/run/user/{os.getuid()}/orgbot-room-mcp.sock", "read_only": data["read_only"], "conflicts": data.get("refresh_conflicts", []), "project_id": _project_id(project), "history": history}
+        shared = _share_with_siblings(state, project, agent, workspace, data["entries"]) if _is_shared_copy(agent, data) else 0
+        return {"ok": True, "shared_bytes": shared, "workspace": os.fspath(workspace), "profile_root": os.fspath(agent_root / "profiles"), "private_home": os.fspath(private_home), "private_home_mount": f"/run/user/{os.getuid()}/orgbot-home", "mcp_socket_mount": f"/run/user/{os.getuid()}/orgbot-room-mcp.sock", "read_only": data["read_only"], "conflicts": data.get("refresh_conflicts", []), "project_id": _project_id(project), "history": history}
     finally:
         os.close(lock_fd)
 
@@ -953,7 +1036,7 @@ def _status(state_arg: str, agent_arg: str) -> dict[str, Any]:
             _fail("Workspace path is missing or unsafe")
         _check_private_dir(workspace)
         current = _scan(project)
-        agent_entries = _scan_workspace(workspace, data["entries"])
+        agent_entries = data["entries"] if _is_shared_copy(agent, data) else _scan_workspace(workspace, data["entries"])
         diffs = _changes(data["entries"], current, agent_entries)
         diffs["ok"] = True
         diffs["workspace"] = os.fspath(workspace)
@@ -965,11 +1048,15 @@ def _status(state_arg: str, agent_arg: str) -> dict[str, Any]:
 
 
 def _tree_bytes(root: Path) -> int:
+    """The bytes removing root would free: a file shared with another copy
+    is not counted."""
     total = 0
     for directory, _dirs, files in os.walk(root, followlinks=False):
         for name in files:
             try:
-                total += os.lstat(os.path.join(directory, name)).st_size
+                info = os.lstat(os.path.join(directory, name))
+                if info.st_nlink == 1:
+                    total += info.st_size
             except OSError:
                 pass
     return total
@@ -1025,10 +1112,13 @@ def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, 
                 workspace = agent_root / "project"
                 if workspace.is_symlink() or not workspace.is_dir():
                     raise WorkspaceError("workspace missing")
-                current = project_scans.get(project_dir.name)
-                if current is None:
-                    current = project_scans[project_dir.name] = _scan(project)
-                diffs = _changes(data["entries"], current, _scan_workspace(workspace, data["entries"]))
+                if _is_shared_copy(agent, data):
+                    diffs = {"changed": [], "added": [], "deleted": []}
+                else:
+                    current = project_scans.get(project_dir.name)
+                    if current is None:
+                        current = project_scans[project_dir.name] = _scan(project)
+                    diffs = _changes(data["entries"], current, _scan_workspace(workspace, data["entries"]))
             except (WorkspaceError, OSError, ValueError, json.JSONDecodeError):
                 kept.append({"agent": agent, "reason": "its changes could not be checked", "bytes": _tree_bytes(agent_root)})
                 continue
