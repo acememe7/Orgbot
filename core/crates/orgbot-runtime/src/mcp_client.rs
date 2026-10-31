@@ -1030,6 +1030,13 @@ pub fn servers_in_codex_config(config: &str) -> Vec<McpServerSpec> {
 /// Returns nothing if there is no such file, which is the ordinary case for a
 /// machine that has never had a CLI installed on it.
 pub async fn discover_on_workspace(workspace: &crate::workspace::Workspace) -> Vec<McpServerSpec> {
+    // From the live room: on this computer, commands run in a protected copy
+    // with a private home, so the lookup could never see the owner's settings,
+    // and asking under a fresh bot id copied the whole project (4.6 GB) at
+    // every room start, for the cleanup to delete.
+    if workspace.capabilities().private_home {
+        return Vec::new();
+    }
     let outcome = workspace
         .call(
             orgbot_proto::AgentId::new(),
@@ -1123,6 +1130,29 @@ impl Drop for StdioPipe {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_workspace_whose_commands_have_a_private_home_is_not_searched_for_settings() {
+        // From the live room: the lookup ran under a fresh bot id at every
+        // room start, copying the whole 4.6 GB project to read a file the
+        // sandbox hides anyway.
+        let (tx, mut calls) = tokio::sync::mpsc::channel(1);
+        let workspace = crate::workspace::Workspace::with_capabilities(
+            crate::workspace::WorkspaceSpec {
+                label: "this computer".into(),
+                root: "/project".into(),
+                writable: true,
+                commands: true,
+            },
+            tx,
+            crate::workspace::WorkspaceCapabilities { private_home: true, ..Default::default() },
+        );
+        let found = tokio::time::timeout(std::time::Duration::from_secs(2), discover_on_workspace(&workspace))
+            .await
+            .expect("answered without running anything");
+        assert!(found.is_empty());
+        assert!(calls.try_recv().is_err(), "nothing ran, so no copy of the project was made");
+    }
+
     use super::*;
     use orgbot_proto::DecisionId;
 

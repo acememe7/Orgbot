@@ -1681,6 +1681,7 @@ mod tests {
             tx,
             WorkspaceCapabilities {
                 verification: true,
+                private_home: false,
                 ..WorkspaceCapabilities::default()
             },
         ));

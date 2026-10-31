@@ -58,6 +58,9 @@ pub struct WorkspaceCapabilities {
     pub git_read: bool,
     /// Run isolated, read-only checks in a protected Linux local workspace.
     pub verification: bool,
+    /// Commands run in a protected copy whose home is private, so the
+    /// computer's own home, and the CLI settings in it, are out of sight.
+    pub private_home: bool,
 }
 
 impl Workspace {
@@ -71,8 +74,14 @@ impl Workspace {
                 attachment_import: true,
                 git_read: false,
                 verification: false,
+                private_home: false,
             },
         }
+    }
+
+    /// What the host behind this workspace implements.
+    pub const fn capabilities(&self) -> WorkspaceCapabilities {
+        self.capabilities
     }
 
     /// Construct a workspace with capabilities backed by its host.
@@ -295,6 +304,7 @@ mod tests {
                 attachment_import: true,
                 git_read: true,
                 verification: false,
+                private_home: false,
             },
         );
         let names: Vec<_> = workspace
@@ -342,6 +352,7 @@ mod tests {
                 attachment_import: false,
                 git_read: false,
                 verification: true,
+                private_home: false,
             },
         );
         let names: Vec<_> = workspace

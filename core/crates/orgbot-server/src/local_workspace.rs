@@ -91,6 +91,7 @@ impl LocalWorkspaceHost {
             attachment_import: spec.writable && host.attachment_parent_fd.is_some(),
             git_read: true,
             verification,
+            private_home: true,
         };
         let mut runtime_spec = spec;
         runtime_spec.root = root.display().to_string();
@@ -2022,6 +2023,7 @@ mod tests {
                 git_read: true,
                 attachment_import: false,
                 verification: false,
+                private_home: false,
             },
         )
         .await;
@@ -2103,6 +2105,7 @@ mod tests {
                 attachment_import: true,
                 git_read: true,
                 verification: false,
+                private_home: false,
             },
         );
         let host_task = tokio::spawn(serve_files(host, rx));
