@@ -168,6 +168,13 @@ handoff fix prepared as 2.1.1, which was never published.
   away, lists leftover copies with their size and discards one after saving
   what may be unique in it. Each copy's git history keeps up with the
   project, and verify copies share their large files.
+- **Sign-ins bots can ask for (rebuilt 31 October, later).** Requests say why
+  the work needs it, what the bot will do, the commands planned and what
+  happens if denied, each on its own line of the card. A bot can ask for a
+  sign-in that is not listed; that always asks the owner and, if allowed,
+  joins their list. Settings knows 33 tools and shows which are signed in on
+  this computer but not turned on. Switched-off sign-ins, the owner's own
+  included, are hidden from every bot.
 - **Provider terms.** The Antigravity sign-in tile warns that Google's terms do
   not allow a personal Google account in third-party apps. The README
   summarises each provider's stated position.
@@ -195,16 +202,16 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 969 passed, zero failures, three ignored,
-  at the 31 October rebuild.
+- Full Rust workspace (`--locked`): 973 passed, zero failures, three ignored,
+  at the last 31 October rebuild.
   New tests cover landing a real bundle in a real repository (refused before the project holds the files, refused off the approval, for diverged commits, links and path-like branches; staged work kept), the approval covering exactly those commits, landing under each access mode, showing a bot the tasks others added during its turn, parking and resuming a task, withdrawing the questions waiting on it, when approved work is ready to deliver, amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
   through the sandbox launcher, the lend list's limits,
   outside tool calls by mode, the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
   pause and held rooms, retiring tasks and leftover-copy cleanup; each was checked to fail without
   its fix.
-- Full Flutter tests: 385 passed, five skipped. Flutter analysis: no issues.
-- Workspace sandbox helper: 82 passed (trash helper 31) at the 31 October
+- Full Flutter tests: 391 passed, five skipped. Flutter analysis: no issues.
+- Workspace sandbox helper: 83 passed (trash helper 31) at the 31 October
   rebuild, adding batched removals, discarding leftover copies, history
   catch-up (including a symlink planted in a copy) and shared verify copies.
   Earlier: 73 passed, including a GitHub CLI token from the keyring reaching gh and git in the sandbox and never a command line, and setting a bot's conflicting files aside without a link redirecting them, including real bubblewrap checks that a
@@ -219,11 +226,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`84c6ab7f8d7249abd5d66d6dc8a8a0bd51978eaecdb6970f8f3aaa0e2cfca7e5`.
+`77d02f119be0650a5fd95653220b9703700638e7b4df4b3a5ff45c6305aee159`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `b9fea50c2d174ee50d70a2ad2e13543223b0e8f581940060905abd92a07ee862` |
+| orgbots_2.2.0_amd64.deb | `11add74c2c4fd5257d785f92bd7e046f9dde47fd880afcbf1a5f6223e3c2e073` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
@@ -405,6 +412,14 @@ and Flutter bundle unchanged). Signed archive revision
 `b11eedbf75ab89012ddf4384a05f1b809e5a3925` replaces only
 `orgbots_2.2.0_amd64.deb`;
 [Pages run 41233166006](https://github.com/acememe7/Orgbot/actions/runs/41233166006)
+published it.
+
+Still before the restart, the package was rebuilt so bots can ask for sign-ins
+that are not listed and every request card says why, what, the commands and
+what happens if denied (source `9c991cf`; engine and Flutter bundle rebuilt).
+Signed archive revision `eeb7ec7ce4f164811fc6464d9166a2f073eb0ab0` replaces
+only `orgbots_2.2.0_amd64.deb`;
+[Pages run 41235683415](https://github.com/acememe7/Orgbot/actions/runs/41235683415)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
