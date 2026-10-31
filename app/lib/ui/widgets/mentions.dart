@@ -137,7 +137,11 @@ class MentionSuggestions extends StatelessWidget {
                         CircleAvatar(
                           radius: 11,
                           backgroundColor: color.withValues(alpha: 0.18),
-                          child: Icon(Icons.groups_2_outlined, size: 14, color: color),
+                          child: Icon(
+                            Icons.groups_2_outlined,
+                            size: 14,
+                            color: color,
+                          ),
                         )
                       else
                         BotAvatar(handle: option.handle, radius: 11),
@@ -219,6 +223,57 @@ class MentionBuilder extends MarkdownElementBuilder {
     TextStyle? preferredStyle,
     TextStyle? parentStyle,
   ) => Text.rich(
-    TextSpan(text: element.textContent, style: parentStyle?.merge(style) ?? style),
+    TextSpan(
+      text: element.textContent,
+      style: parentStyle?.merge(style) ?? style,
+    ),
   );
+}
+
+/// Who a message from the owner reaches, by the room's own rules: `@all`
+/// (or `@everyone`, `@everybody`) reaches every bot; any other mention reaches
+/// only the bots named; with none, a reply reaches the bot replied to and
+/// anything else reaches one coordinator.
+///
+/// From the live room: an update meant for everyone mentioned two bots in
+/// passing and reached only those two; nothing said so before it was sent.
+String? messageAudience(
+  String text,
+  List<MentionOption> options, {
+  String? replyHandle,
+}) {
+  if (text.trim().isEmpty) return null;
+  final tags = text
+      .split(RegExp(r'[^\p{L}\p{N}@_-]', unicode: true))
+      .where((word) => word.startsWith('@') && word.length > 1)
+      .map((word) => word.substring(1))
+      .toList();
+  const broadcast = {'all', 'everyone', 'everybody'};
+  if (tags.any((tag) => broadcast.contains(tag.toLowerCase()))) {
+    return 'Goes to every bot';
+  }
+  if (tags.isEmpty) {
+    if (replyHandle != null) return 'Goes to @$replyHandle only, as a reply';
+    return 'Goes to one coordinator only. Add @all to reach every bot';
+  }
+  final named = <String>[];
+  for (final tag in tags) {
+    final matches = options
+        .where(
+          (option) =>
+              !option.everyone &&
+              (option.handle.toLowerCase() == tag.toLowerCase() ||
+                  (option.name.isNotEmpty &&
+                      option.name.toLowerCase() == tag.toLowerCase())),
+        )
+        .toList();
+    if (matches.length == 1 && !named.contains(matches.single.handle)) {
+      named.add(matches.single.handle);
+    }
+  }
+  if (named.isEmpty) return 'Goes to no bot: nobody here has that name';
+  final who = named.length == 1
+      ? '@${named.single}'
+      : '${named.take(named.length - 1).map((h) => '@$h').join(', ')} and @${named.last}';
+  return 'Goes to $who only. Add @all to reach every bot';
 }

@@ -627,7 +627,7 @@ class EngineRoomController extends ChangeNotifier {
         'reply_to': ?replyTo,
       });
     }
-    _store?.addPending(author, body, files: files);
+    _store?.addPending(author, body, files: files, replyTo: replyTo);
     notifyListeners();
     return true;
   }

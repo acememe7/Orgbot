@@ -258,6 +258,29 @@ void main() {
       store.dispose();
     },
   );
+  test(
+    'a message the room did not take shows as not sent and can be discarded',
+    () async {
+      // From the live room: the room's task had died and the owner's message
+      // stayed "Pending" for ever.
+      final client = FakeClient();
+      final store = RoomStore(client);
+      store.addPending('Aece', 'clean up the repo');
+      final pending = store.messages.single;
+      expect(store.isPending(pending), isTrue);
+      expect(store.isUnsent(pending), isFalse);
+      client.emit({
+        'type': 'error',
+        'message': 'room control queue is full or closed',
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(store.isUnsent(pending), isTrue);
+      store.removePending(pending);
+      expect(store.messages, isEmpty);
+      store.dispose();
+    },
+  );
+
   test('a sign-in the owner allowed is kept once, as it happens', () async {
     final client = FakeClient();
     final store = RoomStore(client);

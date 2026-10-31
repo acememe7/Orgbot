@@ -799,6 +799,23 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
               setState(() => _replyTo = message);
               _composeFocus.requestFocus();
             },
+            onRetry: (message) async {
+              // Kept on screen until the room takes the new copy, so a
+              // failed retry loses nothing.
+              final sent = await _controller.say(
+                message.author.name ?? widget.library.userName,
+                message.body,
+                files: message.files,
+                replyTo: message.replyTo,
+              );
+              if (sent) {
+                store.removePending(message);
+              } else {
+                _attachmentError(
+                  _controller.error ?? 'The room is not taking messages yet.',
+                );
+              }
+            },
           ),
         ),
         Composer(

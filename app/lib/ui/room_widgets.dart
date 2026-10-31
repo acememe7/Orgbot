@@ -507,6 +507,7 @@ class Transcript extends StatefulWidget {
     this.attachmentRoot,
     this.onOpenAttachment,
     this.onReply,
+    this.onRetry,
   });
 
   final RoomStore store;
@@ -515,6 +516,9 @@ class Transcript extends StatefulWidget {
   final String? attachmentRoot;
   final void Function(ChatFile)? onOpenAttachment;
   final ValueChanged<ChatMessage>? onReply;
+
+  /// Send a message the room did not take again.
+  final ValueChanged<ChatMessage>? onRetry;
 
   @override
   State<Transcript> createState() => _TranscriptState();
@@ -638,6 +642,7 @@ class _TranscriptState extends State<Transcript>
             attachmentRoot: widget.attachmentRoot,
             onOpenAttachment: widget.onOpenAttachment,
             onReply: widget.onReply,
+            onRetry: widget.onRetry,
           );
           final animate =
               !_initialIds!.contains(message.id) && _arrived.add(message.id);
@@ -1060,7 +1065,9 @@ class _ArrivalState extends State<_Arrival>
   void didChangeDependencies() {
     super.didChangeDependencies();
     final controller = _controller;
-    if (controller == null || controller.isAnimating || controller.isCompleted) {
+    if (controller == null ||
+        controller.isAnimating ||
+        controller.isCompleted) {
       return;
     }
     if (MediaQuery.disableAnimationsOf(context)) {
@@ -1166,8 +1173,11 @@ class _ReplyQuote extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.subdirectory_arrow_right_rounded,
-              size: 14, color: scheme.onSurfaceVariant),
+          Icon(
+            Icons.subdirectory_arrow_right_rounded,
+            size: 14,
+            color: scheme.onSurfaceVariant,
+          ),
           const SizedBox(width: 6),
           Flexible(
             child: Text(
@@ -1220,6 +1230,7 @@ class _Bubble extends StatelessWidget {
     this.attachmentRoot,
     this.onOpenAttachment,
     this.onReply,
+    this.onRetry,
   });
 
   final ChatMessage message;
@@ -1231,6 +1242,9 @@ class _Bubble extends StatelessWidget {
   final String? attachmentRoot;
   final void Function(ChatFile)? onOpenAttachment;
   final ValueChanged<ChatMessage>? onReply;
+
+  /// Send a message the room did not take again.
+  final ValueChanged<ChatMessage>? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -1284,15 +1298,53 @@ class _Bubble extends StatelessWidget {
                 : '${parent.author.isHuman ? parent.author.name ?? 'You' : store.handleFor(parent.author.agentId)}: ${parent.body}',
           );
     final time = message.sentAt.dateTime.toLocal();
-    final stamp = pending
+    final unsent = pending && store.isUnsent(message);
+    final stamp = unsent
+        ? 'Not sent'
+        : pending
         ? 'Pending'
         : message.sentAt.millis > 0
         ? '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}'
         : null;
-    final body = Opacity(
+    final text = Opacity(
       opacity: pending ? 0.6 : 1,
       child: MessageText(text: message.body),
     );
+    final body = !unsent
+        ? text
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              text,
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Wrap(
+                  spacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      'The room did not take this message.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                    if (onRetry != null)
+                      TextButton(
+                        key: ValueKey('retry-${message.id}'),
+                        onPressed: () => onRetry!(message),
+                        child: const Text('Send again'),
+                      ),
+                    TextButton(
+                      key: ValueKey('discard-${message.id}'),
+                      onPressed: () => store.removePending(message),
+                      child: const Text('Discard'),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
     final files = [
       for (final file in message.files)
         AttachmentTile(
@@ -1359,10 +1411,7 @@ class _Bubble extends StatelessWidget {
                             const SizedBox(width: 6),
                             Text(
                               '@$name',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: color,
-                              ),
+                              style: TextStyle(fontSize: 12, color: color),
                             ),
                           ],
                           if (stamp != null) ...[
@@ -1561,7 +1610,9 @@ class RoomFileLinks extends InheritedWidget {
       path = '$root${Uri.decodeFull(href)}';
     }
     final normal = Uri.file(path).normalizePath().toFilePath();
-    return normal.startsWith(root) && normal.length > root.length ? normal : null;
+    return normal.startsWith(root) && normal.length > root.length
+        ? normal
+        : null;
   }
 
   @override
@@ -1618,12 +1669,13 @@ class _ProjectImageThumbState extends State<ProjectImageThumb> {
 
   Future<Uint8List> _load() {
     if (_cache.length > 64) _cache.remove(_cache.keys.first);
-    return _cache[widget.path] ??= checkedImage(
-      DesktopFiles.readProjectFile(expandHome(widget.root), widget.path),
-    ).catchError((Object error) {
-      _cache.remove(widget.path);
-      throw error;
-    });
+    return _cache[widget.path] ??=
+        checkedImage(
+          DesktopFiles.readProjectFile(expandHome(widget.root), widget.path),
+        ).catchError((Object error) {
+          _cache.remove(widget.path);
+          throw error;
+        });
   }
 
   @override
@@ -1825,7 +1877,11 @@ class MessageText extends StatelessWidget {
       children: [
         body,
         const SizedBox(height: 8),
-        Wrap(spacing: 8, runSpacing: 8, children: [for (final path in images) thumb(path)]),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [for (final path in images) thumb(path)],
+        ),
       ],
     );
   }
@@ -2182,9 +2238,8 @@ class _ComposerState extends State<Composer> {
     _focus.requestFocus();
   }
 
-  void _move(int by) => setState(
-    () => _highlighted = (_highlighted + by) % _suggestions.length,
-  );
+  void _move(int by) =>
+      setState(() => _highlighted = (_highlighted + by) % _suggestions.length);
 
   void _insertTag(String value) {
     final controller = widget.controller;
@@ -2330,7 +2385,8 @@ class _ComposerState extends State<Composer> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              if (widget.onAttach != null || widget.mentions.isNotEmpty ||
+              if (widget.onAttach != null ||
+                  widget.mentions.isNotEmpty ||
                   (widget.mentionOptions?.isNotEmpty ?? false))
                 PopupMenuButton<String>(
                   tooltip: desktop ? 'Add files or mention' : 'Add to message',
@@ -2464,19 +2520,40 @@ class _ComposerState extends State<Composer> {
     );
     final hint = Padding(
       padding: EdgeInsets.fromLTRB(desktop ? 30 : 22, 0, desktop ? 30 : 22, 8),
-      child: Text(
-        suggesting
-            ? '↑ ↓ to choose · Enter or Tab to insert · Esc to close'
-            : '@all asks every bot · @name asks one · Ctrl+Enter sends',
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+      child: ValueListenableBuilder<TextEditingValue>(
+        valueListenable: widget.controller,
+        builder: (context, value, _) {
+          final audience = suggesting
+              ? null
+              : messageAudience(
+                  value.text,
+                  _options,
+                  replyHandle:
+                      widget.replyTo != null && !widget.replyTo!.author.isHuman
+                      ? widget.replyAuthor
+                      : null,
+                );
+          return Text(
+            suggesting
+                ? '↑ ↓ to choose · Enter or Tab to insert · Esc to close'
+                : audience != null
+                ? '$audience · Ctrl+Enter sends'
+                : '@all asks every bot · @name asks one · Ctrl+Enter sends',
+            key: const ValueKey('composer-audience'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+          );
+        },
       ),
     );
     final column = Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [composer, if (desktop && _options.isNotEmpty) hint else const SizedBox(height: 8)],
+      children: [
+        composer,
+        if (desktop && _options.isNotEmpty) hint else const SizedBox(height: 8),
+      ],
     );
     return desktop
         ? Center(
@@ -2535,10 +2612,15 @@ class AttachmentTile extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
                   child: Text(
-                    file.note.isNotEmpty ? '${file.name} · ${file.note}' : file.name,
+                    file.note.isNotEmpty
+                        ? '${file.name} · ${file.note}'
+                        : file.name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
               ],
@@ -2670,8 +2752,10 @@ class _AttachmentImageState extends State<_AttachmentImage> {
             snapshot.data!,
             fit: BoxFit.cover,
             cacheWidth: 528,
-            errorBuilder: (_, _, _) =>
-                Icon(Icons.broken_image_outlined, color: scheme.onSurfaceVariant),
+            errorBuilder: (_, _, _) => Icon(
+              Icons.broken_image_outlined,
+              color: scheme.onSurfaceVariant,
+            ),
           );
         }
         if (snapshot.hasError) {
@@ -2682,7 +2766,9 @@ class _AttachmentImageState extends State<_AttachmentImage> {
             ),
           );
         }
-        return ColoredBox(color: scheme.surfaceContainerHighest.withValues(alpha: 0.6));
+        return ColoredBox(
+          color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+        );
       },
     );
   }

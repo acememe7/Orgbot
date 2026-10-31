@@ -104,12 +104,66 @@ void main() {
   testWidgets('tags in a message are drawn as one paragraph', (tester) async {
     await tester.pumpWidget(
       const MaterialApp(
-        home: Scaffold(body: MessageText(text: '@all please say hi to bob@x.io')),
+        home: Scaffold(
+          body: MessageText(text: '@all please say hi to bob@x.io'),
+        ),
       ),
     );
     expect(
       find.text('@all please say hi to bob@x.io', findRichText: true),
       findsOneWidget,
     );
+  });
+
+  group('who a message reaches', () {
+    final options = [
+      MentionOption.all,
+      const MentionOption(handle: 'mira', name: 'Mira'),
+      const MentionOption(handle: 'sol', name: 'Sol'),
+      const MentionOption(handle: 'opus', name: 'Julian'),
+    ];
+
+    test('an update that names two bots in passing reaches only them', () {
+      // From the live room: the 20:58 update reached only @mira and @sol.
+      expect(
+        messageAudience(
+          'OrgBots has been updated. @mira your copies moved; the haze question is with @sol.',
+          options,
+        ),
+        'Goes to @mira and @sol only. Add @all to reach every bot',
+      );
+    });
+
+    test('@all, @everyone and @everybody reach every bot', () {
+      for (final tag in ['@all', '@Everyone', '@everybody']) {
+        expect(
+          messageAudience('$tag heads up, @mira too', options),
+          'Goes to every bot',
+        );
+      }
+    });
+
+    test('no mention reaches one coordinator, or the bot replied to', () {
+      expect(
+        messageAudience('pausing soon', options),
+        'Goes to one coordinator only. Add @all to reach every bot',
+      );
+      expect(
+        messageAudience('thanks', options, replyHandle: 'sol'),
+        'Goes to @sol only, as a reply',
+      );
+      expect(messageAudience('   ', options), isNull);
+    });
+
+    test('a display name counts, and an unknown name reaches nobody', () {
+      expect(
+        messageAudience('@Julian take the cleanup', options),
+        'Goes to @opus only. Add @all to reach every bot',
+      );
+      expect(
+        messageAudience('@nobody hello', options),
+        'Goes to no bot: nobody here has that name',
+      );
+    });
   });
 }

@@ -312,25 +312,60 @@ class RoomStore extends ChangeNotifier {
   bool isPending(ChatMessage message) =>
       _pending.any((candidate) => identical(candidate, message));
 
+  /// Pending messages the room did not take: it said its queue was full or
+  /// closed, or nothing confirmed them in time.
+  ///
+  /// From the live room: the room's task had died, the owner's message stayed
+  /// "Pending" for ever, and a second copy sent after the restart left the
+  /// first one stuck on screen.
+  final Set<String> _unsent = {};
+  bool isUnsent(ChatMessage message) =>
+      isPending(message) && _unsent.contains(message.id);
+
+  /// How long a sent message may wait for the room before it shows as not
+  /// sent. The room takes messages within a second, even mid-turn.
+  static const unconfirmedAfter = Duration(seconds: 30);
+
+  /// Take a pending message off the screen, to discard it or send it again.
+  void removePending(ChatMessage message) {
+    _pending.removeWhere((candidate) => identical(candidate, message));
+    _unsent.remove(message.id);
+    _invalidateMessages();
+    _notifyChanged();
+  }
+
+  void _markUnsent(Iterable<ChatMessage> messages) {
+    var changed = false;
+    for (final message in messages) {
+      if (isPending(message)) changed |= _unsent.add(message.id);
+    }
+    if (changed) {
+      _invalidateMessages();
+      _notifyChanged();
+    }
+  }
+
   /// Show something you just said, before the room has echoed it back.
   void addPending(
     String author,
     String body, {
     List<ChatFile> files = const [],
+    String? replyTo,
   }) {
     final text = body.trim();
     if (text.isEmpty) return;
-    _pending.add(
-      ChatMessage(
-        id: 'pending_${DateTime.now().microsecondsSinceEpoch}',
-        author: Author(kind: 'human', name: author),
-        body: text,
-        intent: 'ask',
-        taskId: null,
-        sentAt: Timestamp(DateTime.now().millisecondsSinceEpoch),
-        files: files,
-      ),
+    final message = ChatMessage(
+      id: 'pending_${DateTime.now().microsecondsSinceEpoch}',
+      author: Author(kind: 'human', name: author),
+      body: text,
+      intent: 'ask',
+      taskId: null,
+      sentAt: Timestamp(DateTime.now().millisecondsSinceEpoch),
+      files: files,
+      replyTo: replyTo,
     );
+    _pending.add(message);
+    Timer(unconfirmedAfter, () => _markUnsent([message]));
     _invalidateMessages();
     _notifyChanged();
   }
@@ -570,6 +605,9 @@ class RoomStore extends ChangeNotifier {
       case 'error':
         // A lag notice: ask for a fresh snapshot to catch back up.
         lastError = message['message'] as String?;
+        if (lastError?.contains('control queue') == true) {
+          _markUnsent(List.of(_pending));
+        }
         _notifyChanged();
     }
   }
