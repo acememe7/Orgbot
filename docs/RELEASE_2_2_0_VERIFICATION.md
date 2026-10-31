@@ -204,7 +204,7 @@ One task and one run of each; see the
   pause and held rooms, retiring tasks and leftover-copy cleanup; each was checked to fail without
   its fix.
 - Full Flutter tests: 385 passed, five skipped. Flutter analysis: no issues.
-- Workspace sandbox helper: 81 passed (trash helper 31) at the 31 October
+- Workspace sandbox helper: 82 passed (trash helper 31) at the 31 October
   rebuild, adding batched removals, discarding leftover copies, history
   catch-up (including a symlink planted in a copy) and shared verify copies.
   Earlier: 73 passed, including a GitHub CLI token from the keyring reaching gh and git in the sandbox and never a command line, and setting a bot's conflicting files aside without a link redirecting them, including real bubblewrap checks that a
@@ -223,7 +223,7 @@ Final engine SHA-256:
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `8701873acda6b40a08a194c8df2c545316b253b28ac0b9dfd386c699df8fe852` |
+| orgbots_2.2.0_amd64.deb | `b9fea50c2d174ee50d70a2ad2e13543223b0e8f581940060905abd92a07ee862` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
@@ -396,6 +396,15 @@ described above (source `832f6a3`; engine and Flutter bundle both rebuilt).
 Signed archive revision `2aad39ceedd1eb276644beb1ccd62130b0daf4fd` replaces
 only `orgbots_2.2.0_amd64.deb`;
 [Pages run 41232249026](https://github.com/acememe7/Orgbot/actions/runs/41232249026)
+published it.
+
+Before the owner restarted, the sandbox helper was changed so copies made
+before the update catch up too: in the live room all three of one bot's copies
+sat on an old commit the project had long moved past (source `9dcc0f7`; engine
+and Flutter bundle unchanged). Signed archive revision
+`b11eedbf75ab89012ddf4384a05f1b809e5a3925` replaces only
+`orgbots_2.2.0_amd64.deb`;
+[Pages run 41233166006](https://github.com/acememe7/Orgbot/actions/runs/41233166006)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
