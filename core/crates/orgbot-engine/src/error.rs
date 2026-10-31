@@ -109,6 +109,12 @@ pub enum EngineError {
 
     #[error("task {task} is not part of this room")]
     WrongRoom { task: TaskId },
+
+    #[error(
+        "others added tasks while you were working: {tasks}. Check that what you are \
+         creating is not already one of these; if it is still needed, create it again"
+    )]
+    BoardChanged { tasks: String },
 }
 
 /// Shorthand for engine results.

@@ -133,6 +133,14 @@ pub struct Engine {
     /// restart never got to answer, so after one every offer counts as unread.
     #[serde(skip)]
     turn_began: BTreeMap<AgentId, Timestamp>,
+    /// When a bot was last shown the tasks others added during its turn, so
+    /// the same tasks never stop it twice. Not saved, like `turn_began`.
+    #[serde(skip)]
+    board_shown: BTreeMap<AgentId, Timestamp>,
+    /// Which bot created each task this session, so a bot is not shown its
+    /// own work as news. Not saved: after a restart no turn is under way.
+    #[serde(skip)]
+    created_by: BTreeMap<TaskId, AgentId>,
     /// Every question put to the operator and every answer given, so the room
     /// can tell what it has already been told.
     ///
@@ -375,6 +383,8 @@ impl Engine {
             error_streak: BTreeMap::new(),
             fault_retry: BTreeMap::new(),
             turn_began: BTreeMap::new(),
+            board_shown: BTreeMap::new(),
+            created_by: BTreeMap::new(),
             decisions: DecisionLog::default(),
             roles: RoleTable::default(),
             governance: Governance::default(),
@@ -2118,6 +2128,9 @@ impl Engine {
                     action: "create tasks".into(),
                 });
             }
+            if let Some(tasks) = self.tasks_added_unseen_by(creator) {
+                return Err(EngineError::BoardChanged { tasks });
+            }
         }
         for dep in &depends_on {
             if !self.tasks.contains_key(dep) {
@@ -2154,10 +2167,53 @@ impl Engine {
         // `parent` stays in step with the lineage so nothing that already reads
         // it has to learn about the new field.
         task.parent = task.lineage.parent;
+        if let Some(creator) = by {
+            self.created_by.insert(task.id, creator);
+        }
         self.tasks.insert(task.id, task.clone());
         Ok(vec![self.emit(Event::TaskCreated {
             task: Box::new(task),
         })])
+    }
+
+    /// The tasks others added since `agent` last had the board in front of
+    /// it, as one readable list, or `None` when there are none.
+    ///
+    /// From the live room: two coordinators woke to the same owner message and
+    /// each split it into tasks. One's turn had begun before the other's tasks
+    /// existed and ran for fifteen minutes on that picture, so it created five
+    /// duplicates and two bots took the same job. Being shown the list counts
+    /// as seeing it, so the same tasks never stop a bot twice.
+    fn tasks_added_unseen_by(&mut self, agent: AgentId) -> Option<String> {
+        let began = self.turn_began.get(&agent).copied()?;
+        let since = self.board_shown.get(&agent).map_or(began, |shown| began.max(*shown));
+        let unseen: Vec<String> = self
+            .tasks
+            .values()
+            .filter(|task| {
+                task.created_at > since
+                    && !task.state.is_terminal()
+                    && self.created_by.get(&task.id) != Some(&agent)
+            })
+            .map(|task| {
+                let by = self
+                    .created_by
+                    .get(&task.id)
+                    .and_then(|creator| self.specs.get(creator))
+                    .map_or_else(|| "the owner".to_string(), |spec| format!("@{}", spec.handle));
+                format!("{} \"{}\" (by {by})", task.id, task.title)
+            })
+            .collect();
+        if unseen.is_empty() {
+            return None;
+        }
+        self.board_shown.insert(agent, Timestamp::now());
+        let more = unseen.len().saturating_sub(10);
+        let mut list = unseen.into_iter().take(10).collect::<Vec<_>>().join("; ");
+        if more > 0 {
+            list.push_str(&format!("; and {more} more"));
+        }
+        Some(list)
     }
 
     /// Replace one task with another, permanently.

@@ -3352,6 +3352,40 @@ fn only_a_coordinator_may_propose_retiring_a_task() {
     });
 }
 
+/// From the live room: two coordinators woke to the same owner message, and
+/// the one whose turn began first created five duplicates of the other's tasks
+/// fifteen minutes later; two bots then took the same job.
+#[test]
+fn a_bot_creating_work_is_shown_once_what_others_added_during_its_turn() {
+    let mut f = fixture();
+    let lead = f.coordinator;
+    let create = |title: &str, by: Option<AgentId>| Command::CreateTask {
+        title: title.into(),
+        brief: String::new(),
+        by,
+        required_role: None,
+        priority: Priority::Normal,
+        acceptance_criteria: vec![],
+        depends_on: vec![],
+        origin: TaskOrigin::plain(),
+    };
+    f.apply(Command::BeginTurn { agent: lead });
+    f.apply(create("Split the release commit", Some(lead)));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let theirs = created_task(&f.apply(create("Curfew: the closing cordon becomes a wall of tear gas", None)));
+
+    let refused = f.reject(create("Redo the Curfew cordon as a tear-gas bank", Some(lead)));
+    assert!(matches!(refused, EngineError::BoardChanged { .. }), "{refused:?}");
+    let shown = refused.to_string();
+    assert!(shown.contains(&theirs.to_string()) && shown.contains("wall of tear gas") && shown.contains("by the owner"), "{shown}");
+    assert!(!shown.contains("Split the release commit"), "its own work is not news: {shown}");
+
+    // Seen now: the same tasks never stop it twice, and a new turn starts clean.
+    f.apply(create("Redo the Curfew cordon as a tear-gas bank", Some(lead)));
+    f.apply(Command::BeginTurn { agent: lead });
+    f.apply(create("Record Release 2", Some(lead)));
+}
+
 /// From the live room: the owner said to leave launch work parked, a builder
 /// claimed it anyway, and the coordinator asked the owner about it again.
 #[test]
