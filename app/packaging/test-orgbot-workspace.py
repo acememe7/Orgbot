@@ -363,6 +363,23 @@ class WorkspaceTests(unittest.TestCase):
         self.assertIsNone(again["history"])
 
     @unittest.skipUnless(workspace.shutil.which("git"), "needs git")
+    def test_a_copy_made_before_baselines_recorded_a_commit_still_catches_up(self):
+        # From the live room: every copy was made before the update and sat
+        # on an old commit the project had long moved past.
+        self._git_project()
+        work = self.prepare()
+        manifest = next((self.state / "manifests").glob("*/dev.json"))
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data.pop("git_head")
+        workspace._atomic_json(manifest, data)
+        (self.project / "README.md").write_text("owner moved on\n", encoding="utf-8")
+        self.git(self.project, "commit", "-q", "-am", "owner work")
+        result = workspace._prepare(os.fspath(self.project), os.fspath(self.state), "dev", False)
+        self.assertEqual(result["history"], "caught up")
+        self.assertEqual(self.git(work, "rev-parse", "HEAD"), self.git(self.project, "rev-parse", "HEAD"))
+        self.assertEqual(self.git(work, "status", "--porcelain"), "")
+
+    @unittest.skipUnless(workspace.shutil.which("git"), "needs git")
     def test_a_copy_with_its_own_commits_keeps_them_and_is_offered_the_project(self):
         self._git_project()
         work = self.prepare()

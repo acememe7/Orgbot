@@ -811,8 +811,14 @@ def _catch_up_history(project: Path, workspace: Path, data: dict[str, Any], scra
     if copy_sha == sha:
         data["git_head"] = sha
         return None
-    baseline = data.get("git_head")
-    behind = copy_sha is not None and copy_sha == baseline and copy_branch == branch and branch is not None
+    # The copy is only behind when the project already holds its commit:
+    # moving its branch then loses nothing. The project is asked, never the
+    # copy. Copies made before baselines recorded a commit catch up the same
+    # way.
+    behind = copy_sha is not None and copy_branch == branch and branch is not None and (
+        copy_sha == data.get("git_head")
+        or _owner_git(project, "merge-base", "--is-ancestor", copy_sha, sha).returncode == 0
+    )
     offered = branch is not None and (_read_inside(copy_git, f"refs/remotes/project/{branch}") or "").strip() == sha
     if offered and not behind:
         return "kept"
