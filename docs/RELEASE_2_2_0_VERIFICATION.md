@@ -90,6 +90,13 @@ handoff fix prepared as 2.1.1, which was never published.
   task has no holder, is never offered, claimed or worked, and no bot may ask
   you about it. Questions waiting on it are withdrawn from Needs you, unless
   another live task waits on the same question.
+- **Bots see what others added before planning more.** In the live room two
+  coordinators woke to the same owner message and each split it into tasks;
+  the one whose turn began first created five duplicates fifteen minutes later,
+  two bots took the same job, and the owner was asked four times to retire the
+  copies. A bot creating a task is now turned back once with the open tasks
+  others added since its turn began, and creates its task again only if it is
+  still needed.
 - **A lent GitHub CLI signs in from the keyring.** The GitHub CLI keeps its
   token in the desktop keyring, which a sandbox cannot reach, so in the live
   room a bot lent it got a 401 on push. The launcher now asks your `gh` for the
@@ -153,8 +160,8 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 952 passed, zero failures, three ignored.
-  New tests cover parking and resuming a task, withdrawing the questions waiting on it, when approved work is ready to deliver, amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
+- Full Rust workspace (`--locked`): 954 passed, zero failures, three ignored.
+  New tests cover showing a bot the tasks others added during its turn, parking and resuming a task, withdrawing the questions waiting on it, when approved work is ready to deliver, amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
   through the sandbox launcher, the lend list's limits,
   outside tool calls by mode, the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
@@ -173,11 +180,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`427c009f41cf811a50f7d9634bbc5375458ab2b645f8e49c8411508236de9dbe`.
+`f85f3d852b660881eff8e669a2ffa3200575d0cb05ba835b8066971a4ac56ce5`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `37de7eaa9f01dc33c18d583802df2fa26383f83237f217326fd2724b6bb61955` |
+| orgbots_2.2.0_amd64.deb | `8f35be7f101be2ae7901111b98e1e9762c707b46ad400d530f62de67393efe77` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
@@ -283,9 +290,18 @@ was rebuilt to show, park and resume tasks). Signed archive revision
 `686065df77400532e8bfdcf57328fd909db4f0db` replaces only
 `orgbots_2.2.0_amd64.deb`;
 [Pages run 41141310237](https://github.com/acememe7/Orgbot/actions/runs/41141310237)
-published it, and the public archive serves the hashes in the table above. A
-real sandboxed turn lent the GitHub CLI was signed in to the owner's account
-from the keyring; one not lent was signed out.
+published it. A real sandboxed turn lent the GitHub CLI was signed in to the
+owner's account from the keyring; one not lent was signed out. In the live room
+that night the owner parked launch work and the room spent no turns on it, and
+a bot pushed the released game to GitHub with the lent sign-in.
+
+On 31 October they were rebuilt again so a bot is shown the tasks others added
+during its turn before it creates more (source `a800543`; the Flutter bundle is
+byte-identical to the previous package). Signed archive revision
+`dfa790179009ef8eb6d0ee62a7b1243868e94de3` replaces only
+`orgbots_2.2.0_amd64.deb`;
+[Pages run 41208959113](https://github.com/acememe7/Orgbot/actions/runs/41208959113)
+published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
 
