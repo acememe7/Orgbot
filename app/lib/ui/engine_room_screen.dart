@@ -23,7 +23,9 @@ import '../workspace/workspace_screen.dart';
 import '../workspace/workspace.dart';
 import '../workspace/attachments.dart';
 import '../protocol/models.dart' show ChatFile;
-import '../protocol/models.dart' show ChatMessage, RoomDigest;
+import '../protocol/models.dart' show Author, ChatMessage, RoomDigest;
+import '../state/room_recap.dart';
+import 'widgets/recap_card.dart';
 import '../orgbot/room_check.dart';
 import '../state/room_store.dart';
 import '../net/room_client.dart' show LinkState;
@@ -87,6 +89,14 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   bool _awaitingQuestionFocus = false;
   int _inspector = 0;
   double _inspectorWidth = 360;
+
+  /// What the owner last saw here, and what changed since, shown once.
+  RoomSeen? _seen;
+  bool _seenLoaded = false;
+  bool _recapChecked = false;
+  RoomRecap? _recap;
+  Timer? _seenTimer;
+  late final AppLifecycleListener _lifecycle;
   bool get _desktop => widget.desktopLayout ?? canRunAgentClis;
 
   /// Below this the rail becomes a tab rather than a column.
@@ -108,6 +118,9 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
     _controller.trustHost = (host, type, key) async =>
         mounted && await trustWorkspaceHost(context, host, type, key);
     _controller.addListener(_onChange);
+    _lifecycle = AppLifecycleListener(onHide: _saveSeen, onPause: _saveSeen);
+    _seenTimer = Timer.periodic(const Duration(minutes: 5), (_) => _saveSeen());
+    unawaited(_loadSeen());
     if (widget.attentionRequest > 0) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _requestAttention());
     }
@@ -190,8 +203,62 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
     unawaited(_controller.start());
   }
 
+  Future<void> _loadSeen() async {
+    try {
+      _seen = await RoomSeen.load(await RoomArchive.directory(widget.room.id));
+    } catch (_) {
+      // No record is the same as a first visit.
+    }
+    _seenLoaded = true;
+    if (mounted) _maybeRecap();
+  }
+
+  void _maybeRecap() {
+    final store = _controller.store;
+    if (_recapChecked || !_seenLoaded || store == null || !store.hasSnapshot) {
+      return;
+    }
+    _recapChecked = true;
+    final seen = _seen;
+    if (seen == null) return;
+    final recap = recapSince(
+      seen,
+      tasks: store.tasks,
+      messages: store.messages,
+      digest: store.digest,
+      nameOf: (author) => _authorName(store, author),
+    );
+    if (recap != null) setState(() => _recap = recap);
+  }
+
+  String _authorName(RoomStore store, Author author) {
+    for (final agent in store.agents) {
+      if (agent.id == author.agentId && agent.handle.isNotEmpty) {
+        return '@${agent.handle}';
+      }
+    }
+    if (author.isSystem) return 'OrgBots';
+    return author.name ?? 'someone';
+  }
+
+  /// Record what the owner has seen. Only after the comparison ran, so
+  /// opening the room cannot overwrite the record it is compared against.
+  void _saveSeen() {
+    final store = _controller.store;
+    if (!_recapChecked || store == null || !store.hasSnapshot) return;
+    final seen = RoomSeen.now(store.tasks);
+    unawaited(() async {
+      try {
+        await seen.save(await RoomArchive.directory(widget.room.id));
+      } catch (_) {
+        // A missed record only means a smaller summary next time.
+      }
+    }());
+  }
+
   void _onChange() {
     if (!mounted) return;
+    _maybeRecap();
     final questionArrived =
         _awaitingQuestionFocus &&
         (_controller.store?.digest.needsYou.isNotEmpty ?? false);
@@ -266,6 +333,9 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
 
   @override
   void dispose() {
+    _saveSeen();
+    _seenTimer?.cancel();
+    _lifecycle.dispose();
     _controller.removeListener(_onChange);
     _controller.draft = _input.text;
     _controller.trustHost = null;
@@ -706,6 +776,11 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
       children: [
         if (!_controller.isRunning && _controller.phase != RoomLaunch.failed)
           const LinearProgressIndicator(minHeight: 2),
+        if (_recap != null)
+          RecapCard(
+            recap: _recap!,
+            onDismiss: () => setState(() => _recap = null),
+          ),
         if (_desktop)
           NeedsYouPanel(
             decisions: store.digest.needsYou,

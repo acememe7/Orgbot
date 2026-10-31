@@ -168,6 +168,11 @@ class RoomStore extends ChangeNotifier {
 
   final Map<String, Agent> _agents = {};
   int _snapshotHead = 0;
+
+  /// Whether the room's state has arrived, so a summary of it means
+  /// something.
+  bool get hasSnapshot => _hasSnapshot;
+  bool _hasSnapshot = false;
   final Map<String, int> _snapshotErrors = {};
   final Map<String, Task> _tasks = {};
   final Map<String, Handoff> _handoffs = {};
@@ -573,6 +578,7 @@ class RoomStore extends ChangeNotifier {
     _closedReason = null;
     _appliedTo = 0;
     _snapshotHead = (snapshot['head'] as num?)?.toInt() ?? 0;
+    _hasSnapshot = true;
     _snapshotErrors.clear();
     _activity.clear();
     _agents.clear();
