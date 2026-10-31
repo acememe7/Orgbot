@@ -184,6 +184,36 @@ and the commits against the approval, moves the branch forward with
 the branch is put back. Nothing is pushed or merged, no history is rewritten,
 and no project file is written. Review-only bots cannot land commits.
 
+A landing card can name the checks recorded for those commits: an artifact on
+the task, given as `checks`. The card then says which artifact it is, or says
+that no checks were recorded.
+
+## Pushing the owner's branch
+
+`workspace_push_commits` pushes a branch of the owner's project that already
+exists on the remote, such as `origin/main`, with the owner's own git setup.
+The room service reads where the remote branch stands with `git ls-remote`,
+refuses a branch the remote does not have, history that does not build on the
+remote's commit, and more than 50 commits, and lists the commits on a card.
+Every push asks the owner, whatever the room's access mode: Full write does not
+skip it. After the owner approves, the service re-checks that neither the
+branch nor the remote moved, then runs `git push <remote> <commit>:refs/heads/<branch>`
+with hooks off and no terminal prompt. It never forces, deletes or creates a
+remote branch.
+
+## Copies that keep up with the project
+
+`prepare` brings a copy's history along with its files. When the project's
+commit has moved, the copy receives the project's missing object files. A copy
+with no commits of its own has its branch moved to the project's commit and its
+index rebuilt to match, so `git status` there shows only the bot's own changes.
+A copy with commits of its own keeps them; the project's commit is written to
+`project/<branch>` for the bot to rebase onto. Git is never run inside a copy,
+because a bot can change that copy's git config: refs, objects and the index are
+written as files, through directory descriptors that refuse symlinks, and the
+index is built by git in the owner's project with hooks, monitors and user
+configuration off. A copy with refresh conflicts is not touched.
+
 ## Independent reviewer tests
 
 Protected local rooms with command execution enabled expose `workspace_verify`
@@ -201,6 +231,16 @@ available in this mode. A check that needs them must be reported as unavailable;
 passing the Python fixture does not establish that every project's build can
 run in the sandbox. Android and SSH workspaces do not advertise this Linux tool.
 
+Verify copies share their large files. Nothing but the helper changes a verify
+copy, and it always replaces a file rather than writing into it, so each file
+of 64 KiB or more is hard-linked to the identical file in another verify copy
+of the same project, after that file's contents hash to what this copy's
+baseline records. Refreshing one verify copy gives it new files and leaves the
+others alone. Because nothing else writes to them, refreshes trust a verify
+copy's baseline rather than re-reading every file. Copies a bot can write are
+never shared: this filesystem has no copy-on-write, and a bot writing into a
+shared file would change every copy at once.
+
 ## Leftover copies
 
 Each bot can have two copies of the project: the one its own coding CLI works
@@ -213,6 +253,15 @@ for approval), a missing or unreadable baseline, or a project that is gone is
 kept, and the room says which copies it kept and why. Current bots' copies and
 the project itself are never touched. `prune --dry-run` reports what would be
 removed without removing it.
+
+The app lists every leftover copy under Workspace changes, Leftover copies, with
+its size and why it was kept. `discard --agent NAME` removes one the owner picks:
+first every file that is missing from the project or differs from it is copied
+to `~/.local/share/orgbot/leftovers/<name>-<time>/`, and the copy's whole git
+history too when it holds commits the project does not have. The copy's refs are
+read as files and only the owner's project is asked about them. A copy that
+belongs to a bot in the room is refused. A size counts only the bytes removing
+the copy would free, so files shared with another copy are left out.
 
 ## Integration and recovery
 
@@ -237,6 +286,13 @@ command's output always reaches the bot: a merge problem is reported beside it,
 and in a CLI turn it is reported in the turn rather than failing it. An owner's
 deletion approval never sets files aside, because it covers the exact list the
 owner saw.
+
+An approved review moves removals to the trash in batches of 200, through one
+call of the trash helper per batch, and every target is checked against the
+reviewed list before the first one moves. The helper prints a progress line on
+standard error for each batch and for the files applied, and the app shows
+them as counts. A batch that fails part way stops the apply and reports what
+already moved, with a receipt for each file.
 
 `apply` performs a three-way comparison of the trusted baseline, current
 project, and agent worktree before writing anything. If any conflict exists,
