@@ -22,10 +22,10 @@ Depends: libatk1.0-0t64 (>= 2.7.91), libc6 (>= 2.39), libcairo-gobject2 (>= 1.10
 Breaks: orgbot (<< 2.2.0)
 Replaces: orgbot (<< 2.2.0)
 Filename: pool/main/o/orgbots/orgbots_2.2.0_amd64.deb
-Size: 15897404
-MD5sum: 48f99cc126cb16e893c74be55d34b585
-SHA1: b0fb39fb8e33ed3dbeb287bd8348400c9a961913
-SHA256: ee283a23d6808f8d4f71b3011c18c64019362ccd0bfa22bde3bef0bef4b00eec
+Size: 15897364
+MD5sum: d5255b27a77d42565dd47ce1b9909834
+SHA1: f7c7aaceba882abd601398bfe1d8166c0161d729
+SHA256: e5eaf9878dca7017df31ce73bc50667615e3aa81ccf17b0e8cd9332f58e48365
 Section: devel
 Priority: optional
 Description: CLI and API agents working together in shared rooms
