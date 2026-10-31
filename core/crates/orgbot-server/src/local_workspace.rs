@@ -205,6 +205,13 @@ impl LocalWorkspaceHost {
             if self.guard_state.is_none() && !self.writable {
                 return Ok(self.handle(name, args));
             }
+            // Landing moves a branch of the owner's repository, so it acts on
+            // the project itself, never on the bot's copy. From the live room:
+            // routed through the copy like every other call, it moved the
+            // branch in the bot's own repository and reported it landed.
+            if name == "workspace_land_commits" {
+                return Ok(self.handle(name, args));
+            }
             let guard = self.guard(agent)?;
             let prepared = guard.prepare()?;
             let attachment_fd = self
@@ -1553,6 +1560,53 @@ mod tests {
         assert!(ask(json!({"bundle": "artifacts/link.bundle", "branch": "main"})).is_error);
         assert!(ask(json!({"bundle": "artifacts/land.bundle", "branch": "../main"})).is_error);
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(copy);
+    }
+
+    #[test]
+    fn a_protected_room_lands_commits_in_the_project_not_the_bots_copy() {
+        // From the live room: routed through the bot's copy like every other
+        // call, a landing moved the branch in the bot's own repository and
+        // the room was told it had landed.
+        let root = temp_dir();
+        let state = temp_dir();
+        let copy = temp_dir();
+        let configure = |dir: &Path| {
+            run_git(dir, &["config", "user.name", "Workspace test"]);
+            run_git(dir, &["config", "user.email", "test@example.invalid"]);
+        };
+        run_git(&root, &["init", "--quiet", "-b", "main"]);
+        configure(&root);
+        fs::write(root.join("notes.md"), "one\n").unwrap();
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "--quiet", "-m", "base"]);
+        let base = run_git(&root, &["rev-parse", "HEAD"]);
+        let _ = fs::remove_dir_all(&copy);
+        run_git(Path::new("/"), &["clone", "--quiet", root.to_str().unwrap(), copy.to_str().unwrap()]);
+        configure(&copy);
+        fs::write(copy.join("notes.md"), "two\n").unwrap();
+        run_git(&copy, &["commit", "--quiet", "-am", "notes [skip ci]"]);
+        let head = run_git(&copy, &["rev-parse", "HEAD"]);
+        run_git(&copy, &["bundle", "create", root.join("land.bundle").to_str().unwrap(), &format!("{base}..main")]);
+        fs::write(root.join("notes.md"), "two\n").unwrap();
+
+        let host = protected_host(&root, &state, true);
+        let agent = AgentId::new();
+        let inspected = host.handle_agent(agent, "workspace_land_commits", &json!({"bundle": "land.bundle", "branch": "main"}));
+        assert!(!inspected.is_error, "{}", inspected.content);
+        let found: Value = serde_json::from_str(&inspected.content).unwrap();
+        let landed = host.handle_agent(
+            agent,
+            "workspace_land_commits",
+            &json!({
+                "bundle": "land.bundle", "branch": "main", "land": true,
+                "expect_base": base, "expect_head": head, "expect_sha256": found["bundle_sha256"],
+            }),
+        );
+        assert!(!landed.is_error, "{}", landed.content);
+        assert_eq!(run_git(&root, &["rev-parse", "main"]), head, "the owner's own branch moved");
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(state);
         let _ = fs::remove_dir_all(copy);
     }
 
