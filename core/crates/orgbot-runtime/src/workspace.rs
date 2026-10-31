@@ -151,8 +151,11 @@ impl Workspace {
                  path, the branch, the task you hold and why. The owner approves once; call again \
                  with the same bundle and branch after they do. The branch only moves forward: \
                  nothing is pushed or merged, no history is rewritten and no project file changes, \
-                 so every file the commits change must already be in the project as they leave it.",
-                json!({"bundle":{"type":"string"},"branch":{"type":"string"},"task":{"type":"string"},"reason":{"type":"string"}}),
+                 so every file the commits change must already be in the project as they leave it. \
+                 Run the project's checks (typecheck, lint, tests) on these exact commits first, \
+                 record the results as an artifact on the task and pass its id as checks: the \
+                 owner's card says which checks, if any, were recorded.",
+                json!({"bundle":{"type":"string"},"branch":{"type":"string"},"task":{"type":"string"},"reason":{"type":"string"},"checks":{"type":"string"}}),
                 json!(["bundle","branch","task","reason"]),
             ));
         }

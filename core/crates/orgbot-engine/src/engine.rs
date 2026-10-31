@@ -2010,8 +2010,9 @@ impl Engine {
                 head,
                 commits,
                 changes,
+                checks,
                 reason,
-            } => self.request_landing(by, task, branch, base, head, commits, changes, reason),
+            } => self.request_landing(by, task, branch, base, head, commits, changes, checks, reason),
             Command::RecordPendingRemovals { agent, copy, count } => {
                 self.record_pending_removals(agent, copy, count)
             }
@@ -2782,6 +2783,7 @@ impl Engine {
         head: String,
         commits: Vec<String>,
         changes: String,
+        checks: Option<ArtifactId>,
         reason: String,
     ) -> Result<Vec<EventEnvelope>> {
         let spec = self.require_agent(by)?;
@@ -2791,6 +2793,20 @@ impl Engine {
                 action: "land commits as a review-only bot".into(),
             });
         }
+        // From the live room: a reviewer sent a landing back because its
+        // checks ran after it. The card now says which checks, if any, were
+        // recorded for these commits.
+        let checks_line = match checks {
+            Some(id) => {
+                let artifact = self
+                    .artifacts
+                    .get(&id)
+                    .filter(|artifact| artifact.task == task)
+                    .ok_or(EngineError::UnknownArtifact { artifact: id })?;
+                format!("\nChecks on these commits: \"{}\" ({id}).", artifact.name)
+            }
+            None => "\nNo checks were recorded for these commits.".to_string(),
+        };
         let handle = spec.handle.clone();
         let reason = reason.trim().to_string();
         if reason.is_empty() || reason.chars().count() > 500 {
@@ -2827,7 +2843,7 @@ impl Engine {
             format!(
                 "@{handle} asks to land {count} commit{} on {branch} for \"{title}\": {reason}\n\
                  The branch moves forward from {} to {} ({}). Nothing is pushed or merged, \
-                 no history is rewritten, and no file in your project changes.{listed}{more}",
+                 no history is rewritten, and no file in your project changes.{checks_line}{listed}{more}",
                 if count == 1 { "" } else { "s" },
                 &base[..7],
                 &head[..7],

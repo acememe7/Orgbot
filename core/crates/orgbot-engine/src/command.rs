@@ -240,6 +240,9 @@ pub enum Command {
         commits: Vec<String>,
         /// What the commits change, in git's short words.
         changes: String,
+        /// An artifact on the task recording the checks run on these commits.
+        #[serde(default)]
+        checks: Option<ArtifactId>,
         /// Why, shown to the owner.
         reason: String,
     },

@@ -1011,6 +1011,13 @@ async fn land_commits(
     use orgbot_tools::ToolOutcome;
     let text = |key: &str| input.get(key).and_then(serde_json::Value::as_str).unwrap_or("").trim().to_string();
     let (bundle, branch, reason) = (text("bundle"), text("branch"), text("reason"));
+    let checks = match text("checks") {
+        raw if raw.is_empty() => None,
+        raw => match serde_json::from_value::<orgbot_proto::ArtifactId>(serde_json::json!(raw)) {
+            Ok(id) => Some(id),
+            Err(_) => return ToolOutcome::error("checks must be the id of an artifact on your task."),
+        },
+    };
     let Ok(task) = serde_json::from_value::<orgbot_proto::TaskId>(serde_json::json!(text("task"))) else {
         return ToolOutcome::error("Name the task you hold that these commits are for.");
     };
@@ -1042,6 +1049,7 @@ async fn land_commits(
                 head: head.clone(),
                 commits,
                 changes: field("changes"),
+                checks,
                 reason,
             })
         });

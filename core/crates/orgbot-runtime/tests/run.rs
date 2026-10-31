@@ -2659,6 +2659,7 @@ async fn landing_commits_follows_the_rooms_access_mode() {
         head: "b".repeat(40),
         commits: vec!["bbbbbbb tests: add the squad test [skip ci]".into()],
         changes: "1 file changed".into(),
+        checks: None,
         reason: "the owner asked for separate commits".into(),
     };
     let (mut room, lead, task) = access_room(AccessMode::Auto);

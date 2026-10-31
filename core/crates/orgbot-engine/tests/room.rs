@@ -3369,11 +3369,13 @@ fn landing_commits_needs_the_owners_yes_for_exactly_those_commits() {
         head: head.into(),
         commits: vec!["bbbbbbb tests: add the squad test [skip ci]".into()],
         changes: "1 file changed, 40 insertions(+)".into(),
+        checks: None,
         reason: "the owner asked for separate commits".into(),
     };
     let asked = f.apply(request(worker, "main", &head));
     let question = f.engine.decisions().pending().next().unwrap().because.clone();
     assert!(question.contains("land 1 commit on main") && question.contains("Nothing is pushed") && question.contains("add the squad test"), "{question}");
+    assert!(question.contains("No checks were recorded for these commits"), "{question}");
     assert!(!f.engine.landing_approved(task, worker, "main", &base, &head), "not before the owner answers");
     assert_eq!(
         f.engine.digest().needs_you[0].grants_with.as_deref(),
@@ -3396,6 +3398,33 @@ fn landing_commits_needs_the_owners_yes_for_exactly_those_commits() {
     assert!(matches!(not_holding, EngineError::NotAssignee { .. }), "only the task's holder may ask: {not_holding:?}");
     f.reject(request(worker, "../main", &head));
     f.reject(request(worker, "main", &base));
+}
+
+/// From the live room: a reviewer sent a landing back because its checks ran
+/// after it.
+#[test]
+fn a_landing_card_names_the_checks_recorded_for_those_commits() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("commit the docs", worker);
+    let checks = f.add_artifact(task, worker);
+    let other = f.start_task("something else", f.worker2);
+    let elsewhere = f.add_artifact(other, f.worker2);
+    let request = |checks| Command::RequestLanding {
+        by: worker,
+        task,
+        branch: "main".into(),
+        base: "a".repeat(40),
+        head: "b".repeat(40),
+        commits: vec!["bbbbbbb docs [skip ci]".into()],
+        changes: "1 file changed".into(),
+        checks,
+        reason: "the owner asked for separate commits".into(),
+    };
+    f.reject(request(Some(elsewhere)));
+    f.apply(request(Some(checks)));
+    let question = f.engine.decisions().pending().next().unwrap().because.clone();
+    assert!(question.contains(&format!("Checks on these commits: \"notes.md\" ({checks})")), "{question}");
 }
 
 /// From the live room: one release reached the owner as three cards in a row.
@@ -3497,6 +3526,7 @@ fn asking_for_something_on_a_claimed_task_starts_it_and_waits_for_the_answer() {
         head: "b".repeat(40),
         commits: vec!["bbbbbbb docs: record the commit set [skip ci]".into()],
         changes: "1 file changed".into(),
+        checks: None,
         reason: "the owner asked for separate commits".into(),
     });
     assert_eq!(f.state(task), TaskState::Blocked, "it waits on the owner, so nothing wakes it meanwhile");
@@ -3515,6 +3545,7 @@ fn asking_for_something_on_a_claimed_task_starts_it_and_waits_for_the_answer() {
         head: "c".repeat(40),
         commits: vec!["ccccccc notes [skip ci]".into()],
         changes: "1 file changed".into(),
+        checks: None,
         reason: "notes".into(),
     });
     assert_eq!(f.engine.decisions().pending().count(), 1, "no orphan question");
