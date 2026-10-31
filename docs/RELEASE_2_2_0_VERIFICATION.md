@@ -154,8 +154,20 @@ handoff fix prepared as 2.1.1, which was never published.
   away for eight hours was due 133 KB of catch-up, more than Linux allows in
   one command-line argument, so its CLI could not start.
 - **Easier to find.** The workspace review is a labelled "Workspace changes"
-  button, a bot asking for file removals says where it is, and each bot's two
+  button that shows how many file removals wait for review, and each bot's two
   project copies are labelled "its own CLI" and "room tools".
+- **Easier long runs (rebuilt 31 October).** Approved removals move to the
+  trash in batches with a running count (1,549 had taken 13 minutes behind a
+  bare progress bar). Bots no longer repeat waiting removals in every message,
+  and a turn that changed nothing posts its status once. A coordinator can make
+  a task wait for others, and waiting work is left alone. A bot asks the owner
+  one question per task at a time, and asks for a step's access at once. A
+  landing card names the checks recorded for its commits. A bot can push an
+  existing branch of the owner's project after a card the owner always sees,
+  whatever the access mode. The app says what happened while the owner was
+  away, lists leftover copies with their size and discards one after saving
+  what may be unique in it. Each copy's git history keeps up with the
+  project, and verify copies share their large files.
 - **Provider terms.** The Antigravity sign-in tile warns that Google's terms do
   not allow a personal Google account in third-party apps. The README
   summarises each provider's stated position.
@@ -183,15 +195,19 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 961 passed, zero failures, three ignored.
+- Full Rust workspace (`--locked`): 969 passed, zero failures, three ignored,
+  at the 31 October rebuild.
   New tests cover landing a real bundle in a real repository (refused before the project holds the files, refused off the approval, for diverged commits, links and path-like branches; staged work kept), the approval covering exactly those commits, landing under each access mode, showing a bot the tasks others added during its turn, parking and resuming a task, withdrawing the questions waiting on it, when approved work is ready to deliver, amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
   through the sandbox launcher, the lend list's limits,
   outside tool calls by mode, the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
   pause and held rooms, retiring tasks and leftover-copy cleanup; each was checked to fail without
   its fix.
-- Full Flutter tests: 375 passed, five skipped. Flutter analysis: no issues.
-- Workspace sandbox helper: 73 passed, including a GitHub CLI token from the keyring reaching gh and git in the sandbox and never a command line, and setting a bot's conflicting files aside without a link redirecting them, including real bubblewrap checks that a
+- Full Flutter tests: 385 passed, five skipped. Flutter analysis: no issues.
+- Workspace sandbox helper: 81 passed (trash helper 31) at the 31 October
+  rebuild, adding batched removals, discarding leftover copies, history
+  catch-up (including a symlink planted in a copy) and shared verify copies.
+  Earlier: 73 passed, including a GitHub CLI token from the keyring reaching gh and git in the sandbox and never a command line, and setting a bot's conflicting files aside without a link redirecting them, including real bubblewrap checks that a
   turn the owner did not allow, or a read-only turn, has no server key anywhere,
   that lent sign-ins are hidden unless lent and then appear only in the bot's
   home, and that a once read-only workspace never gets the key. Trash helper: 30
@@ -203,11 +219,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`422168eb388d0f936bd90421f44e1b69c4d27e6c5277f2c5bd1daf23c1d13c0a`.
+`84c6ab7f8d7249abd5d66d6dc8a8a0bd51978eaecdb6970f8f3aaa0e2cfca7e5`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `e5eaf9878dca7017df31ce73bc50667615e3aa81ccf17b0e8cd9332f58e48365` |
+| orgbots_2.2.0_amd64.deb | `8701873acda6b40a08a194c8df2c545316b253b28ac0b9dfd386c699df8fe852` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
@@ -373,6 +389,13 @@ previous package). Signed archive revision
 `878a7adec112248aaeedec15fbba58102e31d998` replaces only
 `orgbots_2.2.0_amd64.deb`;
 [Pages run 41224108972](https://github.com/acememe7/Orgbot/actions/runs/41224108972)
+published it.
+
+On 31 October the package was rebuilt with the update for easier long runs
+described above (source `832f6a3`; engine and Flutter bundle both rebuilt).
+Signed archive revision `2aad39ceedd1eb276644beb1ccd62130b0daf4fd` replaces
+only `orgbots_2.2.0_amd64.deb`;
+[Pages run 41232249026](https://github.com/acememe7/Orgbot/actions/runs/41232249026)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
