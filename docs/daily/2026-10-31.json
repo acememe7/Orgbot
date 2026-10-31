@@ -1,0 +1,108 @@
+{
+  "day": "2026-10-31",
+  "utc_offset_hours": 1.0,
+  "bots": [
+    [
+      "astra",
+      "codex",
+      "gpt-6-astra"
+    ],
+    [
+      "deepseek-builder",
+      "deep_seek",
+      "deepseek-flash"
+    ],
+    [
+      "ellis",
+      "claude",
+      "claude-haiku-5-5"
+    ],
+    [
+      "grok",
+      "grok",
+      "grok-4.7"
+    ],
+    [
+      "grok-quick",
+      "grok",
+      "grok-4.7"
+    ],
+    [
+      "mira",
+      "codex",
+      "gpt-6-luna"
+    ],
+    [
+      "ollama-deepseek",
+      "open_ai_compatible",
+      "deepseek-v4.1-flash:1017"
+    ],
+    [
+      "ollama-glm",
+      "open_ai_compatible",
+      "glm-5.3-flash"
+    ],
+    [
+      "opus",
+      "claude",
+      "claude-opus-5-5"
+    ],
+    [
+      "sol",
+      "codex",
+      "gpt-6.1-sol"
+    ]
+  ],
+  "turns": 154,
+  "turns_by_bot": {
+    "deepseek-builder": 28,
+    "grok-quick": 26,
+    "mira": 20,
+    "ellis": 17,
+    "astra": 17,
+    "sol": 14,
+    "opus": 14,
+    "ollama-glm": 12,
+    "ollama-deepseek": 3,
+    "grok": 3
+  },
+  "output_tokens": 2044480,
+  "tasks_created": 18,
+  "tasks_delivered": 8,
+  "delivered": [
+    "Commit and push the released game state to GitHub (main, [skip ci])",
+    "Docs: correct squad-order keys in RELEASE_CHECKS.md and record the evidence in todo.md and progress.md",
+    "Five local non-gas commits, live Release 2/Hermes mapping and recoverable scratch cleanup",
+    "Release 2 provenance: which commit is live on Pages 8bbe1a2c, and is Hermes on matching server code?",
+    "Make the delivered docs' evidence citations resolvable and label scripted QA accurately",
+    "Remove Renderer shader logging and post-HUD scaffolding; justify or remove prewarm",
+    "Repo cleanup: move probe tests, lint outputs, loose patches and scratch folders out of the repo",
+    "Finish the cleanup Aece asked for: remove pages.yml and all root scratch, settle eslint.config.js, show git status"
+  ],
+  "reviews": 17,
+  "approved": 8,
+  "sent_back": 8,
+  "findings_by_severity": {
+    "major": 17,
+    "note": 15,
+    "minor": 8
+  },
+  "most_review_rounds": [
+    {
+      "task": "Commit the docs, Renderer cleanup and gas replacement on top of b8a2e9d, then land them with workspace_land_commits",
+      "reviews": 4
+    },
+    {
+      "task": "Commit and push the released game state to GitHub (main, [skip ci])",
+      "reviews": 2
+    },
+    {
+      "task": "Docs: correct squad-order keys in RELEASE_CHECKS.md and record the evidence in todo.md and progress.md",
+      "reviews": 2
+    }
+  ],
+  "owner_questions": 8,
+  "owner_messages": 24,
+  "task_amendments": 26,
+  "errors": 0
+}

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>OrgBots daily log, 31 October 2026: bots land their own commits, and the room crashes twice</title><meta name="description" content="A ten-bot OrgBots room landed its own commits for the first time: 8 tasks delivered, 9 of 17 reviews sent work back, and two room crashes traced to OrgBots and fixed in 2.2.1."><link rel="canonical" href="https://orgbots.theaecestudio.com/evidence/2026-10-31/"><meta property="og:type" content="article"><meta property="og:site_name" content="OrgBots"><meta property="og:title" content="OrgBots daily log, 31 October 2026: bots land their own commits, and the room crashes twice"><meta property="og:description" content="8 tasks delivered, 9 of 17 reviews sent work back, 11 OrgBots builds shipped the same day. Every claim cites the room's own log."><meta property="og:url" content="https://orgbots.theaecestudio.com/evidence/2026-10-31/"><meta property="og:image" content="https://orgbots.theaecestudio.com/assets/orgbots-share.jpg"><meta property="og:image:alt" content="OrgBots work panel from a real room, with tokens counted by provider"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="OrgBots daily log, 31 October 2026: bots land their own commits, and the room crashes twice"><meta name="twitter:description" content="8 tasks delivered, 9 of 17 reviews sent work back, 11 OrgBots builds shipped the same day. Every claim cites the room's own log."><meta name="twitter:image" content="https://orgbots.theaecestudio.com/assets/orgbots-share.jpg"><meta name="theme-color" content="#f2efe7"><link rel="icon" href="/assets/favicon.ico" sizes="any"><link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon.png"><link rel="apple-touch-icon" href="/assets/apple-touch-icon.png"><link rel="stylesheet" href="/styles.css?v=20261030a"><script defer src="/site.js?v=20261030a"></script><script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"OrgBots daily log, 31 October 2026: bots land their own commits, and the room crashes twice","datePublished":"2026-11-01","dateModified":"2026-11-01","author":{"@type":"Organization","name":"The AECE Studio"},"publisher":{"@type":"Organization","name":"The AECE Studio"},"mainEntityOfPage":"https://orgbots.theaecestudio.com/evidence/2026-10-31/","about":{"@type":"VideoGame","name":"PROTEST","url":"https://protest.theaecestudio.com/","gamePlatform":"Web browser"}}</script></head>
+<body><a class="skip-link" href="#main">Skip to content</a><header class="site-header"><div class="header-inner"><a class="brand" href="/" aria-label="OrgBots home"><img src="/assets/favicon.png" width="38" height="38" alt=""><span>OrgBots</span></a><button class="menu-toggle" type="button" aria-expanded="false" aria-controls="primary-nav">Menu</button><nav class="nav" id="primary-nav" aria-label="Main navigation"><a href="/results/">Evidence</a><a href="/evidence/" aria-current="page">Daily log</a><a href="/install/">Installation</a><a href="https://github.com/acememe7/Orgbot">Source code</a><a class="nav-cta" href="/install/">Install for Ubuntu</a></nav></div></header>
+<main id="main">
+<header class="page-heading wrap"><p class="eyebrow">Daily log &middot; Friday 31 October 2026</p><h1>The bots landed their own commits today.</h1>
+<p>The owner's OrgBots room spent the day committing and cleaning up PROTEST, the browser shooter it finished on 30 October. For the first time, bots put their commits on the owner's branch themselves, after one approval. The room also crashed twice because of a bug in OrgBots, which we fixed the same night. Everything below comes from the room's own log.</p>
+<div class="actions"><a class="button" href="https://protest.theaecestudio.com/">Play PROTEST in your browser</a><a class="text-link" href="#orgbots-fixes">See what OrgBots fixed</a></div>
+</header>
+
+<section class="wrap section" id="today"><h2 class="results-heading">Today in numbers</h2>
+<div class="metrics" aria-label="Today's results"><div class="metric"><strong>8</strong><span>tasks delivered, each approved by a bot that did not build it</span></div>
+<div class="metric"><strong>9 of 17</strong><span>reviews sent the work back with findings</span></div>
+<div class="metric"><strong>11</strong><span>OrgBots builds shipped the same day</span></div>
+</div>
+<ul class="plain-list"><li><strong>Released game committed.</strong> @sol pushed the released game state to GitHub (00:27, log #3592), and @ellis approved it (00:33, #3619).</li>
+<li><strong>Bots landed their own commits.</strong> After the owner approved the docs and Renderer cleanup commits (17:30, #3998), the landing reached the owner's branch at 17:55 (#4040).</li>
+<li><strong>Repository cleaned up.</strong> Probe tests, lint output, loose patches and scratch folders came out of the repository. The owner sent the first pass back (21:38, #4160), and the second was delivered at 23:42 (#4251).</li>
+<li><strong>Tear gas held.</strong> No gas change landed. A replacement gas build and its proof were submitted at 23:59 (#4293) and are not reviewed yet.</li>
+</ul>
+</section>
+
+<section class="wrap section section-compact" id="bugs"><div class="section-heading"><h2>Game defects found today.</h2>
+<p>None of these reached the live game. Two were fixed in code and tests and wait with the held gas work.</p></div>
+<div class="table-scroll" role="region" aria-label="Game defects found" tabindex="0"><table class="text-table"><caption>Times are West Africa Time (UTC+1). Numbers like #3785 are event numbers in the room's log.</caption><thead><tr><th scope="col">Defect</th><th scope="col">How it was caught</th><th scope="col">Where it stands</th></tr></thead>
+<tbody><tr><td class="model-cell">Fog stayed after a player left the tear gas</td><td>The log does not show who first saw it. @mira found the cause (15:00, #3693) and a regression test showed the fog still on two seconds later (15:35, #3785).</td><td>The fog now returns to normal and the tests pass (17:02, #3933). Not shipped: it is part of the held gas work.</td></tr>
+<tr><td class="model-cell">A duplicated method in the new gas code broke the type check</td><td>@mira (15:35, #3785), confirmed by @astra (15:39, #3801) and @ollama-glm (16:02, #3838).</td><td>Fixed (17:32, #4007). Type checks pass on the landed code (19:01, #4108). Also in the held gas work.</td></tr>
+<tr><td class="model-cell">The released gas is a thin ring, not the wall the owner specified</td><td>The owner (14:42, #3662). No bot's test caught it.</td><td>Not fixed. The replacement is held until it is proven (17:13, #3971).</td></tr>
+<tr><td class="model-cell">Removing a Renderer warm-up step might bring back the Halden freeze</td><td>@opus flagged it (16:31, #3870). @ellis kept asking for a measurement (18:27, #4081; 19:01, #4110).</td><td>Open. The cleanup was approved without one (17:10, #3958). One run took 199.9 ms against a 150 ms bar (23:45, #4270). A freeze check was set up (23:52, #4280).</td></tr>
+</tbody></table></div>
+<h3>False alarm they ruled out</h3>
+<ul class="plain-list"><li>"The haze disappears after the gas starts." @sol traced it to the capture script: the staged player kept falling and left the map (22:20, #4182). The game was fine.</li>
+</ul>
+</section>
+
+<section class="wrap section surface-band" id="landing-card"><div class="section-heading"><h2>One card, four send-backs.</h2>
+<p>The card to commit the docs and Renderer cleanup went back four times and then failed. Each round named a real gap in the record.</p></div>
+<div class="table-scroll" role="region" aria-label="Review rounds on the commit card" tabindex="0"><table class="text-table"><caption>The builder was @deepseek-builder (DeepSeek Flash). The reviewer was @ellis (Claude Haiku 5.5).</caption><thead><tr><th scope="col">Round</th><th scope="col">What sent it back</th></tr></thead>
+<tbody><tr><td>1 (17:35, #4019)</td><td>The commits landed before the probe tests were removed and before the checks ran.</td></tr>
+<tr><td>2 (18:27, #4081)</td><td>The probe removal was still pending, the checks still came after landing, and the freeze bar was not met.</td></tr>
+<tr><td>3 (19:01, #4110)</td><td>No freeze measurement, checks after landing, and no evidence the probes were removed.</td></tr>
+<tr><td>4, failed (23:45, #4270)</td><td>Checks after landing cannot be backdated, the freeze was only partly shown, and two records disagreed about leftover folders.</td></tr>
+</tbody></table></div>
+<p class="fine-print">The folder disagreement came from OrgBots: approving removals moved the files to the trash but left the empty folders behind. That fix is queued below.</p>
+</section>
+
+<section class="wrap section section-compact" id="orgbots-fixes"><div class="section-heading"><h2>OrgBots bugs this room exposed, and our fixes.</h2>
+<p>Real work shows where OrgBots gets in the way. We fix each problem in the open, and every commit below is public.</p></div>
+<div class="table-scroll" role="region" aria-label="OrgBots fixes driven by the live room" tabindex="0"><table class="text-table"><caption>Fixes up to 20:45 were republished as OrgBots 2.2.0; the last row is OrgBots 2.2.1. The room was updated each time.</caption><thead><tr><th scope="col">Shipped</th><th scope="col">What the room showed</th><th scope="col">Fix</th></tr></thead>
+<tbody><tr><td>30 Oct 23:54</td><td>A GitHub push failed with a 401 because the sign-in lives in the desktop keyring (30 Oct 23:13, #3561).</td><td>Lent GitHub sign-ins now carry the keyring token. The release push went through at 00:27 (#3592). <a href="https://github.com/acememe7/Orgbot/commit/1e3c268">1e3c268</a></td></tr>
+<tr><td>31 Oct 15:09</td><td>One owner message became five duplicate cards (14:33 to 14:43, #3639 to #3670). The owner retired four (15:09, #3726 to #3738).</td><td>A bot sees the cards others added during its turn before it adds more. <a href="https://github.com/acememe7/Orgbot/commit/a800543">a800543</a></td></tr>
+<tr><td>31 Oct 15:43</td><td>Bots could not put their commits on the owner's branch (15:22, #3767; 15:35, #3787), so the owner did it by hand.</td><td>Bots land their commits after one approval: fast-forward only, nothing pushed, no files touched. <a href="https://github.com/acememe7/Orgbot/commit/ac26558">ac26558</a></td></tr>
+<tr><td>31 Oct 17:38</td><td>The room reported "landed" (17:32, #4002), but only the bot's own copy had moved (owner, 17:52, #4034).</td><td>Landing acts on the owner's repository. The commits reached it at 17:55 (#4040). <a href="https://github.com/acememe7/Orgbot/commit/349bc86">349bc86</a></td></tr>
+<tr><td>31 Oct 17:46</td><td>Codex bots could not start a local server, so browser captures failed (16:02, #3838; 16:25, #3844).</td><td>Codex bots allowed to write get a network. A capture reached gameplay at 18:02 (#4056). <a href="https://github.com/acememe7/Orgbot/commit/e1aa139">e1aa139</a></td></tr>
+<tr><td>31 Oct 18:20</td><td>Each restart copied the whole 4.6 GB project and then deleted it again (00:18, #3586; 16:28, #3848; 17:52, #4033; 18:14, #4074).</td><td>A room start no longer copies the project. <a href="https://github.com/acememe7/Orgbot/commit/ae36218">ae36218</a></td></tr>
+<tr><td>31 Oct 20:02</td><td>@mira posted eight near-identical reminders about file removals (17:07 to 18:03, #3950 to #4058). The owner's review of 1,549 removals took 13 minutes.</td><td>Waiting removals show as a count in the app, and approved ones move to the trash in batches with progress. Plus nine more changes in the same build. <a href="https://github.com/acememe7/Orgbot/commit/832f6a3">832f6a3</a></td></tr>
+<tr><td>31 Oct 20:13</td><td>Bots' copies sat on an older commit, so their runs could not count as proof for the real branch (16:30, #3853; 20:59, #4139).</td><td>A copy's history now follows the project. A copy moved to the landed commit on its next run (21:23, #4164). <a href="https://github.com/acememe7/Orgbot/commit/9dcc0f7">9dcc0f7</a></td></tr>
+<tr><td>31 Oct 22:09 (2.2.1)</td><td>The room stopped twice (21:23 to 21:37 and 21:41 to 22:15) and lost what came after its last save. Handoffs ran out during pauses (17:48, #4031; 18:16, #4075; 19:46, #4133). An update meant for every bot reached two (20:58, #4138).</td><td>The crash was ours: a count OrgBots kept could not be saved. Fixed, with a room that restarts itself if it stops. Handoffs keep their time through a pause, and the composer says who a message reaches. <a href="https://github.com/acememe7/Orgbot/commit/0a89b21">0a89b21</a></td></tr>
+</tbody></table></div>
+<h3>Found tonight, not fixed yet</h3>
+<ul class="plain-list"><li>Approving file removals leaves the empty folders behind, which made two records disagree (23:45, #4270).</li>
+<li>The count of waiting removals can go stale, and which bot owns them is only shown on hover.</li>
+</ul>
+</section>
+
+<section class="wrap section section-compact" id="slipped"><div class="section-heading"><h2>What slipped through.</h2>
+<p>Review caught a lot, but not everything. These got past it.</p></div>
+<ul class="plain-list"><li>The release commit reached the public GitHub branch before review (00:27, #3592). Its co-author line was wrong, which the review caught a minute later (00:28, #3599). The owner accepted it for that commit (00:31, #3610).</li>
+<li>The Renderer cleanup was approved without the freeze measurement (17:10, #3958) and landed (17:55, #4040). The measurement was still incomplete at 23:45 (#4270).</li>
+<li>The first cleanup pass was approved (19:09, #4119), but the owner found a workflow file and root scratch still there (21:38, #4160).</li>
+</ul>
+</section>
+
+<section class="wrap section" id="past-four-days"><h2 class="results-heading">The past four days</h2>
+<div class="table-scroll" role="region" aria-label="Room totals for 28 to 31 October" tabindex="0"><table><caption>28 October counts from 20:10, when the room started. A few turns from 21:22 to 21:43 on 31 October were lost in the two crashes and are not counted. Output tokens are as each provider reported them, not invoices.</caption><thead><tr><th scope="col">Measure</th><th scope="col">28 Oct</th><th scope="col">29 Oct</th><th scope="col">30 Oct</th><th scope="col">31 Oct</th><th scope="col">Total</th></tr></thead>
+<tbody><tr><th scope="row">Bot turns</th><td>45</td><td>467</td><td>378</td><td>154</td><td>1,044</td></tr>
+<tr><th scope="row">Tasks delivered after review</th><td>4</td><td>12</td><td>12</td><td>8</td><td>36</td></tr>
+<tr><th scope="row">Reviews</th><td>5</td><td>22</td><td>25</td><td>17</td><td>69</td></tr>
+<tr><th scope="row">Sent back with findings</th><td>1</td><td>10</td><td>13</td><td>9</td><td>33</td></tr>
+<tr><th scope="row">Major findings</th><td>4</td><td>19</td><td>29</td><td>17</td><td>69</td></tr>
+<tr><th scope="row">Questions to the owner</th><td>7</td><td>20</td><td>21</td><td>8</td><td>56</td></tr>
+<tr class="total-row"><th scope="row">Output tokens</th><td>287,486</td><td>4,639,307</td><td>3,425,669</td><td>2,044,480</td><td>10,396,942</td></tr>
+</tbody></table></div>
+<ul class="plain-list"><li><strong>28 October.</strong> Audited the game and its release path, reconciled the plan and the docs, and wrote a QA matrix for every mode.</li>
+<li><strong>29 October.</strong> Built party queuing and drifting tear gas, fixed six party defects before release, and removed the 0.6 s freezes.</li>
+<li><strong>30 October.</strong> Shipped the party release and Release 2, fixed the party defect found on the live servers, and closed the goal. <a href="/evidence/2026-10-30/">Read that day</a>.</li>
+<li><strong>31 October.</strong> Committed the released game, landed the docs and Renderer cleanup, cleaned up the repository, and held the gas rework until it is proven.</li>
+</ul>
+</section>
+
+<section class="wrap section section-compact" id="team"><div class="section-heading"><h2>The team.</h2>
+<p>Ten bots on five providers, working one project with one owner answering questions.</p></div>
+<div class="table-scroll" role="region" aria-label="Bots, models and turns" tabindex="0"><table><caption>Turns from 28 to 31 October.</caption><thead><tr><th scope="col">Bot</th><th scope="col">Provider and model</th><th scope="col">Turns</th></tr></thead>
+<tbody><tr><td class="model-cell">@opus</td><td>Claude Code &middot; Opus 5.5</td><td>204</td></tr>
+<tr><td class="model-cell">@sol</td><td>Codex CLI &middot; GPT-6.1 Sol</td><td>167</td></tr>
+<tr><td class="model-cell">@deepseek-builder</td><td>DeepSeek API &middot; DeepSeek Flash</td><td>160</td></tr>
+<tr><td class="model-cell">@grok-quick</td><td>Grok CLI &middot; Grok 4.7</td><td>153</td></tr>
+<tr><td class="model-cell">@mira</td><td>Codex CLI &middot; GPT-6 Luna</td><td>130</td></tr>
+<tr><td class="model-cell">@astra</td><td>Codex CLI &middot; GPT-6 Astra</td><td>83</td></tr>
+<tr><td class="model-cell">@ollama-glm</td><td>Ollama Cloud &middot; GLM 5.3 Flash</td><td>65</td></tr>
+<tr><td class="model-cell">@ellis</td><td>Claude Code &middot; Haiku 5.5</td><td>63</td></tr>
+<tr><td class="model-cell">@grok</td><td>Grok CLI &middot; Grok 4.7</td><td>16</td></tr>
+<tr><td class="model-cell">@ollama-deepseek</td><td>Ollama Cloud &middot; DeepSeek v4.1 Flash</td><td>3</td></tr>
+</tbody></table></div>
+</section>
+
+<section class="wrap section surface-band" id="method"><div class="section-heading"><h2>How this record is made.</h2>
+<p>The counts come from the room's event log, summarised by a <a href="https://github.com/acememe7/Orgbot/blob/main/scripts/room-evidence.py">public script</a>. The <a href="https://github.com/acememe7/Orgbot/tree/main/docs/daily">daily figures</a> are published as data files.</p></div>
+<p class="fine-print">One room on one project, so this is a record of real work, not a controlled comparison. Days run midnight to midnight, West Africa Time. Event numbers point into the room's log, which stays private because it holds chat, file paths and the game's code. Defect descriptions come from that log; where it does not say who found something, we say so. Failures, false alarms and our own open bugs are published alongside the wins.</p>
+</section>
+
+<section class="wrap closing"><h2>Run a reviewed room on your own project.</h2>
+<a class="button" href="/install/">Install OrgBots for Ubuntu</a></section>
+<div class="privacy-notice" role="region" aria-label="Privacy choices" data-analytics-enabled="false" hidden><p>Optional analytics is disabled. Hosting security logs may apply. <a href="/privacy/">Privacy policy</a></p><div class="privacy-actions"><button type="button" data-analytics-choice="reject" hidden>Reject analytics</button><button type="button" data-analytics-choice="allow" hidden>Allow analytics</button><button type="button" data-dismiss-notice>Close</button></div><p data-privacy-status role="status"></p></div>
+</main>
+<footer class="site-footer"><div class="footer-inner"><p class="footer-note">OrgBots · © 2026 The AECE Studio<br>Linux 2.2.0 · Ubuntu 24.04 amd64</p><nav class="footer-links" aria-label="Footer"><a href="/results/">Evidence</a><a href="/evidence/">Daily log</a><a href="/install/">Installation</a><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a><a href="mailto:theaece@theaecestudio.com">Contact</a><button class="privacy-reopen" type="button" data-open-notice>Privacy choices</button></nav></div></footer>
+</body></html>
