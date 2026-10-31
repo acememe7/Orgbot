@@ -97,6 +97,13 @@ handoff fix prepared as 2.1.1, which was never published.
   copies. A bot creating a task is now turned back once with the open tasks
   others added since its turn began, and creates its task again only if it is
   still needed.
+- **Bots can land their commits after one approval.** A bot's copy keeps its
+  own git history, so in the live room a bot asked to commit could only hand
+  the owner a bundle and a script. `workspace_land_commits` checks a bundle the
+  bot wrote in the project, shows the owner the commits on one card (a second
+  tap confirms; the access mode applies), and moves the branch forward only:
+  no push, no merge, no history rewrite, no project file written, and only
+  when the project already holds every changed file as the commits leave it.
 - **A lent GitHub CLI signs in from the keyring.** The GitHub CLI keeps its
   token in the desktop keyring, which a sandbox cannot reach, so in the live
   room a bot lent it got a 401 on push. The launcher now asks your `gh` for the
@@ -160,8 +167,8 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 954 passed, zero failures, three ignored.
-  New tests cover showing a bot the tasks others added during its turn, parking and resuming a task, withdrawing the questions waiting on it, when approved work is ready to deliver, amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
+- Full Rust workspace (`--locked`): 958 passed, zero failures, three ignored.
+  New tests cover landing a real bundle in a real repository (refused before the project holds the files, refused off the approval, for diverged commits, links and path-like branches; staged work kept), the approval covering exactly those commits, landing under each access mode, showing a bot the tasks others added during its turn, parking and resuming a task, withdrawing the questions waiting on it, when approved work is ready to deliver, amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
   through the sandbox launcher, the lend list's limits,
   outside tool calls by mode, the server-key grant and its sandbox mount, per-turn access,
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
@@ -180,11 +187,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`f85f3d852b660881eff8e669a2ffa3200575d0cb05ba835b8066971a4ac56ce5`.
+`426f88700c66e091ddae1224cb710768b6b951f2d4d847ca9a88949fc8d2ee87`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `8f35be7f101be2ae7901111b98e1e9762c707b46ad400d530f62de67393efe77` |
+| orgbots_2.2.0_amd64.deb | `7de5292292ca80c779f3300f2e0335ce3512eb72d48fe2f6e0adef570f33780a` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
@@ -301,6 +308,14 @@ byte-identical to the previous package). Signed archive revision
 `dfa790179009ef8eb6d0ee62a7b1243868e94de3` replaces only
 `orgbots_2.2.0_amd64.deb`;
 [Pages run 41208959113](https://github.com/acememe7/Orgbot/actions/runs/41208959113)
+published it.
+
+Later that afternoon they were rebuilt again so bots can land their commits
+after one approval (source `ac26558`; the Flutter bundle is byte-identical to
+the previous package). Signed archive revision
+`edf9a5a7c6194c21265437b2f1ebc0b1a20523b8` replaces only
+`orgbots_2.2.0_amd64.deb`;
+[Pages run 41211548830](https://github.com/acememe7/Orgbot/actions/runs/41211548830)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
