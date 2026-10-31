@@ -107,6 +107,10 @@ handoff fix prepared as 2.1.1, which was never published.
   Asking the owner for access or a landing starts a task the bot had only
   claimed, so it waits on the answer instead of being woken while the owner
   has the card (in the live room a bot was woken eleven times that way).
+- **Codex bots can start local servers.** Codex's own sandbox, inside
+  OrgBots' one, refused every socket, so a Codex bot's browser captures failed
+  with EPERM. A Codex bot allowed to write now has the network inside its CLI,
+  like bots on other CLIs; writes outside the project are still refused.
 - **A lent GitHub CLI signs in from the keyring.** The GitHub CLI keeps its
   token in the desktop keyring, which a sandbox cannot reach, so in the live
   room a bot lent it got a 401 on push. The launcher now asks your `gh` for the
@@ -190,11 +194,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`1d34ff97cfad21d3ec3669efdb9dba9e3f1bfbecfe758dbe3bc4fe1a3c4fd1d3`.
+`5a6f1537fe82abdb7091cc68cb507704f5394de6e1448d0a9c7cdb01120c5ef0`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `494304891c609a55f3d46bfe4f5f118920c8154de79e49eda7558e5455a4a80c` |
+| orgbots_2.2.0_amd64.deb | `bc28cd45a891283f9412db1cb6266c099b219ffda2fb5d4a60298961ba9f55f8` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
@@ -336,6 +340,14 @@ project (source `349bc86`; the Flutter bundle is byte-identical). Signed archive
 revision `6e4bcf6c0d356b1faf4e3a63ea98bab3ab0303a1` replaces only
 `orgbots_2.2.0_amd64.deb`;
 [Pages run 41220708972](https://github.com/acememe7/Orgbot/actions/runs/41220708972)
+published it.
+
+Minutes later they were rebuilt again so Codex bots that may write have the
+network inside their CLI (source `e1aa139`; the Flutter bundle is
+byte-identical). Signed archive revision
+`0c1768eb0efcb855928606079af4f95b71c0d18a` replaces only
+`orgbots_2.2.0_amd64.deb`;
+[Pages run 41221352175](https://github.com/acememe7/Orgbot/actions/runs/41221352175)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
