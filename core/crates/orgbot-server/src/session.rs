@@ -512,7 +512,11 @@ impl RoomSession {
         if self.saved_at == Some(stamp) {
             return Ok(());
         }
-        write_board(path, self.orchestrator.checkpoint())?;
+        let state = self.orchestrator.try_checkpoint().map_err(|error| {
+            tracing::error!(%error, "room state could not be written");
+            anyhow::anyhow!("room state could not be written: {error}")
+        })?;
+        write_board(path, state)?;
         self.saved_at = Some(stamp);
         // Everything journaled mid-turn is in the board just written.
         let _ = std::fs::remove_file(journal_path(path));

@@ -168,12 +168,21 @@ impl Orchestrator {
     }
 
     /// Complete room state and bot conversations, without provider credentials.
+    ///
+    /// Panics if the state cannot be written as JSON; saves use
+    /// [`Self::try_checkpoint`] instead.
     pub fn checkpoint(&self) -> serde_json::Value {
-        let engine = self.engine.borrow();
-        serde_json::json!({
-            "version": 1, "engine": &*engine,
-            "bots": self
-                .bots
+        self.try_checkpoint().expect("room state is written as JSON")
+    }
+
+    /// Complete room state and bot conversations, or why it cannot be written.
+    ///
+    /// From the live room: one field could not be written as JSON, and the
+    /// save that tried crashed the whole room. A save now fails on its own.
+    pub fn try_checkpoint(&self) -> Result<serde_json::Value, serde_json::Error> {
+        let engine = serde_json::to_value(&*self.engine.borrow())?;
+        let bots = serde_json::to_value(
+            self.bots
                 .iter()
                 .map(|(id, bot)| (*id, bot.memory()))
                 // A bot parked by a dropped turn is still part of the room.
@@ -181,8 +190,12 @@ impl Orchestrator {
                 // So is one in a turn right now.
                 .chain(self.leased_memory.iter().map(|(id, memory)| (*id, memory.clone())))
                 .collect::<BTreeMap<_, _>>(),
+        )?;
+        Ok(serde_json::json!({
+            "version": 1, "engine": engine,
+            "bots": bots,
             "cursor": self.cursor,
-        })
+        }))
     }
 
     /// Reopen saved work paused; providers come from the current account settings.
@@ -993,7 +1006,10 @@ impl Orchestrator {
                     if last_save.elapsed() >= AUTOSAVE_EVERY {
                         last_save = tokio::time::Instant::now();
                         if let Some(Autosave(save)) = self.autosave.clone() {
-                            save(self.checkpoint());
+                            match self.try_checkpoint() {
+                                Ok(state) => save(state),
+                                Err(error) => tracing::error!(%error, "room state could not be written; keeping the last save"),
+                            }
                         }
                     }
                 }

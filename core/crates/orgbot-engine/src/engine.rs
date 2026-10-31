@@ -144,7 +144,7 @@ pub struct Engine {
     #[serde(skip)]
     created_by: BTreeMap<TaskId, AgentId>,
     /// File removals waiting for the owner's review, per bot and copy.
-    #[serde(default)]
+    #[serde(default, with = "removal_counts")]
     pending_removals: BTreeMap<(AgentId, String), u32>,
     /// Sign-ins bots asked the owner to add, by the decision that asks.
     #[serde(default)]
@@ -166,6 +166,34 @@ pub struct Engine {
     /// The room's standing rules, and which version of each is in force.
     #[serde(default)]
     governance: Governance,
+}
+
+/// Waiting removals are saved as a list of `[bot, copy, count]` rows.
+///
+/// From the live room: kept as a map keyed by (bot, copy) pairs, they could
+/// not be written as JSON, whose keys are strings, and the room crashed at the
+/// first save after a bot left removals waiting. Boards saved before then
+/// hold an empty map, which still reads.
+mod removal_counts {
+    use super::{AgentId, BTreeMap};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(counts: &BTreeMap<(AgentId, String), u32>, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(counts.iter().map(|((agent, copy), count)| (agent, copy, count)))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BTreeMap<(AgentId, String), u32>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Saved {
+            Rows(Vec<(AgentId, String, u32)>),
+            Older(#[allow(dead_code)] BTreeMap<String, u32>),
+        }
+        Ok(match Saved::deserialize(deserializer)? {
+            Saved::Rows(rows) => rows.into_iter().map(|(agent, copy, count)| ((agent, copy), count)).collect(),
+            Saved::Older(_) => BTreeMap::new(),
+        })
+    }
 }
 
 impl Engine {

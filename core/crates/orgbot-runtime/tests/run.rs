@@ -2489,6 +2489,7 @@ async fn a_bot_can_ask_for_a_sign_in_that_is_not_listed_and_the_owner_adds_it() 
     assert!(decision.because.contains("If denied: the capture runs only on this computer"));
     assert_eq!(decision.options[0], NEW_SIGN_IN_ALLOW);
     assert!(room.engine().lent_paths_for(lead).is_empty(), "nothing is lent before the owner answers");
+    room.try_checkpoint().expect("a room with a sign-in waiting to be added saves");
     room.engine_mut()
         .apply(orgbot_engine::Command::AnswerDecision {
             decision: decision.id,

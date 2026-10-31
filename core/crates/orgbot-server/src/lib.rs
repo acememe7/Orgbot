@@ -194,6 +194,25 @@ async fn serve_room_inner(
     };
     // Dropping a host also stops its room, including a model call in flight.
     let session_task = tokio::spawn(session.run());
+    // From the live room: the room's task panicked while the service kept
+    // answering pings and serving the last state, so the app showed the room
+    // active and every message the owner sent failed. A room that stops
+    // unexpectedly now takes its service down with it, so the supervisor
+    // restarts it from the last save and clients reconnect.
+    let crashed = std::sync::Arc::new(tokio::sync::Notify::new());
+    let watcher = {
+        let crashed = crashed.clone();
+        tokio::spawn(async move {
+            match session_task.await {
+                Err(error) if error.is_panic() => {
+                    tracing::error!("the room stopped unexpectedly; restarting its service");
+                    crashed.notify_one();
+                    true
+                }
+                _ => false,
+            }
+        })
+    };
     struct RunningWorkspace(tokio::task::JoinHandle<()>);
     impl Drop for RunningWorkspace {
         fn drop(&mut self) {
@@ -205,6 +224,7 @@ async fn serve_room_inner(
     report(Ok(local));
     tracing::info!(%addr, "serving room; connect a client to ws://{addr}/ws");
     let shutdown_trigger = shutdown_session.clone();
+    let stopped = crashed.clone();
     let serving = axum::serve(listener, app).with_graceful_shutdown(async move {
         #[cfg(unix)]
         {
@@ -214,10 +234,14 @@ async fn serve_room_inner(
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {},
                 _ = terminate.recv() => {},
+                _ = stopped.notified() => return,
             }
         }
         #[cfg(not(unix))]
-        let _ = tokio::signal::ctrl_c().await;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = stopped.notified() => return,
+        }
         let _ = shutdown_trigger.send(Control::Stop).await;
     });
     let serving_result = serving.await;
@@ -226,7 +250,13 @@ async fn serve_room_inner(
     if serving_result.is_err() {
         let _ = shutdown_session.send(Control::Stop).await;
     }
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), session_task).await;
+    let died = matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), watcher).await,
+        Ok(Ok(true))
+    );
     serving_result?;
+    if died {
+        anyhow::bail!("the room stopped unexpectedly");
+    }
     Ok(())
 }

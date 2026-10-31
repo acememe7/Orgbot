@@ -3509,6 +3509,17 @@ fn pending_removals_are_counted_for_the_app_and_only_changes_are_announced() {
     let restored = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec()).unwrap();
     assert_eq!(restored.digest().pending_removals.len(), 2);
 
+    // From the live room: the room crashed at its next save, because a map
+    // keyed by (bot, copy) pairs cannot be written as JSON.
+    let saved = serde_json::to_value(&f.engine).expect("a room with waiting removals saves");
+    let reopened: Engine = serde_json::from_value(saved.clone()).expect("and reopens");
+    assert_eq!(reopened.digest().pending_removals.len(), 2);
+    // A board saved before then holds an empty map, which still reads.
+    let mut older = saved;
+    older["pending_removals"] = serde_json::json!({});
+    let reopened: Engine = serde_json::from_value(older).expect("an older board reopens");
+    assert!(reopened.digest().pending_removals.is_empty());
+
     f.apply(record(0));
     assert_eq!(f.engine.digest().pending_removals.len(), 1, "zero clears that copy");
     f.reject(Command::RecordPendingRemovals { agent: worker, copy: "somewhere".into(), count: 1 });
