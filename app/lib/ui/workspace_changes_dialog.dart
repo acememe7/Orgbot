@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'leftover_copies_dialog.dart';
 import 'workspace_helper.dart';
 
 typedef WorkspaceProcessRunner =
@@ -24,6 +25,7 @@ class WorkspaceChangesDialog extends StatefulWidget {
     this.processRunner,
     this.helperPath,
     this.onStatus,
+    this.leftoverKeep,
   });
 
   final Directory stateDirectory;
@@ -34,6 +36,10 @@ class WorkspaceChangesDialog extends StatefulWidget {
   /// Told how many removals each fresh status shows for an agent copy, so
   /// the room's count follows what the owner sees and applies.
   final void Function(String agentId, int deleted)? onStatus;
+
+  /// Copy names of the bots in the room. When given, the dialog offers the
+  /// leftover copies of every other bot.
+  final List<String>? leftoverKeep;
 
   @override
   State<WorkspaceChangesDialog> createState() => _WorkspaceChangesDialogState();
@@ -149,7 +155,9 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
       final value = await _invoke('status');
       if (mounted) setState(() => _status = value);
       final agent = _agentId;
-      if (agent != null) widget.onStatus?.call(agent, _paths(value['deleted']).length);
+      if (agent != null) {
+        widget.onStatus?.call(agent, _paths(value['deleted']).length);
+      }
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -206,7 +214,10 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
                 PathSummary(paths: removals),
                 const SizedBox(height: 8),
                 Expanded(
-                  child: PathList(paths: removals, keyPrefix: 'approved-delete-'),
+                  child: PathList(
+                    paths: removals,
+                    keyPrefix: 'approved-delete-',
+                  ),
                 ),
               ],
             ),
@@ -303,8 +314,10 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
   Future<void> _refreshAfterApply() async {
     final value = await _invoke('status');
     if (mounted) setState(() => _status = value);
-      final agent = _agentId;
-      if (agent != null) widget.onStatus?.call(agent, _paths(value['deleted']).length);
+    final agent = _agentId;
+    if (agent != null) {
+      widget.onStatus?.call(agent, _paths(value['deleted']).length);
+    }
   }
 
   @override
@@ -392,6 +405,21 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
         ),
       ),
       actions: [
+        if (widget.leftoverKeep != null)
+          TextButton(
+            onPressed: _busy
+                ? null
+                : () => showDialog<void>(
+                    context: context,
+                    builder: (context) => LeftoverCopiesDialog(
+                      stateDirectory: widget.stateDirectory,
+                      keep: widget.leftoverKeep!,
+                      processRunner: widget.processRunner,
+                      helperPath: widget.helperPath,
+                    ),
+                  ),
+            child: const Text('Leftover copies'),
+          ),
         TextButton(
           onPressed: _busy ? null : _refresh,
           child: const Text('Refresh'),
@@ -442,7 +470,9 @@ class PathSummary extends StatelessWidget {
     final grouped = groups(paths);
     if (grouped.length < 2 && paths.length < 20) return const SizedBox.shrink();
     final shown = grouped.take(limit).toList();
-    final rest = grouped.skip(limit).fold<int>(0, (sum, group) => sum + group.$2);
+    final rest = grouped
+        .skip(limit)
+        .fold<int>(0, (sum, group) => sum + group.$2);
     final style = Theme.of(context).textTheme.bodySmall;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,

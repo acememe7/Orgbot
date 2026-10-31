@@ -473,6 +473,17 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
       builder: (context) => WorkspaceChangesDialog(
         stateDirectory: Directory('${archive.path}/workspaces'),
         agents: agents,
+        leftoverKeep: [
+          for (final agent in store.agents) ...[
+            agent.id,
+            '${agent.id}-verify',
+            if (agent.handle.isNotEmpty)
+              utf8
+                  .encode(agent.handle)
+                  .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+                  .join(),
+          ],
+        ],
         onStatus: (copyId, deleted) {
           // A room-tools copy is named by the bot's id; a CLI copy by its
           // handle, hex-encoded.

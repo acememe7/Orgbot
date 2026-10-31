@@ -818,10 +818,10 @@ def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, 
                     raise WorkspaceError("no project identity")
                 project = _canonical_directory(project_value, "project")
             except (WorkspaceError, OSError, ValueError, json.JSONDecodeError):
-                kept.append({"agent": agent, "reason": "its baseline or project could not be read"})
+                kept.append({"agent": agent, "reason": "its baseline or project could not be read", "bytes": _tree_bytes(agent_root)})
                 continue
             if _project_id(project) != project_dir.name:
-                kept.append({"agent": agent, "reason": "its baseline names another project"})
+                kept.append({"agent": agent, "reason": "its baseline names another project", "bytes": _tree_bytes(agent_root)})
                 continue
             try:
                 data = _manifest_read(manifest, project, agent)
@@ -833,11 +833,11 @@ def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, 
                     current = project_scans[project_dir.name] = _scan(project)
                 diffs = _changes(data["entries"], current, _scan_workspace(workspace, data["entries"]))
             except (WorkspaceError, OSError, ValueError, json.JSONDecodeError):
-                kept.append({"agent": agent, "reason": "its changes could not be checked"})
+                kept.append({"agent": agent, "reason": "its changes could not be checked", "bytes": _tree_bytes(agent_root)})
                 continue
             pending = len(diffs["changed"]) + len(diffs["added"]) + len(diffs["deleted"])
             if pending:
-                kept.append({"agent": agent, "reason": f"{pending} change(s) never merged into the project"})
+                kept.append({"agent": agent, "reason": f"{pending} change(s) never merged into the project", "bytes": _tree_bytes(agent_root)})
                 continue
             size = _tree_bytes(agent_root)
             if not dry_run:
@@ -845,6 +845,135 @@ def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, 
                 manifest.unlink(missing_ok=True)
             removed.append({"agent": agent, "bytes": size})
     return {"ok": True, "dry_run": dry_run, "removed": removed, "kept": kept, "freed_bytes": sum(item["bytes"] for item in removed)}
+
+
+def _same_bytes(first: Path, second: Path) -> bool:
+    if first.stat().st_size != second.stat().st_size:
+        return False
+    with open(first, "rb") as a, open(second, "rb") as b:
+        while True:
+            left, right = a.read(1024 * 1024), b.read(1024 * 1024)
+            if left != right:
+                return False
+            if not left:
+                return True
+
+
+def _unlanded_commits(copy: Path, project: Path | None) -> bool:
+    """Whether a copy's history holds commits the project does not have.
+
+    The copy's refs are read as files, never by running git inside the copy,
+    whose config a bot could have changed; only the owner's project is asked.
+    """
+    git_dir = copy / ".git"
+    if git_dir.is_symlink() or not git_dir.is_dir():
+        return False
+    tips: set[str] = set()
+    hex_re = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
+    def note(text: str) -> None:
+        value = text.strip().split(" ")[0]
+        if hex_re.fullmatch(value):
+            tips.add(value)
+    for path in [git_dir / "HEAD", *(p for p in (git_dir / "refs").rglob("*") if p.is_file() and not p.is_symlink())]:
+        try:
+            note(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    try:
+        for line in (git_dir / "packed-refs").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line and not line.startswith(("#", "^")):
+                note(line)
+    except OSError:
+        pass
+    if not tips:
+        return False
+    if project is None or not (project / ".git").exists():
+        return True
+    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0"}
+    for tip in sorted(tips):
+        found = subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", os.fspath(project),
+             "cat-file", "-e", f"{tip}^{{commit}}"],
+            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+        if found.returncode != 0:
+            return True
+    return False
+
+
+def _discard(state_arg: str, agent_arg: str, keep: list[str]) -> dict[str, Any]:
+    """Let go of a leftover copy the owner chose, keeping what may be unique.
+
+    From the live room: a copy whose baseline was lost was kept, and named at
+    every room start, with nothing in the app to act on it. Every file in it
+    that is missing from the project or differs from it is copied to a
+    private leftovers folder first; then the copy is removed. A copy that
+    belongs to a bot in the room is never discarded.
+    """
+    agent = _safe_agent(agent_arg)
+    if agent in {_safe_agent(name) for name in keep}:
+        _fail("That copy belongs to a bot in the room, so it is not a leftover")
+    state = _canonical_directory(state_arg, "state")
+    _check_private_dir(state)
+    agents_root = state / "agents"
+    candidates = [
+        project_dir for project_dir in sorted(agents_root.iterdir())
+        if project_dir.is_dir() and not project_dir.is_symlink()
+        and (project_dir / agent).is_dir() and not (project_dir / agent).is_symlink()
+    ] if agents_root.is_dir() and not agents_root.is_symlink() else []
+    if len(candidates) != 1:
+        _fail("There is no single leftover copy with that name")
+    project_dir = candidates[0]
+    agent_root = project_dir / agent
+    if agent_root.stat().st_uid != os.getuid():
+        _fail("That copy is not a private directory")
+    manifests = state / "manifests" / project_dir.name
+    project: Path | None = None
+    for candidate in [manifests / f"{agent}.json", *sorted(manifests.glob("*.json"))]:
+        try:
+            raw = _read_private_json(candidate, "workspace baseline manifest")
+            value = Path(raw["project"]).resolve(strict=True)
+        except (WorkspaceError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if value.is_dir() and _project_id(value) == project_dir.name:
+            project = value
+            break
+    rescued = 0
+    rescue: Path | None = None
+    history = False
+    copy = agent_root / "project"
+    if copy.is_dir() and not copy.is_symlink():
+        raw_xdg = os.environ.get("XDG_DATA_HOME")
+        data = Path(raw_xdg) if raw_xdg and Path(raw_xdg).is_absolute() else Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local/share"
+        rescue = data / "orgbot" / "leftovers" / f"{agent}-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}"
+        if _unlanded_commits(copy, project):
+            # Commits that never landed live only here; keep the whole history.
+            _mkdir_chain_no_symlinks(rescue)
+            shutil.copytree(copy / ".git", rescue / ".git", symlinks=True)
+            history = True
+        for current, dirs, files in os.walk(copy, topdown=True, followlinks=False):
+            base = Path(current)
+            dirs[:] = [d for d in dirs if not (base / d).is_symlink() and not _excluded((base / d).relative_to(copy).as_posix())]
+            for name in files:
+                source = base / name
+                relative = source.relative_to(copy).as_posix()
+                if source.is_symlink() or _excluded(relative):
+                    continue
+                theirs = project / relative if project is not None else None
+                if theirs is not None and theirs.is_file() and not theirs.is_symlink() and _same_bytes(source, theirs):
+                    continue
+                target = rescue / relative
+                _mkdir_chain_no_symlinks(target.parent)
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                with os.fdopen(fd, "wb") as out, open(source, "rb") as src:
+                    shutil.copyfileobj(src, out)
+                rescued += 1
+    size = _tree_bytes(agent_root)
+    shutil.rmtree(agent_root)
+    (manifests / f"{agent}.json").unlink(missing_ok=True)
+    kept_any = rescued or history
+    return {"ok": True, "agent": agent, "rescued": rescued, "history": history,
+            "rescue_dir": os.fspath(rescue) if kept_any else None, "freed_bytes": size}
 
 
 def _gpu_device_args() -> list[str]:
@@ -2813,6 +2942,10 @@ def _parser() -> argparse.ArgumentParser:
     prune.add_argument("--state", required=True)
     prune.add_argument("--keep", action="append", default=[])
     prune.add_argument("--dry-run", action="store_true", help="Report what would be removed without removing it")
+    discard = sub.add_parser("discard", help="Remove a leftover copy, first keeping its files that differ from the project")
+    discard.add_argument("--state", required=True)
+    discard.add_argument("--agent", required=True)
+    discard.add_argument("--keep", action="append", default=[])
     apply = sub.add_parser("apply")
     apply.add_argument("--state", required=True)
     apply.add_argument("--agent", required=True)
@@ -2837,6 +2970,9 @@ def main(argv: list[str] | None = None) -> int:
             return _run(args.state, args.agent, program, read_only=args.read_only, profiles=args.profile, private_home_arg=args.private_home, mcp_socket=args.mcp_socket, agent_cli=args.agent_cli, mcp_relay=args.mcp_relay, verify=args.verify, server_access=args.server_access, hide=args.hide, lend=args.lend)
         if args.command == "prune":
             _json(_prune(args.state, args.keep, args.dry_run))
+            return 0
+        if args.command == "discard":
+            _json(_discard(args.state, args.agent, args.keep))
             return 0
         if args.command == "agy-auth":
             result = _agy_auth_login() if args.action == "login" else _agy_auth_status()

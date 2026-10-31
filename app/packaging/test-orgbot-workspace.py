@@ -304,6 +304,59 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual({op["state"] for op in journal["operations"]}, {"applied"})
         self.assertTrue(all(op.get("trash_receipt") for op in journal["operations"]))
 
+    def test_a_leftover_copy_is_discarded_only_after_keeping_what_differs(self):
+        # From the live room: a copy whose baseline was lost was kept and
+        # named at every room start, with nothing the owner could do.
+        self.prepare("dev")
+        work = self.prepare("gone-bot")
+        (work / "src/main.py").write_text("only in the copy\n", encoding="utf-8")
+        (work / "notes.txt").write_text("new in the copy\n", encoding="utf-8")
+        manifest = next((self.state / "manifests").glob("*/gone-bot.json"))
+        manifest.unlink()
+        xdg = self.root / "xdg"
+        with patch.dict(os.environ, {"XDG_DATA_HOME": str(xdg)}):
+            listed = workspace._prune(os.fspath(self.state), keep=["dev"], dry_run=True)
+            kept = {row["agent"]: row for row in listed["kept"]}
+            self.assertIn("gone-bot", kept)
+            self.assertGreater(kept["gone-bot"]["bytes"], 0)
+            with self.assertRaises(workspace.WorkspaceError):
+                workspace._discard(os.fspath(self.state), "dev", keep=["dev"])
+            result = workspace._discard(os.fspath(self.state), "gone-bot", keep=["dev"])
+        self.assertEqual(result["rescued"], 2, result)
+        rescue = Path(result["rescue_dir"])
+        self.assertEqual((rescue / "src/main.py").read_text(encoding="utf-8"), "only in the copy\n")
+        self.assertEqual((rescue / "notes.txt").read_text(encoding="utf-8"), "new in the copy\n")
+        self.assertFalse((rescue / "README.md").exists(), "a file the project already has is not rescued")
+        self.assertFalse(work.parent.exists(), "the copy is gone")
+        self.assertGreater(result["freed_bytes"], 0)
+
+    @unittest.skipUnless(workspace.shutil.which("git"), "needs git")
+    def test_a_discarded_copy_keeps_its_history_only_when_commits_never_landed(self):
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+        def git(where, *args):
+            subprocess.run(["git", "-C", os.fspath(where), *args], env=env, check=True, capture_output=True)
+        git(self.project, "init", "-q", "-b", "main")
+        git(self.project, "add", "-A")
+        git(self.project, "commit", "-q", "-m", "start")
+        self.prepare("dev")
+        landed = self.prepare("landed-bot")
+        unlanded = self.prepare("unlanded-bot")
+        (unlanded / "src/main.py").write_text("bot work\n", encoding="utf-8")
+        git(unlanded, "commit", "-q", "-am", "bot work")
+        with patch.dict(os.environ, {"XDG_DATA_HOME": str(self.root / "xdg")}):
+            quiet = workspace._discard(os.fspath(self.state), "landed-bot", keep=["dev"])
+            kept = workspace._discard(os.fspath(self.state), "unlanded-bot", keep=["dev"])
+        self.assertFalse(quiet["history"], quiet)
+        self.assertIsNone(quiet["rescue_dir"], quiet)
+        self.assertFalse(landed.exists())
+        self.assertTrue(kept["history"], kept)
+        rescue = Path(kept["rescue_dir"])
+        log = subprocess.run(["git", "-C", os.fspath(rescue), "log", "-1", "--format=%s"],
+                             env=env, check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(log, "bot work")
+
     def test_deletion_requires_explicit_owner_approval(self):
         work = self.prepare()
         (work / "README.md").unlink()

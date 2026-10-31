@@ -721,6 +721,7 @@ impl RoomSession {
                         .collect::<Vec<_>>()
                         .join("; ")
                 ));
+                body.push_str(" The owner can review or discard them under Workspace changes, Leftover copies.");
             }
             shared.with(|engine| {
                 let room = engine.room().id;
