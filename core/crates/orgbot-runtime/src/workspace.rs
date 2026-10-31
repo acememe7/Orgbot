@@ -159,6 +159,19 @@ impl Workspace {
                 json!(["bundle","branch","task","reason"]),
             ));
         }
+        if self.capabilities.git_read && self.spec.writable && self.spec.commands {
+            tools.push(tool(
+                "workspace_push_commits",
+                "Push a branch of the owner's repository to one of its remotes, such as origin, \
+                 once its commits have landed there. The owner approves each push on a card, \
+                 whatever the room's access mode; call again with the same remote and branch \
+                 after they do. It is a normal push from the owner's own git setup: it never \
+                 forces, never creates a branch, and is refused if the remote has commits the \
+                 project lacks.",
+                json!({"remote":{"type":"string"},"branch":{"type":"string"},"task":{"type":"string"},"reason":{"type":"string"}}),
+                json!(["branch","task","reason"]),
+            ));
+        }
         if self.capabilities.git_read {
             tools.push(tool(
                 "workspace_git",

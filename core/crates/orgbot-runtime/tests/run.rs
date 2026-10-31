@@ -2729,3 +2729,34 @@ async fn a_bot_holding_work_that_waits_on_unfinished_tasks_is_not_woken_for_it()
         .unwrap();
     assert!(!room.is_actionable(builder), "its only work waits on the docs card");
 }
+
+#[tokio::test]
+async fn a_push_is_always_put_to_the_owner_whatever_the_access_mode() {
+    use orgbot_proto::decision::{Answer, PUSH_COMMITS_ALLOW};
+    use orgbot_proto::room::AccessMode;
+    let (mut room, lead, task) = access_room(AccessMode::FullWrite);
+    let (base, head) = ("a".repeat(40), "b".repeat(40));
+    room.engine_mut()
+        .apply(orgbot_engine::Command::RequestPush {
+            by: lead,
+            task,
+            remote: "origin".into(),
+            url: "https://github.com/acememe7/Protest.git".into(),
+            branch: "main".into(),
+            base: base.clone(),
+            head: head.clone(),
+            commits: vec!["bbbbbbb docs [skip ci]".into()],
+            reason: "the owner asked to save the release to GitHub".into(),
+        })
+        .unwrap();
+    assert!(!room.engine().push_approved(task, lead, "origin", "main", &base, &head), "even full write asks");
+    let decision = room.engine().decisions().pending().next().unwrap().id;
+    room.engine_mut()
+        .apply(orgbot_engine::Command::AnswerDecision {
+            decision,
+            answer: Answer { chosen: PUSH_COMMITS_ALLOW.into(), note: String::new(), at: orgbot_proto::Timestamp::now() },
+        })
+        .unwrap();
+    assert!(room.engine().push_approved(task, lead, "origin", "main", &base, &head));
+    assert!(!room.engine().push_approved(task, lead, "origin", "release", &base, &head), "only that branch");
+}

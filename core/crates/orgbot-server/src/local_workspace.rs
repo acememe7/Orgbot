@@ -210,7 +210,7 @@ impl LocalWorkspaceHost {
             // the project itself, never on the bot's copy. From the live room:
             // routed through the copy like every other call, it moved the
             // branch in the bot's own repository and reported it landed.
-            if name == "workspace_land_commits" {
+            if matches!(name, "workspace_land_commits" | "workspace_push_commits") {
                 return Ok(self.handle(name, args));
             }
             let guard = self.guard(agent)?;
@@ -429,6 +429,8 @@ impl LocalWorkspaceHost {
             "workspace_git" => self.git(arg_string(args, "action")),
             "workspace_land_commits" if self.writable => self.land_commits(args),
             "workspace_land_commits" => Err("This workspace is read-only.".into()),
+            "workspace_push_commits" if self.writable => self.push_commits(args),
+            "workspace_push_commits" => Err("This workspace is read-only.".into()),
             "workspace_write" | "workspace_mkdir" => Err("This workspace is read-only.".into()),
             "workspace_import_attachment" if self.writable => {
                 self.import_attachment(arg_string(args, "id"))
@@ -715,6 +717,76 @@ impl LocalWorkspaceHost {
             }
         }
         Ok(json!({"landed": true, "branch": branch, "from": base, "to": head, "commits": commits, "changes": changes}).to_string())
+    }
+
+    /// Inspect, or make, a push of a branch of the owner's repository to one of
+    /// its remotes, only as a fast-forward of what the remote has.
+    ///
+    /// From the live room: a bot pushed the released game through a lent
+    /// GitHub sign-in, and when the sign-in failed it could only ask the owner
+    /// to fix it. Here the push uses the owner's own git setup, like their own
+    /// terminal would, with hooks off and no prompts. It never forces and
+    /// never creates a branch, and the push re-checks what was approved.
+    #[cfg(target_os = "linux")]
+    fn push_commits(&self, args: &Value) -> Result<String, String> {
+        let remote = arg_string(args, "remote").unwrap_or("origin");
+        let branch = arg_string(args, "branch")?;
+        if !landable_branch(branch) || !landable_branch(remote) {
+            return Err("Name a plain remote, such as origin, and a plain branch, such as main.".into());
+        }
+        let pushing = args.get("push").and_then(Value::as_bool).unwrap_or(false);
+        let cwd = format!("/proc/self/fd/{}", self.root_fd.as_raw_fd());
+        self.require_repository_root(&cwd)?;
+        let git = |args: &[&str], timeout: u64| -> Result<String, String> {
+            let mut command = owner_git_command(&cwd);
+            command.args(args);
+            let result = run_bounded_git(&mut command, Duration::from_secs(timeout))?;
+            if !result.success {
+                return Err(format!(
+                    "git {} failed: {}",
+                    args.first().copied().unwrap_or(""),
+                    String::from_utf8_lossy(&result.stderr).trim()
+                ));
+            }
+            Ok(String::from_utf8_lossy(&result.stdout).trim_end().to_string())
+        };
+        let branch_ref = format!("refs/heads/{branch}");
+        let url = git(&["remote", "get-url", remote], 10).map_err(|_| format!("The project has no remote called {remote}."))?;
+        let head = git(&["rev-parse", "--verify", "--quiet", &format!("{branch_ref}^{{commit}}")], 10)
+            .map_err(|_| format!("The project has no branch {branch}."))?;
+        let listed = git(&["ls-remote", "--heads", remote, &branch_ref], 60)?;
+        let base = listed
+            .lines()
+            .find_map(|line| line.split_once('\t').filter(|(_, name)| *name == branch_ref).map(|(id, _)| id.to_string()))
+            .ok_or_else(|| format!("{remote} has no branch {branch}; OrgBots only pushes to a branch that exists there."))?;
+        if base == head {
+            return Err(format!("{remote}/{branch} already has {}; there is nothing to push.", &head[..7]));
+        }
+        if git(&["cat-file", "-e", &format!("{base}^{{commit}}")], 10).is_err()
+            || git(&["merge-base", "--is-ancestor", &base, &head], 10).is_err()
+        {
+            return Err(format!(
+                "{remote}/{branch} has commits the project does not ({}), so this push would overwrite them. Bring them in first; OrgBots never forces a push.",
+                &base[..7]
+            ));
+        }
+        let range = format!("{base}..{head}");
+        let log = git(&["log", "--no-color", "--format=%h %s", "-n", "51", &range], 10)?;
+        let commits: Vec<&str> = log.lines().collect();
+        if commits.len() > 50 {
+            return Err("Push at most 50 commits at a time.".into());
+        }
+        let summary = json!({"remote": remote, "url": url, "branch": branch, "base": base, "head": head, "commits": commits});
+        if !pushing {
+            return Ok(summary.to_string());
+        }
+        for (key, actual) in [("expect_base", &base), ("expect_head", &head)] {
+            if args.get(key).and_then(Value::as_str) != Some(actual.as_str()) {
+                return Err("The branch or the remote moved since the owner approved; ask again.".into());
+            }
+        }
+        git(&["push", "--porcelain", remote, &format!("{head}:{branch_ref}")], 180)?;
+        Ok(json!({"pushed": true, "remote": remote, "branch": branch, "from": base, "to": head, "commits": commits}).to_string())
     }
 
     /// Files the commits base..head change that the project does not already
@@ -1044,6 +1116,24 @@ fn git_command(cwd: &str) -> Command {
         .env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0");
+    command
+}
+
+/// Git as the owner's own terminal would run it, for talking to a remote:
+/// their config and credential helper apply, but hooks are off and git never
+/// waits on a prompt.
+#[cfg(target_os = "linux")]
+fn owner_git_command(cwd: &str) -> Command {
+    let mut command = Command::new("git");
+    command
+        .current_dir(cwd)
+        .arg("--no-pager")
+        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "/bin/false")
+        .env("SSH_ASKPASS", "/bin/false")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE");
     command
 }
 
@@ -1562,6 +1652,68 @@ mod tests {
         assert!(ask(json!({"bundle": "artifacts/land.bundle", "branch": "../main"})).is_error);
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(copy);
+    }
+
+    #[test]
+    fn a_push_goes_out_only_as_approved_and_never_overwrites_the_remote() {
+        let remote = temp_dir();
+        let root = temp_dir();
+        run_git(&remote, &["init", "--quiet", "--bare", "-b", "main"]);
+        let _ = fs::remove_dir_all(&root);
+        run_git(Path::new("/"), &["clone", "--quiet", remote.to_str().unwrap(), root.to_str().unwrap()]);
+        run_git(&root, &["config", "user.name", "Workspace test"]);
+        run_git(&root, &["config", "user.email", "test@example.invalid"]);
+        fs::write(root.join("notes.md"), "one\n").unwrap();
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "--quiet", "-m", "base"]);
+        run_git(&root, &["push", "--quiet", "origin", "main"]);
+        let base = run_git(&root, &["rev-parse", "HEAD"]);
+        for text in ["two", "three"] {
+            fs::write(root.join("notes.md"), format!("{text}\n")).unwrap();
+            run_git(&root, &["commit", "--quiet", "-am", &format!("notes {text} [skip ci]")]);
+        }
+        let head = run_git(&root, &["rev-parse", "HEAD"]);
+        let host = LocalWorkspaceHost::open_root(
+            root.to_string_lossy().into_owned(),
+            true,
+            None,
+            Arc::new(RwLock::new(std::collections::HashSet::new())),
+        )
+        .unwrap();
+        let ask = |args: Value| host.handle("workspace_push_commits", &args);
+
+        let inspected = ask(json!({"remote": "origin", "branch": "main"}));
+        assert!(!inspected.is_error, "{}", inspected.content);
+        let found: Value = serde_json::from_str(&inspected.content).unwrap();
+        assert_eq!(found["base"], base.as_str());
+        assert_eq!(found["head"], head.as_str());
+        assert_eq!(found["commits"].as_array().unwrap().len(), 2);
+        assert_eq!(run_git(&remote, &["rev-parse", "main"]), base, "inspecting pushes nothing");
+
+        let push = |expect_head: &str| ask(json!({"remote": "origin", "branch": "main", "push": true, "expect_base": base, "expect_head": expect_head}));
+        assert!(push(&base).is_error, "anything but what was approved is refused");
+        let pushed = push(&head);
+        assert!(!pushed.is_error, "{}", pushed.content);
+        assert_eq!(run_git(&remote, &["rev-parse", "main"]), head);
+
+        // The remote moving on without the project: no push overwrites it.
+        let other = temp_dir();
+        let _ = fs::remove_dir_all(&other);
+        run_git(Path::new("/"), &["clone", "--quiet", remote.to_str().unwrap(), other.to_str().unwrap()]);
+        run_git(&other, &["config", "user.name", "Workspace test"]);
+        run_git(&other, &["config", "user.email", "test@example.invalid"]);
+        fs::write(other.join("elsewhere.md"), "theirs\n").unwrap();
+        run_git(&other, &["add", "."]);
+        run_git(&other, &["commit", "--quiet", "-m", "someone else"]);
+        run_git(&other, &["push", "--quiet", "origin", "main"]);
+        fs::write(root.join("notes.md"), "four\n").unwrap();
+        run_git(&root, &["commit", "--quiet", "-am", "notes four"]);
+        let refused = ask(json!({"remote": "origin", "branch": "main"}));
+        assert!(refused.is_error && refused.content.contains("never forces"), "{}", refused.content);
+        assert!(ask(json!({"remote": "upstream", "branch": "main"})).is_error, "only a remote the project has");
+        for dir in [remote, root, other] {
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

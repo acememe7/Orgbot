@@ -247,6 +247,30 @@ pub enum Command {
         reason: String,
     },
 
+    /// Ask the owner to push a branch of their repository to one of its
+    /// remotes, as a fast-forward. Always asked, whatever the access mode:
+    /// it leaves the owner's computer.
+    RequestPush {
+        /// The bot asking.
+        by: AgentId,
+        /// The task it holds that the push is for.
+        task: TaskId,
+        /// The remote, such as origin.
+        remote: String,
+        /// Where that remote points, shown to the owner.
+        url: String,
+        /// The branch to push.
+        branch: String,
+        /// Where the remote's branch stands now.
+        base: String,
+        /// The commit it would move to.
+        head: String,
+        /// One line per commit, newest first.
+        commits: Vec<String>,
+        /// Why, shown to the owner.
+        reason: String,
+    },
+
     /// Propose to the owner that a task nobody should work on be retired. The
     /// owner's "Retire this task" answer retires it.
     ProposeRetire {
@@ -400,6 +424,7 @@ impl Command {
             Self::AmendTask { .. } => "amend_task",
             Self::ProposeRetire { .. } => "propose_retire",
             Self::RequestLanding { .. } => "request_landing",
+            Self::RequestPush { .. } => "request_push",
             Self::RecordPendingRemovals { .. } => "record_pending_removals",
             Self::ParkTask { .. } => "park_task",
             Self::ResumeTask { .. } => "resume_task",
@@ -429,6 +454,7 @@ impl Command {
             Self::RequestServerAccess { task, .. } => Some(*task),
             Self::RequestAccess { task, .. } => Some(*task),
             Self::RequestLanding { task, .. } => Some(*task),
+            Self::RequestPush { task, .. } => Some(*task),
             Self::AmendTask { task, .. } => Some(*task),
             _ => None,
         }

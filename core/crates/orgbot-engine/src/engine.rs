@@ -18,7 +18,7 @@ use orgbot_proto::decision::{
     lend_action, server_access_scope, task_scope, AccessAction, Answer, Decision, DecisionLog,
     Governance, Request, Settled, ACCESS_ALLOW, RETIRE_TASK, RETIRE_TASK_ALLOW, RETIRE_TASK_KEEP,
     SERVER_ACCESS, SERVER_ACCESS_ALLOW, SERVER_ACCESS_DENY, SERVER_ITEM, land_action,
-    LAND_COMMITS_ALLOW, LAND_COMMITS_DENY,
+    push_action, LAND_COMMITS_ALLOW, LAND_COMMITS_DENY, PUSH_COMMITS_ALLOW, PUSH_COMMITS_DENY,
 };
 use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope, Seq};
 use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness, TaskKind, TaskOrigin};
@@ -2016,6 +2016,17 @@ impl Engine {
             Command::RecordPendingRemovals { agent, copy, count } => {
                 self.record_pending_removals(agent, copy, count)
             }
+            Command::RequestPush {
+                by,
+                task,
+                remote,
+                url,
+                branch,
+                base,
+                head,
+                commits,
+                reason,
+            } => self.request_push(by, task, remote, url, branch, base, head, commits, reason),
             Command::ParkTask { by, task, reason } => self.park_task(by, task, reason),
             Command::ResumeTask { task } => self.resume_task(task),
             Command::AmendTask {
@@ -2712,31 +2723,50 @@ impl Engine {
     ) -> Result<Vec<EventEnvelope>> {
         let mode = self.room.spec.access.mode;
         if !mode.approves(risk) {
-            self.refuse_second_question(by, task, &proposed.because)?;
-            // From the live room: a bot asked to land commits for a task it had
-            // claimed and not started. The card reached the owner, the task
-            // could not wait on it, and the bot was told the request failed, so
-            // it was woken eleven times while the owner had the card. Asking
-            // for something to do the task with is starting it; a task that
-            // cannot wait at all is refused before anyone is asked.
-            let state = self.require_task(task)?.state;
-            let wait = TaskTransition::Block {
-                reason: BlockReason::AwaitingDecision { decision: proposed.id },
-            };
-            if state != TaskState::Claimed && !state.can_apply(&wait) {
-                return Err(EngineError::NotReady {
-                    task,
-                    reason: format!("cannot ask while the task is {}", state.as_str()),
-                });
-            }
-            let mut events = Vec::new();
-            if state == TaskState::Claimed {
-                events.extend(self.transition(task, TaskTransition::Start, Some(by))?);
-            }
-            events.extend(self.put_to_owner(by, Some(task), proposed)?);
-            return Ok(events);
+            return self.ask_and_wait(by, task, proposed);
         }
         // Approved by the room's mode: not parked, answered at once.
+        self.grant_by_mode(by, title, proposed, allow, risk)
+    }
+
+    /// Put a request to the owner and have `task` wait for the answer.
+    fn ask_and_wait(&mut self, by: AgentId, task: TaskId, proposed: Decision) -> Result<Vec<EventEnvelope>> {
+        self.refuse_second_question(by, task, &proposed.because)?;
+        // From the live room: a bot asked to land commits for a task it had
+        // claimed and not started. The card reached the owner, the task
+        // could not wait on it, and the bot was told the request failed, so
+        // it was woken eleven times while the owner had the card. Asking
+        // for something to do the task with is starting it; a task that
+        // cannot wait at all is refused before anyone is asked.
+        let state = self.require_task(task)?.state;
+        let wait = TaskTransition::Block {
+            reason: BlockReason::AwaitingDecision { decision: proposed.id },
+        };
+        if state != TaskState::Claimed && !state.can_apply(&wait) {
+            return Err(EngineError::NotReady {
+                task,
+                reason: format!("cannot ask while the task is {}", state.as_str()),
+            });
+        }
+        let mut events = Vec::new();
+        if state == TaskState::Claimed {
+            events.extend(self.transition(task, TaskTransition::Start, Some(by))?);
+        }
+        events.extend(self.put_to_owner(by, Some(task), proposed)?);
+        Ok(events)
+    }
+
+    /// Grant an access-style request at once, as the room's access mode
+    /// allows, recording it as an answered decision.
+    fn grant_by_mode(
+        &mut self,
+        by: AgentId,
+        title: &str,
+        proposed: Decision,
+        allow: &str,
+        risk: orgbot_proto::room::Risk,
+    ) -> Result<Vec<EventEnvelope>> {
+        let mode = self.room.spec.access.mode;
         let mut events = self.put_to_owner(by, None, proposed)?;
         let asked = events.iter().find_map(|envelope| match &envelope.event {
             Event::DecisionAsked { decision } => Some(decision.id),
@@ -2856,6 +2886,77 @@ impl Engine {
         proposed.envelope.environment = server_access_scope(task);
         proposed.task = Some(task);
         self.ask_or_grant(by, task, &title, proposed, LAND_COMMITS_ALLOW, orgbot_proto::room::Risk::Risky)
+    }
+
+    /// Ask the owner to push `branch` to `remote`. Never granted by the
+    /// access mode: a push leaves the owner's computer.
+    #[allow(clippy::too_many_arguments)]
+    fn request_push(
+        &mut self,
+        by: AgentId,
+        task: TaskId,
+        remote: String,
+        url: String,
+        branch: String,
+        base: String,
+        head: String,
+        commits: Vec<String>,
+        reason: String,
+    ) -> Result<Vec<EventEnvelope>> {
+        let spec = self.require_agent(by)?;
+        if spec.autonomy.review_only {
+            return Err(EngineError::NotPermitted { agent: by, action: "push commits as a review-only bot".into() });
+        }
+        let handle = spec.handle.clone();
+        let reason = reason.trim().to_string();
+        if reason.is_empty() || reason.chars().count() > 500 {
+            return Err(EngineError::InvalidOwnerQuestion { reason: "say in 1–500 characters what the push is for".into() });
+        }
+        let commit_id = |id: &str| id.len() == 40 && id.bytes().all(|b| b.is_ascii_hexdigit());
+        if !landable_branch(&branch) || !landable_branch(&remote) || !commit_id(&base) || !commit_id(&head) || base == head {
+            return Err(EngineError::InvalidOwnerQuestion { reason: "name a plain remote and branch and two different full commit ids".into() });
+        }
+        if commits.is_empty() || commits.len() > 50 {
+            return Err(EngineError::InvalidOwnerQuestion { reason: "push between 1 and 50 commits at a time".into() });
+        }
+        self.require_assignee(task, by)?;
+        let action = push_action(&remote, &branch, &base, &head);
+        if self.access_granted(task, by, &action) {
+            return Ok(Vec::new());
+        }
+        let title = self.require_task(task)?.title.clone();
+        let count = commits.len();
+        let listed: String = commits
+            .iter()
+            .take(20)
+            .map(|commit| format!("\n• {}", commit.chars().take(160).collect::<String>()))
+            .collect();
+        let more = if count > 20 { format!("\n…and {} more", count - 20) } else { String::new() };
+        let mut proposed = Decision::ask(
+            self.room.id,
+            format!(
+                "@{handle} asks to push {count} commit{} to {branch} on {remote} ({}) for \"{title}\": {reason}\n\
+                 {remote}/{branch} moves forward from {} to {}. It is a normal push: nothing is forced \
+                 and no history on {remote} is rewritten.{listed}{more}",
+                if count == 1 { "" } else { "s" },
+                url.chars().take(200).collect::<String>(),
+                &base[..7],
+                &head[..7],
+            ),
+        );
+        proposed.owner_question = true;
+        proposed.options = vec![PUSH_COMMITS_ALLOW.into(), PUSH_COMMITS_DENY.into()];
+        proposed.envelope.allowed = vec![action];
+        proposed.envelope.environment = server_access_scope(task);
+        proposed.task = Some(task);
+        self.ask_and_wait(by, task, proposed)
+    }
+
+    /// Whether the owner has let `agent` push exactly these commits to
+    /// `branch` on `remote` for `task`, which it must still be working.
+    pub fn push_approved(&self, task: TaskId, agent: AgentId, remote: &str, branch: &str, base: &str, head: &str) -> bool {
+        self.tasks_open_to_access(agent).any(|open| open.id == task)
+            && self.access_granted(task, agent, &push_action(remote, branch, base, head))
     }
 
     /// Whether the owner has let `agent` land exactly these commits onto
@@ -3197,6 +3298,7 @@ impl Engine {
                     answer.chosen == SERVER_ACCESS_ALLOW
                         || answer.chosen == ACCESS_ALLOW
                         || answer.chosen == LAND_COMMITS_ALLOW
+                        || answer.chosen == PUSH_COMMITS_ALLOW
                 })
         })
     }

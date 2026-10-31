@@ -62,6 +62,18 @@ pub fn land_action(branch: &str, base: &str, head: &str) -> String {
     format!("land-commits:{branch}:{base}..{head}")
 }
 
+/// The answer that lets a bot push the commits it asked to push.
+pub const PUSH_COMMITS_ALLOW: &str = "Push these commits";
+
+/// The answer that keeps them local.
+pub const PUSH_COMMITS_DENY: &str = "Don't push them";
+
+/// The action a push decision grants: exactly these commits to `branch` on
+/// `remote`, from where the remote stood when the bot asked.
+pub fn push_action(remote: &str, branch: &str, base: &str, head: &str) -> String {
+    format!("push-commits:{remote}:{branch}:{base}..{head}")
+}
+
 /// The name a bot asks for the bot server key by, beside the owner's sign-ins.
 pub const SERVER_ITEM: &str = "server";
 

@@ -574,6 +574,11 @@ impl Bot {
                                     .with(|engine| sandbox_grants(engine, self.spec.id));
                                 land_commits(engine, workspace, self.spec.id, input, grants).await
                             }
+                            Some(workspace) if name == "workspace_push_commits" => {
+                                let grants = engine
+                                    .with(|engine| sandbox_grants(engine, self.spec.id));
+                                push_commits(engine, workspace, self.spec.id, input, grants).await
+                            }
                             Some(workspace) => {
                                 let grants = engine
                                     .with(|engine| sandbox_grants(engine, self.spec.id));
@@ -939,6 +944,98 @@ fn is_durable_fact(text: &str) -> bool {
     .any(|marker| line.contains(marker))
 }
 
+/// Push a branch of the owner's repository once the owner has approved
+/// exactly those commits to that remote branch for the task the bot holds.
+/// Asked every time, whatever the access mode: a push leaves the computer.
+async fn push_commits(
+    engine: &SharedEngine,
+    workspace: &crate::workspace::Workspace,
+    actor: AgentId,
+    input: &serde_json::Value,
+    grants: orgbot_providers::SandboxGrants,
+) -> orgbot_tools::ToolOutcome {
+    use orgbot_tools::ToolOutcome;
+    let text = |key: &str| input.get(key).and_then(serde_json::Value::as_str).unwrap_or("").trim().to_string();
+    let remote = match text("remote") {
+        remote if remote.is_empty() => "origin".to_string(),
+        remote => remote,
+    };
+    let (branch, reason) = (text("branch"), text("reason"));
+    let Ok(task) = serde_json::from_value::<orgbot_proto::TaskId>(serde_json::json!(text("task"))) else {
+        return ToolOutcome::error("Name the task you hold that this push is for.");
+    };
+    let inspected = workspace
+        .call_as(actor, "workspace_push_commits", &serde_json::json!({"remote": remote, "branch": branch}), grants.clone())
+        .await;
+    if inspected.is_error {
+        return inspected;
+    }
+    let Ok(found) = serde_json::from_str::<serde_json::Value>(&inspected.content) else {
+        return ToolOutcome::error("The workspace could not describe the push.");
+    };
+    let field = |key: &str| found.get(key).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+    let (base, head) = (field("base"), field("head"));
+    let commits: Vec<String> = found
+        .get("commits")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| list.iter().filter_map(|c| c.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let count = commits.len();
+    let approved = |engine: &SharedEngine| engine.with(|e| e.push_approved(task, actor, &remote, &branch, &base, &head));
+    if !approved(engine) {
+        let asked = engine.with(|e| {
+            e.apply(Command::RequestPush {
+                by: actor,
+                task,
+                remote: remote.clone(),
+                url: field("url"),
+                branch: branch.clone(),
+                base: base.clone(),
+                head: head.clone(),
+                commits,
+                reason,
+            })
+        });
+        if let Err(error) = asked {
+            return ToolOutcome::error(error.to_string());
+        }
+        if !approved(engine) {
+            return ToolOutcome::ok(format!(
+                "Asked the owner to push these {count} commit(s) to {branch} on {remote}. You will be \
+                 woken when they answer; then call workspace_push_commits again with the same remote \
+                 and branch. Do not ask again meanwhile."
+            ));
+        }
+    }
+    let pushed = workspace
+        .call_as(
+            actor,
+            "workspace_push_commits",
+            &serde_json::json!({
+                "remote": remote, "branch": branch, "push": true,
+                "expect_base": base, "expect_head": head,
+            }),
+            grants,
+        )
+        .await;
+    if !pushed.is_error {
+        engine.with(|e| {
+            let handle = e.agent(actor).map(|spec| spec.handle.clone()).unwrap_or_default();
+            let note = orgbot_proto::chat::ChatMessage::system(
+                e.room().id,
+                format!(
+                    "@{handle} pushed {count} commit(s) to {branch} on {remote}, moving it from {} to {} as the owner approved.",
+                    base.get(..7).unwrap_or(&base),
+                    head.get(..7).unwrap_or(&head)
+                ),
+            )
+            .about_task(task);
+            let _ = e.apply(Command::PostMessage { message: Box::new(note) });
+        });
+    }
+    pushed
+}
+
 /// Record the removals a workspace command left waiting in the bot's room
 /// copy, for the app to show the owner.
 fn note_room_removals(engine: &SharedEngine, actor: AgentId, name: &str, outcome: &orgbot_tools::ToolOutcome) {
@@ -990,6 +1087,7 @@ fn is_workspace_write_tool(name: &str) -> bool {
             | "workspace_mkdir"
             | "workspace_run"
             | "workspace_land_commits"
+            | "workspace_push_commits"
     )
 }
 
@@ -1246,6 +1344,8 @@ async fn dispatch_room_mcp(
         let grants = engine.with(|engine| sandbox_grants(engine, actor));
         if name == "workspace_land_commits" {
             land_commits(engine, workspace, actor, &args, grants).await
+        } else if name == "workspace_push_commits" {
+            push_commits(engine, workspace, actor, &args, grants).await
         } else {
             let outcome = workspace.call_as(actor, &name, &args, grants).await;
             note_room_removals(engine, actor, &name, &outcome);
