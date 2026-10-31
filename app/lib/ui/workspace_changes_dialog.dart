@@ -149,27 +149,26 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('Approve deleted files'),
+          // A fixed size and a lazily built list: from the live room, 1,570
+          // removals built as one column froze the app on this dialog.
           content: SizedBox(
             width: 520,
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    'These exact project files will be moved to your configured recovery folder before the changes are applied:',
-                  ),
-                  const SizedBox(height: 12),
-                  for (final path in removals)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: SelectableText(
-                        path,
-                        key: ValueKey('approved-delete-$path'),
-                      ),
-                    ),
-                ],
-              ),
+            height: 440,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  removals.length == 1
+                      ? 'This project file will be moved to your configured recovery folder before the changes are applied:'
+                      : 'These ${removals.length} project files will be moved to your configured recovery folder before the changes are applied:',
+                ),
+                const SizedBox(height: 8),
+                PathSummary(paths: removals),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: PathList(paths: removals, keyPrefix: 'approved-delete-'),
+                ),
+              ],
             ),
           ),
           actions: [
@@ -311,54 +310,31 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
               ),
+            if (_status != null &&
+                changed.isEmpty &&
+                added.isEmpty &&
+                deleted.isEmpty &&
+                conflicts.isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text('No unreviewed workspace changes.'),
+              ),
+            if (_status != null && conflicts.isNotEmpty)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  'Resolve conflicts in the project before applying any changes.',
+                ),
+              ),
             if (_status != null)
               Expanded(
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (changed.isEmpty &&
-                          added.isEmpty &&
-                          deleted.isEmpty &&
-                          conflicts.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.only(top: 8),
-                          child: Text('No unreviewed workspace changes.'),
-                        ),
-                      for (final entry in [
-                        ('Changed', changed),
-                        ('Added', added),
-                        ('Deleted', deleted),
-                        ('Conflicts', conflicts),
-                      ])
-                        if (entry.$2.isNotEmpty) ...[
-                          Padding(
-                            padding: const EdgeInsets.only(top: 12),
-                            child: Text(
-                              '${entry.$1} (${entry.$2.length})',
-                              style: Theme.of(context).textTheme.titleSmall,
-                            ),
-                          ),
-                          for (final path in entry.$2)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 4),
-                              child: SelectableText(
-                                path,
-                                key: ValueKey(
-                                  'workspace-path-${entry.$1}-$path',
-                                ),
-                              ),
-                            ),
-                        ],
-                      if (conflicts.isNotEmpty)
-                        const Padding(
-                          padding: EdgeInsets.only(top: 8),
-                          child: Text(
-                            'Resolve conflicts in the project before applying any changes.',
-                          ),
-                        ),
-                    ],
-                  ),
+                child: _ChangeList(
+                  sections: [
+                    ('Changed', changed),
+                    ('Added', added),
+                    ('Deleted', deleted),
+                    ('Conflicts', conflicts),
+                  ],
                 ),
               ),
           ],
@@ -386,6 +362,123 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
           label: const Text('Apply changes'),
         ),
       ],
+    );
+  }
+}
+
+/// How many paths sit in each top-level folder, largest first, so a long
+/// list can be judged at a glance before it is read.
+class PathSummary extends StatelessWidget {
+  const PathSummary({super.key, required this.paths, this.limit = 6});
+
+  final List<String> paths;
+  final int limit;
+
+  static List<(String, int)> groups(List<String> paths) {
+    final counts = <String, int>{};
+    for (final path in paths) {
+      final slash = path.indexOf('/');
+      final key = slash < 0 ? path : '${path.substring(0, slash)}/';
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+    final sorted = counts.entries.map((e) => (e.key, e.value)).toList()
+      ..sort((a, b) => b.$2 != a.$2 ? b.$2 - a.$2 : a.$1.compareTo(b.$1));
+    return sorted;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final grouped = groups(paths);
+    if (grouped.length < 2 && paths.length < 20) return const SizedBox.shrink();
+    final shown = grouped.take(limit).toList();
+    final rest = grouped.skip(limit).fold<int>(0, (sum, group) => sum + group.$2);
+    final style = Theme.of(context).textTheme.bodySmall;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final (folder, count) in shown)
+          Text(
+            folder.endsWith('/')
+                ? '$count ${count == 1 ? 'file' : 'files'} in $folder'
+                : folder,
+            style: style,
+          ),
+        if (rest > 0) Text('$rest more elsewhere', style: style),
+      ],
+    );
+  }
+}
+
+/// Every path, built only as it scrolls into view.
+class PathList extends StatelessWidget {
+  const PathList({super.key, required this.paths, required this.keyPrefix});
+
+  final List<String> paths;
+  final String keyPrefix;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scrollbar(
+      child: ListView.builder(
+        itemCount: paths.length,
+        itemExtent: 24,
+        itemBuilder: (context, index) => Text(
+          paths[index],
+          key: ValueKey('$keyPrefix${paths[index]}'),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+    );
+  }
+}
+
+/// The review's sections as one lazily built list: a heading and summary per
+/// section, then its paths.
+class _ChangeList extends StatelessWidget {
+  const _ChangeList({required this.sections});
+
+  final List<(String, List<String>)> sections;
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = <Widget Function(BuildContext)>[];
+    for (final (title, paths) in sections) {
+      if (paths.isEmpty) continue;
+      rows.add(
+        (context) => Padding(
+          padding: const EdgeInsets.only(top: 12, bottom: 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '$title (${paths.length})',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              PathSummary(paths: paths),
+            ],
+          ),
+        ),
+      );
+      for (final path in paths) {
+        rows.add(
+          (context) => Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              path,
+              key: ValueKey('workspace-path-$title-$path'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        );
+      }
+    }
+    return Scrollbar(
+      child: ListView.builder(
+        itemCount: rows.length,
+        itemBuilder: (context, index) => rows[index](context),
+      ),
     );
   }
 }

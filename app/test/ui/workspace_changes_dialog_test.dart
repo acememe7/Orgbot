@@ -128,7 +128,7 @@ void main() {
 
       expect(
         find.text(
-          'These exact project files will be moved to your configured recovery folder before the changes are applied:',
+          'This project file will be moved to your configured recovery folder before the changes are applied:',
         ),
         findsOneWidget,
       );
@@ -152,6 +152,65 @@ void main() {
       );
     },
   );
+
+  testWidgets('a review of 1,570 removals stays responsive and says where they are', (
+    tester,
+  ) async {
+    // From the live room: 1,570 removals built as one column of selectable
+    // text froze the app when the owner pressed apply.
+    final removals = [
+      for (var i = 0; i < 759; i++) '.failwith/src/file$i.ts',
+      for (var i = 0; i < 759; i++) '.ng/src/file$i.ts',
+      for (var i = 0; i < 42; i++) '.nongas/file$i.ts',
+      for (var i = 0; i < 10; i++) 'lint$i.out',
+    ];
+    final calls = <List<String>>[];
+    await tester.pumpWidget(
+      _host(
+        runner: (executable, arguments) async {
+          calls.add(arguments);
+          return _result({
+            'ok': true,
+            'changed': [],
+            'added': [],
+            'deleted': removals,
+            'review_token': 'b' * 64,
+            'conflicts': [],
+          });
+        },
+      ),
+    );
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    expect(find.text('Deleted (1570)'), findsOneWidget);
+    expect(find.text('759 files in .failwith/'), findsOneWidget);
+    expect(
+      find
+          .byWidgetPredicate(
+            (widget) =>
+                widget.key is ValueKey<String> &&
+                (widget.key! as ValueKey<String>).value.startsWith('workspace-path-'),
+            skipOffstage: false,
+          )
+          .evaluate()
+          .length,
+      lessThan(200),
+      reason: 'only the rows on screen are built',
+    );
+
+    final started = DateTime.now();
+    await tester.tap(find.text('Apply changes'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('These 1570 project files'), findsOneWidget);
+    expect(find.text('759 files in .ng/'), findsWidgets);
+    await tester.tap(find.text('Move listed files to Trash and apply'));
+    await tester.pumpAndSettle();
+    expect(
+      DateTime.now().difference(started),
+      lessThan(const Duration(seconds: 5)),
+    );
+    expect(calls.where((arguments) => arguments[1] == 'apply'), hasLength(1));
+  });
 
   testWidgets('helper failures are visible and do not enable apply', (
     tester,
