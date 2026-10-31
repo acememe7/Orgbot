@@ -154,6 +154,26 @@ through a pipe (`--args`), never a command line or a file, and the keyring is
 never opened to the bot. With no keyring sign-in the bot is signed out and keeps
 its turn.
 
+## Landing a bot's commits
+
+A bot's copy keeps its own git history, so commits made there never reach the
+project by themselves. `workspace_land_commits` lands them: the bot writes a git
+bundle inside the project and names it with the branch, the task it holds and
+why. The room service copies the bundle out of the project by descriptor
+(refusing links), checks it with git's hooks, global configuration and filters
+off, fetches it into a temporary ref, and requires that its commits build on
+where the branch stands now. When the branch is checked out, every file the
+commits change must already be in the project byte for byte as they leave it,
+so the project never seems to undo them. The owner then sees the commits on one
+card, with a second tap to confirm; the room's access mode applies, rated
+risky. The grant covers only those commits onto that branch from where it stood.
+On the bot's next call the service re-checks the bundle's SHA-256, the branch
+and the commits against the approval, moves the branch forward with
+`git update-ref` (expecting the old value), and lets the index follow with
+`git read-tree -m -i`, which keeps anything staged; if the index cannot follow,
+the branch is put back. Nothing is pushed or merged, no history is rewritten,
+and no project file is written. Review-only bots cannot land commits.
+
 ## Independent reviewer tests
 
 Protected local rooms with command execution enabled expose `workspace_verify`

@@ -132,6 +132,21 @@ impl Workspace {
         if self.capabilities.verification {
             tools.push(tool("workspace_verify", "Run a test or verification command in a read-only, network-isolated Linux workspace copy. No results are applied to the original workspace. Output is bounded to 64 KiB. Timeout defaults to 300 seconds (1–1800 allowed).", json!({"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":1800}}), json!(["command"])));
         }
+        if self.capabilities.git_read && self.spec.writable && self.spec.commands {
+            tools.push(tool(
+                "workspace_land_commits",
+                "Land commits you made in your copy onto a branch of the owner's real repository. \
+                 Your copy's git history never reaches the project on its own. Bundle the commits \
+                 inside the project (`git bundle create <path> <base>..<branch>`, where <base> is \
+                 the commit the branch is on in the project now), then call this with the bundle's \
+                 path, the branch, the task you hold and why. The owner approves once; call again \
+                 with the same bundle and branch after they do. The branch only moves forward: \
+                 nothing is pushed or merged, no history is rewritten and no project file changes, \
+                 so every file the commits change must already be in the project as they leave it.",
+                json!({"bundle":{"type":"string"},"branch":{"type":"string"},"task":{"type":"string"},"reason":{"type":"string"}}),
+                json!(["bundle","branch","task","reason"]),
+            ));
+        }
         if self.capabilities.git_read {
             tools.push(tool(
                 "workspace_git",
@@ -144,13 +159,19 @@ impl Workspace {
     }
 
     pub fn instruction(&self) -> String {
-        format!(
+        let landing = if self.capabilities.git_read && self.spec.writable && self.spec.commands {
+            " Commits you make in your copy stay in your copy: to put them on the owner's branch, bundle them in the project and use workspace_land_commits, which the owner approves once. Never ask the owner to run git commands or scripts for you."
+        } else {
+            ""
+        };
+        let text = format!(
             "\n\nCOMPUTER: {}. Working directory: {}. Use workspace_* tools for actual computer work. All paths must be relative to this root. File writes allowed: {}. Shell commands available: {}. You are an API model; do not claim files were changed or commands ran without successful tool results. Preserve existing user files; ask before destructive operations. After an interrupted write, inspect its effects using workspace_read or workspace_list before deciding what remains. Never blindly repeat a mutation or tell others the computer is unavailable without checking it. This workspace may already carry playbooks written for it — look in .agents/skills, .claude/skills, .codex/skills or ~/.codex/skills with workspace_list, and read a SKILL.md with workspace_read when its name matches your work. Prefer one written for this machine over a general approach; it knows things about this setup that you do not.",
             self.spec.label,
             self.spec.root,
             self.spec.writable,
             self.spec.writable && self.spec.commands
-        )
+        );
+        text + landing
     }
 
     pub async fn call(&self, agent: AgentId, name: &str, arguments: &Value) -> ToolOutcome {

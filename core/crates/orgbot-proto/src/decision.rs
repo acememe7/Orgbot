@@ -50,6 +50,18 @@ pub fn lend_action(name: &str) -> String {
 /// The answer that grants a request including one of the owner's sign-ins.
 pub const ACCESS_ALLOW: &str = "Allow for this task";
 
+/// The answer that lets a bot land the commits it asked to land.
+pub const LAND_COMMITS_ALLOW: &str = "Land these commits";
+
+/// The answer that keeps them out.
+pub const LAND_COMMITS_DENY: &str = "Don't land them";
+
+/// The action a landing decision grants: exactly these commits onto `branch`,
+/// from where it stood when the bot asked. Anything else needs asking again.
+pub fn land_action(branch: &str, base: &str, head: &str) -> String {
+    format!("land-commits:{branch}:{base}..{head}")
+}
+
 /// The name a bot asks for the bot server key by, beside the owner's sign-ins.
 pub const SERVER_ITEM: &str = "server";
 

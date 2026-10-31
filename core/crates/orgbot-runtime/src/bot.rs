@@ -561,6 +561,11 @@ impl Bot {
                         )
                     } else {
                         match &self.workspace {
+                            Some(workspace) if name == "workspace_land_commits" => {
+                                let grants = engine
+                                    .with(|engine| sandbox_grants(engine, self.spec.id));
+                                land_commits(engine, workspace, self.spec.id, input, grants).await
+                            }
                             Some(workspace) => {
                                 let grants = engine
                                     .with(|engine| sandbox_grants(engine, self.spec.id));
@@ -904,8 +909,104 @@ fn is_durable_fact(text: &str) -> bool {
 fn is_workspace_write_tool(name: &str) -> bool {
     matches!(
         name,
-        "workspace_import_attachment" | "workspace_write" | "workspace_mkdir" | "workspace_run"
+        "workspace_import_attachment"
+            | "workspace_write"
+            | "workspace_mkdir"
+            | "workspace_run"
+            | "workspace_land_commits"
     )
+}
+
+/// Land commits `actor` bundled in the project, once the owner has approved
+/// exactly those commits onto that branch for the task it holds.
+///
+/// The workspace inspects the bundle on the computer first: what it holds,
+/// where the branch stands, whether the project already reads as the commits
+/// leave it. Without the owner's approval for exactly that, the owner is asked
+/// (or the room's access mode answers); with it, the workspace lands it after
+/// checking nothing has moved since, and the room is told.
+async fn land_commits(
+    engine: &SharedEngine,
+    workspace: &crate::workspace::Workspace,
+    actor: AgentId,
+    input: &serde_json::Value,
+    grants: orgbot_providers::SandboxGrants,
+) -> orgbot_tools::ToolOutcome {
+    use orgbot_tools::ToolOutcome;
+    let text = |key: &str| input.get(key).and_then(serde_json::Value::as_str).unwrap_or("").trim().to_string();
+    let (bundle, branch, reason) = (text("bundle"), text("branch"), text("reason"));
+    let Ok(task) = serde_json::from_value::<orgbot_proto::TaskId>(serde_json::json!(text("task"))) else {
+        return ToolOutcome::error("Name the task you hold that these commits are for.");
+    };
+    let inspected = workspace
+        .call_as(actor, "workspace_land_commits", &serde_json::json!({"bundle": bundle, "branch": branch}), grants.clone())
+        .await;
+    if inspected.is_error {
+        return inspected;
+    }
+    let Ok(found) = serde_json::from_str::<serde_json::Value>(&inspected.content) else {
+        return ToolOutcome::error("The workspace could not describe the bundle.");
+    };
+    let field = |key: &str| found.get(key).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+    let (base, head, sha) = (field("base"), field("head"), field("bundle_sha256"));
+    let commits: Vec<String> = found
+        .get("commits")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| list.iter().filter_map(|c| c.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let count = commits.len();
+    let approved = |engine: &SharedEngine| engine.with(|e| e.landing_approved(task, actor, &branch, &base, &head));
+    if !approved(engine) {
+        let asked = engine.with(|e| {
+            e.apply(Command::RequestLanding {
+                by: actor,
+                task,
+                branch: branch.clone(),
+                base: base.clone(),
+                head: head.clone(),
+                commits,
+                changes: field("changes"),
+                reason,
+            })
+        });
+        if let Err(error) = asked {
+            return ToolOutcome::error(error.to_string());
+        }
+        if !approved(engine) {
+            return ToolOutcome::ok(format!(
+                "Asked the owner to land these {count} commit(s) on {branch}. You will be woken when \
+                 they answer; then call workspace_land_commits again with the same bundle and branch. \
+                 Do not ask again meanwhile."
+            ));
+        }
+    }
+    let landed = workspace
+        .call_as(
+            actor,
+            "workspace_land_commits",
+            &serde_json::json!({
+                "bundle": bundle, "branch": branch, "land": true,
+                "expect_base": base, "expect_head": head, "expect_sha256": sha,
+            }),
+            grants,
+        )
+        .await;
+    if !landed.is_error {
+        engine.with(|e| {
+            let handle = e.agent(actor).map(|spec| spec.handle.clone()).unwrap_or_default();
+            let note = orgbot_proto::chat::ChatMessage::system(
+                e.room().id,
+                format!(
+                    "@{handle} landed {count} commit(s) on {branch}, moving it from {} to {} as the owner approved. Nothing was pushed.",
+                    base.get(..7).unwrap_or(&base),
+                    head.get(..7).unwrap_or(&head)
+                ),
+            )
+            .about_task(task);
+            let _ = e.apply(Command::PostMessage { message: Box::new(note) });
+        });
+    }
+    landed
 }
 
 /// Retry only the current API response. Nothing from an incomplete response
@@ -1059,7 +1160,11 @@ async fn dispatch_room_mcp(
         // A CLI bot's room workspace tools arrive here mid-episode; the
         // owner's grants apply to them as to an API bot's.
         let grants = engine.with(|engine| sandbox_grants(engine, actor));
-        workspace.call_as(actor, &name, &args, grants).await
+        if name == "workspace_land_commits" {
+            land_commits(engine, workspace, actor, &args, grants).await
+        } else {
+            workspace.call_as(actor, &name, &args, grants).await
+        }
     } else {
         orgbot_tools::ToolOutcome::error("No workspace attached")
     };
@@ -1602,6 +1707,103 @@ mod tests {
             "blocked mutation never reaches the workspace"
         );
         assert_eq!(report.said.as_deref(), Some("review complete"));
+    }
+
+    #[tokio::test]
+    async fn landing_asks_the_owner_once_then_lands_exactly_what_was_approved() {
+        // From the live room: a bot's commits stayed in its own copy, so it
+        // handed the owner a bundle and a script to run.
+        use crate::workspace::{Workspace, WorkspaceCapabilities, WorkspaceSpec};
+        use orgbot_proto::decision::{Answer, LAND_COMMITS_ALLOW};
+        use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+        let agent = spec();
+        let actor = agent.id;
+        let mut room = Engine::new(RoomSpec {
+            name: "landing".into(),
+            goal: "commit the release".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        room.apply(Command::JoinAgent { spec: Box::new(agent) }).unwrap();
+        room.apply(Command::StartRoom).unwrap();
+        let created = room
+            .apply(Command::CreateTask {
+                title: "commit in separate commits".into(),
+                brief: String::new(),
+                by: None,
+                required_role: None,
+                priority: orgbot_proto::task::Priority::Normal,
+                acceptance_criteria: vec![],
+                depends_on: vec![],
+                origin: orgbot_proto::graph::TaskOrigin::plain(),
+            })
+            .unwrap();
+        let task = created
+            .iter()
+            .find_map(|e| match &e.event {
+                orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+                _ => None,
+            })
+            .unwrap();
+        for command in [Command::OpenTask { task }, Command::ClaimTask { task, by: actor }, Command::StartTask { task, by: actor }] {
+            room.apply(command).unwrap();
+        }
+        let engine = SharedEngine::new(room);
+        let (tx, mut calls) = mpsc::channel(4);
+        let workspace = Workspace::with_capabilities(
+            WorkspaceSpec { label: "test".into(), root: "/work".into(), writable: true, commands: true },
+            tx,
+            WorkspaceCapabilities { git_read: true, ..WorkspaceCapabilities::default() },
+        );
+        assert!(workspace.definitions().iter().any(|tool| tool.name == "workspace_land_commits"));
+        let (base, head) = ("a".repeat(40), "b".repeat(40));
+        let found = json!({
+            "branch": "main", "base": base, "head": head, "bundle_sha256": "f00",
+            "commits": ["bbbbbbb tests: add the squad test", "ccccccc tests: add the duration test"],
+            "changes": "2 files changed", "checked_out": true,
+        });
+        let host = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            while let Some(call) = calls.recv().await {
+                assert_eq!(call.name, "workspace_land_commits");
+                let reply = if call.arguments.get("land").is_some() {
+                    orgbot_tools::ToolOutcome::ok(json!({"landed": true}).to_string())
+                } else {
+                    orgbot_tools::ToolOutcome::ok(found.to_string())
+                };
+                seen.push(call.arguments.clone());
+                call.reply.send(reply).unwrap();
+            }
+            seen
+        });
+        let input = json!({
+            "bundle": "artifacts/land.bundle", "branch": "main", "task": task,
+            "reason": "the owner asked for separate commits",
+        });
+        let first = land_commits(&engine, &workspace, actor, &input, Default::default()).await;
+        assert!(!first.is_error && first.content.contains("Asked the owner"), "{}", first.content);
+        let decision = engine.with(|e| e.decisions().pending().next().map(|d| d.id)).unwrap();
+        engine
+            .with(|e| {
+                e.apply(Command::AnswerDecision {
+                    decision,
+                    answer: Answer { chosen: LAND_COMMITS_ALLOW.into(), note: String::new(), at: orgbot_proto::Timestamp::now() },
+                })
+            })
+            .unwrap();
+        let second = land_commits(&engine, &workspace, actor, &input, Default::default()).await;
+        assert!(!second.is_error, "{}", second.content);
+        drop(workspace);
+        let seen = host.await.unwrap();
+        assert_eq!(seen.len(), 3, "inspect, inspect again, land: {seen:?}");
+        assert!(seen[..2].iter().all(|args| args.get("land").is_none()), "nothing lands before the owner's yes");
+        assert_eq!(seen[2]["expect_base"], base.as_str());
+        assert_eq!(seen[2]["expect_head"], head.as_str());
+        assert_eq!(seen[2]["expect_sha256"], "f00");
+        let told = engine.with(|e| e.transcript().iter().any(|m| m.body.contains("landed 2 commit(s) on main")));
+        assert!(told, "the room is told what landed");
     }
 
     async fn local_mcp_server() -> (McpServerSpec, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {

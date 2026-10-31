@@ -419,6 +419,8 @@ impl LocalWorkspaceHost {
             }
             "workspace_mkdir" if self.writable => self.mkdir(arg_string(args, "path")),
             "workspace_git" => self.git(arg_string(args, "action")),
+            "workspace_land_commits" if self.writable => self.land_commits(args),
+            "workspace_land_commits" => Err("This workspace is read-only.".into()),
             "workspace_write" | "workspace_mkdir" => Err("This workspace is read-only.".into()),
             "workspace_import_attachment" if self.writable => {
                 self.import_attachment(arg_string(args, "id"))
@@ -575,26 +577,7 @@ impl LocalWorkspaceHost {
             _ => return Err("Git action must be status, diff, or log.".into()),
         };
         let cwd = format!("/proc/self/fd/{}", self.root_fd.as_raw_fd());
-        let mut root_command = git_command(&cwd);
-        root_command
-            .arg("rev-parse")
-            .arg("--path-format=absolute")
-            .arg("--show-toplevel");
-        let root_result = run_bounded_git(&mut root_command, Duration::from_secs(5))?;
-        if !root_result.success {
-            return Err("Selected workspace is not inside a Git repository.".into());
-        }
-        let reported_root = String::from_utf8(root_result.stdout)
-            .map_err(|_| "Git returned a non-UTF-8 repository path.")?;
-        let reported_root = reported_root.trim_end_matches('\n');
-        let expected_root = std::fs::canonicalize(&cwd).map_err(io_error)?;
-        let actual_root = std::fs::canonicalize(reported_root)
-            .map_err(|_| "Git repository root is unavailable.")?;
-        if actual_root != expected_root {
-            return Err(
-                "Git access requires the selected workspace to be the repository root.".into(),
-            );
-        }
+        self.require_repository_root(&cwd)?;
         let mut action_command = git_command(&cwd);
         action_command.args(args);
         let result = run_bounded_git(&mut action_command, Duration::from_secs(15))?;
@@ -608,6 +591,207 @@ impl LocalWorkspaceHost {
             return Err(format!("Git {action} failed: {detail}"));
         }
         Ok(output)
+    }
+
+    /// Inspect, or land, commits a bot packed as a git bundle in the project.
+    ///
+    /// From the live room: the owner asked for separate commits, and a bot's
+    /// copy keeps its own git history, so its commits never reached the
+    /// project. Here the branch only moves forward onto the bundle's commits:
+    /// nothing is pushed or merged, no history is rewritten, and no project
+    /// file is written. When the branch is checked out, every file the commits
+    /// change must already read as they leave it, so the project stays clean
+    /// instead of seeming to undo them, and the index keeps whatever was staged.
+    /// Landing re-checks everything against what the owner approved.
+    #[cfg(target_os = "linux")]
+    fn land_commits(&self, args: &Value) -> Result<String, String> {
+        let bundle = validate_relative(arg_string(args, "bundle")?)?;
+        let branch = arg_string(args, "branch")?;
+        if !landable_branch(branch) {
+            return Err("Name a plain local branch, such as main.".into());
+        }
+        let landing = args.get("land").and_then(Value::as_bool).unwrap_or(false);
+        let cwd = format!("/proc/self/fd/{}", self.root_fd.as_raw_fd());
+        self.require_repository_root(&cwd)?;
+        let git = |args: &[&str]| -> Result<String, String> {
+            let mut command = git_command(&cwd);
+            command.args(args);
+            let result = run_bounded_git(&mut command, Duration::from_secs(60))?;
+            if !result.success {
+                return Err(format!(
+                    "git {} failed: {}",
+                    args.first().copied().unwrap_or(""),
+                    String::from_utf8_lossy(&result.stderr).trim()
+                ));
+            }
+            Ok(String::from_utf8_lossy(&result.stdout).trim_end().to_string())
+        };
+        let branch_ref = format!("refs/heads/{branch}");
+        git(&["check-ref-format", &branch_ref])?;
+        let base = git(&["rev-parse", "--verify", "--quiet", &format!("{branch_ref}^{{commit}}")])
+            .map_err(|_| format!("The project has no branch {branch}."))?;
+
+        let copy = BundleCopy::from_project(&self.root_fd, &bundle)?;
+        let copy_path = copy.path.to_str().ok_or("Temporary bundle path is not UTF-8.")?.to_string();
+        git(&["bundle", "verify", "--quiet", &copy_path])
+            .map_err(|error| format!("The bundle cannot be used with this project: {error}"))?;
+        let heads = git(&["bundle", "list-heads", &copy_path])?;
+        let heads: Vec<(&str, &str)> = heads.lines().filter_map(|line| line.split_once(' ')).collect();
+        let source = heads
+            .iter()
+            .find(|(_, name)| *name == branch_ref)
+            .or_else(|| (heads.len() == 1).then(|| &heads[0]))
+            .map(|(_, name)| name.to_string())
+            .ok_or_else(|| format!("The bundle has no {branch_ref}; bundle it as `git bundle create <file> <base>..{branch}`."))?;
+        let landing_ref = format!("refs/orgbots/landing/{}", uuid::Uuid::new_v4().simple());
+        git(&[
+            "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+            &copy_path, &format!("{source}:{landing_ref}"),
+        ])?;
+        let _drop_ref = TemporaryRef { cwd: cwd.clone(), name: landing_ref.clone() };
+        let head = git(&["rev-parse", "--verify", &format!("{landing_ref}^{{commit}}")])?;
+        if head == base {
+            return Err(format!("{branch} already points at {}; there is nothing to land.", &head[..7]));
+        }
+        if git(&["merge-base", "--is-ancestor", &base, &head]).is_err() {
+            return Err(format!(
+                "These commits do not build on where {branch} stands now ({}), so landing them would rewrite history. Rebase them onto {branch} and bundle again.",
+                &base[..7]
+            ));
+        }
+        let range = format!("{base}..{head}");
+        let log = git(&["log", "--no-color", "--format=%h %s", "-n", "51", &range])?;
+        let commits: Vec<&str> = log.lines().collect();
+        if commits.len() > 50 {
+            return Err("Land at most 50 commits at a time.".into());
+        }
+        let changes = git(&["diff", "--shortstat", &base, &head])?.trim().to_string();
+        let checked_out = git(&["symbolic-ref", "-q", "HEAD"]).is_ok_and(|current| current == branch_ref);
+        let root = std::fs::canonicalize(&cwd).map_err(io_error)?;
+        let worktrees = git(&["worktree", "list", "--porcelain"])?;
+        let mut path = None;
+        for line in worktrees.lines() {
+            if let Some(worktree) = line.strip_prefix("worktree ") {
+                path = std::fs::canonicalize(worktree).ok();
+            } else if line == format!("branch {branch_ref}") && path.as_ref() != Some(&root) {
+                return Err(format!("{branch} is checked out in another worktree; land it there."));
+            }
+        }
+        if checked_out {
+            let differing = self.files_not_matching(&cwd, &base, &head)?;
+            if !differing.is_empty() {
+                return Err(format!(
+                    "{branch} is checked out, and these files in the project do not match the commits: {}. Get your changes into the project first (a workspace command that makes them), then land, so the project does not seem to undo them.",
+                    differing.join(", ")
+                ));
+            }
+        }
+        let summary = json!({
+            "branch": branch, "base": base, "head": head, "bundle_sha256": copy.sha256,
+            "commits": commits, "changes": changes, "checked_out": checked_out,
+        });
+        if !landing {
+            return Ok(summary.to_string());
+        }
+        for (key, actual) in [("expect_base", &base), ("expect_head", &head), ("expect_sha256", &copy.sha256)] {
+            if args.get(key).and_then(Value::as_str) != Some(actual.as_str()) {
+                return Err("The branch or the bundle changed since the owner approved it; ask again.".into());
+            }
+        }
+        let message = format!("OrgBots: land {} commit(s) the owner approved", commits.len());
+        git(&["update-ref", "-m", &message, &branch_ref, &head, &base])?;
+        if checked_out {
+            if let Err(error) = git(&["read-tree", "-m", "-i", &base, &head]) {
+                let _ = git(&["update-ref", "-m", "OrgBots: undo a landing", &branch_ref, &base, &head]);
+                return Err(format!("The index could not follow, so {branch} was left where it was: {error}"));
+            }
+        }
+        Ok(json!({"landed": true, "branch": branch, "from": base, "to": head, "commits": commits, "changes": changes}).to_string())
+    }
+
+    /// Files the commits base..head change that the project does not already
+    /// hold as they leave them, compared byte for byte without git's filters.
+    #[cfg(target_os = "linux")]
+    fn files_not_matching(&self, cwd: &str, base: &str, head: &str) -> Result<Vec<String>, String> {
+        use rustix::fs::{FileType, OFlags};
+
+        let mut command = git_command(cwd);
+        command.args(["diff", "--raw", "-z", "--no-renames", "--no-abbrev", base, head]);
+        let result = run_bounded_git(&mut command, Duration::from_secs(30))?;
+        if !result.success {
+            return Err("Git could not list what the commits change.".into());
+        }
+        let raw = String::from_utf8(result.stdout).map_err(|_| "A changed path is not UTF-8.")?;
+        let mut fields = raw.split('\0').filter(|field| !field.is_empty());
+        let mut differing = Vec::new();
+        let mut checked = 0;
+        while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+            checked += 1;
+            if checked > 500 {
+                return Err("The commits change more than 500 files; land them in smaller steps.".into());
+            }
+            // ":<old mode> <new mode> <old id> <new id> <status>"
+            let parts: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+            let [_, new_mode, _, new_id, status] = parts[..] else {
+                return Err("Git described a change in an unexpected form.".into());
+            };
+            let relative = validate_relative(path)?;
+            let opened = rustix::fs::openat2(
+                &self.root_fd,
+                path_arg(&relative)?,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                rustix::fs::Mode::empty(),
+                no_symlink_resolution(),
+            );
+            let matches = if status == "D" {
+                matches!(opened, Err(rustix::io::Errno::NOENT))
+            } else if !matches!(new_mode, "100644" | "100755") {
+                return Err(format!("{path} becomes a link or submodule; land that change by hand."));
+            } else {
+                match opened {
+                    Ok(fd) => {
+                        let info = rustix::fs::fstat(&fd).map_err(io_error)?;
+                        if FileType::from_raw_mode(info.st_mode) != FileType::RegularFile
+                            || info.st_size as u64 > 64 * 1024 * 1024
+                        {
+                            false
+                        } else {
+                            let mut bytes = Vec::new();
+                            File::from(fd).read_to_end(&mut bytes).map_err(io_error)?;
+                            hash_blob(cwd, &bytes)? == new_id
+                        }
+                    }
+                    Err(_) => false,
+                }
+            };
+            if !matches {
+                differing.push(path.to_string());
+            }
+        }
+        differing.truncate(20);
+        Ok(differing)
+    }
+
+    /// Fail unless the selected workspace is the root of its git repository.
+    #[cfg(target_os = "linux")]
+    fn require_repository_root(&self, cwd: &str) -> Result<(), String> {
+        let mut root_command = git_command(cwd);
+        root_command
+            .arg("rev-parse")
+            .arg("--path-format=absolute")
+            .arg("--show-toplevel");
+        let root_result = run_bounded_git(&mut root_command, Duration::from_secs(5))?;
+        if !root_result.success {
+            return Err("Selected workspace is not inside a Git repository.".into());
+        }
+        let reported_root = String::from_utf8(root_result.stdout)
+            .map_err(|_| "Git returned a non-UTF-8 repository path.")?;
+        let actual_root = std::fs::canonicalize(reported_root.trim_end_matches('\n'))
+            .map_err(|_| "Git repository root is unavailable.")?;
+        if actual_root != std::fs::canonicalize(cwd).map_err(io_error)? {
+            return Err("Git access requires the selected workspace to be the repository root.".into());
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -1050,6 +1234,119 @@ fn atomic_write_at(parent: &std::os::fd::OwnedFd, name: &str, content: &str) -> 
     result
 }
 
+/// Whether `name` is a plain branch name a bot may ask to move.
+fn landable_branch(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 100
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'))
+        && !name.starts_with(['-', '/', '.'])
+        && !name.ends_with(['/', '.'])
+        && !name.ends_with(".lock")
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name.contains("/.")
+}
+
+/// A private copy of a bundle taken from the project by descriptor, so a
+/// link or a swap mid-check cannot change what is landed. Removed on drop.
+#[cfg(target_os = "linux")]
+struct BundleCopy {
+    path: PathBuf,
+    sha256: String,
+}
+
+#[cfg(target_os = "linux")]
+impl BundleCopy {
+    fn from_project(root: &std::os::fd::OwnedFd, relative: &Path) -> Result<Self, String> {
+        use rustix::fs::{FileType, OFlags};
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let fd = rustix::fs::openat2(
+            root,
+            path_arg(relative)?,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            rustix::fs::Mode::empty(),
+            no_symlink_resolution(),
+        )
+        .map_err(|_| format!("No bundle at {} in the project.", relative.display()))?;
+        let info = rustix::fs::fstat(&fd).map_err(io_error)?;
+        if FileType::from_raw_mode(info.st_mode) != FileType::RegularFile {
+            return Err("The bundle must be a regular file.".into());
+        }
+        if info.st_size as u64 > 256 * 1024 * 1024 {
+            return Err("The bundle is larger than 256 MiB.".into());
+        }
+        let path = std::env::temp_dir().join(format!("orgbot-landing-{}.bundle", uuid::Uuid::new_v4().simple()));
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(io_error)?;
+        let mut copy = Self { path, sha256: String::new() };
+        let mut source = File::from(fd);
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            let read = source.read(&mut buffer).map_err(io_error)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            out.write_all(&buffer[..read]).map_err(io_error)?;
+        }
+        out.sync_all().map_err(io_error)?;
+        copy.sha256 = format!("{:x}", hasher.finalize());
+        Ok(copy)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for BundleCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// The ref a bundle is fetched into while it is checked; deleted on drop, so
+/// nothing but unreachable objects is left behind.
+#[cfg(target_os = "linux")]
+struct TemporaryRef {
+    cwd: String,
+    name: String,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for TemporaryRef {
+    fn drop(&mut self) {
+        let mut command = git_command(&self.cwd);
+        command.args(["update-ref", "-d", &self.name]);
+        let _ = run_bounded_git(&mut command, Duration::from_secs(10));
+    }
+}
+
+/// The id git gives `bytes` as a blob in this repository, without filters.
+#[cfg(target_os = "linux")]
+fn hash_blob(cwd: &str, bytes: &[u8]) -> Result<String, String> {
+    let mut command = git_command(cwd);
+    command
+        .args(["hash-object", "--no-filters", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|_| "Git is unavailable or could not be started.".to_string())?;
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let input = bytes.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let output = child.wait_with_output().map_err(io_error)?;
+    let _ = writer.join();
+    if !output.status.success() {
+        return Err("Git could not hash a project file.".into());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 fn arg_string<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
         .and_then(Value::as_str)
@@ -1161,6 +1458,102 @@ mod tests {
         host.guard_state = Some(state.to_path_buf());
         host.commands = commands;
         host
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn commits_a_bot_bundled_land_only_as_approved_and_leave_project_files_alone() {
+        // From the live room: the owner asked for separate commits, a bot's
+        // copy kept its own git history, and it could only hand the owner a
+        // bundle and a script to run.
+        let root = temp_dir();
+        let copy = temp_dir();
+        run_git(&root, &["init", "--quiet", "-b", "main"]);
+        let configure = |dir: &Path| {
+            run_git(dir, &["config", "user.name", "Workspace test"]);
+            run_git(dir, &["config", "user.email", "test@example.invalid"]);
+        };
+        configure(&root);
+        fs::write(root.join("a.txt"), "a\n").unwrap();
+        fs::write(root.join("b.txt"), "b\n").unwrap();
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "--quiet", "-m", "base"]);
+        let base = run_git(&root, &["rev-parse", "HEAD"]);
+        let _ = fs::remove_dir_all(&copy);
+        run_git(Path::new("/"), &["clone", "--quiet", root.to_str().unwrap(), copy.to_str().unwrap()]);
+        configure(&copy);
+        fs::write(copy.join("a.txt"), "a2\n").unwrap();
+        run_git(&copy, &["commit", "--quiet", "-am", "change a [skip ci]"]);
+        fs::write(copy.join("c.txt"), "c\n").unwrap();
+        run_git(&copy, &["add", "c.txt"]);
+        run_git(&copy, &["commit", "--quiet", "-m", "add c [skip ci]"]);
+        let head = run_git(&copy, &["rev-parse", "HEAD"]);
+        fs::create_dir(root.join("artifacts")).unwrap();
+        let bundle = root.join("artifacts/land.bundle");
+        run_git(&copy, &["bundle", "create", bundle.to_str().unwrap(), &format!("{base}..main")]);
+
+        // The owner has something staged, which must survive.
+        fs::write(root.join("b.txt"), "b staged\n").unwrap();
+        run_git(&root, &["add", "b.txt"]);
+        let host = LocalWorkspaceHost::open_root(
+            root.to_string_lossy().into_owned(),
+            true,
+            None,
+            Arc::new(RwLock::new(std::collections::HashSet::new())),
+        )
+        .unwrap();
+        let ask = |args: Value| host.handle("workspace_land_commits", &args);
+
+        // Not yet in the project: landing would make it seem to undo them.
+        let early = ask(json!({"bundle": "artifacts/land.bundle", "branch": "main"}));
+        assert!(early.is_error && early.content.contains("a.txt") && early.content.contains("c.txt"), "{}", early.content);
+
+        fs::write(root.join("a.txt"), "a2\n").unwrap();
+        fs::write(root.join("c.txt"), "c\n").unwrap();
+        let inspected = ask(json!({"bundle": "artifacts/land.bundle", "branch": "main"}));
+        assert!(!inspected.is_error, "{}", inspected.content);
+        let found: Value = serde_json::from_str(&inspected.content).unwrap();
+        assert_eq!(found["base"], base.as_str());
+        assert_eq!(found["head"], head.as_str());
+        assert_eq!(found["commits"].as_array().unwrap().len(), 2);
+        assert_eq!(found["checked_out"], true);
+        assert_eq!(run_git(&root, &["rev-parse", "main"]), base, "inspecting moves nothing");
+
+        let land = |expect_head: &str| {
+            ask(json!({
+                "bundle": "artifacts/land.bundle", "branch": "main", "land": true,
+                "expect_base": base, "expect_head": expect_head, "expect_sha256": found["bundle_sha256"],
+            }))
+        };
+        assert!(land(&base).is_error, "landing anything but what was approved is refused");
+        assert_eq!(run_git(&root, &["rev-parse", "main"]), base);
+        let landed = land(&head);
+        assert!(!landed.is_error, "{}", landed.content);
+        assert_eq!(run_git(&root, &["rev-parse", "main"]), head);
+        assert_eq!(run_git(&root, &["status", "--porcelain", "--untracked-files=no"]), "M  b.txt", "landed files are clean; the staged change stays");
+        assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "b staged\n");
+        assert_eq!(run_git(&root, &["for-each-ref", "refs/orgbots/"]), "", "no temporary ref is left");
+
+        // Commits that do not build on the branch would rewrite history.
+        run_git(&copy, &["reset", "--quiet", "--hard", &base]);
+        fs::write(copy.join("d.txt"), "d\n").unwrap();
+        run_git(&copy, &["add", "d.txt"]);
+        run_git(&copy, &["commit", "--quiet", "-m", "elsewhere"]);
+        run_git(&copy, &["bundle", "create", root.join("artifacts/old.bundle").to_str().unwrap(), &format!("{base}..main")]);
+        let diverged = ask(json!({"bundle": "artifacts/old.bundle", "branch": "main"}));
+        assert!(diverged.is_error && diverged.content.contains("rewrite history"), "{}", diverged.content);
+
+        // A link, or a branch that reads as a path trick, is refused.
+        std::os::unix::fs::symlink(&bundle, root.join("artifacts/link.bundle")).unwrap();
+        assert!(ask(json!({"bundle": "artifacts/link.bundle", "branch": "main"})).is_error);
+        assert!(ask(json!({"bundle": "artifacts/land.bundle", "branch": "../main"})).is_error);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(copy);
     }
 
     #[tokio::test]

@@ -3352,6 +3352,52 @@ fn only_a_coordinator_may_propose_retiring_a_task() {
     });
 }
 
+/// From the live room: a bot's commits stayed in its own copy, so it handed
+/// the owner a bundle and a script to run.
+#[test]
+fn landing_commits_needs_the_owners_yes_for_exactly_those_commits() {
+    use orgbot_proto::decision::{LAND_COMMITS_ALLOW, LAND_COMMITS_DENY};
+    let mut f = fixture();
+    let (worker, worker2, inspector) = (f.worker, f.worker2, f.inspector);
+    let task = f.start_task("commit the release in separate commits", worker);
+    let (base, head, other) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+    let request = |by: AgentId, branch: &str, head: &str| Command::RequestLanding {
+        by,
+        task,
+        branch: branch.into(),
+        base: "a".repeat(40),
+        head: head.into(),
+        commits: vec!["bbbbbbb tests: add the squad test [skip ci]".into()],
+        changes: "1 file changed, 40 insertions(+)".into(),
+        reason: "the owner asked for separate commits".into(),
+    };
+    let asked = f.apply(request(worker, "main", &head));
+    let question = f.engine.decisions().pending().next().unwrap().because.clone();
+    assert!(question.contains("land 1 commit on main") && question.contains("Nothing is pushed") && question.contains("add the squad test"), "{question}");
+    assert!(!f.engine.landing_approved(task, worker, "main", &base, &head), "not before the owner answers");
+    assert_eq!(
+        f.engine.digest().needs_you[0].grants_with.as_deref(),
+        Some(LAND_COMMITS_ALLOW),
+        "landing takes a second tap in the app"
+    );
+
+    answer(&mut f, asked_decision(&asked), LAND_COMMITS_ALLOW);
+    assert!(f.engine.landing_approved(task, worker, "main", &base, &head));
+    assert!(!f.engine.landing_approved(task, worker, "main", &base, &other), "only those commits");
+    assert!(!f.engine.landing_approved(task, worker, "release", &base, &head), "only onto that branch");
+    assert!(!f.engine.landing_approved(task, worker2, "main", &base, &head), "only for that bot");
+    assert!(f.apply(request(worker, "main", &head)).is_empty(), "asking again for the same is not a new question");
+
+    let refused = f.apply(request(worker, "main", &other));
+    answer(&mut f, asked_decision(&refused), LAND_COMMITS_DENY);
+    assert!(!f.engine.landing_approved(task, worker, "main", &base, &other));
+
+    let not_holding = f.reject(request(inspector, "main", &head));
+    assert!(matches!(not_holding, EngineError::NotAssignee { .. }), "only the task's holder may ask: {not_holding:?}");
+    f.reject(request(worker, "../main", &head));
+    f.reject(request(worker, "main", &base));
+}
+
 /// From the live room: two coordinators woke to the same owner message, and
 /// the one whose turn began first created five duplicates of the other's tasks
 /// fifteen minutes later; two bots then took the same job.

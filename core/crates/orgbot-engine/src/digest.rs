@@ -672,7 +672,8 @@ fn chain_to(
 /// The answer to `decision` that grants access beyond a bot's sandbox, if any.
 fn granting_answer(decision: &orgbot_proto::decision::Decision) -> Option<String> {
     use orgbot_proto::decision::{
-        ACCESS_ALLOW, RETIRE_TASK, RETIRE_TASK_ALLOW, SERVER_ACCESS, SERVER_ACCESS_ALLOW,
+        ACCESS_ALLOW, LAND_COMMITS_ALLOW, RETIRE_TASK, RETIRE_TASK_ALLOW, SERVER_ACCESS,
+        SERVER_ACCESS_ALLOW,
     };
     if decision
         .envelope
@@ -685,6 +686,10 @@ fn granting_answer(decision: &orgbot_proto::decision::Decision) -> Option<String
             .iter()
             .find(|option| option.as_str() == SERVER_ACCESS_ALLOW || option.as_str() == ACCESS_ALLOW)
             .cloned();
+    }
+    // Landing moves a branch of the owner's repository.
+    if decision.envelope.allowed.iter().any(|action| action.starts_with("land-commits:")) {
+        return Some(LAND_COMMITS_ALLOW.to_string());
     }
     // Retiring cannot be undone from the app.
     if decision.envelope.allowed.iter().any(|action| action == RETIRE_TASK) {

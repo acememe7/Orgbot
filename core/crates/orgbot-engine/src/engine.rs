@@ -17,7 +17,8 @@ use orgbot_proto::convergence::{self, Convergence};
 use orgbot_proto::decision::{
     lend_action, server_access_scope, task_scope, AccessAction, Answer, Decision, DecisionLog,
     Governance, Request, Settled, ACCESS_ALLOW, RETIRE_TASK, RETIRE_TASK_ALLOW, RETIRE_TASK_KEEP,
-    SERVER_ACCESS, SERVER_ACCESS_ALLOW, SERVER_ACCESS_DENY, SERVER_ITEM,
+    SERVER_ACCESS, SERVER_ACCESS_ALLOW, SERVER_ACCESS_DENY, SERVER_ITEM, land_action,
+    LAND_COMMITS_ALLOW, LAND_COMMITS_DENY,
 };
 use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope, Seq};
 use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness, TaskKind, TaskOrigin};
@@ -1953,6 +1954,16 @@ impl Engine {
                 reason,
             } => self.request_access(by, task, items, action, reason),
             Command::ProposeRetire { by, task, reason } => self.propose_retire(by, task, reason),
+            Command::RequestLanding {
+                by,
+                task,
+                branch,
+                base,
+                head,
+                commits,
+                changes,
+                reason,
+            } => self.request_landing(by, task, branch, base, head, commits, changes, reason),
             Command::ParkTask { by, task, reason } => self.park_task(by, task, reason),
             Command::ResumeTask { task } => self.resume_task(task),
             Command::AmendTask {
@@ -2590,7 +2601,6 @@ impl Engine {
         if actions.iter().all(|action| self.access_granted(task, by, action)) {
             return Ok(Vec::new());
         }
-        let mode = access.mode;
         let title = self.require_task(task)?.title.clone();
         let allow = if items == [SERVER_ITEM] { SERVER_ACCESS_ALLOW } else { ACCESS_ALLOW };
         let mut proposed = Decision::ask(
@@ -2607,6 +2617,21 @@ impl Engine {
         proposed.envelope.allowed = actions;
         proposed.envelope.environment = server_access_scope(task);
         proposed.task = Some(task);
+        self.ask_or_grant(by, task, &title, proposed, allow, risk)
+    }
+
+    /// Put an access-style request to the owner, or grant it at once when the
+    /// room's access mode approves requests of this risk.
+    fn ask_or_grant(
+        &mut self,
+        by: AgentId,
+        task: TaskId,
+        title: &str,
+        proposed: Decision,
+        allow: &str,
+        risk: orgbot_proto::room::Risk,
+    ) -> Result<Vec<EventEnvelope>> {
+        let mode = self.room.spec.access.mode;
         if !mode.approves(risk) {
             return self.put_to_owner(by, Some(task), proposed);
         }
@@ -2637,6 +2662,91 @@ impl Engine {
             events.extend(self.post_message(message)?);
         }
         Ok(events)
+    }
+
+    /// Ask the owner to land commits `by` made in its copy onto `branch`.
+    ///
+    /// From the live room: the owner asked for separate commits, and a bot's
+    /// copy keeps its own git history, so its commits never reached the
+    /// project; it shipped a bundle and asked the owner to run a script. The
+    /// workspace checks the bundle first. The owner sees exactly which commits
+    /// and answers once, and the grant covers only those commits onto that
+    /// branch from where it stood.
+    #[allow(clippy::too_many_arguments)]
+    fn request_landing(
+        &mut self,
+        by: AgentId,
+        task: TaskId,
+        branch: String,
+        base: String,
+        head: String,
+        commits: Vec<String>,
+        changes: String,
+        reason: String,
+    ) -> Result<Vec<EventEnvelope>> {
+        let spec = self.require_agent(by)?;
+        if spec.autonomy.review_only {
+            return Err(EngineError::NotPermitted {
+                agent: by,
+                action: "land commits as a review-only bot".into(),
+            });
+        }
+        let handle = spec.handle.clone();
+        let reason = reason.trim().to_string();
+        if reason.is_empty() || reason.chars().count() > 500 {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "say in 1–500 characters what the commits are".into(),
+            });
+        }
+        let commit_id = |id: &str| id.len() == 40 && id.bytes().all(|b| b.is_ascii_hexdigit());
+        if !landable_branch(&branch) || !commit_id(&base) || !commit_id(&head) || base == head {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "name a plain branch and two different full commit ids".into(),
+            });
+        }
+        if commits.is_empty() || commits.len() > 50 {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "land between 1 and 50 commits at a time".into(),
+            });
+        }
+        self.require_assignee(task, by)?;
+        let action = land_action(&branch, &base, &head);
+        if self.access_granted(task, by, &action) {
+            return Ok(Vec::new());
+        }
+        let title = self.require_task(task)?.title.clone();
+        let count = commits.len();
+        let listed: String = commits
+            .iter()
+            .take(20)
+            .map(|commit| format!("\n• {}", commit.chars().take(160).collect::<String>()))
+            .collect();
+        let more = if count > 20 { format!("\n…and {} more", count - 20) } else { String::new() };
+        let mut proposed = Decision::ask(
+            self.room.id,
+            format!(
+                "@{handle} asks to land {count} commit{} on {branch} for \"{title}\": {reason}\n\
+                 The branch moves forward from {} to {} ({}). Nothing is pushed or merged, \
+                 no history is rewritten, and no file in your project changes.{listed}{more}",
+                if count == 1 { "" } else { "s" },
+                &base[..7],
+                &head[..7],
+                changes.chars().take(160).collect::<String>(),
+            ),
+        );
+        proposed.owner_question = true;
+        proposed.options = vec![LAND_COMMITS_ALLOW.into(), LAND_COMMITS_DENY.into()];
+        proposed.envelope.allowed = vec![action];
+        proposed.envelope.environment = server_access_scope(task);
+        proposed.task = Some(task);
+        self.ask_or_grant(by, task, &title, proposed, LAND_COMMITS_ALLOW, orgbot_proto::room::Risk::Risky)
+    }
+
+    /// Whether the owner has let `agent` land exactly these commits onto
+    /// `branch` for `task`, which it must still be working.
+    pub fn landing_approved(&self, task: TaskId, agent: AgentId, branch: &str, base: &str, head: &str) -> bool {
+        self.tasks_open_to_access(agent).any(|open| open.id == task)
+            && self.access_granted(task, agent, &land_action(branch, base, head))
     }
 
     /// Change what `task` asks for, on a coordinator's decision.
@@ -2907,7 +3017,9 @@ impl Engine {
                 && decision.asked_by.contains(&agent)
                 && decision.envelope.covers(&request, now).is_ok()
                 && decision.answer.as_ref().is_some_and(|answer| {
-                    answer.chosen == SERVER_ACCESS_ALLOW || answer.chosen == ACCESS_ALLOW
+                    answer.chosen == SERVER_ACCESS_ALLOW
+                        || answer.chosen == ACCESS_ALLOW
+                        || answer.chosen == LAND_COMMITS_ALLOW
                 })
         })
     }
@@ -4452,6 +4564,20 @@ impl Engine {
         self.log.push(envelope.clone());
         envelope
     }
+}
+
+/// Whether `name` is a plain branch name a bot may ask to move: what git would
+/// accept, without anything that reads as a pattern or a path trick.
+fn landable_branch(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 100
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'))
+        && !name.starts_with(['-', '/', '.'])
+        && !name.ends_with(['/', '.'])
+        && !name.ends_with(".lock")
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name.contains("/.")
 }
 
 /// A task named as what something waits on, saying so when the owner parked

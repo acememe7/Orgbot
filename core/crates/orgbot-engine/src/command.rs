@@ -222,6 +222,28 @@ pub enum Command {
         reason: String,
     },
 
+    /// Ask the owner to land commits a bot made in its copy onto a branch of
+    /// the real repository, as a fast-forward. The workspace has already
+    /// checked the bundle; the owner sees the commits and answers once.
+    RequestLanding {
+        /// The bot asking.
+        by: AgentId,
+        /// The task it holds that the commits are for.
+        task: TaskId,
+        /// The branch to move.
+        branch: String,
+        /// Where the branch stands now.
+        base: String,
+        /// The commit it would move to.
+        head: String,
+        /// One line per commit, newest first.
+        commits: Vec<String>,
+        /// What the commits change, in git's short words.
+        changes: String,
+        /// Why, shown to the owner.
+        reason: String,
+    },
+
     /// Propose to the owner that a task nobody should work on be retired. The
     /// owner's "Retire this task" answer retires it.
     ProposeRetire {
@@ -360,6 +382,7 @@ impl Command {
             Self::RequestAccess { .. } => "request_access",
             Self::AmendTask { .. } => "amend_task",
             Self::ProposeRetire { .. } => "propose_retire",
+            Self::RequestLanding { .. } => "request_landing",
             Self::ParkTask { .. } => "park_task",
             Self::ResumeTask { .. } => "resume_task",
             Self::AnswerDecision { .. } => "answer_decision",
@@ -387,6 +410,7 @@ impl Command {
             Self::AskOwner { task: Some(task), .. } => Some(*task),
             Self::RequestServerAccess { task, .. } => Some(*task),
             Self::RequestAccess { task, .. } => Some(*task),
+            Self::RequestLanding { task, .. } => Some(*task),
             Self::AmendTask { task, .. } => Some(*task),
             _ => None,
         }

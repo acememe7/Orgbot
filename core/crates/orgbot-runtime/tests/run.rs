@@ -2647,3 +2647,24 @@ async fn nobody_is_woken_for_parked_work_and_every_bot_is_told_to_leave_it() {
     room.engine_mut().apply(Command::ResumeTask { task }).unwrap();
     assert!(room.is_actionable(builder), "resumed work is offered again");
 }
+
+#[tokio::test]
+async fn landing_commits_follows_the_rooms_access_mode() {
+    use orgbot_proto::room::AccessMode;
+    let request = |lead, task| orgbot_engine::Command::RequestLanding {
+        by: lead,
+        task,
+        branch: "main".into(),
+        base: "a".repeat(40),
+        head: "b".repeat(40),
+        commits: vec!["bbbbbbb tests: add the squad test [skip ci]".into()],
+        changes: "1 file changed".into(),
+        reason: "the owner asked for separate commits".into(),
+    };
+    let (mut room, lead, task) = access_room(AccessMode::Auto);
+    room.engine_mut().apply(request(lead, task)).unwrap();
+    assert!(room.engine().landing_approved(task, lead, "main", &"a".repeat(40), &"b".repeat(40)), "auto approves a risky landing");
+    let (mut room, lead, task) = access_room(AccessMode::HalfApproval);
+    room.engine_mut().apply(request(lead, task)).unwrap();
+    assert!(!room.engine().landing_approved(task, lead, "main", &"a".repeat(40), &"b".repeat(40)), "half approval asks");
+}
