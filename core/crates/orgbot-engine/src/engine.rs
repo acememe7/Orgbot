@@ -15,10 +15,11 @@ use orgbot_proto::agent::AgentStatus;
 use orgbot_proto::artifact::{Artifact, ArtifactBody};
 use orgbot_proto::convergence::{self, Convergence};
 use orgbot_proto::decision::{
-    lend_action, server_access_scope, task_scope, AccessAction, Answer, Decision, DecisionLog,
+    lend_action, server_access_scope, task_scope, AccessAction, AccessPlan, Answer, Decision, DecisionLog,
     Governance, Request, Settled, ACCESS_ALLOW, RETIRE_TASK, RETIRE_TASK_ALLOW, RETIRE_TASK_KEEP,
     SERVER_ACCESS, SERVER_ACCESS_ALLOW, SERVER_ACCESS_DENY, SERVER_ITEM, land_action,
-    push_action, LAND_COMMITS_ALLOW, LAND_COMMITS_DENY, PUSH_COMMITS_ALLOW, PUSH_COMMITS_DENY,
+    push_action, LAND_COMMITS_ALLOW, LAND_COMMITS_DENY, NEW_SIGN_IN_ALLOW, PUSH_COMMITS_ALLOW,
+    PUSH_COMMITS_DENY,
 };
 use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope, Seq};
 use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness, TaskKind, TaskOrigin};
@@ -145,6 +146,9 @@ pub struct Engine {
     /// File removals waiting for the owner's review, per bot and copy.
     #[serde(default)]
     pending_removals: BTreeMap<(AgentId, String), u32>,
+    /// Sign-ins bots asked the owner to add, by the decision that asks.
+    #[serde(default)]
+    proposed_sign_ins: BTreeMap<DecisionId, orgbot_proto::room::LendItem>,
     /// Every question put to the operator and every answer given, so the room
     /// can tell what it has already been told.
     ///
@@ -240,6 +244,15 @@ impl Engine {
                         if question.task.is_none() {
                             question.task = *task;
                         }
+                    }
+                }
+                Event::SignInProposed { decision, item } => {
+                    engine.proposed_sign_ins.insert(*decision, item.clone());
+                }
+                Event::SignInAdded { item } => {
+                    engine.proposed_sign_ins.retain(|_, proposed| proposed.name != item.name);
+                    if engine.room.spec.access.item(&item.name).is_none() {
+                        engine.room.spec.access.lend.push(item.clone());
                     }
                 }
                 Event::PendingRemovals { agent, copy, count } => {
@@ -401,6 +414,7 @@ impl Engine {
             board_shown: BTreeMap::new(),
             created_by: BTreeMap::new(),
             pending_removals: BTreeMap::new(),
+            proposed_sign_ins: BTreeMap::new(),
             decisions: DecisionLog::default(),
             roles: RoleTable::default(),
             governance: Governance::default(),
@@ -1991,8 +2005,8 @@ impl Engine {
                 options,
             } => self.ask_owner(by, task, question, options),
 
-            Command::RequestServerAccess { by, task, reason } => {
-                self.request_server_access(by, task, reason)
+            Command::RequestServerAccess { by, task, reason, plan } => {
+                self.request_server_access(by, task, reason, plan)
             }
             Command::RequestAccess {
                 by,
@@ -2000,7 +2014,16 @@ impl Engine {
                 items,
                 action,
                 reason,
-            } => self.request_access(by, task, items, action, reason),
+                plan,
+            } => self.request_access(by, task, items, action, reason, plan),
+            Command::RequestNewSignIn {
+                by,
+                task,
+                item,
+                action,
+                reason,
+                plan,
+            } => self.request_new_sign_in(by, task, item, action, reason, plan),
             Command::ProposeRetire { by, task, reason } => self.propose_retire(by, task, reason),
             Command::RequestLanding {
                 by,
@@ -2618,8 +2641,9 @@ impl Engine {
         by: AgentId,
         task: TaskId,
         reason: String,
+        plan: AccessPlan,
     ) -> Result<Vec<EventEnvelope>> {
-        self.request_access(by, task, vec![SERVER_ITEM.into()], AccessAction::Change, reason)
+        self.request_access(by, task, vec![SERVER_ITEM.into()], AccessAction::Change, reason, plan)
     }
 
     /// Ask to use some of what the owner lends for `task`.
@@ -2637,8 +2661,12 @@ impl Engine {
         items: Vec<String>,
         action: AccessAction,
         reason: String,
+        plan: AccessPlan,
     ) -> Result<Vec<EventEnvelope>> {
         use orgbot_proto::room::Risk;
+        if let Some(problem) = plan.problem() {
+            return Err(EngineError::InvalidOwnerQuestion { reason: problem });
+        }
         let spec = self.require_agent(by)?;
         if spec.autonomy.review_only {
             return Err(EngineError::NotPermitted {
@@ -2693,21 +2721,125 @@ impl Engine {
         }
         let title = self.require_task(task)?.title.clone();
         let allow = if items == [SERVER_ITEM] { SERVER_ACCESS_ALLOW } else { ACCESS_ALLOW };
-        let mut proposed = Decision::ask(
-            self.room.id,
+        let because = if plan == AccessPlan::default() {
             format!(
                 "@{handle} asks to use {} for \"{title}\" ({}, rated {}): {reason}",
                 labels.join(" and "),
                 action.as_str(),
                 risk.as_str()
-            ),
-        );
+            )
+        } else {
+            format!(
+                "@{handle} asks to use {} for \"{title}\" ({}, rated {}).\n{}",
+                labels.join(" and "),
+                action.as_str(),
+                risk.as_str(),
+                plan.card_lines(&reason)
+            )
+        };
+        let mut proposed = Decision::ask(self.room.id, because);
         proposed.owner_question = true;
         proposed.options = vec![allow.into(), SERVER_ACCESS_DENY.into()];
         proposed.envelope.allowed = actions;
         proposed.envelope.environment = server_access_scope(task);
         proposed.task = Some(task);
         self.ask_or_grant(by, task, &title, proposed, allow, risk)
+    }
+
+    /// Ask the owner to add a sign-in that is not on their list and lend it
+    /// for `task`.
+    ///
+    /// From the live room: the owner asked whether bots can ask for something
+    /// on the computer that is not listed. A request for an unlisted name was
+    /// refused, so a bot had no way to say what it needed. This is always put
+    /// to the owner, whatever the room's access mode, and rated at least risky.
+    /// Allowing it adds the sign-in to the room, hidden from every other bot,
+    /// and lends it to this bot for this task only.
+    fn request_new_sign_in(
+        &mut self,
+        by: AgentId,
+        task: TaskId,
+        item: orgbot_proto::room::LendItem,
+        action: AccessAction,
+        reason: String,
+        plan: AccessPlan,
+    ) -> Result<Vec<EventEnvelope>> {
+        use orgbot_proto::room::{LendItem, Risk};
+        let spec = self.require_agent(by)?;
+        if spec.autonomy.review_only {
+            return Err(EngineError::NotPermitted {
+                agent: by,
+                action: "ask for the owner's sign-ins as a review-only bot".into(),
+            });
+        }
+        let handle = spec.handle.clone();
+        let reason = reason.trim().to_string();
+        if reason.is_empty() || reason.chars().count() > 500 {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "say in 1–500 characters what you will do with it".into(),
+            });
+        }
+        if plan.why.trim().is_empty() {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "say why the work needs it".into(),
+            });
+        }
+        if let Some(problem) = plan.problem() {
+            return Err(EngineError::InvalidOwnerQuestion { reason: problem });
+        }
+        let risk = action.risk().max(Risk::Risky);
+        let mut paths: Vec<String> = item.paths.iter().map(|path| path.trim().trim_start_matches("~/").to_string()).collect();
+        paths.sort();
+        paths.dedup();
+        let item = LendItem {
+            name: item.name.trim().to_string(),
+            label: item.label.trim().chars().take(80).collect(),
+            paths,
+            risk,
+        };
+        if item.paths.len() > 4 {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "name at most 4 folders or files".into(),
+            });
+        }
+        if let Some(problem) = item.problem() {
+            return Err(EngineError::InvalidOwnerQuestion { reason: problem });
+        }
+        if self.room.spec.access.item(&item.name).is_some() {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: format!("the owner already lends \"{}\"; ask for it with request_access", item.name),
+            });
+        }
+        self.require_assignee(task, by)?;
+        let title = self.require_task(task)?.title.clone();
+        let label = if item.label.is_empty() { item.name.clone() } else { item.label.clone() };
+        let places: Vec<String> = item.paths.iter().map(|path| format!("~/{path}")).collect();
+        let mut proposed = Decision::ask(
+            self.room.id,
+            format!(
+                "@{handle} asks you to add a new sign-in, {label} ({}), and use it for \"{title}\" ({}, rated {}).\n{}\nAllowing adds it to your sign-ins as \"{}\" and lends it to @{handle} for this task only.",
+                places.join(", "),
+                action.as_str(),
+                risk.as_str(),
+                plan.card_lines(&reason),
+                item.name
+            ),
+        );
+        proposed.owner_question = true;
+        proposed.options = vec![NEW_SIGN_IN_ALLOW.into(), SERVER_ACCESS_DENY.into()];
+        proposed.envelope.allowed = vec![lend_action(&item.name)];
+        proposed.envelope.environment = server_access_scope(task);
+        proposed.task = Some(task);
+        let mut events = self.ask_and_wait(by, task, proposed)?;
+        let asked = events.iter().find_map(|envelope| match &envelope.event {
+            Event::DecisionAsked { decision } => Some(decision.id),
+            _ => None,
+        });
+        if let Some(decision) = asked {
+            self.proposed_sign_ins.insert(decision, item.clone());
+            events.push(self.emit(Event::SignInProposed { decision, item }));
+        }
+        Ok(events)
     }
 
     /// Put an access-style request to the owner, or grant it at once when the
@@ -3297,6 +3429,7 @@ impl Engine {
                 && decision.answer.as_ref().is_some_and(|answer| {
                     answer.chosen == SERVER_ACCESS_ALLOW
                         || answer.chosen == ACCESS_ALLOW
+                        || answer.chosen == NEW_SIGN_IN_ALLOW
                         || answer.chosen == LAND_COMMITS_ALLOW
                         || answer.chosen == PUSH_COMMITS_ALLOW
                 })
@@ -3465,6 +3598,12 @@ impl Engine {
             decision,
             answer: answer.clone(),
         })];
+        if let Some(item) = self.proposed_sign_ins.remove(&decision) {
+            if answer.chosen == NEW_SIGN_IN_ALLOW && self.room.spec.access.item(&item.name).is_none() {
+                self.room.spec.access.lend.push(item.clone());
+                events.push(self.emit(Event::SignInAdded { item }));
+            }
+        }
 
         if !settled.asked_by.is_empty() {
             let owner = self.owner_name();

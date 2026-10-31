@@ -52,6 +52,7 @@ RoomFile buildRoomFile(
   List<String> priorBoards = const [],
   DesktopIntegrationSnapshot? desktopIntegrations,
   List<LendEntry> lend = const [],
+  List<String> hide = const [],
 }) {
   // A CLI can only run where the binary exists. Everywhere else — a phone,
   // most obviously — the same subscription is reached through its API with
@@ -72,8 +73,12 @@ RoomFile buildRoomFile(
     ..writeln('completion = "all_tasks_terminal"')
     // What bots may use without asking you; questions about the work
     // itself always come to you.
-    ..writeln('access = ' + _s(room.access.wire))
-    ..writeln();
+    ..writeln('access = ' + _s(room.access.wire));
+  // Sign-ins on your list that are switched off: hidden from every bot.
+  if (hide.isNotEmpty) {
+    buffer.writeln('hide = [' + hide.map(_s).join(', ') + ']');
+  }
+  buffer.writeln();
 
   if (statePath != null) buffer.writeln('state_path = ${_s(statePath)}\n');
 

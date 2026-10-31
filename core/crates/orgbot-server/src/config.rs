@@ -200,6 +200,10 @@ pub struct RoomSection {
     /// The owner's sign-ins they lend bots, each for one approved task.
     #[serde(default)]
     pub lend: Vec<orgbot_proto::room::LendItem>,
+    /// Sign-ins on the owner's list that are switched off: hidden from every
+    /// bot and never lent.
+    #[serde(default)]
+    pub hide: Vec<String>,
 }
 
 /// The completion rule, as a friendly string in TOML.
@@ -695,7 +699,7 @@ impl RoomConfig {
             })
             .collect();
 
-        validate_lend(&self.room.lend)?;
+        validate_lend(&self.room.lend, &self.room.hide)?;
         let spec = RoomSpec {
             name: self.room.name.clone(),
             goal: self.room.goal.clone(),
@@ -705,6 +709,7 @@ impl RoomConfig {
             access: orgbot_proto::room::RoomAccess {
                 mode: self.room.access,
                 lend: self.room.lend.clone(),
+                hide: self.room.hide.clone(),
             },
         };
 
@@ -811,49 +816,21 @@ type SeedTaskId = TaskId;
 /// not reach outside it or into what OrgBots never lends (its own data, SSH
 /// and GnuPG keys, and the model CLIs' sign-ins, which bots get their own
 /// copies of). The sandbox launcher checks paths again before mounting them.
-fn validate_lend(lend: &[orgbot_proto::room::LendItem]) -> Result<(), ConfigError> {
-    const NEVER: &[&str] = &[
-        ".local/share/orgbot", ".config/orgbot", ".local/share/com.orgbot.app",
-        ".ssh", ".gnupg", ".codex", ".claude", ".claude.json", ".grok",
-        ".gemini", ".config/opencode", ".local/share/opencode",
-    ];
+fn validate_lend(lend: &[orgbot_proto::room::LendItem], hide: &[String]) -> Result<(), ConfigError> {
     let mut names = std::collections::BTreeSet::new();
     for item in lend {
-        let name = item.name.as_str();
-        let valid_name = !name.is_empty()
-            && name.len() <= 40
-            && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
-        if !valid_name || name == orgbot_proto::decision::SERVER_ITEM {
+        if let Some(problem) = item.problem() {
+            return Err(ConfigError::Invalid(problem));
+        }
+        if !names.insert(item.name.as_str()) {
+            return Err(ConfigError::Invalid(format!("lent sign-in `{}` is listed twice", item.name)));
+        }
+    }
+    for path in hide {
+        if !orgbot_proto::room::plain_home_path(path) {
             return Err(ConfigError::Invalid(format!(
-                "lent sign-in name `{name}` must be 1-40 lowercase letters, digits, - or _, and not `server`"
+                "hidden path `{path}` must be a plain path relative to your home"
             )));
-        }
-        if !names.insert(name) {
-            return Err(ConfigError::Invalid(format!("lent sign-in `{name}` is listed twice")));
-        }
-        if item.paths.is_empty() {
-            return Err(ConfigError::Invalid(format!("lent sign-in `{name}` names no paths")));
-        }
-        for path in &item.paths {
-            let parts: Vec<&str> = path.split('/').collect();
-            let clean = !path.is_empty()
-                && !path.starts_with('/')
-                && parts.iter().all(|part| !part.is_empty() && *part != "." && *part != "..");
-            if !clean {
-                return Err(ConfigError::Invalid(format!(
-                    "lent sign-in `{name}` path `{path}` must be a plain path relative to your home"
-                )));
-            }
-            let forbidden = NEVER.iter().any(|never| {
-                path == never
-                    || path.starts_with(&format!("{never}/"))
-                    || never.starts_with(&format!("{path}/"))
-            });
-            if forbidden {
-                return Err(ConfigError::Invalid(format!(
-                    "lent sign-in `{name}` path `{path}` is never lent to bots"
-                )));
-            }
         }
     }
     Ok(())
@@ -907,6 +884,25 @@ mod tests {
         // Older room files have neither and keep asking for everything.
         let older = RoomConfig::parse(SAMPLE, "sample.toml").unwrap().resolve().unwrap();
         assert_eq!(older.spec.access, orgbot_proto::room::RoomAccess::default());
+    }
+
+    #[test]
+    fn switched_off_sign_ins_are_hidden_from_every_bot() {
+        // From the live room: a sign-in the owner added and then switched off
+        // was left out of the room file, so nothing hid it.
+        let toml = SAMPLE.replace(
+            "completion = \"all_tasks_terminal\"",
+            "completion = \"all_tasks_terminal\"\nhide = [\".config/mytool\", \".docker/config.json\"]",
+        );
+        let resolved = RoomConfig::parse(&toml, "hide.toml").unwrap().resolve().unwrap();
+        let hidden = resolved.spec.access.all_paths();
+        assert!(hidden.contains(&".config/mytool".to_string()), "{hidden:?}");
+        assert!(resolved.spec.access.lend.is_empty(), "a hidden path is never offered");
+        let outside = SAMPLE.replace(
+            "completion = \"all_tasks_terminal\"",
+            "completion = \"all_tasks_terminal\"\nhide = [\"../etc\"]",
+        );
+        assert!(RoomConfig::parse(&outside, "hide.toml").unwrap().resolve().is_err());
     }
 
     #[test]

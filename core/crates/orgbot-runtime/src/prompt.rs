@@ -717,7 +717,13 @@ fn access_rules(access: &orgbot_proto::room::RoomAccess) -> String {
          owner's sign-ins. If a task you hold needs one (deploying, reading server logs, \
          publishing with a tool the owner is signed in to), call request_access with that \
          task, what you will use, what you will do (inspect, change, release, destroy or \
-         spend: say it honestly, it decides who approves) and why. The owner lends: {}. {mode} \
+         spend: say it honestly, it decides who approves), why the work needs it, the \
+         commands you plan to run, and what happens if the owner says no. The owner sees \
+         each of these on the card. The owner lends: {}. {mode} \
+         If the work needs a sign-in of the owner's that is not listed (a tool's sign-in \
+         under their home, such as .docker/config.json), ask with request_new_sign_in, \
+         naming where it lives; it always waits for the owner, and allowing it adds it to \
+         their list. \
          A request is rated the higher of what you will do and what you use. Once allowed, it \
          is in your sandbox only while you work that task, and not while it is blocked, \
          waiting on unfinished work, on hold, in review or done. Never deploy or change a live \

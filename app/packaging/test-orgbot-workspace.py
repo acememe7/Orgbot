@@ -5,6 +5,7 @@ import io
 import importlib.util
 import json
 import os
+import re
 import signal
 import shutil
 import socket
@@ -481,6 +482,17 @@ class WorkspaceTests(unittest.TestCase):
         second = self.prepare("b-verify", read_only=True)
         self.assertNotEqual((first / "media.bin").stat().st_ino, (second / "media.bin").stat().st_ino)
         self.assertEqual((second / "media.bin").read_bytes(), b"a" * (100 * 1024))
+
+    def test_every_sign_in_the_app_knows_is_hidden_in_every_sandbox(self):
+        # The app lists these for the owner to lend; a bot must not read one
+        # the owner has not lent, whatever a room file says.
+        dart = (Path(__file__).resolve().parent.parent / "lib/orgbot/lend_settings.dart").read_text(encoding="utf-8")
+        groups = re.findall(r"_known\(\s*'[^']+',\s*'[^']+',\s*\[([^\]]+)\]", dart)
+        paths = [path for group in groups for path in re.findall(r"'([^']+)'", group)]
+        self.assertGreater(len(paths), 30)
+        for path in paths:
+            covered = any(path == d or path.startswith(d + "/") for d in workspace._OWNER_SECRET_DIRS) or path in workspace._OWNER_SECRET_FILES
+            self.assertTrue(covered, path)
 
     def test_deletion_requires_explicit_owner_approval(self):
         work = self.prepare()

@@ -3157,6 +3157,7 @@ fn ask_for_server(f: &mut Fixture, task: TaskId, by: AgentId) -> orgbot_proto::D
         by,
         task,
         reason: "deploy the reviewed build to the game server".into(),
+        plan: Default::default(),
     });
     asked_decision(&events)
 }
@@ -3180,6 +3181,7 @@ fn the_server_key_is_granted_by_the_owner_for_one_task_while_it_is_under_way() {
         by: worker,
         task,
         reason: "deploy the reviewed build to the game server".into(),
+        plan: Default::default(),
     });
     assert!(
         !again.iter().any(|e| matches!(e.event, Event::DecisionAsked { .. })),
@@ -3257,16 +3259,19 @@ fn only_the_bot_holding_the_task_may_ask_for_the_server_key() {
         by: worker2,
         task,
         reason: reason(),
+        plan: Default::default(),
     });
     f.reject(Command::RequestServerAccess {
         by: inspector,
         task,
         reason: reason(),
+        plan: Default::default(),
     });
     f.reject(Command::RequestServerAccess {
         by: worker,
         task,
         reason: "  ".into(),
+        plan: Default::default(),
     });
 }
 

@@ -203,6 +203,8 @@ pub enum Command {
         task: TaskId,
         /// Why, shown to the owner.
         reason: String,
+        /// Why it is needed, the commands planned and what happens if denied.
+        plan: orgbot_proto::decision::AccessPlan,
     },
 
     /// Ask to use some of what the owner lends (the bot server key and the
@@ -220,6 +222,26 @@ pub enum Command {
         action: orgbot_proto::decision::AccessAction,
         /// Why, shown to the owner.
         reason: String,
+        /// Why it is needed, the commands planned and what happens if denied.
+        plan: orgbot_proto::decision::AccessPlan,
+    },
+
+    /// Ask the owner to add a sign-in that is not on their list, such as a
+    /// tool's config under their home, and lend it for a task the bot holds.
+    /// Always asked, whatever the room's access mode.
+    RequestNewSignIn {
+        /// The bot asking, which must hold the task.
+        by: AgentId,
+        /// The task it is for.
+        task: TaskId,
+        /// The sign-in: the name to ask for, what it is, and where it lives.
+        item: orgbot_proto::room::LendItem,
+        /// What it says it will do, which can only raise the rating.
+        action: orgbot_proto::decision::AccessAction,
+        /// What it will do with it, shown to the owner.
+        reason: String,
+        /// Why it is needed, the commands planned and what happens if denied.
+        plan: orgbot_proto::decision::AccessPlan,
     },
 
     /// Ask the owner to land commits a bot made in its copy onto a branch of
@@ -421,6 +443,7 @@ impl Command {
             Self::AskOwner { .. } => "ask_owner",
             Self::RequestServerAccess { .. } => "request_server_access",
             Self::RequestAccess { .. } => "request_access",
+            Self::RequestNewSignIn { .. } => "request_new_sign_in",
             Self::AmendTask { .. } => "amend_task",
             Self::ProposeRetire { .. } => "propose_retire",
             Self::RequestLanding { .. } => "request_landing",
@@ -453,6 +476,7 @@ impl Command {
             Self::AskOwner { task: Some(task), .. } => Some(*task),
             Self::RequestServerAccess { task, .. } => Some(*task),
             Self::RequestAccess { task, .. } => Some(*task),
+            Self::RequestNewSignIn { task, .. } => Some(*task),
             Self::RequestLanding { task, .. } => Some(*task),
             Self::RequestPush { task, .. } => Some(*task),
             Self::AmendTask { task, .. } => Some(*task),

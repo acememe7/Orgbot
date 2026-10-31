@@ -137,27 +137,60 @@ void main() {
     expect(toml, contains('max_parallel_turns = 1'));
   });
 
-  test('the room file carries the access mode and only the sign-ins you lend', () {
-    final bot = BotDef(name: 'Demo', provider: ProviderKind.scripted);
-    final lent = LendEntry(
-      name: 'wrangler',
-      label: 'Cloudflare (Wrangler)',
-      paths: ['.config/.wrangler'],
-      enabled: true,
-    );
-    final off = LendEntry(name: 'gh', label: 'GitHub CLI', paths: ['.config/gh']);
-    final toml = buildRoomFile(
-      RoomDef(name: 'Release', goal: 'ship it', access: AccessMode.halfApproval),
-      [bot],
-      canRunClis: false,
-      lend: [lent, off],
-    ).toml;
-    expect(toml, contains('access = "half_approval"'));
-    expect(toml, contains('[[room.lend]]\nname = "wrangler"'));
-    expect(toml, contains('paths = [".config/.wrangler"]'));
-    expect(toml, contains('risk = "risky"'));
-    expect(toml, isNot(contains('"gh"')), reason: 'a sign-in you did not turn on is not offered');
-  });
+  test(
+    'the room file carries the access mode and only the sign-ins you lend',
+    () {
+      final bot = BotDef(name: 'Demo', provider: ProviderKind.scripted);
+      final lent = LendEntry(
+        name: 'wrangler',
+        label: 'Cloudflare (Wrangler)',
+        paths: ['.config/.wrangler'],
+        enabled: true,
+      );
+      final off = LendEntry(
+        name: 'gh',
+        label: 'GitHub CLI',
+        paths: ['.config/gh'],
+      );
+      final toml = buildRoomFile(
+        RoomDef(
+          name: 'Release',
+          goal: 'ship it',
+          access: AccessMode.halfApproval,
+        ),
+        [bot],
+        canRunClis: false,
+        lend: [lent, off],
+      ).toml;
+      expect(toml, contains('access = "half_approval"'));
+      expect(toml, contains('[[room.lend]]\nname = "wrangler"'));
+      expect(toml, contains('paths = [".config/.wrangler"]'));
+      expect(toml, contains('risk = "risky"'));
+      expect(
+        toml,
+        isNot(contains('"gh"')),
+        reason: 'a sign-in you did not turn on is not offered',
+      );
+    },
+  );
+
+  test(
+    'switched-off sign-ins are written as hidden paths in the room table',
+    () {
+      final bot = BotDef(name: 'Demo', provider: ProviderKind.scripted);
+      final toml = buildRoomFile(
+        RoomDef(name: 'Release', goal: 'ship it'),
+        [bot],
+        canRunClis: false,
+        hide: ['.config/gh', '.config/mytool'],
+      ).toml;
+      final room = toml.substring(
+        toml.indexOf('[room]'),
+        toml.indexOf('\n\n', toml.indexOf('access =')),
+      );
+      expect(room, contains('hide = [".config/gh", ".config/mytool"]'));
+    },
+  );
 
   test('a room saved before access modes existed asks for everything', () {
     final restored = RoomDef.fromJson({'id': 'room_old', 'name': 'Existing'});

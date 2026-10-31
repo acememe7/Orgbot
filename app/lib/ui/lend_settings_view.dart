@@ -48,7 +48,8 @@ class _LendSettingsViewState extends State<LendSettingsView> {
     if (settings == null) return;
     final added = await showDialog<LendEntry>(
       context: context,
-      builder: (context) => _AddSignInDialog(taken: {for (final e in settings.entries) e.name}),
+      builder: (context) =>
+          _AddSignInDialog(taken: {for (final e in settings.entries) e.name}),
     );
     if (added != null) _change(() => settings.entries.add(added));
   }
@@ -72,6 +73,7 @@ class _LendSettingsViewState extends State<LendSettingsView> {
           ),
         ),
         if (_error != null) ListTile(title: Text(_error!)),
+        if (settings != null) ..._found(settings),
         if (settings != null)
           for (final entry in settings.entries)
             _LendTile(
@@ -86,14 +88,66 @@ class _LendSettingsViewState extends State<LendSettingsView> {
             ),
         Align(
           alignment: Alignment.centerRight,
-          child: TextButton.icon(
-            onPressed: settings == null ? null : _add,
-            icon: const Icon(Icons.add),
-            label: const Text('Add a sign-in'),
+          child: Wrap(
+            spacing: 8,
+            children: [
+              TextButton.icon(
+                onPressed: _open,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Look again'),
+              ),
+              TextButton.icon(
+                onPressed: settings == null ? null : _add,
+                icon: const Icon(Icons.add),
+                label: const Text('Add a sign-in'),
+              ),
+            ],
           ),
         ),
       ],
     );
+  }
+
+  /// Sign-ins on this computer that are not turned on, and tools installed
+  /// here without a sign-in yet.
+  List<Widget> _found(LendSettings settings) {
+    final found = settings.found;
+    final unsigned = settings.installedNotSignedIn;
+    if (found.isEmpty && unsigned.isEmpty) return const [];
+    final theme = Theme.of(context);
+    return [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+        child: Text(
+          'Found on this computer',
+          style: theme.textTheme.titleSmall,
+        ),
+      ),
+      for (final entry in found)
+        ListTile(
+          key: ValueKey('found-${entry.name}'),
+          dense: true,
+          title: Text(entry.label),
+          subtitle: Text(
+            '${entry.paths.map((path) => '~/$path').join(', ')} · signed in, not turned on',
+          ),
+          trailing: TextButton(
+            onPressed: () => _change(() => entry.enabled = true),
+            child: const Text('Turn on'),
+          ),
+        ),
+      if (unsigned.isNotEmpty)
+        ListTile(
+          key: const ValueKey('installed-not-signed-in'),
+          dense: true,
+          title: Text(
+            'Installed, not signed in: '
+            '${unsigned.map((entry) => entry.label).join(', ')}. '
+            'Sign in with the tool first, then look again.',
+          ),
+        ),
+      const Divider(height: 1),
+    ];
   }
 }
 
@@ -142,10 +196,7 @@ class _LendTile extends StatelessWidget {
             onPressed: onRemove,
             icon: const Icon(Icons.delete_outline),
           ),
-        Switch(
-          value: entry.enabled,
-          onChanged: onEnabled,
-        ),
+        Switch(value: entry.enabled, onChanged: onEnabled),
       ],
     ),
   );
@@ -212,11 +263,17 @@ class _AddSignInDialogState extends State<_AddSignInDialog> {
         children: [
           TextField(
             controller: _name,
-            decoration: const InputDecoration(labelText: 'Name bots ask for', hintText: 'mytool'),
+            decoration: const InputDecoration(
+              labelText: 'Name bots ask for',
+              hintText: 'mytool',
+            ),
           ),
           TextField(
             controller: _label,
-            decoration: const InputDecoration(labelText: 'What you call it', hintText: 'My tool'),
+            decoration: const InputDecoration(
+              labelText: 'What you call it',
+              hintText: 'My tool',
+            ),
           ),
           TextField(
             controller: _path,
@@ -238,13 +295,19 @@ class _AddSignInDialogState extends State<_AddSignInDialog> {
           if (_problem != null)
             Padding(
               padding: const EdgeInsets.only(top: 12),
-              child: Text(_problem!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+              child: Text(
+                _problem!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
             ),
         ],
       ),
     ),
     actions: [
-      TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
       FilledButton(onPressed: _submit, child: const Text('Add sign-in')),
     ],
   );

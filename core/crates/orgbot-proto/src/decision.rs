@@ -50,6 +50,60 @@ pub fn lend_action(name: &str) -> String {
 /// The answer that grants a request including one of the owner's sign-ins.
 pub const ACCESS_ALLOW: &str = "Allow for this task";
 
+/// The answer that adds a sign-in a bot asked for to the owner's list and
+/// lends it for that task.
+pub const NEW_SIGN_IN_ALLOW: &str = "Add it and allow for this task";
+
+/// What a bot says about a request beyond what it will do, for the owner's
+/// card.
+///
+/// From the live room: the owner asked whether bots say exactly why they need
+/// something and what it would do. A request carried one sentence for both.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AccessPlan {
+    /// Why the work needs it.
+    pub why: String,
+    /// The commands the bot plans to run with it.
+    pub commands: Vec<String>,
+    /// What happens to the work if the owner says no.
+    pub if_denied: String,
+}
+
+impl AccessPlan {
+    /// What is wrong with the plan, if anything.
+    pub fn problem(&self) -> Option<String> {
+        if self.why.trim().chars().count() > 500 {
+            return Some("say why in at most 500 characters".into());
+        }
+        if self.if_denied.trim().chars().count() > 300 {
+            return Some("say what happens if denied in at most 300 characters".into());
+        }
+        if self.commands.len() > 10 || self.commands.iter().any(|c| c.trim().is_empty() || c.chars().count() > 200) {
+            return Some("list at most 10 commands, each 1-200 characters".into());
+        }
+        None
+    }
+
+    /// The card's lines after its first: why, what, commands, if denied.
+    /// Empty parts are left out.
+    pub fn card_lines(&self, will_do: &str) -> String {
+        let mut lines = Vec::new();
+        if !self.why.trim().is_empty() {
+            lines.push(format!("Why: {}", self.why.trim()));
+        }
+        lines.push(format!("Will do: {}", will_do.trim()));
+        if !self.commands.is_empty() {
+            let commands: Vec<String> = self.commands.iter().map(|c| format!("`{}`", c.trim())).collect();
+            lines.push(format!("Commands: {}", commands.join("; ")));
+        }
+        if !self.if_denied.trim().is_empty() {
+            lines.push(format!("If denied: {}", self.if_denied.trim()));
+        }
+        lines.join("\n")
+    }
+}
+
 /// The answer that lets a bot land the commits it asked to land.
 pub const LAND_COMMITS_ALLOW: &str = "Land these commits";
 

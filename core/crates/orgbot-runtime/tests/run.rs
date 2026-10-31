@@ -1957,6 +1957,7 @@ async fn a_bot_turn_carries_the_server_key_only_once_the_owner_allows_it() {
             by: ops,
             task,
             reason: "deploy the reviewed build".into(),
+            plan: Default::default(),
         })
         .unwrap();
     let decision = asked
@@ -2263,6 +2264,7 @@ fn access_room(
                     risk: Risk::Regular,
                 },
             ],
+            hide: vec![],
         },
     });
     let lead = room
@@ -2312,6 +2314,7 @@ fn ask_access(
         items: items.iter().map(|item| item.to_string()).collect(),
         action,
         reason: "publish the verified build".into(),
+        plan: Default::default(),
     })
 }
 
@@ -2399,6 +2402,138 @@ async fn an_owner_answer_lends_a_sign_in_for_the_task() {
     assert_eq!(room.engine().lendable_paths().len(), 2, "every lent path stays hidden from other turns");
     let situation = orgbot_runtime::prompt::situation(&room.engine(), lead, orgbot_proto::event::Seq::ZERO);
     assert!(situation.contains("Cloudflare (Wrangler) (in ~/.config/.wrangler)"), "{situation}");
+}
+
+#[tokio::test]
+async fn a_request_card_says_why_what_the_commands_and_what_happens_if_denied() {
+    use orgbot_proto::decision::{AccessAction, AccessPlan};
+    // From the live room: the owner asked whether bots say exactly why they
+    // need something and what it would do.
+    let (mut room, lead, task) = access_room(orgbot_proto::room::AccessMode::Approval);
+    let asked = room
+        .engine_mut()
+        .apply(orgbot_engine::Command::RequestAccess {
+            by: lead,
+            task,
+            items: vec!["wrangler".into()],
+            action: AccessAction::Release,
+            reason: "publish the verified build to Pages".into(),
+            plan: AccessPlan {
+                why: "the site is hosted on Cloudflare Pages and only Wrangler can deploy it".into(),
+                commands: vec!["npx wrangler pages deploy dist".into()],
+                if_denied: "the build stays verified locally and unpublished".into(),
+            },
+        })
+        .unwrap();
+    let because = asked
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::DecisionAsked { decision } => Some(decision.because.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        because,
+        "@lead asks to use Cloudflare (Wrangler) for \"Publish the website\" (release, rated risky).\n\
+         Why: the site is hosted on Cloudflare Pages and only Wrangler can deploy it\n\
+         Will do: publish the verified build to Pages\n\
+         Commands: `npx wrangler pages deploy dist`\n\
+         If denied: the build stays verified locally and unpublished"
+    );
+}
+
+fn ask_new_sign_in(
+    room: &mut Orchestrator,
+    by: orgbot_proto::AgentId,
+    task: orgbot_proto::TaskId,
+    name: &str,
+    paths: &[&str],
+) -> Result<Vec<orgbot_proto::EventEnvelope>, orgbot_engine::EngineError> {
+    room.engine_mut().apply(orgbot_engine::Command::RequestNewSignIn {
+        by,
+        task,
+        item: orgbot_proto::room::LendItem {
+            name: name.into(),
+            label: "Docker Hub".into(),
+            paths: paths.iter().map(|path| path.to_string()).collect(),
+            risk: orgbot_proto::room::Risk::Regular,
+        },
+        action: orgbot_proto::decision::AccessAction::Change,
+        reason: "push the capture image".into(),
+        plan: orgbot_proto::decision::AccessPlan {
+            why: "the capture runs from an image on Docker Hub".into(),
+            commands: vec!["docker push protest/capture:latest".into()],
+            if_denied: "the capture runs only on this computer".into(),
+        },
+    })
+}
+
+#[tokio::test]
+async fn a_bot_can_ask_for_a_sign_in_that_is_not_listed_and_the_owner_adds_it() {
+    use orgbot_proto::decision::{Answer, NEW_SIGN_IN_ALLOW};
+    // From the live room: a request for anything not on the owner's list was
+    // refused, so a bot had no way to say what it needed.
+    let (mut room, lead, task) = access_room(orgbot_proto::room::AccessMode::FullWrite);
+    let asked = ask_new_sign_in(&mut room, lead, task, "dockerhub", &["~/.docker/config.json"]).unwrap();
+    assert_eq!(pending_count(&room), 1, "a new sign-in is asked even in Full write");
+    let decision = asked
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::DecisionAsked { decision } => Some(decision.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(decision.because.starts_with(
+        "@lead asks you to add a new sign-in, Docker Hub (~/.docker/config.json), and use it for \"Publish the website\" (change, rated risky)."
+    ), "{}", decision.because);
+    assert!(decision.because.contains("If denied: the capture runs only on this computer"));
+    assert_eq!(decision.options[0], NEW_SIGN_IN_ALLOW);
+    assert!(room.engine().lent_paths_for(lead).is_empty(), "nothing is lent before the owner answers");
+    room.engine_mut()
+        .apply(orgbot_engine::Command::AnswerDecision {
+            decision: decision.id,
+            answer: Answer { chosen: NEW_SIGN_IN_ALLOW.into(), note: String::new(), at: orgbot_proto::Timestamp::now() },
+        })
+        .unwrap();
+    assert_eq!(room.engine().lent_paths_for(lead), vec![".docker/config.json".to_string()]);
+    assert!(room.engine().lendable_paths().contains(&".docker/config.json".to_string()), "hidden from every other bot");
+    let added = room.engine().room().spec.access.item("dockerhub").cloned().unwrap();
+    assert_eq!(added.risk, orgbot_proto::room::Risk::Risky, "a bot cannot rate its own request below risky");
+    assert!(room.engine().log().iter().any(|e| matches!(&e.event, orgbot_proto::Event::SignInAdded { item } if item.name == "dockerhub")));
+
+    // A restored room keeps it.
+    let mut saved = room.engine().room().clone();
+    saved.spec.access.lend.retain(|item| item.name != "dockerhub");
+    let restored = orgbot_engine::Engine::from_archive(saved, room.engine().log().to_vec()).unwrap();
+    assert!(restored.room().spec.access.item("dockerhub").is_some());
+}
+
+#[tokio::test]
+async fn a_new_sign_in_is_refused_for_what_is_never_lent_or_already_listed_and_kept_out_when_denied() {
+    use orgbot_proto::decision::{Answer, SERVER_ACCESS_DENY};
+    let (mut room, lead, task) = access_room(orgbot_proto::room::AccessMode::Approval);
+    let ssh = ask_new_sign_in(&mut room, lead, task, "keys", &[".ssh/id_ed25519"]).unwrap_err();
+    assert!(ssh.to_string().contains("never lent"), "{ssh}");
+    let outside = ask_new_sign_in(&mut room, lead, task, "etc", &["../../etc/shadow"]).unwrap_err();
+    assert!(outside.to_string().contains("plain path"), "{outside}");
+    let listed = ask_new_sign_in(&mut room, lead, task, "wrangler", &[".config/other"]).unwrap_err();
+    assert!(listed.to_string().contains("request_access"), "{listed}");
+    let asked = ask_new_sign_in(&mut room, lead, task, "dockerhub", &[".docker/config.json"]).unwrap();
+    let decision = asked
+        .iter()
+        .find_map(|event| match &event.event {
+            orgbot_proto::Event::DecisionAsked { decision } => Some(decision.id),
+            _ => None,
+        })
+        .unwrap();
+    room.engine_mut()
+        .apply(orgbot_engine::Command::AnswerDecision {
+            decision,
+            answer: Answer { chosen: SERVER_ACCESS_DENY.into(), note: String::new(), at: orgbot_proto::Timestamp::now() },
+        })
+        .unwrap();
+    assert!(room.engine().room().spec.access.item("dockerhub").is_none());
+    assert!(room.engine().lent_paths_for(lead).is_empty());
 }
 
 /// Says it is about to change the code, every turn, and changes nothing: the

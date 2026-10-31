@@ -258,6 +258,44 @@ void main() {
       store.dispose();
     },
   );
+  test('a sign-in the owner allowed is kept once, as it happens', () async {
+    final client = FakeClient();
+    final store = RoomStore(client);
+    final kept = <String>[];
+    store.onSignInAdded = (item) => kept.add(item['name'] as String);
+    final added = event({
+      'event': 'sign_in_added',
+      'item': {
+        'name': 'docker',
+        'label': 'Docker Hub',
+        'paths': ['.docker/config.json'],
+        'risk': 'risky',
+      },
+    }, seq: 1);
+    store.restore([
+      {'type': 'snapshot', 'head': 0, 'roster': [], 'tasks': []},
+      added,
+    ]);
+    expect(
+      kept,
+      isEmpty,
+      reason: 'a restored transcript does not add it again',
+    );
+    client.emit(
+      event({
+        'event': 'sign_in_added',
+        'item': {
+          'name': 'capture',
+          'label': 'Capture',
+          'paths': ['.config/capture'],
+          'risk': 'risky',
+        },
+      }, seq: 2),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(kept, ['capture']);
+    store.dispose();
+  });
   test('a bot reset from faulted stops showing its old failure', () async {
     final client = FakeClient();
     final store = RoomStore(client);
@@ -579,82 +617,108 @@ void main() {
         'task': 'task_1',
         'title': 'fix the squad count',
         'by': 'bot_lead',
-        'acceptance_criteria': ['late parties are seated', 'a direct test covers the last resort'],
+        'acceptance_criteria': [
+          'late parties are seated',
+          'a direct test covers the last resort',
+        ],
         'reason': 'the join-level test is waived',
       }, seq: 2),
     );
     await Future<void>.delayed(Duration.zero);
 
-    expect(store.tasks.first.acceptanceCriteria, ['late parties are seated', 'a direct test covers the last resort']);
-    expect(store.tasks.first.brief, 'b', reason: 'the brief stays when only the criteria change');
-  });
-
-  test('a parked task drops its holder, and park and resume reach the room', () async {
-    final client = FakeClient();
-    final store = RoomStore(client);
-
-    client.emit(
-      event({
-        'event': 'task_created',
-        'task': {
-          'id': 'task_1',
-          'title': 'launch readiness',
-          'brief': 'b',
-          'state': 'in_progress',
-          'priority': 'normal',
-          'revision': 0,
-          'assignee': 'bot_b',
-        },
-      }),
-    );
-    client.emit(
-      event({
-        'event': 'task_transitioned',
-        'task': 'task_1',
-        'from': 'in_progress',
-        'to': 'parked',
-        'transition': {'transition': 'park', 'reason': 'after the launch'},
-      }, seq: 2),
-    );
-    await Future<void>.delayed(Duration.zero);
-
-    final task = store.tasks.first;
-    expect(task.state, TaskState.parked);
-    expect(task.state.label, 'parked');
-    expect(task.assignee, isNull, reason: 'nobody holds parked work');
-
-    store.resumeTask('task_1');
-    store.parkTask('task_1', reason: 'not yet');
-    expect(client.sent, [
-      {'type': 'resume_task', 'task': 'task_1'},
-      {'type': 'park_task', 'task': 'task_1', 'reason': 'not yet'},
+    expect(store.tasks.first.acceptanceCriteria, [
+      'late parties are seated',
+      'a direct test covers the last resort',
     ]);
+    expect(
+      store.tasks.first.brief,
+      'b',
+      reason: 'the brief stays when only the criteria change',
+    );
   });
 
-  test('pending removals arrive with the digest and are reported back', () async {
-    final client = FakeClient();
-    final store = RoomStore(client);
-    client.emit({
-      'type': 'digest',
-      'digest': {
-        'pending_removals': [
-          {'agent': 'bot_a', 'handle': 'deepseek-builder', 'copy': 'room tools', 'count': 1549},
-          {'agent': 'bot_b', 'handle': 'mira', 'copy': 'its own CLI', 'count': 2},
-        ],
-      },
-    });
-    await Future<void>.delayed(Duration.zero);
-    expect(store.digest.pendingRemovalTotal, 1551);
-    expect(store.digest.pendingRemovals.first.handle, 'deepseek-builder');
+  test(
+    'a parked task drops its holder, and park and resume reach the room',
+    () async {
+      final client = FakeClient();
+      final store = RoomStore(client);
 
-    store.reportPendingRemovals('bot_a', 'room tools', 0);
-    expect(client.sent.last, {
-      'type': 'report_pending_removals',
-      'agent': 'bot_a',
-      'copy': 'room tools',
-      'count': 0,
-    });
-  });
+      client.emit(
+        event({
+          'event': 'task_created',
+          'task': {
+            'id': 'task_1',
+            'title': 'launch readiness',
+            'brief': 'b',
+            'state': 'in_progress',
+            'priority': 'normal',
+            'revision': 0,
+            'assignee': 'bot_b',
+          },
+        }),
+      );
+      client.emit(
+        event({
+          'event': 'task_transitioned',
+          'task': 'task_1',
+          'from': 'in_progress',
+          'to': 'parked',
+          'transition': {'transition': 'park', 'reason': 'after the launch'},
+        }, seq: 2),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      final task = store.tasks.first;
+      expect(task.state, TaskState.parked);
+      expect(task.state.label, 'parked');
+      expect(task.assignee, isNull, reason: 'nobody holds parked work');
+
+      store.resumeTask('task_1');
+      store.parkTask('task_1', reason: 'not yet');
+      expect(client.sent, [
+        {'type': 'resume_task', 'task': 'task_1'},
+        {'type': 'park_task', 'task': 'task_1', 'reason': 'not yet'},
+      ]);
+    },
+  );
+
+  test(
+    'pending removals arrive with the digest and are reported back',
+    () async {
+      final client = FakeClient();
+      final store = RoomStore(client);
+      client.emit({
+        'type': 'digest',
+        'digest': {
+          'pending_removals': [
+            {
+              'agent': 'bot_a',
+              'handle': 'deepseek-builder',
+              'copy': 'room tools',
+              'count': 1549,
+            },
+            {
+              'agent': 'bot_b',
+              'handle': 'mira',
+              'copy': 'its own CLI',
+              'count': 2,
+            },
+          ],
+        },
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(store.digest.pendingRemovalTotal, 1551);
+      expect(store.digest.pendingRemovals.first.handle, 'deepseek-builder');
+
+      store.reportPendingRemovals('bot_a', 'room tools', 0);
+      expect(client.sent.last, {
+        'type': 'report_pending_removals',
+        'agent': 'bot_a',
+        'copy': 'room tools',
+        'count': 0,
+      });
+    },
+  );
 
   test('a task transition updates state and ownership', () async {
     final client = FakeClient();
@@ -731,7 +795,10 @@ void main() {
       void expectAccepted(RoomStore view) {
         expect(view.handoffs.single.state, 'accepted');
         expect(view.handoffs.single.acceptedBy, 'bot_b');
-        expect(view.tasks.single.assignee, kind == 'delegate' ? 'bot_b' : 'bot_a');
+        expect(
+          view.tasks.single.assignee,
+          kind == 'delegate' ? 'bot_b' : 'bot_a',
+        );
       }
 
       expectAccepted(store);

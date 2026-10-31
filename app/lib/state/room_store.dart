@@ -158,6 +158,10 @@ class RoomStore extends ChangeNotifier {
   }
 
   String? lastError;
+
+  /// Told when the owner allows a sign-in a bot asked for, so it joins their
+  /// list for the next room start.
+  void Function(Map<String, Object?> item)? onSignInAdded;
   String? _closedReason;
 
   LinkState _connection = LinkState.disconnected;
@@ -475,6 +479,13 @@ class RoomStore extends ChangeNotifier {
             seq > _appliedTo &&
             seq > _snapshotHead;
         _applyEvent((message['envelope'] as Map?)?.cast<String, Object?>());
+        // Only as it happens: a restored transcript replays old ones, and an
+        // entry the owner removed since must stay removed.
+        final happened = (envelope?['event'] as Map?)?.cast<String, Object?>();
+        if (freshLiveEvent && happened?['event'] == 'sign_in_added') {
+          final item = (happened?['item'] as Map?)?.cast<String, Object?>();
+          if (item != null) onSignInAdded?.call(item);
+        }
         if (freshLiveEvent) {
           unawaited(
             attentions.consider(
@@ -698,7 +709,8 @@ class RoomStore extends ChangeNotifier {
         final handoff = id == null ? null : _handoffs[id];
         if (handoff != null) {
           handoff.state = event['to'] as String? ?? handoff.state;
-          final transition = (event['transition'] as Map?)?.cast<String, Object?>();
+          final transition = (event['transition'] as Map?)
+              ?.cast<String, Object?>();
           final by = transition?['by'] as String?;
           if (handoff.state == 'accepted' &&
               transition?['transition'] == 'accept' &&

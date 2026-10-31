@@ -691,8 +691,8 @@ fn chain_to(
 /// The answer to `decision` that grants access beyond a bot's sandbox, if any.
 fn granting_answer(decision: &orgbot_proto::decision::Decision) -> Option<String> {
     use orgbot_proto::decision::{
-        ACCESS_ALLOW, LAND_COMMITS_ALLOW, PUSH_COMMITS_ALLOW, RETIRE_TASK, RETIRE_TASK_ALLOW,
-        SERVER_ACCESS, SERVER_ACCESS_ALLOW,
+        ACCESS_ALLOW, LAND_COMMITS_ALLOW, NEW_SIGN_IN_ALLOW, PUSH_COMMITS_ALLOW, RETIRE_TASK,
+        RETIRE_TASK_ALLOW, SERVER_ACCESS, SERVER_ACCESS_ALLOW,
     };
     if decision
         .envelope
@@ -703,7 +703,11 @@ fn granting_answer(decision: &orgbot_proto::decision::Decision) -> Option<String
         return decision
             .options
             .iter()
-            .find(|option| option.as_str() == SERVER_ACCESS_ALLOW || option.as_str() == ACCESS_ALLOW)
+            .find(|option| {
+                option.as_str() == SERVER_ACCESS_ALLOW
+                    || option.as_str() == ACCESS_ALLOW
+                    || option.as_str() == NEW_SIGN_IN_ALLOW
+            })
             .cloned();
     }
     // Landing moves a branch of the owner's repository; a push sends it out.

@@ -1687,7 +1687,7 @@ mod tests {
                 roster: vec![],
                 completion: CompletionRule::AllTasksTerminal,
                 limits: RoomLimits::default(),
-                access: RoomAccess { mode, lend: vec![] },
+                access: RoomAccess { mode, lend: vec![], hide: vec![] },
             }));
             let mut agent = orgbot_proto::AgentSpec::new(
                 "mode-agent",

@@ -25,6 +25,7 @@ class LendEntry {
     this.risk = LendRisk.risky,
     this.enabled = false,
     this.builtIn = false,
+    this.commands = const [],
   });
 
   /// What bots ask for, such as `wrangler`.
@@ -43,6 +44,9 @@ class LendEntry {
 
   /// One of the tools OrgBots knows, rather than one you added.
   final bool builtIn;
+
+  /// The programs that use it, to tell whether the tool is installed.
+  final List<String> commands;
 
   Map<String, Object?> toJson() => {
     'name': name,
@@ -73,9 +77,18 @@ final lendNamePattern = RegExp(r'^[a-z0-9_-]{1,40}$');
 /// and the model CLIs' sign-ins (bots get their own copies of those). The
 /// room service and the sandbox launcher check this again.
 const neverLent = [
-  '.local/share/orgbot', '.config/orgbot', '.local/share/com.orgbot.app',
-  '.ssh', '.gnupg', '.codex', '.claude', '.claude.json', '.grok',
-  '.gemini', '.config/opencode', '.local/share/opencode',
+  '.local/share/orgbot',
+  '.config/orgbot',
+  '.local/share/com.orgbot.app',
+  '.ssh',
+  '.gnupg',
+  '.codex',
+  '.claude',
+  '.claude.json',
+  '.grok',
+  '.gemini',
+  '.config/opencode',
+  '.local/share/opencode',
 ];
 
 /// Why `path` cannot be lent, or null when it can.
@@ -97,39 +110,190 @@ String? lendPathProblem(String path) {
 }
 
 /// Tools OrgBots knows where to find. Off until you turn them on.
+///
+/// From the live room: the owner asked whether the app picks up the tools
+/// and sign-ins on their computer. It knew thirteen; the rest had to be
+/// added by hand.
 List<LendEntry> lendCatalog() => [
-  LendEntry(name: 'wrangler', label: 'Cloudflare (Wrangler)', paths: ['.config/.wrangler'], builtIn: true),
-  LendEntry(name: 'gh', label: 'GitHub CLI', paths: ['.config/gh'], builtIn: true),
-  LendEntry(name: 'vercel', label: 'Vercel', paths: ['.local/share/com.vercel.cli'], builtIn: true),
-  LendEntry(name: 'netlify', label: 'Netlify', paths: ['.config/netlify'], builtIn: true),
-  LendEntry(name: 'firebase', label: 'Firebase CLI', paths: ['.config/configstore/firebase-tools.json'], builtIn: true),
-  LendEntry(name: 'fly', label: 'Fly.io', paths: ['.fly'], builtIn: true),
-  LendEntry(name: 'doctl', label: 'DigitalOcean', paths: ['.config/doctl'], builtIn: true),
-  LendEntry(name: 'supabase', label: 'Supabase', paths: ['.supabase'], builtIn: true),
-  LendEntry(name: 'aws', label: 'AWS', paths: ['.aws'], builtIn: true),
-  LendEntry(name: 'gcloud', label: 'Google Cloud', paths: ['.config/gcloud'], builtIn: true),
-  LendEntry(name: 'kube', label: 'Kubernetes', paths: ['.kube'], builtIn: true),
-  LendEntry(name: 'stripe', label: 'Stripe', paths: ['.config/stripe'], risk: LendRisk.critical, builtIn: true),
-  LendEntry(name: 'npm', label: 'npm publishing', paths: ['.npmrc'], risk: LendRisk.critical, builtIn: true),
+  _known(
+    'wrangler',
+    'Cloudflare (Wrangler)',
+    ['.config/.wrangler'],
+    ['wrangler'],
+  ),
+  _known('gh', 'GitHub CLI', ['.config/gh'], ['gh']),
+  _known('glab', 'GitLab CLI', ['.config/glab-cli'], ['glab']),
+  _known('vercel', 'Vercel', ['.local/share/com.vercel.cli'], ['vercel']),
+  _known('netlify', 'Netlify', ['.config/netlify'], ['netlify']),
+  _known(
+    'firebase',
+    'Firebase CLI',
+    ['.config/configstore/firebase-tools.json'],
+    ['firebase'],
+  ),
+  _known('fly', 'Fly.io', ['.fly'], ['fly', 'flyctl']),
+  _known('railway', 'Railway', ['.railway'], ['railway']),
+  _known('doctl', 'DigitalOcean', ['.config/doctl'], ['doctl']),
+  _known('supabase', 'Supabase', ['.supabase'], ['supabase']),
+  _known('neon', 'Neon', ['.config/neonctl'], ['neonctl', 'neon']),
+  _known('planetscale', 'PlanetScale', ['.config/planetscale'], ['pscale']),
+  _known('turso', 'Turso', ['.config/turso'], ['turso']),
+  _known('aws', 'AWS', ['.aws'], ['aws']),
+  _known('gcloud', 'Google Cloud', ['.config/gcloud'], ['gcloud']),
+  _known('azure', 'Azure CLI', ['.azure'], ['az']),
+  _known('kube', 'Kubernetes', ['.kube'], ['kubectl']),
+  _known('docker', 'Docker Hub', ['.docker/config.json'], ['docker']),
+  _known(
+    'terraform',
+    'Terraform Cloud',
+    ['.terraform.d/credentials.tfrc.json'],
+    ['terraform'],
+  ),
+  _known('pulumi', 'Pulumi', ['.pulumi/credentials.json'], ['pulumi']),
+  _known('expo', 'Expo (EAS)', ['.expo/state.json'], ['eas', 'expo']),
+  _known('sentry', 'Sentry CLI', ['.sentryclirc'], ['sentry-cli']),
+  _known('ngrok', 'ngrok', ['.config/ngrok'], ['ngrok']),
+  _known('twilio', 'Twilio CLI', ['.twilio-cli'], ['twilio']),
+  _known(
+    'huggingface',
+    'Hugging Face',
+    ['.cache/huggingface/token'],
+    ['huggingface-cli', 'hf'],
+  ),
+  _known('databricks', 'Databricks', ['.databrickscfg'], ['databricks']),
+  _known('snowflake', 'Snowflake CLI', ['.snowflake'], ['snow']),
+  _known('stripe', 'Stripe', ['.config/stripe'], ['stripe'], LendRisk.critical),
+  _known('npm', 'npm publishing', ['.npmrc'], ['npm'], LendRisk.critical),
+  _known('pypi', 'PyPI publishing', ['.pypirc'], ['twine'], LendRisk.critical),
+  _known(
+    'cargo',
+    'crates.io publishing',
+    ['.cargo/credentials.toml'],
+    ['cargo'],
+    LendRisk.critical,
+  ),
+  _known(
+    'rubygems',
+    'RubyGems publishing',
+    ['.gem/credentials'],
+    ['gem'],
+    LendRisk.critical,
+  ),
+  _known(
+    'rclone',
+    'rclone remotes',
+    ['.config/rclone/rclone.conf'],
+    ['rclone'],
+    LendRisk.critical,
+  ),
 ];
+
+LendEntry _known(
+  String name,
+  String label,
+  List<String> paths,
+  List<String> commands, [
+  LendRisk risk = LendRisk.risky,
+]) => LendEntry(
+  name: name,
+  label: label,
+  paths: paths,
+  commands: commands,
+  risk: risk,
+  builtIn: true,
+);
 
 /// Your sign-ins bots may ask to use, kept in OrgBots' data folder, which no
 /// bot can read. Rooms read the list when they start.
 class LendSettings {
-  LendSettings(this.entries, {required this.file, required this.home});
+  LendSettings(
+    this.entries, {
+    required this.file,
+    required this.home,
+    this.path = '',
+  });
 
   final List<LendEntry> entries;
   final File file;
   final String home;
 
+  /// The owner's PATH, to tell which tools are installed.
+  final String path;
+
   /// The entries a room offers bots.
-  List<LendEntry> get lent =>
-      entries.where((entry) => entry.enabled && entry.paths.isNotEmpty).toList();
+  List<LendEntry> get lent => entries
+      .where((entry) => entry.enabled && entry.paths.isNotEmpty)
+      .toList();
+
+  /// Every listed path that is switched off: hidden from bots, never lent.
+  ///
+  /// From the live room: a sign-in the owner added and then switched off was
+  /// left out of the room file, so nothing hid it.
+  List<String> get hidden {
+    final paths = <String>{
+      for (final entry in entries)
+        if (!entry.enabled)
+          for (final path in entry.paths)
+            if (lendPathProblem(path) == null) path,
+    };
+    return paths.toList()..sort();
+  }
 
   /// Whether `entry`'s sign-in is on this computer.
   bool isPresent(LendEntry entry) => entry.paths.any(
-    (path) => FileSystemEntity.typeSync('$home/$path') != FileSystemEntityType.notFound,
+    (path) =>
+        FileSystemEntity.typeSync('$home/$path') !=
+        FileSystemEntityType.notFound,
   );
+
+  /// Whether one of the programs that use `entry` is on your PATH.
+  bool isInstalled(LendEntry entry) {
+    for (final dir in path.split(':')) {
+      if (!dir.startsWith('/')) continue;
+      for (final command in entry.commands) {
+        final file = File('$dir/$command');
+        try {
+          if (file.statSync().type == FileSystemEntityType.file &&
+              file.statSync().mode & 0x49 != 0) {
+            return true;
+          }
+        } on FileSystemException {
+          // Not here.
+        }
+      }
+    }
+    return false;
+  }
+
+  /// Sign-ins on this computer that are not turned on yet.
+  List<LendEntry> get found =>
+      entries.where((entry) => !entry.enabled && isPresent(entry)).toList();
+
+  /// Tools installed here whose sign-in was not found: not signed in yet.
+  List<LendEntry> get installedNotSignedIn => entries
+      .where(
+        (entry) => !entry.enabled && !isPresent(entry) && isInstalled(entry),
+      )
+      .toList();
+
+  /// Add a sign-in a bot asked for and you allowed, turned on, keeping any
+  /// entry of that name you already have. Returns whether it was added.
+  bool addApproved(LendEntry entry) {
+    if (!lendNamePattern.hasMatch(entry.name) ||
+        entry.paths.isEmpty ||
+        entry.paths.any((path) => lendPathProblem(path) != null)) {
+      return false;
+    }
+    for (final existing in entries) {
+      if (existing.name == entry.name) {
+        if (existing.enabled) return false;
+        existing.enabled = true;
+        return true;
+      }
+    }
+    entries.add(entry..enabled = true);
+    return true;
+  }
 
   static String _dataHome(Map<String, String> environment, String home) {
     final xdg = environment['XDG_DATA_HOME'];
@@ -167,9 +331,16 @@ class LendSettings {
       entries.add(known);
     }
     entries.addAll(
-      saved.values.where((entry) => entry.paths.every((path) => lendPathProblem(path) == null)),
+      saved.values.where(
+        (entry) => entry.paths.every((path) => lendPathProblem(path) == null),
+      ),
     );
-    return LendSettings(entries, file: file, home: home);
+    return LendSettings(
+      entries,
+      file: file,
+      home: home,
+      path: env['PATH'] ?? '',
+    );
   }
 
   void save() {

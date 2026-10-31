@@ -268,6 +268,7 @@ class EngineRoomController extends ChangeNotifier {
             : null,
         // Desktop rooms only: a phone has no home folder of yours to lend.
         lend: !runsInProcess ? LendSettings.load().lent : const [],
+        hide: !runsInProcess ? LendSettings.load().hidden : const [],
       );
       if (!runsInProcess) {
         file.environment.addAll(
@@ -353,7 +354,8 @@ class EngineRoomController extends ChangeNotifier {
       }
       _archive?.append([message]);
     });
-    final store = RoomStore(client, notificationRoomId: room.id);
+    final store = RoomStore(client, notificationRoomId: room.id)
+      ..onSignInAdded = keepApprovedSignIn;
     _store = store;
     store.addListener(_changed);
 
@@ -431,7 +433,8 @@ class EngineRoomController extends ChangeNotifier {
     _archiveSubscription = client.messages.listen(
       (message) => _archive?.append([message]),
     );
-    final store = RoomStore(client, notificationRoomId: room.id);
+    final store = RoomStore(client, notificationRoomId: room.id)
+      ..onSignInAdded = keepApprovedSignIn;
     _store = store;
     store.addListener(_changed);
 
@@ -849,3 +852,28 @@ Future<String?> _projectScope(String path) async {
 // Only strings cross this boundary. Reading a large saved room stays off the UI.
 Future<int> _openEmbeddedRoom(String toml, Map<String, String> environment) =>
     Isolate.run(() => EmbeddedEngine.load().openRoom(toml, environment));
+
+/// Keep a sign-in the owner allowed a bot to add: turned on in their list, so
+/// the next room start lends it as the room does now.
+void keepApprovedSignIn(
+  Map<String, Object?> item, {
+  LendSettings Function()? load,
+}) {
+  final name = item['name'];
+  final paths = item['paths'];
+  if (name is! String || paths is! List) return;
+  try {
+    final settings = (load ?? LendSettings.load)();
+    final added = settings.addApproved(
+      LendEntry(
+        name: name,
+        label: item['label'] as String? ?? name,
+        paths: paths.whereType<String>().toList(),
+        risk: LendRisk.parse(item['risk']),
+      ),
+    );
+    if (added) settings.save();
+  } on Object {
+    // The room has it either way; the owner can add it by hand.
+  }
+}

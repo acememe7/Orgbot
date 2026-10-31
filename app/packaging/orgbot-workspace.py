@@ -1299,6 +1299,10 @@ _OWNER_SECRET_DIRS = (
     ".config/.wrangler", ".wrangler", ".cloudflared", ".config/netlify", ".netlify",
     ".vercel", ".local/share/com.vercel.cli", ".fly", ".config/doctl", ".supabase",
     ".config/stripe", ".railway", ".config/configstore",
+    # More tools the app's sign-in list knows, hidden whether or not a room
+    # lists them.
+    ".config/glab-cli", ".config/neonctl", ".config/planetscale", ".config/turso",
+    ".pulumi", ".expo", ".config/ngrok", ".twilio-cli", ".snowflake",
 )
 
 # Never lent, whatever the owner lists: OrgBots' own data, private keys, and
@@ -1314,6 +1318,7 @@ _OWNER_SECRET_FILES = (
     ".netrc", ".git-credentials", ".config/git/credentials", ".npmrc", ".pypirc",
     ".cargo/credentials", ".cargo/credentials.toml", ".vault-token",
     ".config/rclone/rclone.conf", ".bash_history", ".zsh_history", ".python_history",
+    ".sentryclirc", ".databrickscfg", ".gem/credentials", ".cache/huggingface/token",
 )
 
 

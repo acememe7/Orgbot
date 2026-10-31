@@ -366,8 +366,11 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                 vec![
                     ("task", schema::string("Your task that needs a server.")),
                     ("reason", schema::string("What you will do on which server, in one or two sentences.")),
+                    ("why", schema::string("Why the work needs it, in one or two sentences.")),
+                    ("commands", schema::string_array("The commands you plan to run with it, if you know them (at most 10).")),
+                    ("if_denied", schema::string("What happens to the work if the owner says no.")),
                 ],
-                &["task", "reason"],
+                &["task", "reason", "why", "if_denied"],
             ),
         ),
         tool(
@@ -393,8 +396,41 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                         ),
                     ),
                     ("reason", schema::string("What you will do with it, in one or two sentences.")),
+                    ("why", schema::string("Why the work needs it, in one or two sentences.")),
+                    ("commands", schema::string_array("The commands you plan to run with it, if you know them (at most 10).")),
+                    ("if_denied", schema::string("What happens to the work if the owner says no.")),
                 ],
-                &["task", "items", "action", "reason"],
+                &["task", "items", "action", "reason", "why", "if_denied"],
+            ),
+        ),
+        tool(
+            "request_new_sign_in",
+            "Ask the owner to add one of their sign-ins that is not listed in your situation, \
+             such as a tool's sign-in under their home (for example .docker/config.json for \
+             Docker Hub or .pypirc for PyPI), and lend it for a task you hold. It always waits \
+             for the owner, whatever the room's access mode. Name only folders or files under \
+             their home where the tool keeps its sign-in; system services and sockets cannot be \
+             lent, nor SSH keys or the model CLIs' sign-ins. Allowing adds it to the owner's \
+             list and lends it to you for this task only; ask with request_access after that.",
+            schema::object(
+                vec![
+                    ("task", schema::string("Your task that needs it.")),
+                    ("name", schema::string("A short name to ask for it by: lowercase letters, digits, - or _.")),
+                    ("label", schema::string("What it is, as the owner would say it, such as \"Docker Hub\".")),
+                    ("paths", schema::string_array("Where its sign-in lives, relative to the owner's home, such as .docker/config.json (at most 4).")),
+                    (
+                        "action",
+                        schema::enumerated(
+                            "What you will do: inspect (read or check), change (build, test or easily undone changes), release (production or a live service), destroy (delete data or change credentials), spend (money). Say it honestly.",
+                            &["inspect", "change", "release", "destroy", "spend"],
+                        ),
+                    ),
+                    ("reason", schema::string("What you will do with it, in one or two sentences.")),
+                    ("why", schema::string("Why the work needs it, in one or two sentences.")),
+                    ("commands", schema::string_array("The commands you plan to run with it, if you know them (at most 10).")),
+                    ("if_denied", schema::string("What happens to the work if the owner says no.")),
+                ],
+                &["task", "name", "label", "paths", "action", "reason", "why", "if_denied"],
             ),
         ),
         tool(
@@ -708,6 +744,7 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
         "ask_owner" => ask_owner(engine, actor, input),
         "request_server_access" => request_server_access(engine, actor, input),
         "request_access" => request_access(engine, actor, input),
+        "request_new_sign_in" => request_new_sign_in(engine, actor, input),
         "fail_handoff" => fail_handoff(engine, actor, input),
         "propose_retire_task" => propose_retire_task(engine, actor, input),
         "amend_task" => amend_task(engine, actor, input),
@@ -1893,10 +1930,15 @@ fn request_server_access(engine: &mut Engine, actor: AgentId, input: &Value) -> 
         Ok(reason) => reason.to_string(),
         Err(message) => return ToolOutcome::error(message),
     };
+    let plan = match access_plan(input) {
+        Ok(plan) => plan,
+        Err(message) => return ToolOutcome::error(message),
+    };
     let outcome = engine.apply(Command::RequestServerAccess {
         by: actor,
         task,
         reason,
+        plan,
     });
     access_outcome(engine, actor, outcome)
 }
@@ -1922,14 +1964,74 @@ fn request_access(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOut
             )
         }
     };
+    let plan = match access_plan(input) {
+        Ok(plan) => plan,
+        Err(message) => return ToolOutcome::error(message),
+    };
     let outcome = engine.apply(Command::RequestAccess {
         by: actor,
         task,
         items,
         action,
         reason,
+        plan,
     });
     access_outcome(engine, actor, outcome)
+}
+
+fn request_new_sign_in(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
+    let task = match task_arg(input, "task") {
+        Ok(task) => task,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    let (name, label, reason) = match (required_str(input, "name"), required_str(input, "label"), required_str(input, "reason")) {
+        (Ok(name), Ok(label), Ok(reason)) => (name.to_string(), label.to_string(), reason.to_string()),
+        (Err(message), _, _) | (_, Err(message), _) | (_, _, Err(message)) => return ToolOutcome::error(message),
+    };
+    let paths = string_list(input, "paths");
+    if paths.is_empty() {
+        return ToolOutcome::error("`paths` is required: where the sign-in lives, relative to the owner's home.");
+    }
+    let action = match required_str(input, "action")
+        .ok()
+        .and_then(orgbot_proto::decision::AccessAction::parse)
+    {
+        Some(action) => action,
+        None => {
+            return ToolOutcome::error(
+                "action must be one of inspect, change, release, destroy, spend",
+            )
+        }
+    };
+    let plan = match access_plan(input) {
+        Ok(plan) => plan,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    let item = orgbot_proto::room::LendItem {
+        name,
+        label,
+        paths,
+        risk: orgbot_proto::room::Risk::Risky,
+    };
+    let outcome = engine.apply(Command::RequestNewSignIn {
+        by: actor,
+        task,
+        item,
+        action,
+        reason,
+        plan,
+    });
+    access_outcome(engine, actor, outcome)
+}
+
+/// Why a request is needed, the commands planned and what happens if the
+/// owner says no: required, so the owner's card says them.
+fn access_plan(input: &Value) -> Result<orgbot_proto::decision::AccessPlan, String> {
+    Ok(orgbot_proto::decision::AccessPlan {
+        why: required_str(input, "why")?.trim().to_string(),
+        commands: string_list(input, "commands"),
+        if_denied: required_str(input, "if_denied")?.trim().to_string(),
+    })
 }
 
 /// What a bot is told after asking for access, approved on the spot or not.

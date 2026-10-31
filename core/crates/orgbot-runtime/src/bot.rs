@@ -2553,6 +2553,7 @@ mod tests {
                     by: spec.id,
                     task,
                     reason: "deploy the reviewed build".into(),
+                    plan: Default::default(),
                 })
                 .unwrap();
             let decision = events

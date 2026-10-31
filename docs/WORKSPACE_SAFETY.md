@@ -132,8 +132,13 @@ them through, Approval and Half approval ask for each call.
 The owner lists the sign-ins they will lend in **Connections & tools → Sign-ins
 bots may use** (saved in `$XDG_DATA_HOME/orgbot/lending.json`, which bots cannot
 read). Every tool there is off until turned on. A room passes the enabled ones
-to its engine when it starts, as `[[room.lend]]` tables in its room file. Every
-listed path is hidden from every sandbox where it lives. A sign-in lent to a bot
+to its engine when it starts, as `[[room.lend]]` tables in its room file, and the
+paths of every switched-off entry, the owner's own included, as `hide`. Every
+listed path, on or off, is hidden from every sandbox where it lives; the
+launcher also hides every tool the app's list knows, whatever a room file says.
+The list knows 33 tools. Under "Found on this computer" it suggests those signed
+in here but not turned on, and names those installed (a program on the owner's
+PATH) but not signed in; "Look again" checks afresh. A sign-in lent to a bot
 for its task is mounted read-write into that bot's private home at the same
 relative path, so the tool finds it under `HOME` and a renewed token reaches the
 owner's copy. The same terms as the server key apply: only that bot, only while
@@ -144,6 +149,16 @@ CLIs' sign-ins, which bots get their own copies of. Lending is not available to
 OpenCode or Antigravity bots, whose private homes are built differently. A lent
 sign-in is usable over the network from the sandbox, so lend tokens scoped to
 what the work needs where the provider allows it.
+
+A request says why the work needs it, what the bot will do, the commands it
+plans to run and what happens if the owner says no, and the card shows each on
+its own line. A bot that needs a sign-in not on the list asks with
+`request_new_sign_in`, naming where it lives under the owner's home. That is
+always put to the owner, whatever the access mode, and rated at least risky;
+the same path checks apply. Allowing it ("Add it and allow for this task") adds
+it to the room, hidden from every other bot, lends it to that bot for that task
+only, and turns it on in the owner's list for later rooms. System services and
+sockets, such as Docker's, cannot be lent.
 
 The GitHub CLI usually keeps its token in the desktop keyring, not in
 `~/.config/gh`, and a sandbox cannot reach the keyring. When `~/.config/gh` is

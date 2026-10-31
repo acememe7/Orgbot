@@ -99,6 +99,20 @@ pub enum Event {
         /// What they said.
         answer: Answer,
     },
+    /// A bot asked the owner to add a sign-in that is not on their list, and
+    /// lend it for a task. Kept until the decision is answered.
+    SignInProposed {
+        /// The decision that asks.
+        decision: DecisionId,
+        /// The sign-in, as the bot described it.
+        item: crate::room::LendItem,
+    },
+    /// The owner added a sign-in a bot asked for: lendable from now on, and
+    /// hidden from every other bot.
+    SignInAdded {
+        /// The sign-in.
+        item: crate::room::LendItem,
+    },
     /// How many file removals in one of a bot's copies wait for the owner's
     /// review. Zero clears it.
     PendingRemovals {
@@ -242,6 +256,8 @@ impl Event {
             Self::DecisionQuestionJoined { .. } => "decision_question_joined",
             Self::DecisionAnswered { .. } => "decision_answered",
             Self::DecisionWithdrawn { .. } => "decision_withdrawn",
+            Self::SignInProposed { .. } => "sign_in_proposed",
+            Self::SignInAdded { .. } => "sign_in_added",
             Self::PendingRemovals { .. } => "pending_removals",
             Self::TaskTransitioned { .. } => "task_transitioned",
             Self::TaskAmended { .. } => "task_amended",

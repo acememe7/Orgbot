@@ -239,6 +239,53 @@ pub struct LendItem {
     pub risk: Risk,
 }
 
+/// What OrgBots never lends: its own data, SSH and GnuPG keys, and the model
+/// CLIs' sign-ins, which bots get their own copies of.
+pub const NEVER_LENT: &[&str] = &[
+    ".local/share/orgbot", ".config/orgbot", ".local/share/com.orgbot.app",
+    ".ssh", ".gnupg", ".codex", ".claude", ".claude.json", ".grok",
+    ".gemini", ".config/opencode", ".local/share/opencode",
+];
+
+/// Whether `path` is a plain path relative to the owner's home.
+pub fn plain_home_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && path.len() <= 255
+        && path.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+impl LendItem {
+    /// What is wrong with this sign-in, if anything: its name, or a path that
+    /// is not plain or reaches into what is never lent.
+    pub fn problem(&self) -> Option<String> {
+        let name = self.name.as_str();
+        let valid_name = !name.is_empty()
+            && name.len() <= 40
+            && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+        if !valid_name || name == crate::decision::SERVER_ITEM {
+            return Some(format!(
+                "lent sign-in name `{name}` must be 1-40 lowercase letters, digits, - or _, and not `server`"
+            ));
+        }
+        if self.paths.is_empty() {
+            return Some(format!("lent sign-in `{name}` names no paths"));
+        }
+        for path in &self.paths {
+            if !plain_home_path(path) {
+                return Some(format!("lent sign-in `{name}` path `{path}` must be a plain path relative to your home"));
+            }
+            let forbidden = NEVER_LENT.iter().any(|never| {
+                path == never || path.starts_with(&format!("{never}/")) || never.starts_with(&format!("{path}/"))
+            });
+            if forbidden {
+                return Some(format!("lent sign-in `{name}` path `{path}` is never lent"));
+            }
+        }
+        None
+    }
+}
+
 /// What a room's bots may use of the owner's, and how much needs asking.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -246,6 +293,12 @@ pub struct RoomAccess {
     pub mode: AccessMode,
     /// Sign-ins the owner lends, each only for a task it is approved for.
     pub lend: Vec<LendItem>,
+    /// Sign-ins on the owner's list that are switched off: never lent, and
+    /// hidden from every bot like the rest.
+    ///
+    /// From the live room: a sign-in the owner added and then switched off
+    /// was left out of the room file, so it was not hidden at all.
+    pub hide: Vec<String>,
 }
 
 impl RoomAccess {
@@ -253,12 +306,13 @@ impl RoomAccess {
         self.lend.iter().find(|item| item.name == name)
     }
 
-    /// Every path the owner lends, lent or not: hidden unless granted.
+    /// Every path the owner lists, lent or not: hidden unless granted.
     pub fn all_paths(&self) -> Vec<String> {
         let mut paths: Vec<String> = self
             .lend
             .iter()
             .flat_map(|item| item.paths.iter().cloned())
+            .chain(self.hide.iter().cloned())
             .collect();
         paths.sort();
         paths.dedup();
