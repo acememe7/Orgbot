@@ -308,6 +308,13 @@ folder), with its size, modification time, change time, inode and device. A file
 is read again only when one of those differs. A bot can set a file's
 modification time back but not its change time, so an edit is always seen.
 
+After an approved apply, and when a copy drops files the project removed, each
+folder that held a removed file is removed once it is empty, deepest first. None
+of them was empty before; `rmdir` keeps any that still hold something, and
+symlinks are never followed. The review lists each copy with its waiting
+removals, opens on the copy with the most, and re-checks every other copy whose
+count is not zero.
+
 An approved review moves removals to the trash in batches of 200, through one
 call of the trash helper per batch, and every target is checked against the
 reviewed list before the first one moves. The helper prints a progress line on
