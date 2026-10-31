@@ -4459,6 +4459,16 @@ impl Engine {
                 handoff.hold_open(now);
             }
         }
+        // From the live room: the owner paused to install an update, and an
+        // assist offered just before ran out five minutes into the pause, so
+        // the help the sender asked for was gone when the room resumed. Nobody
+        // can act on a handoff while the room is paused; each keeps its whole
+        // timeout from the moment the room runs again.
+        if self.room.phase == RoomPhase::Paused {
+            for handoff in self.handoffs.values_mut() {
+                handoff.hold_open(now);
+            }
+        }
         let expired: Vec<HandoffId> = self
             .handoffs
             .values()

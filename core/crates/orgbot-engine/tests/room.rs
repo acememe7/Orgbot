@@ -575,6 +575,40 @@ fn an_unanswered_handoff_expires_and_frees_the_sender() {
     assert_eq!(f.state(task), TaskState::InProgress);
 }
 
+/// From the live room: the owner paused to install an update, and an assist
+/// offered just before ran out five minutes into the pause.
+#[test]
+fn a_handoff_does_not_run_out_while_the_room_is_paused() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.start_task("write the release notes", worker);
+    let events = f.apply(Command::OfferHandoff {
+        task,
+        from: worker,
+        to: Recipient::Agent { agent: worker2 },
+        kind: HandoffKind::Assist,
+        brief: "help".into(),
+        expects: vec![],
+        context: vec![],
+        blocks_sender: None,
+        timeout_ms: Some(1_000),
+    });
+    let handoff = offered_handoff(&events);
+    let start = Timestamp::now();
+    f.apply(Command::PauseRoom { reason: "installing an update".into() });
+    // Ten seconds of pause, ticked through: far past the one-second timeout.
+    for second in 1..=10 {
+        f.apply(Command::Tick { now: start.plus_millis(second * 1_000) });
+    }
+    assert_eq!(f.engine.handoff(handoff).unwrap().state, HandoffState::Offered);
+    f.apply(Command::ResumeRoom);
+    // Just after the room runs again it is still open; its whole timeout later it expires.
+    f.apply(Command::Tick { now: start.plus_millis(10_500) });
+    assert_eq!(f.engine.handoff(handoff).unwrap().state, HandoffState::Offered);
+    f.apply(Command::Tick { now: start.plus_millis(11_500) });
+    assert_eq!(f.engine.handoff(handoff).unwrap().state, HandoffState::Expired);
+}
+
 /// From the live room: @opus offered @grok-quick a delegation while
 /// @grok-quick was in a turn that had begun before the offer and ran fifteen
 /// minutes more. The offer's five minutes ran out before that turn ended, so
