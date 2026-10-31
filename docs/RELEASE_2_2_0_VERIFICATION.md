@@ -111,6 +111,10 @@ handoff fix prepared as 2.1.1, which was never published.
   OrgBots' one, refused every socket, so a Codex bot's browser captures failed
   with EPERM. A Codex bot allowed to write now has the network inside its CLI,
   like bots on other CLIs; writes outside the project are still refused.
+- **Long reviews stay responsive.** A cleanup left 1,570 removals to review
+  in the live room, and the app froze on apply: every path was built at once.
+  The review and the delete confirmation now build only the rows on screen and
+  open with how many files sit in each top-level folder.
 - **A lent GitHub CLI signs in from the keyring.** The GitHub CLI keeps its
   token in the desktop keyring, which a sandbox cannot reach, so in the live
   room a bot lent it got a 401 on push. The launcher now asks your `gh` for the
@@ -181,7 +185,7 @@ One task and one run of each; see the
   accepted handoffs, retry timing, CLI error classes, owner paging, the graceful
   pause and held rooms, retiring tasks and leftover-copy cleanup; each was checked to fail without
   its fix.
-- Full Flutter tests: 374 passed, five skipped. Flutter analysis: no issues.
+- Full Flutter tests: 375 passed, five skipped. Flutter analysis: no issues.
 - Workspace sandbox helper: 73 passed, including a GitHub CLI token from the keyring reaching gh and git in the sandbox and never a command line, and setting a bot's conflicting files aside without a link redirecting them, including real bubblewrap checks that a
   turn the owner did not allow, or a read-only turn, has no server key anywhere,
   that lent sign-ins are hidden unless lent and then appear only in the bot's
@@ -198,7 +202,7 @@ Final engine SHA-256:
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `bc28cd45a891283f9412db1cb6266c099b219ffda2fb5d4a60298961ba9f55f8` |
+| orgbots_2.2.0_amd64.deb | `ee283a23d6808f8d4f71b3011c18c64019362ccd0bfa22bde3bef0bef4b00eec` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
@@ -348,6 +352,14 @@ byte-identical). Signed archive revision
 `0c1768eb0efcb855928606079af4f95b71c0d18a` replaces only
 `orgbots_2.2.0_amd64.deb`;
 [Pages run 41221352175](https://github.com/acememe7/Orgbot/actions/runs/41221352175)
+published it. In the live room a Codex bot's capture run then reached the map
+with no EPERM.
+
+That evening the app was rebuilt so a long review of workspace changes stays
+responsive (source `0903ec5`; the engine is unchanged). Signed archive revision
+`bbf1f1bd86db798bae2de8ca6bfa8da74bce37c0` replaces only
+`orgbots_2.2.0_amd64.deb`;
+[Pages run 41223113034](https://github.com/acememe7/Orgbot/actions/runs/41223113034)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
