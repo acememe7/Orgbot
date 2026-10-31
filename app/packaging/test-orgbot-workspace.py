@@ -59,6 +59,9 @@ class WorkspaceTests(unittest.TestCase):
         os.replace(target, backup)
         return os.fspath(backup)
 
+    def _fake_trash_batch(self, project, items):
+        return [self._fake_trash(project, target, digest) for target, digest in items]
+
     def _agy_runtime_home(self, *, room_mcp, suffix=None):
         name = "agy-runtime-home-room" if room_mcp else "agy-runtime-home-no-room"
         home = self.root / (f"{name}-{suffix}" if suffix else name)
@@ -125,7 +128,7 @@ class WorkspaceTests(unittest.TestCase):
         work = self.prepare()
         self.assertEqual(workspace._status(os.fspath(self.state), "dev")["changed"], [])
         (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")
-        with patch.object(workspace, "_trash_replacement", self._fake_trash):
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
             result = workspace._apply(os.fspath(self.state), "dev", review_token=None)
         self.assertTrue(result["ok"])
         self.assertEqual(stat.S_IMODE(source.stat().st_mode), 0o444)
@@ -155,7 +158,7 @@ class WorkspaceTests(unittest.TestCase):
         work = self.prepare()
         (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")
         (work / "new file.txt").write_text("new\n", encoding="utf-8")
-        with patch.object(workspace, "_trash_replacement", self._fake_trash):
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
             result = workspace._apply(os.fspath(self.state), "dev", review_token=None)
         self.assertTrue(result["ok"])
         self.assertEqual((self.project / "src/main.py").read_text(encoding="utf-8"), "agent edit\n")
@@ -199,12 +202,12 @@ class WorkspaceTests(unittest.TestCase):
         second = self.prepare("agent-b")
         (first / "src/main.py").write_text("agent a\n", encoding="utf-8")
         (second / "README.md").write_text("agent b\n", encoding="utf-8")
-        with patch.object(workspace, "_trash_replacement", self._fake_trash):
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
             self.assertTrue(workspace._apply(os.fspath(self.state), "agent-b", review_token=None)["ok"])
             self.assertTrue(workspace._apply(os.fspath(self.state), "agent-a", review_token=None)["ok"])
         self.assertEqual((self.project / "README.md").read_text(encoding="utf-8"), "agent b\n")
         workspace._prepare(os.fspath(self.project), os.fspath(self.state), "agent-a", False)
-        with patch.object(workspace, "_trash_replacement", self._fake_trash):
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
             self.assertTrue(workspace._apply(os.fspath(self.state), "agent-a", review_token=None)["ok"])
         self.assertEqual((self.project / "README.md").read_text(encoding="utf-8"), "agent b\n")
 
@@ -213,7 +216,7 @@ class WorkspaceTests(unittest.TestCase):
         (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")
         (work / "new file.txt").write_text("new\n", encoding="utf-8")
         (self.project / "src/main.py").write_text("owner edit\n", encoding="utf-8")
-        with patch.object(workspace, "_trash_replacement", self._fake_trash):
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
             result = workspace._apply(os.fspath(self.state), "dev", review_token=None)
         self.assertFalse(result["ok"])
         self.assertEqual(result["conflicts"], ["src/main.py"])
@@ -228,7 +231,7 @@ class WorkspaceTests(unittest.TestCase):
         (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")
         (work / "new file.txt").write_text("new\n", encoding="utf-8")
         (self.project / "src/main.py").write_text("owner edit\n", encoding="utf-8")
-        with patch.object(workspace, "_trash_replacement", self._fake_trash):
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
             result = workspace._apply(os.fspath(self.state), "dev", review_token=None, set_aside=True)
         self.assertTrue(result["ok"], result)
         self.assertEqual((self.project / "src/main.py").read_text(encoding="utf-8"), "owner edit\n", "the project's newer version is kept")
@@ -258,11 +261,11 @@ class WorkspaceTests(unittest.TestCase):
         work = self.prepare()
         (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")
 
-        def preserve_then_interrupt(project, target, expected_sha256=None):
-            self._fake_trash(project, target, expected_sha256)
+        def preserve_then_interrupt(project, items):
+            self._fake_trash_batch(project, items)
             raise workspace.WorkspaceError("simulated interruption after preservation")
 
-        with patch.object(workspace, "_trash_replacement", preserve_then_interrupt):
+        with patch.object(workspace, "_trash_replacements", preserve_then_interrupt):
             with self.assertRaisesRegex(workspace.WorkspaceError, "simulated interruption"):
                 workspace._apply(os.fspath(self.state), "dev", review_token=None)
         backups = list((self.root / "synthetic-trash").iterdir())
@@ -272,6 +275,35 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(journal["phase"], "applying")
         self.assertEqual(journal["operations"][0]["state"], "preserving")
 
+    def test_a_long_review_is_preserved_in_batches_and_reports_progress(self):
+        # From the live room: 1,549 approved removals took thirteen minutes,
+        # one trash helper per file and the whole journal rewritten three
+        # times per file, with nothing on screen but a bar.
+        for index in range(450):
+            (self.project / f"scratch-{index}.txt").write_text(f"scratch {index}\n", encoding="utf-8")
+        work = self.prepare()
+        for index in range(450):
+            (work / f"scratch-{index}.txt").unlink()
+        reviewed = workspace._status(os.fspath(self.state), "dev")
+        calls = []
+
+        def batch(project, items):
+            calls.append(len(items))
+            return self._fake_trash_batch(project, items)
+
+        progress = io.StringIO()
+        with patch.object(workspace, "_trash_replacements", batch), contextlib.redirect_stderr(progress):
+            applied = workspace._apply(os.fspath(self.state), "dev", review_token=reviewed["review_token"])
+        self.assertTrue(applied["ok"], applied)
+        self.assertEqual(calls, [200, 200, 50], "three helper runs, not 450")
+        self.assertFalse(any((self.project / f"scratch-{index}.txt").exists() for index in range(450)))
+        lines = [json.loads(line)["progress"] for line in progress.getvalue().splitlines() if line.startswith('{"progress"')]
+        self.assertIn({"stage": "trash", "done": 450, "total": 450}, lines)
+        self.assertIn({"stage": "apply", "done": 450, "total": 450}, lines)
+        journal = json.loads((work.parent / "apply-journal.json").read_text(encoding="utf-8"))
+        self.assertEqual({op["state"] for op in journal["operations"]}, {"applied"})
+        self.assertTrue(all(op.get("trash_receipt") for op in journal["operations"]))
+
     def test_deletion_requires_explicit_owner_approval(self):
         work = self.prepare()
         (work / "README.md").unlink()
@@ -280,7 +312,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(denied["ok"])
         self.assertEqual(denied["pending_delete"], ["README.md"])
         self.assertTrue((self.project / "README.md").exists())
-        with patch.object(workspace, "_trash_replacement", self._fake_trash):
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
             approved = workspace._apply(os.fspath(self.state), "dev", review_token=reviewed["review_token"])
         self.assertTrue(approved["ok"])
         self.assertEqual(approved["review_token"], workspace._status(os.fspath(self.state), "dev")["review_token"])

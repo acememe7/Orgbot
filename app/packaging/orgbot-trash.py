@@ -1112,6 +1112,22 @@ def _remove_known_tree_inner(
             raise
 
 
+def _expected_pairs(raw: str) -> list[tuple[Path, str]]:
+    """[path, sha256] pairs from a JSON file, or from stdin for `-`."""
+    text = sys.stdin.read() if raw == "-" else Path(raw).read_text(encoding="utf-8")
+    value = json.loads(text)
+    if not isinstance(value, list) or not value or len(value) > 100_000:
+        _fail("Expected pairs must be a non-empty JSON list")
+    pairs = []
+    for item in value:
+        if not (isinstance(item, list) and len(item) == 2 and all(isinstance(part, str) for part in item)):
+            _fail("Each expected pair must be [path, sha256]")
+        if not re.fullmatch(r"[a-f0-9]{64}", item[1]):
+            _fail("Each expected pair needs a valid SHA-256")
+        pairs.append((Path(item[0]), item[1]))
+    return pairs
+
+
 def move(root: Path, project: str, source: Path, *, expected_sha256: str | None = None) -> str:
     if not project.strip() or len(project) > 160:
         _fail("Project name must contain 1 to 160 characters")
@@ -1478,7 +1494,12 @@ def _cli() -> int:
     move_parser = sub.add_parser("move", help="Move files or directories into project trash")
     move_parser.add_argument("--project", required=True)
     move_parser.add_argument("--expected-sha256")
-    move_parser.add_argument("paths", nargs="+", type=Path)
+    move_parser.add_argument(
+        "--expected-json",
+        metavar="FILE",
+        help="Read [path, sha256] pairs as JSON (- for stdin) and move each only if it still has that content",
+    )
+    move_parser.add_argument("paths", nargs="*", type=Path)
     sub.add_parser("list", help="List trashed entries")
     restore_parser = sub.add_parser("restore", help="Restore one entry without overwriting")
     restore_parser.add_argument("entry_id")
@@ -1513,7 +1534,17 @@ def _cli() -> int:
             with _selected_root_locked() as root:
                 _sync_systemd(root)
             return 0
+        batch: list[tuple[Path, str]] = []
+        if args.command == "move":
+            if args.expected_json is not None:
+                if args.paths or args.expected_sha256 is not None:
+                    _fail("Pass either --expected-json or paths, not both")
+                batch = _expected_pairs(args.expected_json)
+            elif not args.paths:
+                _fail("Name at least one path to move")
         workspace = _working_copy() if args.command == "move" else None
+        if workspace is not None and batch:
+            _fail("Expected SHA-256 applies to the owner's project, not a working copy")
         if workspace is not None:
             inside = [_inside(workspace, source) for source in args.paths]
             if all(inside):
@@ -1540,6 +1571,12 @@ def _cli() -> int:
                     _fail("Expected SHA-256 can be used with exactly one source path")
                 for source in args.paths:
                     print(move(root, args.project, source, expected_sha256=args.expected_sha256))
+                # One process for many files. From the live room: 1,549
+                # removals took thirteen minutes, a helper started per file.
+                # Each receipt is printed as its file is moved, so a caller
+                # that sees a failure knows exactly which ones went.
+                for source, digest in batch:
+                    print(move(root, args.project, source, expected_sha256=digest), flush=True)
             elif args.command == "list":
                 for row in list_entries(root):
                     print(json.dumps({key: row[key] for key in ("id", "project", "status", "moved_at", "original_path", "source_recovery")}, ensure_ascii=False, sort_keys=True))

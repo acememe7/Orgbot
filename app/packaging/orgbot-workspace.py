@@ -2525,7 +2525,8 @@ def _set_process_limits() -> None:
         resource.setrlimit(limit, (min(soft, bound) if soft != resource.RLIM_INFINITY else bound, bound))
 
 
-def _trash_replacement(project: Path, target: Path, expected_sha256: str) -> str:
+def _trash_command() -> list[str]:
+    """The trusted orgbot-trash helper, as a command to run."""
     candidates = [
         Path(__file__).with_name("orgbot-trash.py"),
         Path.home() / ".local/lib/orgbot/orgbot-trash.py",
@@ -2551,12 +2552,39 @@ def _trash_replacement(project: Path, target: Path, expected_sha256: str) -> str
             helper = candidate
             command = [os.fspath(candidate)]
             break
-    if helper is None:
+    if helper is None or command is None:
         _fail("Trusted orgbot-trash helper is unavailable; existing bytes were not replaced")
-    result = subprocess.run([*command, "move", "--project", project.name, "--expected-sha256", expected_sha256, os.fspath(target)], check=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        _fail(f"orgbot-trash refused to preserve {target}: {result.stderr.strip()[:400]}")
-    return result.stdout.strip()[-200:]
+    return command
+
+
+TRASH_BATCH = 200
+
+
+def _trash_replacements(project: Path, items: list[tuple[Path, str]]) -> list[str]:
+    """Move each (target, expected SHA-256) to the trash in one helper run.
+
+    From the live room: 1,549 approved removals took thirteen minutes, one
+    helper process per file. Returns a receipt per file, in order. When the
+    helper stops part way, the files it did move are returned with the error,
+    so the caller can record them before failing.
+    """
+    payload = json.dumps([[os.fspath(target), digest] for target, digest in items])
+    result = subprocess.run([*_trash_command(), "move", "--project", project.name, "--expected-json", "-"], input=payload, check=False, capture_output=True, text=True)
+    receipts = [line.strip()[-200:] for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or len(receipts) != len(items):
+        raise PartialTrash(receipts, f"orgbot-trash refused to preserve {items[len(receipts)][0] if len(receipts) < len(items) else 'a file'}: {result.stderr.strip()[:400]}")
+    return receipts
+
+
+class PartialTrash(WorkspaceError):
+    def __init__(self, receipts: list[str], message: str) -> None:
+        super().__init__(message)
+        self.receipts = receipts
+
+
+def _progress(stage: str, done: int, total: int) -> None:
+    """A progress line on stderr for the app to show while it waits."""
+    print(json.dumps({"progress": {"stage": stage, "done": done, "total": total}}), file=sys.stderr, flush=True)
 
 
 def _set_aside_conflicts(project: Path, workspace: Path, conflicts: list[str], current: dict[str, dict[str, Any]], agent_entries: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2673,7 +2701,8 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
         journal_path = workspace.parent / "apply-journal.json"
         journal = {"format_version": FORMAT_VERSION, "project": os.fspath(project), "agent": agent, "started_at": int(time.time()), "phase": "applying", "operations": [{"path": name, "action": action, "state": "pending", "expected_current": current.get(name), "agent_entry": agent_entries.get(name)} for name, action in operations]}
         _atomic_json(journal_path, journal)
-        for index, (name, action) in enumerate(operations):
+        # Every target must still be as reviewed before anything moves.
+        for name, action in operations:
             target = _file_at(project, name)
             expected_current = current.get(name)
             if expected_current is not None:
@@ -2687,29 +2716,39 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
                     pass
                 else:
                     _fail(f"Project target appeared after conflict checking; preserved {name}")
-            if action == "delete":
+        # Whatever is removed or replaced goes to the trash first, in batches:
+        # the helper re-checks each file's content as it moves it. The journal
+        # is written per batch, not three times per file, which made a long
+        # review quadratic.
+        preserve = [index for index, (name, _) in enumerate(operations) if current.get(name) is not None]
+        for start in range(0, len(preserve), TRASH_BATCH):
+            batch = preserve[start:start + TRASH_BATCH]
+            for index in batch:
                 journal["operations"][index]["state"] = "preserving"
-                _atomic_json(journal_path, journal)
-                receipt = _trash_replacement(project, target, expected_current["sha256"])
-                journal["operations"][index]["state"] = "preserved"
-                journal["operations"][index]["trash_receipt"] = receipt
-                _atomic_json(journal_path, journal)
-            else:
-                if expected_current is not None:
-                    journal["operations"][index]["state"] = "preserving"
-                    _atomic_json(journal_path, journal)
-                    receipt = _trash_replacement(project, target, expected_current["sha256"])
+            _atomic_json(journal_path, journal)
+            items = [(_file_at(project, operations[index][0]), current[operations[index][0]]["sha256"]) for index in batch]
+            try:
+                receipts = _trash_replacements(project, items)
+            except PartialTrash as partial:
+                for index, receipt in zip(batch, partial.receipts):
                     journal["operations"][index]["state"] = "preserved"
                     journal["operations"][index]["trash_receipt"] = receipt
-                    _atomic_json(journal_path, journal)
-                else:
-                    journal["operations"][index]["state"] = "writing"
-                    _atomic_json(journal_path, journal)
+                _atomic_json(journal_path, journal)
+                _fail(str(partial))
+            for index, receipt in zip(batch, receipts):
+                journal["operations"][index]["state"] = "preserved"
+                journal["operations"][index]["trash_receipt"] = receipt
+            _atomic_json(journal_path, journal)
+            _progress("trash", start + len(batch), len(preserve))
+        for index, (name, action) in enumerate(operations):
+            if action != "delete":
                 mode = agent_entries[name]["mode"]
                 _copy_from_workspace(workspace, project, name, mode)
             journal["operations"][index]["state"] = "applied"
-            journal["updated_at"] = int(time.time())
-            _atomic_json(journal_path, journal)
+            if (index + 1) % TRASH_BATCH == 0 or index + 1 == len(operations):
+                journal["updated_at"] = int(time.time())
+                _atomic_json(journal_path, journal)
+                _progress("apply", index + 1, len(operations))
         final_entries = _scan(project)
         # Advance the baseline only after clean paths have also been refreshed
         # in this agent's copy. Otherwise another agent's applied change can

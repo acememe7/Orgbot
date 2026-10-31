@@ -101,6 +101,36 @@ class TrashTests(unittest.TestCase):
         self.assertEqual(source.read_text(encoding="utf-8"), "owner replacement")
         self.assertEqual(trash.list_entries(self.root), [])
 
+    def test_a_batch_moves_each_file_once_its_content_is_confirmed_and_stops_at_a_mismatch(self):
+        # From the live room: 1,549 approved removals took thirteen minutes
+        # with one helper process per file.
+        config = self.base / "config"
+        data = self.base / "data"
+        config.mkdir(mode=0o700)
+        files = []
+        for index in range(3):
+            source = self.sources / f"scratch-{index}.txt"
+            source.write_text(f"scratch {index}", encoding="utf-8")
+            files.append(source)
+        digest = lambda path: trash.hashlib.sha256(path.read_bytes()).hexdigest()
+        pairs = self.base / "pairs.json"
+        pairs.write_text(json.dumps([[str(files[0]), digest(files[0])], [str(files[1]), "0" * 64], [str(files[2]), digest(files[2])]]), encoding="utf-8")
+        out = io.StringIO()
+        argv = [str(MODULE_PATH), "move", "--project", "Demo", "--expected-json", str(pairs)]
+        with patch.dict(os.environ, {"HOME": str(self.base), "XDG_CONFIG_HOME": str(config), "XDG_DATA_HOME": str(data)}), patch.object(sys, "argv", argv), redirect_stdout(out):
+            code = trash._cli()
+        self.assertEqual(code, 2, "a file whose content changed stops the batch")
+        self.assertEqual(len(out.getvalue().split()), 1, "one receipt, for the file that moved")
+        self.assertFalse(files[0].exists())
+        self.assertTrue(files[1].exists() and files[2].exists(), "nothing past the mismatch moves")
+
+        pairs.write_text(json.dumps([[str(files[1]), digest(files[1])], [str(files[2]), digest(files[2])]]), encoding="utf-8")
+        out = io.StringIO()
+        with patch.dict(os.environ, {"HOME": str(self.base), "XDG_CONFIG_HOME": str(config), "XDG_DATA_HOME": str(data)}), patch.object(sys, "argv", argv), redirect_stdout(out):
+            self.assertEqual(trash._cli(), 0)
+        self.assertEqual(len(out.getvalue().split()), 2)
+        self.assertFalse(files[1].exists() or files[2].exists())
+
     def test_default_local_root_roundtrip_without_hdd(self):
         config = self.base / "config"
         data = self.base / "data"

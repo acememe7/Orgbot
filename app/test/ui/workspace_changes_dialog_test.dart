@@ -212,6 +212,19 @@ void main() {
     expect(calls.where((arguments) => arguments[1] == 'apply'), hasLength(1));
   });
 
+  test('the helper\'s progress lines read as counts, and other lines are left alone', () {
+    expect(
+      workspaceProgressText('{"progress": {"stage": "trash", "done": 820, "total": 1549}}'),
+      'Moved 820 of 1549 to the trash',
+    );
+    expect(
+      workspaceProgressText('{"progress": {"stage": "apply", "done": 3, "total": 9}}'),
+      'Applied 3 of 9 changes',
+    );
+    expect(workspaceProgressText('orgbot-trash refused to preserve x'), isNull);
+    expect(workspaceProgressText('{"progress": "broken"'), isNull);
+  });
+
   testWidgets('helper failures are visible and do not enable apply', (
     tester,
   ) async {

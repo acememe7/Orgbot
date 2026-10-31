@@ -39,6 +39,7 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
   Map<String, dynamic>? _status;
   String? _error;
   bool _busy = false;
+  String? _progress;
 
   @override
   void initState() {
@@ -80,7 +81,39 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
       agent,
     ];
     if (reviewToken != null) args.addAll(['--review-token', reviewToken]);
+    if (command == 'apply' && widget.processRunner == null) {
+      return _decode(await _streamApply(args));
+    }
     final result = await (widget.processRunner ?? Process.run)('python3', args);
+    return _decode(result);
+  }
+
+  /// Run apply while showing its progress lines. From the live room: 1,549
+  /// removals ran for thirteen minutes behind a bare progress bar.
+  Future<ProcessResult> _streamApply(List<String> args) async {
+    final process = await Process.start('python3', args);
+    final out = StringBuffer();
+    final err = StringBuffer();
+    final reading = [
+      process.stdout.transform(utf8.decoder).forEach(out.write),
+      process.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .forEach((line) {
+            final progress = workspaceProgressText(line);
+            if (progress == null) {
+              err.writeln(line);
+            } else if (mounted) {
+              setState(() => _progress = progress);
+            }
+          }),
+    ];
+    final exitCode = await process.exitCode;
+    await Future.wait(reading);
+    return ProcessResult(process.pid, exitCode, out.toString(), err.toString());
+  }
+
+  Map<String, dynamic> _decode(ProcessResult result) {
     final stdout = result.stdout is String ? result.stdout as String : '';
     Map<String, dynamic>? value;
     try {
@@ -248,6 +281,7 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
     setState(() {
       _busy = true;
       _error = null;
+      _progress = null;
     });
     try {
       await _invoke('apply', reviewToken: reviewToken);
@@ -301,6 +335,14 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
               ),
             const SizedBox(height: 12),
             if (_busy) const LinearProgressIndicator(),
+            if (_busy && _progress != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  _progress!,
+                  key: const ValueKey('workspace-apply-progress'),
+                ),
+              ),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
@@ -480,5 +522,26 @@ class _ChangeList extends StatelessWidget {
         itemBuilder: (context, index) => rows[index](context),
       ),
     );
+  }
+}
+
+/// The words for one of the workspace helper's progress lines, or null when
+/// the line is something else (such as an error to show).
+String? workspaceProgressText(String line) {
+  if (!line.startsWith('{"progress"')) return null;
+  try {
+    final decoded = jsonDecode(line);
+    final progress = decoded is Map ? decoded['progress'] : null;
+    if (progress is! Map) return null;
+    final done = progress['done'];
+    final total = progress['total'];
+    if (done is! int || total is! int) return null;
+    return switch (progress['stage']) {
+      'trash' => 'Moved $done of $total to the trash',
+      'apply' => 'Applied $done of $total changes',
+      _ => null,
+    };
+  } on FormatException {
+    return null;
   }
 }
