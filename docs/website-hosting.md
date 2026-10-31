@@ -85,7 +85,10 @@ The shared SSH exposure and TLS 1.2 support remain pre-existing open items;
 this scoped change is not a complete shared-server security certification.
 
 
-Current release: `58cfbd7`, activated on 1 November 2026: the site names
+Current release: `71db3a8`, activated on 1 November 2026: the Evidence page
+adds a 2.2.1 section and links the 2.2.1 release record, and the install page's
+release note lines up with the page (its margin had cancelled the centring);
+the live pages matched source. Earlier: `58cfbd7`, the same day: the site names
 OrgBots 2.2.1 as the current release; the live home, install, results and log
 pages matched source and the vhost CSP carries the home page's new JSON-LD
 hash. Earlier: `61e0c90`, activated the same day with the 31 October
