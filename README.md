@@ -101,13 +101,14 @@ copies on restart, and the owner retired an obsolete task with one tap.
 [Full record](docs/benchmarks/2026-10-29-live-room-run.md).
 
 Release checks for each version are in `docs/RELEASE_*_VERIFICATION.md`; the
-[2.2.0 record](docs/RELEASE_2_2_0_VERIFICATION.md) lists its tests, package
+[2.2.1 record](docs/RELEASE_2_2_1_VERIFICATION.md) and the
+[2.2.0 record](docs/RELEASE_2_2_0_VERIFICATION.md) list their tests, package
 hashes and known limits. Earlier comparisons are on the
 [evidence page](https://orgbots.theaecestudio.com/results/).
 
 ## Install on Ubuntu
 
-OrgBots 2.2.0 targets **Ubuntu 24.04 amd64**. Set up the signed APT repository
+OrgBots 2.2.1 targets **Ubuntu 24.04 amd64**. Set up the signed APT repository
 once on each computer:
 
 ```bash

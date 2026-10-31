@@ -302,6 +302,12 @@ and in a CLI turn it is reported in the turn rather than failing it. An owner's
 deletion approval never sets files aside, because it covers the exact list the
 owner saw.
 
+Scans of the project and of each copy remember every file's SHA-256 in private
+state (`.project-hashes.json` beside the copies, `.hashes.json` in each copy's
+folder), with its size, modification time, change time, inode and device. A file
+is read again only when one of those differs. A bot can set a file's
+modification time back but not its change time, so an edit is always seen.
+
 An approved review moves removals to the trash in batches of 200, through one
 call of the trash helper per batch, and every target is checked against the
 reviewed list before the first one moves. The helper prints a progress line on

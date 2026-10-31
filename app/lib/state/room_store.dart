@@ -150,6 +150,10 @@ class RoomStore extends ChangeNotifier {
 
   @override
   void dispose() {
+    for (final timer in _unconfirmed.values) {
+      timer.cancel();
+    }
+    _unconfirmed.clear();
     _coalescedNotification?.cancel();
     _coalescedNotification = null;
     _messagesSub.cancel();
@@ -319,6 +323,7 @@ class RoomStore extends ChangeNotifier {
   /// "Pending" for ever, and a second copy sent after the restart left the
   /// first one stuck on screen.
   final Set<String> _unsent = {};
+  final Map<String, Timer> _unconfirmed = {};
   bool isUnsent(ChatMessage message) =>
       isPending(message) && _unsent.contains(message.id);
 
@@ -330,6 +335,7 @@ class RoomStore extends ChangeNotifier {
   void removePending(ChatMessage message) {
     _pending.removeWhere((candidate) => identical(candidate, message));
     _unsent.remove(message.id);
+    _unconfirmed.remove(message.id)?.cancel();
     _invalidateMessages();
     _notifyChanged();
   }
@@ -365,7 +371,10 @@ class RoomStore extends ChangeNotifier {
       replyTo: replyTo,
     );
     _pending.add(message);
-    Timer(unconfirmedAfter, () => _markUnsent([message]));
+    _unconfirmed[message.id] = Timer(unconfirmedAfter, () {
+      _unconfirmed.remove(message.id);
+      _markUnsent([message]);
+    });
     _invalidateMessages();
     _notifyChanged();
   }
@@ -383,7 +392,9 @@ class RoomStore extends ChangeNotifier {
           ),
     );
     if (index >= 0) {
-      _pending.removeAt(index);
+      final confirmed = _pending.removeAt(index);
+      _unsent.remove(confirmed.id);
+      _unconfirmed.remove(confirmed.id)?.cancel();
       _invalidateMessages();
     }
   }

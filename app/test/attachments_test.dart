@@ -67,7 +67,6 @@ void main() {
     (tester) async {
       final client = FakeClient();
       final store = seeded(client);
-      addTearDown(store.dispose);
       store.addPending('Alex', 'Review this');
       store.addPending('Alex', 'Review this', files: const [file]);
       client.emit(
@@ -99,6 +98,8 @@ void main() {
       );
       expect(find.text(file.name), findsOneWidget);
       expect(tester.takeException(), isNull);
+      // The other copy is still waiting on the room, with its not-sent timer.
+      store.dispose();
     },
   );
   test(
