@@ -36,6 +36,15 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   file's hash with its size, modification time, change time, inode and device,
   and read a file again only when one of those differs. A bot can set the
   modification time back but not the change time, so every edit is still seen.
+- **Folders go with their files (rebuilt 1 November).** Approving the live
+  room's cleanup left `.ng/` as 87 empty folders, with `.nongas/` and
+  `.freeze-probe/` beside it, and two records disagreed about whether they were
+  gone. Folders an approved removal leaves empty are now removed too, in the
+  project and in the bot's copy.
+- **Removal counts per copy (rebuilt 1 November).** The badge said 2,177 and the
+  owner could not tell which bot owned them; 1,588 were in a copy that had none
+  left. The review now names each copy with its count, opens on the copy with
+  the most, and re-checks every other non-zero count.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -48,13 +57,17 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
   while the room is paused.
-- Full Flutter tests: 397 passed, five skipped. Flutter analysis: no issues.
+- Full Flutter tests: 397 passed, five skipped, at release; 398 at the
+  1 November rebuild, adding per-copy counts and stale-count correction.
+  Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 84 passed, including unchanged files not being read
+- Workspace sandbox helper: 86 passed at the 1 November rebuild (84 at
+  release), adding folder cleanup after approved removals in the project and
+  in a copy; including unchanged files not being read
   again while an edit with its modification time set back is still seen, and
   the hash cache kept private (mode 0600). Trash helper: 31 passed.
 - Package build test passed. The 2.2.0 and older packages in the archive are
@@ -68,7 +81,7 @@ Final engine SHA-256:
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `3cf9ec543aed48280d7caaf80cb90cf73be1ddeeab2d7344f3b23df256498691` |
+| orgbots_2.2.1_amd64.deb | `e8500d128dfb7ecd0d4e6afcb2ea2f632632389ecbcf40b57426f643690da224` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -77,8 +90,15 @@ The owner asked for this release. Signed archive revision
 `f993303ff3c7634bef017498bda312b67a17ac06` adds `orgbots_2.2.1_amd64.deb` and
 `orgbot_2.2.1_all.deb` beside the earlier releases;
 [Pages run 41242141639](https://github.com/acememe7/Orgbot/actions/runs/41242141639)
-published it, and the public archive serves the hashes in the table above. The
-release commits passed secret scanning with no findings.
+published it. The release commits passed secret scanning with no findings.
+
+On 1 November the package was rebuilt under the same version with folder
+cleanup after approved removals and per-copy removal counts (source `ed5b5fc`;
+the engine is unchanged, the Flutter bundle and sandbox helper rebuilt). Signed
+archive revision `2c7afe7a39dba8336aa8c4437bdeeafe98152641` replaces only
+`orgbots_2.2.1_amd64.deb`;
+[Pages run 41254171933](https://github.com/acememe7/Orgbot/actions/runs/41254171933)
+published it, and the public archive serves the hashes in the table above.
 
 ## Known limits
 
