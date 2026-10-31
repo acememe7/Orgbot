@@ -3398,6 +3398,29 @@ fn landing_commits_needs_the_owners_yes_for_exactly_those_commits() {
     f.reject(request(worker, "main", &base));
 }
 
+/// From the live room: every message a CLI bot posted ended with a reminder
+/// that file removals awaited the owner, appended by OrgBots itself.
+#[test]
+fn pending_removals_are_counted_for_the_app_and_only_changes_are_announced() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let record = |count: u32| Command::RecordPendingRemovals { agent: worker, copy: "room tools".into(), count };
+    assert_eq!(f.apply(record(1549)).len(), 1);
+    assert!(f.apply(record(1549)).is_empty(), "the same count is not announced again");
+    f.apply(Command::RecordPendingRemovals { agent: worker, copy: "its own CLI".into(), count: 3 });
+    let digest = f.engine.digest();
+    assert_eq!(digest.pending_removals.len(), 2);
+    assert_eq!(digest.pending_removals.iter().map(|row| row.count).sum::<u32>(), 1552);
+    assert!(digest.pending_removals.iter().all(|row| row.handle == "w1"));
+
+    let restored = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec()).unwrap();
+    assert_eq!(restored.digest().pending_removals.len(), 2);
+
+    f.apply(record(0));
+    assert_eq!(f.engine.digest().pending_removals.len(), 1, "zero clears that copy");
+    f.reject(Command::RecordPendingRemovals { agent: worker, copy: "somewhere".into(), count: 1 });
+}
+
 /// From the live room: a bot asked to land commits for a task it had claimed
 /// and not started. The card reached the owner, the task could not wait on it,
 /// and the bot was told the request failed and was woken eleven times.

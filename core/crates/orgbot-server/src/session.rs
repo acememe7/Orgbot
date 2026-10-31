@@ -90,6 +90,15 @@ pub enum Control {
         /// Why.
         reason: String,
     },
+    /// The owner's review reports removals waiting in a bot's copy.
+    ReportPendingRemovals {
+        /// The bot.
+        agent: orgbot_proto::AgentId,
+        /// Which copy.
+        copy: String,
+        /// Removals waiting.
+        count: u32,
+    },
     /// The owner resumes a task they parked.
     ResumeTask {
         /// The task.
@@ -1099,6 +1108,13 @@ impl RoomSession {
             Control::ResumeTask { task } => {
                 self.owner_task_command(Command::ResumeTask { task }, "Not resumed");
             }
+            Control::ReportPendingRemovals { agent, copy, count } => {
+                let _ = self
+                    .orchestrator
+                    .engine_mut()
+                    .apply(Command::RecordPendingRemovals { agent, copy, count });
+                self.broadcast_new_events();
+            }
             Control::Stop => return ControlFlow::Stop(RunOutcome::Idle),
             Control::Pause { reason } | Control::StopNow { reason } => {
                 self.orchestrator
@@ -1261,6 +1277,7 @@ fn touches_the_board(event: &orgbot_proto::event::Event) -> bool {
             | Event::DecisionQuestionJoined { .. }
             | Event::DecisionAnswered { .. }
             | Event::DecisionWithdrawn { .. }
+            | Event::PendingRemovals { .. }
             | Event::ReviewRecorded { .. }
             | Event::ArtifactAdded { .. }
             | Event::UsageRecorded { .. }

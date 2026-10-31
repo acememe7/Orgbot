@@ -120,6 +120,16 @@ pub enum ClientMessage {
         #[serde(default)]
         reason: String,
     },
+    /// How many removals the owner's review found waiting in a bot's copy,
+    /// so the room's count matches what the owner just saw or applied.
+    ReportPendingRemovals {
+        /// The bot.
+        agent: AgentId,
+        /// "room tools" or "its own CLI".
+        copy: String,
+        /// Removals waiting.
+        count: u32,
+    },
     /// Resume a task the owner parked; it is open again.
     ResumeTask {
         /// The parked task.

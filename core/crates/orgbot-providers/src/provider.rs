@@ -92,6 +92,13 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
         None
     }
 
+    /// For an agent CLI working in a protected copy, how many file removals
+    /// in that copy wait for the owner's review after its last turn. `None`
+    /// when the provider has no such copy.
+    fn last_pending_removals(&self) -> Option<usize> {
+        None
+    }
+
     /// Start the next turn in a fresh session instead of resuming the last
     /// one. For a bot that has gone round in circles in a long session.
     fn start_fresh_session(&self) {}

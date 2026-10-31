@@ -142,6 +142,9 @@ pub struct Engine {
     /// own work as news. Not saved: after a restart no turn is under way.
     #[serde(skip)]
     created_by: BTreeMap<TaskId, AgentId>,
+    /// File removals waiting for the owner's review, per bot and copy.
+    #[serde(default)]
+    pending_removals: BTreeMap<(AgentId, String), u32>,
     /// Every question put to the operator and every answer given, so the room
     /// can tell what it has already been told.
     ///
@@ -233,6 +236,13 @@ impl Engine {
                         if question.task.is_none() {
                             question.task = *task;
                         }
+                    }
+                }
+                Event::PendingRemovals { agent, copy, count } => {
+                    if *count == 0 {
+                        engine.pending_removals.remove(&(*agent, copy.clone()));
+                    } else {
+                        engine.pending_removals.insert((*agent, copy.clone()), *count);
                     }
                 }
                 Event::DecisionWithdrawn { decision, reason } => {
@@ -386,6 +396,7 @@ impl Engine {
             turn_began: BTreeMap::new(),
             board_shown: BTreeMap::new(),
             created_by: BTreeMap::new(),
+            pending_removals: BTreeMap::new(),
             decisions: DecisionLog::default(),
             roles: RoleTable::default(),
             governance: Governance::default(),
@@ -507,6 +518,16 @@ impl Engine {
     pub fn digest(&self) -> crate::digest::RoomDigest {
         let mut view = crate::digest::digest(self.tasks(), &self.decisions);
         view.utilization = self.utilization();
+        view.pending_removals = self
+            .pending_removals
+            .iter()
+            .map(|((agent, copy), count)| crate::digest::PendingRemovals {
+                agent: *agent,
+                handle: self.specs.get(agent).map(|spec| spec.handle.clone()).unwrap_or_default(),
+                copy: copy.clone(),
+                count: *count,
+            })
+            .collect();
         view.spend = self
             .spend_by_backend()
             .into_iter()
@@ -1964,6 +1985,9 @@ impl Engine {
                 changes,
                 reason,
             } => self.request_landing(by, task, branch, base, head, commits, changes, reason),
+            Command::RecordPendingRemovals { agent, copy, count } => {
+                self.record_pending_removals(agent, copy, count)
+            }
             Command::ParkTask { by, task, reason } => self.park_task(by, task, reason),
             Command::ResumeTask { task } => self.resume_task(task),
             Command::AmendTask {
@@ -2910,6 +2934,30 @@ impl Engine {
         proposed.task = Some(task);
         // Not parked on the answer: the task may be open and held by nobody.
         self.put_to_owner(by, None, proposed)
+    }
+
+    /// Record how many removals wait in one of `agent`'s copies, announcing
+    /// only a change so the app's count stays current without noise.
+    fn record_pending_removals(&mut self, agent: AgentId, copy: String, count: u32) -> Result<Vec<EventEnvelope>> {
+        self.require_agent(agent)?;
+        let copy = match copy.as_str() {
+            "room tools" | "its own CLI" => copy,
+            _ => {
+                return Err(EngineError::InvalidOwnerQuestion {
+                    reason: "a copy is either \"room tools\" or \"its own CLI\"".into(),
+                })
+            }
+        };
+        let key = (agent, copy.clone());
+        if self.pending_removals.get(&key).copied().unwrap_or(0) == count {
+            return Ok(Vec::new());
+        }
+        if count == 0 {
+            self.pending_removals.remove(&key);
+        } else {
+            self.pending_removals.insert(key, count);
+        }
+        Ok(vec![self.emit(Event::PendingRemovals { agent, copy, count })])
     }
 
     /// Put `task` aside until the owner resumes it.

@@ -631,6 +631,31 @@ void main() {
     ]);
   });
 
+  test('pending removals arrive with the digest and are reported back', () async {
+    final client = FakeClient();
+    final store = RoomStore(client);
+    client.emit({
+      'type': 'digest',
+      'digest': {
+        'pending_removals': [
+          {'agent': 'bot_a', 'handle': 'deepseek-builder', 'copy': 'room tools', 'count': 1549},
+          {'agent': 'bot_b', 'handle': 'mira', 'copy': 'its own CLI', 'count': 2},
+        ],
+      },
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(store.digest.pendingRemovalTotal, 1551);
+    expect(store.digest.pendingRemovals.first.handle, 'deepseek-builder');
+
+    store.reportPendingRemovals('bot_a', 'room tools', 0);
+    expect(client.sent.last, {
+      'type': 'report_pending_removals',
+      'agent': 'bot_a',
+      'copy': 'room tools',
+      'count': 0,
+    });
+  });
+
   test('a task transition updates state and ownership', () async {
     final client = FakeClient();
     final store = RoomStore(client);

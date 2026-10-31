@@ -450,6 +450,9 @@ impl Bot {
                 None => self.provider.complete(request, sink.clone()).await,
             };
             report.own_activity += self.provider.last_turn_activity().unwrap_or(0);
+            if let Some(count) = self.provider.last_pending_removals() {
+                engine.with(|e| note_pending_removals(e, self.spec.id, "its own CLI", count));
+            }
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
@@ -569,9 +572,11 @@ impl Bot {
                             Some(workspace) => {
                                 let grants = engine
                                     .with(|engine| sandbox_grants(engine, self.spec.id));
-                                workspace
+                                let outcome = workspace
                                     .call_as(self.spec.id, name, input, grants)
-                                    .await
+                                    .await;
+                                note_room_removals(engine, self.spec.id, name, &outcome);
+                                outcome
                             }
                             None => orgbot_tools::ToolOutcome {
                                 content: "No workspace attached".into(),
@@ -906,6 +911,29 @@ fn is_durable_fact(text: &str) -> bool {
     .any(|marker| line.contains(marker))
 }
 
+/// Record the removals a workspace command left waiting in the bot's room
+/// copy, for the app to show the owner.
+fn note_room_removals(engine: &SharedEngine, actor: AgentId, name: &str, outcome: &orgbot_tools::ToolOutcome) {
+    if name != "workspace_run" {
+        return;
+    }
+    let Ok(result) = serde_json::from_str::<serde_json::Value>(&outcome.content) else {
+        return;
+    };
+    let Some(deleted) = result.get("integration").and_then(|i| i.get("deleted")).and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    engine.with(|e| note_pending_removals(e, actor, "room tools", deleted.len()));
+}
+
+fn note_pending_removals(engine: &mut orgbot_engine::Engine, agent: AgentId, copy: &str, count: usize) {
+    let _ = engine.apply(Command::RecordPendingRemovals {
+        agent,
+        copy: copy.into(),
+        count: u32::try_from(count).unwrap_or(u32::MAX),
+    });
+}
+
 fn is_workspace_write_tool(name: &str) -> bool {
     matches!(
         name,
@@ -1163,7 +1191,9 @@ async fn dispatch_room_mcp(
         if name == "workspace_land_commits" {
             land_commits(engine, workspace, actor, &args, grants).await
         } else {
-            workspace.call_as(actor, &name, &args, grants).await
+            let outcome = workspace.call_as(actor, &name, &args, grants).await;
+            note_room_removals(engine, actor, &name, &outcome);
+            outcome
         }
     } else {
         orgbot_tools::ToolOutcome::error("No workspace attached")

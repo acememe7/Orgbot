@@ -199,6 +199,16 @@ class RoomStore extends ChangeNotifier {
   void parkTask(String task, {String reason = ''}) =>
       _client.send({'type': 'park_task', 'task': task, 'reason': reason});
 
+  /// Tell the room how many removals your review found waiting in a bot's
+  /// copy, so its count matches what you just saw or applied.
+  void reportPendingRemovals(String agent, String copy, int count) =>
+      _client.send({
+        'type': 'report_pending_removals',
+        'agent': agent,
+        'copy': copy,
+        'count': count,
+      });
+
   /// Resume a task you parked. It is open again for whoever picks it up.
   void resumeTask(String task) =>
       _client.send({'type': 'resume_task', 'task': task});

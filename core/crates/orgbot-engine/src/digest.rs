@@ -247,6 +247,24 @@ pub struct RoomDigest {
     /// Room-wide totals, with costs absent when any turn is unknown or unpriced.
     #[serde(default)]
     pub total_spend: RoomSpend,
+    /// File removals waiting for the owner's review, per bot copy. From the
+    /// live room: a bot's every message ended with a reminder of them, added
+    /// by OrgBots; the app shows them instead.
+    #[serde(default)]
+    pub pending_removals: Vec<PendingRemovals>,
+}
+
+/// File removals waiting in one bot copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRemovals {
+    /// The bot.
+    pub agent: AgentId,
+    /// Its handle.
+    pub handle: String,
+    /// Which copy: "room tools" or "its own CLI".
+    pub copy: String,
+    /// Removals waiting.
+    pub count: u32,
 }
 
 /// What one account has been asked for.
@@ -470,6 +488,7 @@ pub fn digest<'a>(tasks: impl Iterator<Item = &'a Task>, decisions: &DecisionLog
         spend: Vec::new(),
         agent_spend: Vec::new(),
         total_spend: RoomSpend::default(),
+        pending_removals: Vec::new(),
     }
 }
 

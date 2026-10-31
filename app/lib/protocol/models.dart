@@ -771,6 +771,7 @@ class RoomDigest {
     this.spend = const [],
     this.agentSpend = const [],
     this.totalSpend = const RoomSpend(),
+    this.pendingRemovals = const [],
   });
 
   /// The outcomes, most urgent first.
@@ -800,6 +801,13 @@ class RoomDigest {
   final List<AgentSpend> agentSpend;
   final RoomSpend totalSpend;
 
+  /// File removals waiting for your review, per bot copy.
+  final List<PendingRemovalCount> pendingRemovals;
+
+  /// Every removal waiting for your review, across bots.
+  int get pendingRemovalTotal =>
+      pendingRemovals.fold(0, (sum, row) => sum + row.count);
+
   /// The state before a room has said anything.
   const RoomDigest.empty()
     : objectives = const [],
@@ -810,7 +818,8 @@ class RoomDigest {
       utilization = const Utilization.empty(),
       spend = const [],
       agentSpend = const [],
-      totalSpend = const RoomSpend();
+      totalSpend = const RoomSpend(),
+      pendingRemovals = const [];
 
   /// Whether there is anything to show yet.
   bool get isEmpty => objectives.isEmpty && needsYou.isEmpty;
@@ -845,7 +854,36 @@ class RoomDigest {
     totalSpend: RoomSpend.fromJson(
       (json['total_spend'] as Map?)?.cast<String, Object?>() ?? const {},
     ),
+    pendingRemovals: (json['pending_removals'] as List? ?? const [])
+        .whereType<Map>()
+        .map((row) => PendingRemovalCount.fromJson(row.cast<String, Object?>()))
+        .toList(),
   );
+}
+
+/// File removals waiting in one bot copy for the owner's review.
+class PendingRemovalCount {
+  const PendingRemovalCount({
+    required this.agent,
+    required this.handle,
+    required this.copy,
+    required this.count,
+  });
+
+  final String agent;
+  final String handle;
+
+  /// "room tools" or "its own CLI".
+  final String copy;
+  final int count;
+
+  factory PendingRemovalCount.fromJson(Map<String, Object?> json) =>
+      PendingRemovalCount(
+        agent: json['agent'] as String? ?? '',
+        handle: json['handle'] as String? ?? '',
+        copy: json['copy'] as String? ?? '',
+        count: (json['count'] as num?)?.toInt() ?? 0,
+      );
 }
 
 /// What one account has been asked for.

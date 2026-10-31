@@ -283,6 +283,17 @@ pub enum Command {
         reason: String,
     },
 
+    /// Record how many file removals in one of `agent`'s copies wait for the
+    /// owner's review, as the workspace last reported them.
+    RecordPendingRemovals {
+        /// The bot.
+        agent: AgentId,
+        /// Which copy: "room tools" or "its own CLI".
+        copy: String,
+        /// Removals waiting.
+        count: u32,
+    },
+
     /// The owner resumes a parked task, which returns to the pool. No bot
     /// tool sends this: only the owner resumes what they parked.
     ResumeTask {
@@ -383,6 +394,7 @@ impl Command {
             Self::AmendTask { .. } => "amend_task",
             Self::ProposeRetire { .. } => "propose_retire",
             Self::RequestLanding { .. } => "request_landing",
+            Self::RecordPendingRemovals { .. } => "record_pending_removals",
             Self::ParkTask { .. } => "park_task",
             Self::ResumeTask { .. } => "resume_task",
             Self::AnswerDecision { .. } => "answer_decision",
@@ -433,6 +445,7 @@ impl Command {
                 // The owner may put work aside or take it back while paused.
                 | Self::ParkTask { by: None, .. }
                 | Self::ResumeTask { .. }
+                | Self::RecordPendingRemovals { .. }
                 | Self::Tick { .. }
                 | Self::KeepAlive { .. }
                 | Self::BeginTurn { .. }

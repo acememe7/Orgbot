@@ -136,6 +136,8 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            wait for the answer: you will be woken when it comes. Do not hand the wait \
            to another bot or post reminders about it. Use ask_owner only for a question \
            you need answered, never to record a status, a hold or a decision already made.\n\
+         - File removals waiting for the owner's review are shown to them in the app, \
+           with a count per bot. Do not mention them in your messages.\n\
          - A parked task is the owner's to resume. Leave it alone: do not work on it, \
            claim it, plan around it as open work, or ask the owner about it.\n\
          - Avoid repeating another bot's status or asking it to confirm a requirement already stated. \

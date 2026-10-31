@@ -23,7 +23,7 @@ import '../workspace/workspace_screen.dart';
 import '../workspace/workspace.dart';
 import '../workspace/attachments.dart';
 import '../protocol/models.dart' show ChatFile;
-import '../protocol/models.dart' show ChatMessage;
+import '../protocol/models.dart' show ChatMessage, RoomDigest;
 import '../orgbot/room_check.dart';
 import '../state/room_store.dart';
 import '../net/room_client.dart' show LinkState;
@@ -473,6 +473,21 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
       builder: (context) => WorkspaceChangesDialog(
         stateDirectory: Directory('${archive.path}/workspaces'),
         agents: agents,
+        onStatus: (copyId, deleted) {
+          // A room-tools copy is named by the bot's id; a CLI copy by its
+          // handle, hex-encoded.
+          for (final agent in store.agents) {
+            final nativeId = utf8
+                .encode(agent.handle)
+                .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+                .join();
+            if (copyId == agent.id) {
+              store.reportPendingRemovals(agent.id, 'room tools', deleted);
+            } else if (agent.handle.isNotEmpty && copyId == nativeId) {
+              store.reportPendingRemovals(agent.id, 'its own CLI', deleted);
+            }
+          }
+        },
       ),
     );
   }
@@ -873,13 +888,24 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
                     Flexible(
                       flex: 2,
                       child: Tooltip(
-                        message: 'Review agent workspace changes',
+                        message: workspaceChangesTooltip(store?.digest),
                         child: TextButton.icon(
                           key: const ValueKey('review-workspace-changes'),
                           onPressed: store == null
                               ? null
                               : () => _reviewWorkspaceChanges(store),
-                          icon: const Icon(Icons.merge_type, size: 18),
+                          // The count of removals waiting, so a bot need not
+                          // keep saying so. From the live room: every message
+                          // a bot posted ended with that reminder.
+                          icon: Badge(
+                            key: const ValueKey('pending-removals-badge'),
+                            isLabelVisible:
+                                (store?.digest.pendingRemovalTotal ?? 0) > 0,
+                            label: Text(
+                              '${store?.digest.pendingRemovalTotal ?? 0}',
+                            ),
+                            child: const Icon(Icons.merge_type, size: 18),
+                          ),
                           label: const Text(
                             'Workspace changes',
                             overflow: TextOverflow.ellipsis,
@@ -1279,4 +1305,16 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
       ),
     );
   }
+}
+
+/// What the Workspace changes button says when hovered: the removals waiting
+/// for review, per bot copy.
+String workspaceChangesTooltip(RoomDigest? digest) {
+  final rows = digest?.pendingRemovals ?? const [];
+  if (rows.isEmpty) return 'Review agent workspace changes';
+  final lines = [
+    for (final row in rows)
+      '@${row.handle} (${row.copy}): ${row.count} ${row.count == 1 ? 'removal' : 'removals'} to review',
+  ];
+  return lines.join('\n');
 }

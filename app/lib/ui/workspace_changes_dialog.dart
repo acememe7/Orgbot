@@ -23,12 +23,17 @@ class WorkspaceChangesDialog extends StatefulWidget {
     required this.agents,
     this.processRunner,
     this.helperPath,
+    this.onStatus,
   });
 
   final Directory stateDirectory;
   final List<WorkspaceAgentLabel> agents;
   final WorkspaceProcessRunner? processRunner;
   final String? helperPath;
+
+  /// Told how many removals each fresh status shows for an agent copy, so
+  /// the room's count follows what the owner sees and applies.
+  final void Function(String agentId, int deleted)? onStatus;
 
   @override
   State<WorkspaceChangesDialog> createState() => _WorkspaceChangesDialogState();
@@ -143,6 +148,8 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
     try {
       final value = await _invoke('status');
       if (mounted) setState(() => _status = value);
+      final agent = _agentId;
+      if (agent != null) widget.onStatus?.call(agent, _paths(value['deleted']).length);
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -296,6 +303,8 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
   Future<void> _refreshAfterApply() async {
     final value = await _invoke('status');
     if (mounted) setState(() => _status = value);
+      final agent = _agentId;
+      if (agent != null) widget.onStatus?.call(agent, _paths(value['deleted']).length);
   }
 
   @override

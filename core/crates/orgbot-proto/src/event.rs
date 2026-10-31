@@ -99,6 +99,16 @@ pub enum Event {
         /// What they said.
         answer: Answer,
     },
+    /// How many file removals in one of a bot's copies wait for the owner's
+    /// review. Zero clears it.
+    PendingRemovals {
+        /// The bot.
+        agent: AgentId,
+        /// Which copy: "room tools" or "its own CLI".
+        copy: String,
+        /// Removals waiting.
+        count: u32,
+    },
     /// An unanswered question was taken back, so it no longer waits on the
     /// operator: the task it was about was parked.
     DecisionWithdrawn {
@@ -229,6 +239,7 @@ impl Event {
             Self::DecisionQuestionJoined { .. } => "decision_question_joined",
             Self::DecisionAnswered { .. } => "decision_answered",
             Self::DecisionWithdrawn { .. } => "decision_withdrawn",
+            Self::PendingRemovals { .. } => "pending_removals",
             Self::TaskTransitioned { .. } => "task_transitioned",
             Self::TaskAmended { .. } => "task_amended",
             Self::HandoffOffered { .. } => "handoff_offered",

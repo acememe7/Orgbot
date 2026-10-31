@@ -567,6 +567,10 @@ impl Provider for GuardedProvider {
     fn last_turn_activity(&self) -> Option<usize> {
         self.inner.last_turn_activity()
     }
+
+    fn last_pending_removals(&self) -> Option<usize> {
+        self.inner.last_pending_removals()
+    }
     fn start_fresh_session(&self) {
         self.inner.start_fresh_session()
     }
