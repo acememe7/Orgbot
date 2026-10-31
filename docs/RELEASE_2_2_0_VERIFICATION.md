@@ -104,6 +104,9 @@ handoff fix prepared as 2.1.1, which was never published.
   tap confirms; the access mode applies), and moves the branch forward only:
   no push, no merge, no history rewrite, no project file written, and only
   when the project already holds every changed file as the commits leave it.
+  Asking the owner for access or a landing starts a task the bot had only
+  claimed, so it waits on the answer instead of being woken while the owner
+  has the card (in the live room a bot was woken eleven times that way).
 - **A lent GitHub CLI signs in from the keyring.** The GitHub CLI keeps its
   token in the desktop keyring, which a sandbox cannot reach, so in the live
   room a bot lent it got a 401 on push. The launcher now asks your `gh` for the
@@ -167,7 +170,7 @@ One task and one run of each; see the
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 958 passed, zero failures, three ignored.
+- Full Rust workspace (`--locked`): 959 passed, zero failures, three ignored.
   New tests cover landing a real bundle in a real repository (refused before the project holds the files, refused off the approval, for diverged commits, links and path-like branches; staged work kept), the approval covering exactly those commits, landing under each access mode, showing a bot the tasks others added during its turn, parking and resuming a task, withdrawing the questions waiting on it, when approved work is ready to deliver, amending a task, a bot resting after turns of talk, a lapsed claim waking a resting room, CLI tool-use counting, a command in a conflicting copy, the four access modes, a lent sign-in reaching a real CLI turn
   through the sandbox launcher, the lend list's limits,
   outside tool calls by mode, the server-key grant and its sandbox mount, per-turn access,
@@ -187,11 +190,11 @@ One task and one run of each; see the
   run and were unchanged.
 
 Final engine SHA-256:
-`426f88700c66e091ddae1224cb710768b6b951f2d4d847ca9a88949fc8d2ee87`.
+`59318b64826f6a874009e0e7b1dec3a742f0e0858cecd9503ea9e9e44098d91e`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.0_amd64.deb | `7de5292292ca80c779f3300f2e0335ce3512eb72d48fe2f6e0adef570f33780a` |
+| orgbots_2.2.0_amd64.deb | `80988e4044ed0dc484908151b3d05978cdba70b5869d7f38895863a5f3ece402` |
 | orgbot_2.2.0_all.deb | `9e7bbfc696cb887195027910c830ee03c1e4a1714184125ead1a3a5f801fafef` |
 
 ## Publication
@@ -316,6 +319,15 @@ the previous package). Signed archive revision
 `edf9a5a7c6194c21265437b2f1ebc0b1a20523b8` replaces only
 `orgbots_2.2.0_amd64.deb`;
 [Pages run 41211548830](https://github.com/acememe7/Orgbot/actions/runs/41211548830)
+published it. Its first live use landed nothing at first: the bot asked for a
+task it had only claimed, so the question reached the owner while the bot was
+told it failed.
+
+That evening they were rebuilt again so asking the owner starts a claimed task
+and waits on the answer (source `60446e4`; the Flutter bundle is byte-identical).
+Signed archive revision `4c3febc0fa03002e1bdab6513302572d9540a17a` replaces only
+`orgbots_2.2.0_amd64.deb`;
+[Pages run 41219081571](https://github.com/acememe7/Orgbot/actions/runs/41219081571)
 published it, and the public archive serves the hashes in the table above.
 
 The release commits passed secret scanning with no findings.
