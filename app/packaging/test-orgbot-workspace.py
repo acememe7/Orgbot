@@ -494,6 +494,31 @@ class WorkspaceTests(unittest.TestCase):
             covered = any(path == d or path.startswith(d + "/") for d in workspace._OWNER_SECRET_DIRS) or path in workspace._OWNER_SECRET_FILES
             self.assertTrue(covered, path)
 
+    def test_unchanged_files_are_not_read_again_but_every_change_is_seen(self):
+        # From the live room: every command re-read a bot's whole 5 GB copy.
+        work = self.prepare()
+        workspace._status(os.fspath(self.state), "dev")
+        real = workspace._hash_contents
+        reads = []
+        def counting(*args, **kwargs):
+            reads.append(1)
+            return real(*args, **kwargs)
+        with patch.object(workspace, "_hash_contents", side_effect=counting):
+            workspace._HASH_CACHES.clear()
+            quiet = workspace._status(os.fspath(self.state), "dev")
+            self.assertEqual(reads, [], "nothing changed, so nothing is read")
+            self.assertEqual(quiet["changed"], [])
+            # A bot writes a file and sets its modification time back.
+            target = work / "src/main.py"
+            before = target.stat()
+            target.write_text("edited\n", encoding="utf-8")
+            os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+            noticed = workspace._status(os.fspath(self.state), "dev")
+            self.assertEqual([row["path"] for row in noticed["changed"]], ["src/main.py"])
+            self.assertEqual(len(reads), 1, "only the changed file is read")
+        cache = next(self.state.glob("agents/*/dev/.hashes.json"))
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+
     def test_deletion_requires_explicit_owner_approval(self):
         work = self.prepare()
         (work / "README.md").unlink()

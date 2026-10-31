@@ -236,17 +236,32 @@ def _validate_internal_symlink(path: Path, root: Path) -> None:
         _fail(f"Project symlink must resolve inside the project: {path.relative_to(root)}")
 
 
-def _entry(path: Path, root: Path, *, limit: bool = True) -> dict[str, Any]:
-    info = path.lstat()
-    if stat.S_ISLNK(info.st_mode):
-        _validate_internal_symlink(path, root)
-        _fail(f"Symlink entries are not mergeable: {path.relative_to(root)}")
-    if not stat.S_ISREG(info.st_mode):
-        _fail(f"Unsupported project file type: {path.relative_to(root)}")
-    if info.st_nlink != 1:
-        _fail(f"Multiply-linked files are not supported in isolated workspaces: {path.relative_to(root)}")
-    if limit and info.st_size > MAX_FILE_BYTES:
-        _fail(f"File exceeds the {MAX_FILE_BYTES}-byte workspace limit: {path.relative_to(root)}")
+# Hashes remembered per scanned tree, by the file's identity. From the live
+# room: every workspace command read and hashed a bot's whole 5 GB copy, and
+# the project, before and after it ran, so a one-line search took minutes.
+# A file is read again only when its size, inode or change time differs: a
+# bot can set a file's modification time back, but not its change time.
+_HASH_CACHES: dict[str, tuple[Path, dict[str, list[Any]], dict[str, list[Any]]]] = {}
+
+
+def _use_hash_cache(root: Path, cache_file: Path) -> None:
+    """Remember file hashes for scans of `root` in `cache_file` (private state)."""
+    known: dict[str, list[Any]] = {}
+    try:
+        raw = _read_private_json(cache_file, "hash cache")
+        if isinstance(raw, dict) and isinstance(raw.get("files"), dict):
+            known = {k: v for k, v in raw["files"].items() if isinstance(v, list) and len(v) == 6}
+    except (WorkspaceError, OSError, ValueError):
+        known = {}
+    _HASH_CACHES[os.fspath(root)] = (cache_file, known, {})
+
+
+def _file_identity(info: os.stat_result) -> list[Any]:
+    return [info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino, info.st_dev]
+
+
+def _hash_contents(path: Path, root: Path, info: os.stat_result) -> str:
+    """Read a file and return its SHA-256, refusing one that changes meanwhile."""
     digest = hashlib.sha256()
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags)
@@ -265,10 +280,49 @@ def _entry(path: Path, root: Path, *, limit: bool = True) -> dict[str, Any]:
             _fail(f"File changed while scanning: {path.relative_to(root)}")
     finally:
         os.close(fd)
-    return {"kind": "file", "sha256": digest.hexdigest(), "mode": stat.S_IMODE(info.st_mode) & 0o777, "size": info.st_size}
+    return digest.hexdigest()
+
+
+def _entry(path: Path, root: Path, *, limit: bool = True) -> dict[str, Any]:
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        _validate_internal_symlink(path, root)
+        _fail(f"Symlink entries are not mergeable: {path.relative_to(root)}")
+    if not stat.S_ISREG(info.st_mode):
+        _fail(f"Unsupported project file type: {path.relative_to(root)}")
+    if info.st_nlink != 1:
+        _fail(f"Multiply-linked files are not supported in isolated workspaces: {path.relative_to(root)}")
+    if limit and info.st_size > MAX_FILE_BYTES:
+        _fail(f"File exceeds the {MAX_FILE_BYTES}-byte workspace limit: {path.relative_to(root)}")
+    cache = _HASH_CACHES.get(os.fspath(root))
+    relative = path.relative_to(root).as_posix()
+    identity = _file_identity(info)
+    if cache is not None:
+        remembered = cache[1].get(relative)
+        if remembered is not None and remembered[:5] == identity and re.fullmatch(r"[a-f0-9]{64}", str(remembered[5])):
+            cache[2][relative] = remembered
+            return {"kind": "file", "sha256": remembered[5], "mode": stat.S_IMODE(info.st_mode) & 0o777, "size": info.st_size}
+    sha = _hash_contents(path, root, info)
+    if cache is not None:
+        cache[2][relative] = [*identity, sha]
+    return {"kind": "file", "sha256": sha, "mode": stat.S_IMODE(info.st_mode) & 0o777, "size": info.st_size}
 
 
 def _scan(root: Path) -> dict[str, dict[str, Any]]:
+    cache = _HASH_CACHES.get(os.fspath(root))
+    if cache is not None:
+        cache[2].clear()
+    entries = _scan_tree(root)
+    if cache is not None and cache[2] != cache[1]:
+        try:
+            _atomic_json(cache[0], {"files": cache[2]})
+            _HASH_CACHES[os.fspath(root)] = (cache[0], dict(cache[2]), {})
+        except OSError:
+            pass
+    return entries
+
+
+def _scan_tree(root: Path) -> dict[str, dict[str, Any]]:
     entries: dict[str, dict[str, Any]] = {}
     total_bytes = 0
     count = 0
@@ -921,6 +975,12 @@ def _share_with_siblings(state: Path, project: Path, agent: str, workspace: Path
     return freed
 
 
+def _cache_hashes(state: Path, project: Path, workspace: Path) -> None:
+    """Remember file hashes for the project and this copy, in private state."""
+    _use_hash_cache(project, state / "agents" / _project_id(project) / ".project-hashes.json")
+    _use_hash_cache(workspace, workspace.parent / ".hashes.json")
+
+
 def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) -> dict[str, Any]:
     agent = _safe_agent(agent_arg)
     project = _canonical_directory(project_arg, "project")
@@ -931,6 +991,7 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) 
     try:
         source_entries = _scan(project)
         agent_root, workspace, manifest_path = _layout(state, project, agent)
+        _cache_hashes(state, project, workspace)
         _safe_state_child(state, f"agents/{_project_id(project)}", create=True)
         _ensure_private_dir(agent_root)
         _safe_state_child(state, f"manifests/{_project_id(project)}", create=True)
@@ -1037,6 +1098,7 @@ def _status(state_arg: str, agent_arg: str) -> dict[str, Any]:
     try:
         data = _manifest_read(manifest_path, project, agent)
         _, workspace, _ = _layout(state, project, agent)
+        _cache_hashes(state, project, workspace)
         _safe_state_child(state, f"agents/{_project_id(project)}/{agent}/profiles/home")
         if workspace.is_symlink() or not workspace.is_dir():
             _fail("Workspace path is missing or unsafe")
@@ -3067,6 +3129,7 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
         if data["read_only"]:
             _fail("Read-only reviewer workspaces cannot apply changes")
         _, workspace, _ = _layout(state, project, agent)
+        _cache_hashes(state, project, workspace)
         _safe_state_child(state, f"agents/{_project_id(project)}/{agent}")
         if not workspace.is_dir() or workspace.is_symlink():
             _fail("Workspace path is missing or unsafe")
