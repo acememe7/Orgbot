@@ -150,6 +150,9 @@ pub struct Bot {
     pub(crate) attachments_root: Option<std::path::PathBuf>,
     pub(crate) input_interrupt: CancellationToken,
     retry_at: Option<std::time::Instant>,
+    /// When this bot last posted the closing words of a turn that changed
+    /// nothing, so it does not post another such status straight away.
+    last_idle_post: Option<std::time::Instant>,
 }
 
 impl Bot {
@@ -188,6 +191,7 @@ impl Bot {
             attachments_root: None,
             input_interrupt: CancellationToken::new(),
             retry_at: None,
+            last_idle_post: None,
         }
     }
 
@@ -363,6 +367,7 @@ impl Bot {
         // never asked of it again.
         let seen_through = head;
         let mut mark_seen = true;
+        let mut changed = false;
         self.history.push(turn);
 
         let mut report = TurnReport {
@@ -596,6 +601,9 @@ impl Bot {
                         .await;
                 }
                 report.tool_calls += 1;
+                if !outcome.is_error && !QUIET_TOOLS.contains(&name) {
+                    changed = true;
+                }
                 if outcome.is_error {
                     report.tool_errors += 1;
                 }
@@ -638,8 +646,28 @@ impl Bot {
                 .collect(),
             None => Vec::new(),
         };
+        // From the live room: bots ended turns that changed nothing with
+        // "Aece, nothing needs you" or "still waiting", turn after turn. Such
+        // a closing is posted at most once in QUIET_REPEAT, unless the turn
+        // answered a person.
+        let changed = changed || report.own_activity > 0;
+        let answering = engine.with(|engine| {
+            engine.events_since(self.last_seen).any(|envelope| {
+                matches!(&envelope.event, orgbot_proto::Event::MessagePosted { message }
+                    if matches!(message.author, orgbot_proto::Author::Human { .. })
+                        && message.wakes(self.spec.id, &self.spec.roles))
+            })
+        });
+        let quiet = !changed
+            && !answering
+            && self.last_idle_post.is_some_and(|at| at.elapsed() < QUIET_REPEAT);
+        if changed {
+            self.last_idle_post = None;
+        } else if report.said.is_some() && !posted_to_chat && !quiet {
+            self.last_idle_post = Some(std::time::Instant::now());
+        }
         engine.with(|engine| {
-            let closing = report.said.clone().filter(|_| !posted_to_chat);
+            let closing = report.said.clone().filter(|_| !posted_to_chat && !quiet);
             if closing.is_some() || !files.is_empty() {
                 let body = closing.unwrap_or_else(|| match files.len() {
                     1 => "Here is the image I generated.".into(),
@@ -933,6 +961,26 @@ fn note_pending_removals(engine: &mut orgbot_engine::Engine, agent: AgentId, cop
         count: u32::try_from(count).unwrap_or(u32::MAX),
     });
 }
+
+/// Tools that only read or talk: a turn that used nothing else changed nothing.
+const QUIET_TOOLS: &[&str] = &[
+    "post_message",
+    "list_tasks",
+    "room_status",
+    "read_artifact",
+    "read_prior_artifact",
+    "find_prior_work",
+    "list_handoffs",
+    "search_project_memory",
+    "find_capabilities",
+    "workspace_read",
+    "workspace_list",
+    "workspace_git",
+];
+
+/// How long a bot whose turns change nothing waits before posting another
+/// such closing status.
+const QUIET_REPEAT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
 fn is_workspace_write_tool(name: &str) -> bool {
     matches!(
@@ -1738,6 +1786,42 @@ mod tests {
             "blocked mutation never reaches the workspace"
         );
         assert_eq!(report.said.as_deref(), Some("review complete"));
+    }
+
+    #[tokio::test]
+    async fn a_bot_whose_turns_change_nothing_posts_its_status_once_until_someone_asks() {
+        // From the live room: "Aece, nothing needs you" turn after turn.
+        use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+        let agent = spec();
+        let actor = agent.id;
+        let mut room = Engine::new(RoomSpec {
+            name: "quiet".into(),
+            goal: "wait well".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        room.apply(Command::JoinAgent { spec: Box::new(agent.clone()) }).unwrap();
+        room.apply(Command::StartRoom).unwrap();
+        let engine = SharedEngine::new(room);
+        let mut bot = Bot::new(agent, Arc::new(ScriptedProvider::always_says("Aece, nothing needs you.")));
+        let posted = |engine: &SharedEngine| {
+            engine.with(|e| e.transcript().iter().filter(|m| m.author.agent() == Some(actor)).count())
+        };
+        bot.take_turn(&engine, None).await.unwrap();
+        bot.take_turn(&engine, None).await.unwrap();
+        assert_eq!(posted(&engine), 1, "the same do-nothing status is not posted twice");
+
+        engine.with(|e| {
+            let room = e.room_id();
+            let message = orgbot_proto::ChatMessage::human(room, "Aece", "@w1 anything for me?").to_agents(vec![actor]);
+            e.apply(Command::PostMessage { message: Box::new(message) }).unwrap();
+        });
+        bot.take_turn(&engine, None).await.unwrap();
+        assert_eq!(posted(&engine), 2, "asked directly, it answers");
+        bot.take_turn(&engine, None).await.unwrap();
+        assert_eq!(posted(&engine), 2);
     }
 
     #[tokio::test]
