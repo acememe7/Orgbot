@@ -405,6 +405,7 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                     ("task", schema::string("The task to amend.")),
                     ("acceptance_criteria", schema::string_array("The complete new list of acceptance criteria, replacing the old one.")),
                     ("brief", schema::string("The new brief, if it changes.")),
+                    ("depends_on", schema::string_array("Every task id this task must wait for, replacing the old list. Use it instead of writing \"after X is approved\" in the brief: a bot cannot claim the task until those land.")),
                     ("reason", schema::string("Why, in one or two sentences, for the log.")),
                 ],
                 &["task", "reason"],
@@ -1795,11 +1796,25 @@ fn amend_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome
         .get("brief")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let depends_on = match input.get("depends_on").filter(|value| value.is_array()) {
+        Some(_) => {
+            let mut ids = Vec::new();
+            for raw in string_list(input, "depends_on") {
+                match parse_id::<TaskId>(&raw, "depends_on", "task") {
+                    Ok(id) => ids.push(id),
+                    Err(message) => return ToolOutcome::error(message),
+                }
+            }
+            Some(ids)
+        }
+        None => None,
+    };
     match engine.apply(Command::AmendTask {
         by: actor,
         task,
         brief,
         acceptance_criteria,
+        depends_on,
         reason,
     }) {
         Ok(_) => ToolOutcome::ok(

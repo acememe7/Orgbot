@@ -152,6 +152,9 @@ pub enum Event {
         /// The new acceptance criteria, in full, when they changed.
         #[serde(default)]
         acceptance_criteria: Option<Vec<String>>,
+        /// The tasks it now waits for, in full, when they changed.
+        #[serde(default)]
+        depends_on: Option<Vec<TaskId>>,
         reason: String,
     },
 

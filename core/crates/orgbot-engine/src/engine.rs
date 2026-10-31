@@ -210,6 +210,7 @@ impl Engine {
                     task,
                     brief,
                     acceptance_criteria,
+                    depends_on,
                     ..
                 } => {
                     let record = engine.tasks.get_mut(task).ok_or("Missing saved task")?;
@@ -218,6 +219,9 @@ impl Engine {
                     }
                     if let Some(criteria) = acceptance_criteria {
                         record.acceptance_criteria = criteria.clone();
+                    }
+                    if let Some(depends_on) = depends_on {
+                        record.depends_on = depends_on.clone();
                     }
                 }
                 Event::DecisionAsked { decision } => {
@@ -1676,6 +1680,29 @@ impl Engine {
     ///
     /// Returns the upstream and whether it exists. A dependency on a task that
     /// is not here can never be satisfied, so it is a blocker, not a nothing.
+    /// Whether `task` waits for upstream work that has not landed yet. Work
+    /// like that is not live: its holder is not woken for it.
+    pub fn waits_on_dependency(&self, task: TaskId) -> bool {
+        self.tasks.get(&task).is_some_and(|record| self.first_unmet_dependency(record).is_some())
+    }
+
+    /// Whether `from` waits, directly or through others, for `target`.
+    fn depends_transitively(&self, from: TaskId, target: TaskId) -> bool {
+        let mut stack = vec![from];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = stack.pop() {
+            if id == target {
+                return true;
+            }
+            if seen.insert(id) {
+                if let Some(record) = self.tasks.get(&id) {
+                    stack.extend(record.depends_on.iter().copied());
+                }
+            }
+        }
+        false
+    }
+
     fn first_unmet_dependency(&self, task: &Task) -> Option<UnmetDependency> {
         for dep in &task.depends_on {
             let resolved = self.follow_supersession(*dep);
@@ -1995,8 +2022,9 @@ impl Engine {
                 task,
                 brief,
                 acceptance_criteria,
+                depends_on,
                 reason,
-            } => self.amend_task(by, task, brief, acceptance_criteria, reason),
+            } => self.amend_task(by, task, brief, acceptance_criteria, depends_on, reason),
 
             Command::AnswerDecision { decision, answer } => self.answer_decision(decision, answer),
 
@@ -2806,6 +2834,7 @@ impl Engine {
         task: TaskId,
         brief: Option<String>,
         acceptance_criteria: Option<Vec<String>>,
+        depends_on: Option<Vec<TaskId>>,
         reason: String,
     ) -> Result<Vec<EventEnvelope>> {
         let spec = self.require_agent(by)?;
@@ -2814,6 +2843,24 @@ impl Engine {
                 agent: by,
                 action: "amend a task without the coordinator role".into(),
             });
+        }
+        // From the live room: a coordinator wrote "commit after the docs,
+        // Renderer and gas cards are approved" into a brief. Nothing held
+        // the task back, so a bot claimed it, could not start, and was woken
+        // eleven times. A real dependency keeps it unclaimable until then.
+        if let Some(upstream) = &depends_on {
+            for dependency in upstream {
+                if *dependency == task {
+                    return Err(EngineError::NotReady { task, reason: "a task cannot wait for itself".into() });
+                }
+                self.require_task(*dependency)?;
+                if self.depends_transitively(*dependency, task) {
+                    return Err(EngineError::NotReady {
+                        task,
+                        reason: format!("{dependency} already waits for this task, so waiting for it would never end"),
+                    });
+                }
+            }
         }
         let handle = spec.handle.clone();
         let reason = reason.trim().to_string();
@@ -2830,9 +2877,9 @@ impl Engine {
                 .filter(|criterion| !criterion.is_empty())
                 .collect::<Vec<_>>()
         });
-        if brief.is_none() && acceptance_criteria.is_none() {
+        if brief.is_none() && acceptance_criteria.is_none() && depends_on.is_none() {
             return Err(EngineError::InvalidOwnerQuestion {
-                reason: "give a new brief, new acceptance criteria, or both".into(),
+                reason: "give a new brief, new acceptance criteria, the tasks it waits for, or a mix".into(),
             });
         }
         if brief.as_ref().is_some_and(|brief| brief.chars().count() > 8_000)
@@ -2860,12 +2907,16 @@ impl Engine {
         if let Some(criteria) = &acceptance_criteria {
             record.acceptance_criteria = criteria.clone();
         }
+        if let Some(upstream) = &depends_on {
+            record.depends_on = upstream.clone();
+        }
         let mut events = vec![self.emit(Event::TaskAmended {
             task,
             title: title.clone(),
             by,
             brief: brief.clone(),
             acceptance_criteria: acceptance_criteria.clone(),
+            depends_on: depends_on.clone(),
             reason: reason.clone(),
         })];
         let mut body = format!("@{handle} amended \"{title}\": {reason}");
@@ -2878,8 +2929,22 @@ impl Engine {
         if brief.is_some() {
             body.push_str("\nThe brief was also updated.");
         }
+        if let Some(upstream) = &depends_on {
+            let names: Vec<String> = upstream
+                .iter()
+                .filter_map(|id| self.tasks.get(id).map(|t| format!("\"{}\"", t.title)))
+                .collect();
+            body.push_str(&if names.is_empty() {
+                "\nIt no longer waits for other tasks.".to_string()
+            } else {
+                format!("\nIt now waits for {}.", names.join(", "))
+            });
+        }
         let mut message = ChatMessage::system(self.room.id, body);
-        if let Some(assignee) = assignee.filter(|assignee| *assignee != by) {
+        // Only a change to what the work is wakes its holder: one that only
+        // makes the task wait need not, since the holder can do nothing yet.
+        let changes_the_work = brief.is_some() || acceptance_criteria.is_some();
+        if let Some(assignee) = assignee.filter(|assignee| *assignee != by && changes_the_work) {
             message = message.to_agents(vec![assignee]);
         }
         events.extend(self.post_message(message)?);

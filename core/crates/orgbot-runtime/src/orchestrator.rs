@@ -442,6 +442,7 @@ impl Orchestrator {
             engine
                 .task(*id)
                 .is_some_and(|task| !task.state.is_waiting())
+                && !engine.waits_on_dependency(*id)
         });
         if has_live_work && !resting {
             return Some(Wake::HeldWork);
@@ -488,6 +489,7 @@ impl Orchestrator {
                 engine
                     .task(*id)
                     .is_some_and(|task| task.state == orgbot_proto::TaskState::Blocked)
+                    || engine.waits_on_dependency(*id)
             });
         if held.is_empty() || parked_indefinitely {
             let open = engine.claimable_by(agent);
@@ -1296,6 +1298,7 @@ impl Orchestrator {
             .active_tasks_of(agent)
             .into_iter()
             .filter(|id| engine.task(*id).is_some_and(|task| !task.state.is_waiting()))
+            .filter(|id| !engine.waits_on_dependency(*id))
             .collect();
         live.sort();
         live

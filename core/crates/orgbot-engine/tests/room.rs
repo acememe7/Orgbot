@@ -3398,6 +3398,43 @@ fn landing_commits_needs_the_owners_yes_for_exactly_those_commits() {
     f.reject(request(worker, "main", &base));
 }
 
+/// From the live room: a gate written into a brief held nothing back, so a
+/// bot claimed the task, could not start it, and was woken eleven times.
+#[test]
+fn a_coordinator_makes_a_task_wait_for_others_with_amend_task() {
+    let mut f = fixture();
+    let (lead, worker) = (f.coordinator, f.worker);
+    let docs = f.open_task("record the docs", None);
+    let commit = f.open_task("commit the docs and Renderer cleanup", None);
+    f.apply(Command::AmendTask {
+        by: lead,
+        task: commit,
+        brief: None,
+        acceptance_criteria: None,
+        depends_on: Some(vec![docs]),
+        reason: "commit only after the docs card is approved".into(),
+    });
+    assert!(f.engine.waits_on_dependency(commit));
+    assert!(!f.engine.claimable_by(worker).contains(&commit), "nobody can claim it yet");
+    f.reject(Command::ClaimTask { task: commit, by: worker });
+    assert!(f.engine.transcript().iter().any(|m| m.body.contains("It now waits for \"record the docs\"")));
+
+    // Waiting for itself, or for a task that waits for it, is refused.
+    let cycle = f.reject(Command::AmendTask {
+        by: lead,
+        task: docs,
+        brief: None,
+        acceptance_criteria: None,
+        depends_on: Some(vec![commit]),
+        reason: "backwards".into(),
+    });
+    assert!(cycle.to_string().contains("never end"), "{cycle}");
+
+    // A saved room keeps the dependency.
+    let restored = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec()).unwrap();
+    assert!(restored.waits_on_dependency(commit));
+}
+
 /// From the live room: every message a CLI bot posted ended with a reminder
 /// that file removals awaited the owner, appended by OrgBots itself.
 #[test]
@@ -3621,6 +3658,7 @@ fn a_coordinator_amends_what_a_task_asks_for_and_the_reviewer_sees_it() {
             "late parties are seated".into(),
             "a direct test covers the last-resort donor".into(),
         ]),
+        depends_on: None,
         reason: "the join-level test is waived: the branch cannot be reached by a real join".into(),
     });
     assert_eq!(
@@ -3644,6 +3682,7 @@ fn a_coordinator_amends_what_a_task_asks_for_and_the_reviewer_sees_it() {
         task,
         brief: None,
         acceptance_criteria: Some(vec!["anything goes".into()]),
+        depends_on: None,
         reason: "I would like an easier bar".into(),
     });
     assert!(matches!(refused, EngineError::NotPermitted { .. }), "{refused:?}");
@@ -3652,6 +3691,7 @@ fn a_coordinator_amends_what_a_task_asks_for_and_the_reviewer_sees_it() {
         task,
         brief: None,
         acceptance_criteria: None,
+        depends_on: None,
         reason: "nothing really".into(),
     });
     assert!(matches!(empty, EngineError::InvalidOwnerQuestion { .. }), "{empty:?}");

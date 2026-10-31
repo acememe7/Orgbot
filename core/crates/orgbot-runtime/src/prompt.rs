@@ -268,6 +268,12 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
              leaves the old requirement in force and the work comes back again.\n",
         );
         out.push_str(
+            "\nWhen a task must wait for others (\"after the docs card is approved\"), say so \
+             with depends_on when you create it, or add it later with amend_task. Never only \
+             in the brief: a bot can claim a task its brief says to wait on, and it then has \
+             nothing it can do.\n",
+        );
+        out.push_str(
             "\nWhen the owner says to hold, park or leave a task for later, park it with \
              park_task, quoting what they said. Nobody can claim, work on or ask about a \
              parked task, and questions waiting on it are withdrawn. Only the owner \

@@ -266,6 +266,9 @@ pub enum Command {
         brief: Option<String>,
         /// The full new acceptance criteria, if they change.
         acceptance_criteria: Option<Vec<String>>,
+        /// Every task it must wait for, if that changes.
+        #[serde(default)]
+        depends_on: Option<Vec<TaskId>>,
         /// Why, recorded on the task and shown to the room.
         reason: String,
     },

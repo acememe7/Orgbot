@@ -2668,3 +2668,63 @@ async fn landing_commits_follows_the_rooms_access_mode() {
     room.engine_mut().apply(request(lead, task)).unwrap();
     assert!(!room.engine().landing_approved(task, lead, "main", &"a".repeat(40), &"b".repeat(40)), "half approval asks");
 }
+
+#[tokio::test]
+async fn a_bot_holding_work_that_waits_on_unfinished_tasks_is_not_woken_for_it() {
+    // From the live room: a claimed task whose brief said to wait for three
+    // other cards woke its holder eleven times.
+    use orgbot_engine::Command;
+    use orgbot_proto::graph::TaskOrigin;
+    let mut room = Orchestrator::new(RoomSpec {
+        name: "gates".into(),
+        goal: "commit in order".into(),
+        roster: vec![],
+        completion: CompletionRule::Manual,
+        limits: RoomLimits::default(),
+        access: Default::default(),
+    });
+    let lead = room
+        .seat(spec("lead", &["coordinator"], Autonomy::coordinator()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    let builder = room
+        .seat(spec("builder", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
+        .unwrap();
+    room.start().unwrap();
+    let mut create = |room: &mut Orchestrator, title: &str| {
+        room.engine_mut()
+            .apply(Command::CreateTask {
+                title: title.into(),
+                brief: String::new(),
+                by: None,
+                required_role: None,
+                priority: orgbot_proto::task::Priority::Normal,
+                acceptance_criteria: vec![],
+                depends_on: vec![],
+                origin: TaskOrigin::plain(),
+            })
+            .unwrap()
+            .iter()
+            .find_map(|event| match &event.event {
+                orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let docs = create(&mut room, "record the docs");
+    let commit = create(&mut room, "commit the docs");
+    for command in [Command::OpenTask { task: commit }, Command::ClaimTask { task: commit, by: builder }] {
+        room.engine_mut().apply(command).unwrap();
+    }
+    assert!(room.is_actionable(builder));
+    room.engine_mut()
+        .apply(Command::AmendTask {
+            by: lead,
+            task: commit,
+            brief: None,
+            acceptance_criteria: None,
+            depends_on: Some(vec![docs]),
+            reason: "commit only after the docs land".into(),
+        })
+        .unwrap();
+    assert!(!room.is_actionable(builder), "its only work waits on the docs card");
+}
