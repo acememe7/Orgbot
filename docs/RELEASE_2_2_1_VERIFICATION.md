@@ -183,6 +183,16 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   @iris's Claude Code gave up on them after 30 seconds and @mira lost them
   for a while. The copy before a turn and the merge after it now run on
   the blocking pool.
+- **A bar for done (fifteenth rebuild, 1 November).** Given only a goal,
+  the bots kept raising their own bar on the tear-gas wall for over 11
+  hours, tightening their test version after version, until the owner set
+  one. Room setup has a "Done when" field under the goal; the bar travels
+  in the goal and becomes the first task's acceptance criteria. Bots build
+  to the owner's bar and not past it: without one, a coordinator asks the
+  owner once, with 2-4 concrete choices; more polish or a stricter check is
+  a new task for the owner; and a self-imposed check that keeps failing
+  goes to the owner instead of into another version of it. The README's
+  getting-started section explains why, with examples.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -211,7 +221,8 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   note to the author, and the ask-the-owner and shared-desktop rules. 1,001 at the twelfth,
   adding the network hint. 1,002 at the thirteenth, adding circular
   waits refused at the source. 1,002 again at the fourteenth; the
-  workspace copy moving off the shared task has no test of its own.
+  workspace copy moving off the shared task has no test of its own. 1,003 at the fifteenth, adding the
+  bar-for-done rule.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
@@ -226,14 +237,16 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   (the sixth adds what each disputed-findings answer does, the eighth the
   estimated and local cost wording); 412 at the ninth, adding every view
   taking who is working from the room, and again at the tenth and eleventh
-  (the app is unchanged), and at the twelfth to fourteenth.
+  (the app is unchanged), and at the twelfth to fourteenth; 413 at the
+  fifteenth, adding the bar for done written as the first task's
+  acceptance criteria.
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 92 passed at the fourteenth, thirteenth, twelfth and eleventh (a symlink leading
+- Workspace sandbox helper: 92 passed at the fifteenth, fourteenth, thirteenth, twelfth and eleventh (a symlink leading
   outside is left out and work goes on; one replacing project files still
   stops), tenth, ninth, eighth, seventh, sixth,
   fifth and fourth 1 November rebuilds,
@@ -249,15 +262,17 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - Package build test passed. The 2.2.0 and older packages in the archive are
   byte-identical to those already published.
 - The owner's real sign-in files were fingerprinted before and after every test
-  run and were unchanged.
+  run and were unchanged, except once at the fifteenth: the Claude sign-in
+  file changed at 20:12 with the same size, as a Claude Code login refresh
+  does, and a full rerun of every suite left it unchanged.
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`8c364cc74ef430761577fdd76e8e4141faa3ae9a51ad2d5dce2ec9dabe39305a`.
+`dea29896712c86c587b59ef7f08fa05b030f865f45db60c0b428a7ab8c71d213`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `c45ddf80bf804459d4400f184211711a5fc1a94e9f9a431ea623e6e6e7ca9277` |
+| orgbots_2.2.1_amd64.deb | `ff2ec715a3a197cfb265e2fb7a8e21d3b088d867ecf03f7ecb5ad9126044507d` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -389,6 +404,15 @@ and sandbox helper rebuilt unchanged). Signed archive revision
 `e025a08b0136a9367b9f3b359c9d015fa29df1fb` replaces only
 `orgbots_2.2.1_amd64.deb`;
 [Pages run 41330930416](https://github.com/acememe7/Orgbot/actions/runs/41330930416)
+published it (package
+`c45ddf80bf804459d4400f184211711a5fc1a94e9f9a431ea623e6e6e7ca9277`, engine
+`8c364cc74ef430761577fdd76e8e4141faa3ae9a51ad2d5dce2ec9dabe39305a`).
+
+The fifteenth rebuild adds the bar for done (source `c7c6248`; engine and
+Flutter bundle changed, sandbox helper rebuilt unchanged). Signed archive
+revision `3191040550a31cb0c4b7637b0d333be816b4bf42` replaces only
+`orgbots_2.2.1_amd64.deb`;
+[Pages run 41341198302](https://github.com/acememe7/Orgbot/actions/runs/41341198302)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits

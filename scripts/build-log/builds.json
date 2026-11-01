@@ -568,5 +568,22 @@
    "Sandbox helper 92 passed",
    "Package c45ddf80"
   ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r15",
+  "when": "1 Nov 20:19",
+  "day": "2026-11-01",
+  "title": "A bar for done",
+  "what": "Room setup asks what done looks like, and the answer becomes the first task's acceptance criteria. Bots build to the owner's bar, ask for one when there is none, and bring a failing self-imposed check to the owner instead of rebuilding it.",
+  "why": "Given only a goal, the bots kept raising their own bar on the tear-gas wall for over 11 hours until the owner set one.",
+  "commit": "c7c6248",
+  "facts": [
+   "Rust 1,003 passed",
+   "App 413 passed",
+   "Sandbox helper 92 passed",
+   "Package ff2ec715"
+  ]
  }
 ]
