@@ -148,8 +148,10 @@ def main() -> None:
     rebuild_hours = round((last - first).total_seconds() / 3600)
     latest = builds[-1]
     latest_facts = {fact.split()[0]: fact.split()[1] for fact in latest.get("facts", []) if len(fact.split()) == 3}
-    rust_tests = latest_facts.get("Rust", "978")
-    app_tests = latest_facts.get("App", "411")
+    # Facts read "Rust 1,003 passed"; the counter needs a plain number, so a
+    # comma there showed as NaN on the live page.
+    rust_tests = int(latest_facts.get("Rust", "978").replace(",", ""))
+    app_tests = int(latest_facts.get("App", "411").replace(",", ""))
 
     counts = Counter(kind_of(b) for b in builds)
     counts["all"] = total
@@ -244,12 +246,12 @@ def main() -> None:
     <div class="bl-hero-copy">
       <p class="eyebrow">Build log</p>
       <h1 id="page-title">Every build, and the room that asked for it</h1>
-      <p class="bl-lede">OrgBots is built against a live room of ten AI bots doing real work on a real project. When the room shows a problem, the next build fixes it. Here is each one: what changed, what the room showed, and the commit you can read.</p>
+      <p class="bl-lede">OrgBots is built against a live room of AI bots doing real work on a real project. When the room shows a problem, the next build fixes it. Here is each one: what changed, what the room showed, and the commit you can read.</p>
       <dl class="bl-stats">
         <div><dt>builds since the first commit</dt><dd data-count="{total}">{total}</dd></div>
         <div><dt>rebuilds in {rebuild_hours} hours</dt><dd data-count="{len(rebuilds)}">{len(rebuilds)}</dd></div>
-        <div><dt>Rust tests passing</dt><dd data-count="{rust_tests}">{rust_tests}</dd></div>
-        <div><dt>app tests passing</dt><dd data-count="{app_tests}">{app_tests}</dd></div>
+        <div><dt>Rust tests passing</dt><dd data-count="{rust_tests}">{rust_tests:,}</dd></div>
+        <div><dt>app tests passing</dt><dd data-count="{app_tests}">{app_tests:,}</dd></div>
       </dl>
       <p class="bl-proof">Test counts are from the <a href="{REPO}/blob/main/docs/RELEASE_2_2_1_VERIFICATION.md">2.2.1 release record</a>, the latest build's run.</p>
       <div class="actions"><a class="button" href="/install/">Install OrgBots {VERSION}</a><a class="text-link" href="#room">See how a room runs</a></div>
