@@ -500,5 +500,22 @@
    "Sandbox helper 92 passed",
    "Package f59489f1"
   ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r11",
+  "when": "1 Nov 17:26",
+  "day": "2026-11-01",
+  "title": "Steer, don't cut off",
+  "what": "Turns are no longer cut at 24 calls and long notes are no longer refused: bots are reminded to finish and told when a note is long. A stray symlink no longer locks a bot out of its workspace. Bots ask the owner for missing network, tools or permissions, and stop waiting for an idle GPU on a desktop that never has one.",
+  "why": "The owner found the limits did more harm than good: @ollama-glm was cut off mid-review, then locked out by a symlink it made, and never asked for the network and Playwright it lacked, while @mira held a capture for an exclusive GPU window.",
+  "commit": "7d8317f",
+  "facts": [
+   "Rust 1,000 passed",
+   "App 412 passed",
+   "Sandbox helper 92 passed",
+   "Package 7e17ea2d"
+  ]
  }
 ]

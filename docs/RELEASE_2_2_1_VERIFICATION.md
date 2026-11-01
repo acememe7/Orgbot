@@ -147,6 +147,20 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   code; nothing told it the turn was ending, and the review expired at
   16:43. Two calls before the limit, a bot is now told how many are left
   and to record its result.
+- **Bots steered instead of cut off (eleventh rebuild, 1 November).** The
+  owner found the limits did more harm than good. A turn is no longer cut
+  at 24 model calls: every 24 calls the bot is reminded to finish if it is
+  done, and a third identical call in a row is named. Notes past 8,000
+  characters are kept whole, and the author is told how long they are and
+  that code and raw data belong in project files; a newer version still
+  replaces the older, and reviewers see each record's size. A symlink
+  leading outside the project no longer stops every command: @ollama-glm
+  made `self-link -> /tmp/orgbot-workspace` in its copy and every command
+  after it failed. Such a link is left out and named to the bot; one
+  standing where project files were still stops the command. Bots now ask
+  the owner at once for what only the owner can give (network, a
+  dependency, a sign-in, a permission), and no longer make an idle or
+  exclusive GPU a condition on the owner's desktop.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -170,7 +184,9 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   replayed), the size limits, the coordinators' notice, and the CHANGES.md
   rule. 998 at the ninth, adding a bot shown as working only while its
   turn runs (a turn cut short by a pause ends) and the digest resent as
-  turns start and end. 999 at the tenth, adding the step-limit warning.
+  turns start and end. 999 at the tenth, adding the step-limit warning. 1,000 at the eleventh, adding uncut turns
+  with reminders and repeated-call notes, long notes kept whole with a
+  note to the author, and the ask-the-owner and shared-desktop rules.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
@@ -184,14 +200,17 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   the arriving commit in a folder's origin line, and at the fifth to eighth
   (the sixth adds what each disputed-findings answer does, the eighth the
   estimated and local cost wording); 412 at the ninth, adding every view
-  taking who is working from the room, and again at the tenth.
+  taking who is working from the room, and again at the tenth and eleventh
+  (the app is unchanged).
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 92 passed at the tenth, ninth, eighth, seventh, sixth,
+- Workspace sandbox helper: 92 passed at the eleventh (a symlink leading
+  outside is left out and work goes on; one replacing project files still
+  stops), tenth, ninth, eighth, seventh, sixth,
   fifth and fourth 1 November rebuilds,
   three runs in a row (naming copies at room start, the commit that brought
   older files in); 90 at the third
@@ -209,11 +228,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`91b48b6363ef43d61aa54d0669aba68707ac503b88b1ba863163c72ff0c42c80`.
+`08e78208f23feb8f5dc44f2318db99cd2d7fe1aea8a03cc9787cdb1b987335fd`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `f59489f16c1eb9bd59a691ccfea755106d4a9cf9e874d9f7129b88159292cb4d` |
+| orgbots_2.2.1_amd64.deb | `7e17ea2d1d835ae6047fb9df799817a2367ad2000d33b57f079f06d31efbf0fd` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -304,6 +323,16 @@ rebuilt unchanged). Signed archive revision
 `e2377b197e937fe26beba1f4e88775a50086eecd` replaces only
 `orgbots_2.2.1_amd64.deb`;
 [Pages run 41323985391](https://github.com/acememe7/Orgbot/actions/runs/41323985391)
+published it (package
+`f59489f16c1eb9bd59a691ccfea755106d4a9cf9e874d9f7129b88159292cb4d`, engine
+`91b48b6363ef43d61aa54d0669aba68707ac503b88b1ba863163c72ff0c42c80`).
+
+The eleventh rebuild stops cutting bots off and steers them instead
+(source `7d8317f`; engine and sandbox helper changed, Flutter bundle
+rebuilt unchanged). Signed archive revision
+`777c6a33859893d2799b3499ba110adcffc1fd12` replaces only
+`orgbots_2.2.1_amd64.deb`;
+[Pages run 41326500783](https://github.com/acememe7/Orgbot/actions/runs/41326500783)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits
@@ -332,6 +361,6 @@ published it, and the public archive serves the hashes in the table above.
   computer would be priced the same.
 - Notes replaced before the eighth rebuild are not linked: the room applies
   the rule to records written from then on.
-- A bot that cannot write project files can keep a long document only by
-  marking it as the document the task asked for (up to 40,000 characters).
+- A turn is no longer cut off, so a bot that loops with varied calls runs
+  until it stops or the owner's spending allowances stop it.
 - The website still names 2.2.0 as the current package.
