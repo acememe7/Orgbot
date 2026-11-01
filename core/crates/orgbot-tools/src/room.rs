@@ -1720,18 +1720,25 @@ fn offer_handoff(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutc
         timeout_ms: None,
     }) {
         Ok(events) => {
-            let id = events
-                .iter()
-                .find_map(|e| match &e.event {
-                    orgbot_proto::Event::HandoffOffered { handoff } => Some(handoff.id),
-                    _ => None,
-                })
-                .map(|id| id.to_string())
-                .unwrap_or_default();
-            if kind.blocks_sender_by_default() {
+            let offered = events.iter().find_map(|e| match &e.event {
+                orgbot_proto::Event::HandoffOffered { handoff } => Some((handoff.id, handoff.blocks_sender)),
+                _ => None,
+            });
+            let (id, blocks) = match offered {
+                Some((id, blocks)) => (id.to_string(), blocks),
+                None => (String::new(), kind.blocks_sender_by_default()),
+            };
+            let asked_not_to_block = input.get("blocks_sender").and_then(Value::as_bool) == Some(false);
+            if blocks {
                 ToolOutcome::ok(format!(
                     "Offered {id}. Your task is now blocked waiting on it — you will be \
                      woken when it settles, so do not poll."
+                ))
+            } else if kind.blocks_sender_by_default() && !asked_not_to_block {
+                ToolOutcome::ok(format!(
+                    "Offered {id}. Your task is not blocked on it: their own work already \
+                     waits on this task, so waiting on them would leave both stuck. Keep \
+                     working on your part; you will see their answer when it comes."
                 ))
             } else {
                 ToolOutcome::ok(format!("Offered {id}. You are not blocked on it."))

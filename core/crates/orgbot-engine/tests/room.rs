@@ -1037,11 +1037,11 @@ fn a_mutual_wait_is_detected_and_broken() {
     let t1 = f.start_task("write the notes", worker);
     let t2 = f.start_task("collect the metrics", worker2);
 
-    // w1 parks on w2...
-    f.apply(Command::OfferHandoff {
+    // w1 parks on whichever writer takes its request...
+    let asked = f.apply(Command::OfferHandoff {
         task: t1,
         from: worker,
-        to: Recipient::Agent { agent: worker2 },
+        to: Recipient::Role { role: "writer".into() },
         kind: HandoffKind::Assist,
         brief: "need the metrics".into(),
         expects: vec![],
@@ -1051,8 +1051,8 @@ fn a_mutual_wait_is_detected_and_broken() {
     });
     assert_eq!(f.state(t1), TaskState::Blocked);
 
-    // ...and w2 parks on w1. Nothing errors; both are politely waiting.
-    let events = f.apply(Command::OfferHandoff {
+    // ...w2 parks on w1, which waits on nobody in particular yet...
+    f.apply(Command::OfferHandoff {
         task: t2,
         from: worker2,
         to: Recipient::Agent { agent: worker },
@@ -1063,6 +1063,12 @@ fn a_mutual_wait_is_detected_and_broken() {
         blocks_sender: None,
         timeout_ms: None,
     });
+    assert_eq!(f.state(t2), TaskState::Blocked);
+
+    // ...and then w2 takes w1's request. A circle no single wait could
+    // have been refused for; the room still finds it and breaks it.
+    f.apply(Command::AcceptHandoff { handoff: offered_handoff(&asked), by: worker2 });
+    let events = f.apply(Command::Tick { now: Timestamp::now() });
 
     let found = deadlocks(&events);
     assert_eq!(found.len(), 1, "the cycle should be reported exactly once");
@@ -1100,11 +1106,12 @@ fn a_dependency_cycle_between_tasks_is_broken_by_release() {
         by: worker,
         reason: BlockReason::AwaitingTask { task: t2 },
     });
-    let events = f.apply(Command::BlockTask {
-        task: t2,
-        by: worker2,
-        reason: BlockReason::AwaitingTask { task: t1 },
-    });
+    // Closing the circle through a command is refused now; written straight
+    // into the board, a circle is still found and broken.
+    let record = f.engine.task_mut(t2).unwrap();
+    record.state = TaskState::Blocked;
+    record.blocked_on = vec![BlockReason::AwaitingTask { task: t1 }];
+    let events = f.apply(Command::Tick { now: Timestamp::now() });
 
     let found = deadlocks(&events);
     assert_eq!(found.len(), 1);
@@ -4516,4 +4523,41 @@ fn a_bot_is_working_while_its_turn_runs_and_not_otherwise() {
     assert!(matches!(ended[..], [EventEnvelope { event: Event::TurnEnded { agent }, .. }] if agent == worker));
     assert_eq!(doing(&f.engine, worker), "between turns");
     assert!(f.apply(Command::EndTurn { agent: worker }).is_empty(), "ending twice says nothing");
+}
+
+/// From the live room: three times on 1 November @sol's combined QA and the
+/// gas work it checks ended up waiting on each other, and the room broke the
+/// circle by taking the QA away from @sol. The circle is never closed now.
+#[test]
+fn a_wait_that_would_close_a_circle_is_never_made() {
+    let mut f = fixture();
+    let (mira, sol) = (f.worker, f.worker2);
+    let gas = f.start_task("gas wall", mira);
+    let qa = f.start_task("combined QA of the gas wall", sol);
+    f.apply(Command::BlockTask { task: qa, by: sol, reason: BlockReason::AwaitingTask { task: gas } });
+
+    // An assist to the bot whose work waits on yours goes out, but you keep
+    // working instead of waiting.
+    let events = f.apply(Command::OfferHandoff {
+        task: gas,
+        from: mira,
+        to: Recipient::Agent { agent: sol },
+        kind: HandoffKind::Assist,
+        brief: "check the fog fade".into(),
+        expects: vec![],
+        context: vec![],
+        blocks_sender: None,
+        timeout_ms: None,
+    });
+    assert!(!events.iter().any(|e| matches!(e.event, Event::DeadlockDetected { .. })));
+    let handoff = offered_handoff(&events);
+    assert!(!f.engine.handoff(handoff).unwrap().blocks_sender);
+    assert_eq!(f.state(gas), TaskState::InProgress);
+    assert_eq!(f.state(qa), TaskState::Blocked);
+    assert_eq!(f.engine.task(qa).unwrap().assignee, Some(sol), "the QA stays with its bot");
+
+    // Waiting outright on work that waits on you is refused, with the reason.
+    let refused = f.reject(Command::BlockTask { task: gas, by: mira, reason: BlockReason::AwaitingTask { task: qa } });
+    assert!(matches!(&refused, EngineError::NotReady { reason, .. } if reason.contains("already waits on this task")), "{refused}");
+    assert_eq!(f.state(gas), TaskState::InProgress);
 }

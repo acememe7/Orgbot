@@ -899,7 +899,7 @@ fn room_status_shows_the_roster_the_goal_and_the_board() {
 }
 
 #[test]
-fn a_deadlock_broken_during_a_block_is_reported_back_to_the_bot() {
+fn a_wait_that_would_close_a_circle_is_refused_with_the_reason() {
     let mut f = fixture();
     let (lead, worker, worker2) = (f.lead, f.worker, f.worker2);
 
@@ -920,15 +920,17 @@ fn a_deadlock_broken_during_a_block_is_reported_back_to_the_bot() {
         "block_on",
         json!({"task": t1, "waiting_for_task": t2}),
     );
-    // This closes the loop, and the bot needs to know its situation changed.
-    let message = f.ok(
+    // This would close the loop, so it is refused, and the bot is told why
+    // and what to do instead.
+    let refused = f.call(
         worker2,
         "block_on",
         json!({"task": t2, "waiting_for_task": t1}),
     );
     assert!(
-        message.contains("circular wait"),
-        "the bot must be told, or it will sit there: {message}"
+        refused.is_error && refused.content.contains("already waits on this task"),
+        "the bot must be told, or it will sit there: {}",
+        refused.content
     );
 }
 

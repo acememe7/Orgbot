@@ -1997,6 +1997,44 @@ impl Engine {
     /// role-addressed offer that nobody has accepted yet draws no edge: any
     /// holder of that role might still pick it up, so calling it a deadlock
     /// would release work that was about to proceed.
+    /// The tasks a wait for `reason` would wait on.
+    fn blockers_for(&self, reason: &BlockReason) -> Vec<TaskId> {
+        match reason {
+            BlockReason::AwaitingTask { task } => vec![*task],
+            BlockReason::AwaitingHandoff { handoff } => {
+                let Some(handoff) = self.handoffs.get(handoff).filter(|h| h.state.is_pending()) else {
+                    return Vec::new();
+                };
+                let responsible = match (handoff.state, &handoff.to) {
+                    (HandoffState::Accepted, _) => handoff.accepted_by,
+                    (HandoffState::Offered, Recipient::Agent { agent }) => Some(*agent),
+                    _ => None,
+                };
+                responsible.map(|agent| self.active_tasks_of(agent)).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The first of `blockers` that already waits, directly or through
+    /// others, on `task`, so that `task` waiting on it would close a circle.
+    fn closes_a_wait_cycle(&self, task: TaskId, blockers: &[TaskId]) -> Option<TaskId> {
+        let graph = self.wait_graph();
+        blockers.iter().copied().find(|&blocker| {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![blocker];
+            while let Some(next) = stack.pop() {
+                if next == task {
+                    return true;
+                }
+                if seen.insert(next) {
+                    stack.extend(graph.blockers_of(next));
+                }
+            }
+            false
+        })
+    }
+
     pub fn wait_graph(&self) -> WaitGraph {
         let mut graph = WaitGraph::new();
         for task in self.tasks.values() {
@@ -4008,6 +4046,21 @@ impl Engine {
                 });
             }
         }
+        // From the live room: three times on 1 November @sol's combined QA
+        // and the gas work it checks ended up waiting on each other, and the
+        // room broke the circle by taking the QA away from @sol. A wait that
+        // would close a circle is refused instead.
+        let blockers = self.blockers_for(&reason);
+        if let Some(blocker) = self.closes_a_wait_cycle(task, &blockers) {
+            let title = self.tasks.get(&blocker).map(|t| t.title.clone()).unwrap_or_default();
+            return Err(EngineError::NotReady {
+                task,
+                reason: format!(
+                    "\"{title}\" already waits on this task, so waiting on it would leave both stuck. \
+                     Keep working on your part, or hand the step over instead of waiting"
+                ),
+            });
+        }
         let mut events = self.transition(task, TaskTransition::Block { reason }, Some(by))?;
         // A new wait edge is the only thing that can create a deadlock, so this
         // is where it is cheapest to look for one.
@@ -4114,6 +4167,19 @@ impl Engine {
         if timeout > 0 {
             handoff.deadline = Some(handoff.created_at.plus_millis(timeout));
             handoff.timeout_ms = Some(timeout);
+        }
+        // An assist to a bot whose own work waits on this task would leave
+        // both stuck. From the live room: @mira asked @sol for help on the gas
+        // work while @sol's QA waited on it, and the room broke the circle by
+        // taking the QA away from @sol. The offer goes out, and the sender
+        // keeps working instead of waiting.
+        if handoff.blocks_sender {
+            if let Recipient::Agent { agent } = &handoff.to {
+                let theirs = self.active_tasks_of(*agent);
+                if self.closes_a_wait_cycle(task, &theirs).is_some() {
+                    handoff.blocks_sender = false;
+                }
+            }
         }
         let (id, blocks) = (handoff.id, handoff.blocks_sender);
         self.handoffs.insert(id, handoff.clone());
