@@ -2149,6 +2149,11 @@ fn append_codex_room_server(config: &mut String, relay: &Path, socket: &str) {
     // approval exception scoped to this local room bridge; global approval
     // remains `never` in the invocation arguments.
     config.push_str("default_tools_approval_mode = \"approve\"\n");
+    // From the live room: @mira's profiling run went through workspace_run,
+    // which allows commands up to 1800 s, but Codex gave up on the call at
+    // its own default ("timed out awaiting tools/call after 300s"). Room
+    // tools get the workspace's limit plus its 180 s of overhead.
+    config.push_str("tool_timeout_sec = 2100\n");
 }
 
 // This grants auto-approval only to OrgBot's guarded local board bridge. Any
@@ -4636,6 +4641,8 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             .expect("the guarded room server is configured");
         assert!(!external.contains("default_tools_approval_mode"));
         assert!(room.contains("default_tools_approval_mode = \"approve\""));
+        assert!(room.contains("tool_timeout_sec = 2100"), "long workspace commands outlast Codex's default");
+        assert!(!external.contains("tool_timeout_sec"));
         assert!(room.contains("args = [\"room-mcp\", \"--socket\", \"/tmp/room.sock\" ]"));
         assert!(!config.contains("approval_policy"));
         assert!(config.contains("[mcp_servers.external]"));
