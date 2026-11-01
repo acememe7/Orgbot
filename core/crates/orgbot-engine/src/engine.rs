@@ -4053,6 +4053,7 @@ impl Engine {
         record.apply(&transition, Timestamp::now())?;
         let to = record.state;
         let actor = transition.actor();
+        let acceptor = record.accepted_by;
 
         let mut events = vec![self.emit(Event::HandoffTransitioned {
             handoff,
@@ -4068,6 +4069,11 @@ impl Engine {
         }
         if let Some(actor) = actor {
             events.extend(self.recompute_status(actor));
+        }
+        // An accepted handoff that expired or was withdrawn ends the
+        // acceptor's work too, though the acceptor did not act.
+        if let Some(acceptor) = acceptor.filter(|a| Some(*a) != actor) {
+            events.extend(self.recompute_status(acceptor));
         }
         Ok(events)
     }
@@ -5034,7 +5040,13 @@ impl Engine {
         Ok(events)
     }
 
-    /// Derive a bot's availability from the tasks it holds.
+    /// Derive a bot's availability from the tasks it holds and the
+    /// handoffs it has taken on.
+    ///
+    /// From the live room: a bot running an accepted assist on another bot's
+    /// task held nothing, so it showed idle for the whole assist while the
+    /// task's owner showed waiting, and the owner saw a room with nobody
+    /// working.
     fn recompute_status(&mut self, agent: AgentId) -> Vec<EventEnvelope> {
         if !self.specs.contains_key(&agent) {
             return Vec::new();
@@ -5048,7 +5060,14 @@ impl Engine {
             .filter(|t| t.assignee == Some(agent) && t.state.is_assigned())
             .collect();
 
-        let next = if held.is_empty() {
+        let assisting = self
+            .handoffs
+            .values()
+            .any(|h| h.state == HandoffState::Accepted && h.accepted_by == Some(agent));
+
+        let next = if assisting {
+            AgentStatus::Working
+        } else if held.is_empty() {
             AgentStatus::Idle
         } else if held.iter().all(|t| t.state.is_waiting()) {
             AgentStatus::Waiting

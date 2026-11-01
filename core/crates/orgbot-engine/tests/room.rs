@@ -713,6 +713,55 @@ fn accepting_a_handoff_restarts_its_timeout() {
     );
 }
 
+/// From the live room on 1 November: @ollama-glm took on @mira's gas proof as
+/// an assist and worked it for minutes, while the room showed it idle and
+/// @mira waiting, so the owner saw nobody working. A bot running an assist
+/// is working, until the assist ends however it ends.
+#[test]
+fn a_bot_running_an_accepted_assist_shows_as_working() {
+    use orgbot_proto::AgentStatus;
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.start_task("write the release notes", worker);
+    let offer = |f: &mut Fixture| {
+        let events = f.apply(Command::OfferHandoff {
+            task,
+            from: worker,
+            to: Recipient::Agent { agent: worker2 },
+            kind: HandoffKind::Assist,
+            brief: "run the checks".into(),
+            expects: vec![],
+            context: vec![],
+            blocks_sender: None,
+            timeout_ms: Some(100),
+        });
+        offered_handoff(&events)
+    };
+
+    let handoff = offer(&mut f);
+    assert_eq!(f.engine.status(worker2), AgentStatus::Idle, "an offer alone is not work");
+    f.apply(Command::AcceptHandoff { handoff, by: worker2 });
+    assert_eq!(f.engine.status(worker2), AgentStatus::Working);
+    f.apply(Command::CompleteHandoff {
+        handoff,
+        by: worker2,
+        artifacts: vec![],
+        summary: "all green".into(),
+    });
+    assert_eq!(f.engine.status(worker2), AgentStatus::Idle, "done with it");
+
+    // An accepted assist that runs out ends the work too, though the bot
+    // that took it on did nothing to end it.
+    let handoff = offer(&mut f);
+    f.apply(Command::AcceptHandoff { handoff, by: worker2 });
+    assert_eq!(f.engine.status(worker2), AgentStatus::Working);
+    f.apply(Command::Tick {
+        now: Timestamp::now().plus_millis(10_000),
+    });
+    assert_eq!(f.engine.handoff(handoff).unwrap().state, HandoffState::Expired);
+    assert_eq!(f.engine.status(worker2), AgentStatus::Idle);
+}
+
 /// From the live room: @ollama-glm accepted an assist for @mira in a turn
 /// that ran on for fifteen minutes doing it. The assist expired five minutes
 /// after it was offered, @mira was released without the result, and the
