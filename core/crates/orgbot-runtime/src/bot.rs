@@ -385,7 +385,7 @@ impl Bot {
         let mut generated: Vec<std::path::PathBuf> = Vec::new();
 
         let max_steps = self.spec.autonomy.max_turns_per_task.max(1);
-        for _ in 0..max_steps {
+        for step in 1..=max_steps {
             self.capabilities
                 .refresh(engine, self.spec.id, self.mcp_servers.as_deref())
                 .await;
@@ -617,6 +617,14 @@ impl Bot {
                     content: outcome.content,
                     is_error: outcome.is_error,
                 });
+            }
+            // From the live room: @ollama-glm accepted a review, and each of
+            // its turns hit the step limit while it was still reading code.
+            // Nothing told it so, and the review expired unanswered.
+            if let Some(warning) = steps_left_warning(max_steps, step) {
+                if let Some(ContentBlock::ToolResult { content, .. }) = results.last_mut() {
+                    content.push_str(&warning);
+                }
             }
             self.history.push(Turn::tool_results(results));
             let waiting_for_owner = engine.with(|engine| {
@@ -1079,6 +1087,23 @@ const QUIET_TOOLS: &[&str] = &[
 /// such closing status.
 const QUIET_REPEAT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
+/// Model calls left in a turn at which a bot is told to record what it has.
+const WRAP_UP_STEPS: u32 = 2;
+
+/// What to tell a bot after `step` of `max_steps`, when its turn is about to
+/// end at the step limit.
+fn steps_left_warning(max_steps: u32, step: u32) -> Option<String> {
+    let left = max_steps.checked_sub(step)?;
+    (max_steps > WRAP_UP_STEPS + 1 && left == WRAP_UP_STEPS).then(|| {
+        format!(
+            "\n\n[OrgBots] You have {left} model calls left in this turn. Use them to \
+             record your result now: complete or fail any handoff you accepted, add \
+             your artifact, or post what you found. Anything not recorded waits for \
+             your next turn, and an accepted handoff can run out meanwhile."
+        )
+    })
+}
+
 fn is_workspace_write_tool(name: &str) -> bool {
     matches!(
         name,
@@ -1414,6 +1439,16 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
+
+    #[test]
+    fn a_bot_is_told_two_calls_before_its_turn_hits_the_step_limit() {
+        // From the live room: @ollama-glm's turns ended at 24 calls with an
+        // accepted review unanswered.
+        assert!(steps_left_warning(24, 22).is_some_and(|w| w.contains("2 model calls left")));
+        assert_eq!(steps_left_warning(24, 21), None);
+        assert_eq!(steps_left_warning(24, 23), None, "told once");
+        assert_eq!(steps_left_warning(3, 1), None, "a short turn has nothing to wrap up");
+    }
 
     #[derive(Debug)]
     struct PendingProvider(Arc<AtomicUsize>);
