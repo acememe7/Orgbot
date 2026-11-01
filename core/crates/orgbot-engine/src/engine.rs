@@ -3967,6 +3967,42 @@ impl Engine {
         reason: BlockReason,
     ) -> Result<Vec<EventEnvelope>> {
         self.require_assignee(task, by)?;
+        // From the live room on 1 November: @sol set its QA to wait on a proof
+        // delivered two hours earlier. The room released the wait seconds
+        // later, which woke @sol, which set it again, four times. A wait on
+        // something that will never change is refused, with the reason.
+        if let BlockReason::AwaitingTask { task: other } = &reason {
+            if *other == task {
+                return Err(EngineError::NotReady {
+                    task,
+                    reason: "a task cannot wait on itself".into(),
+                });
+            }
+            let awaited = self.require_task(*other)?;
+            if awaited.state.is_terminal() {
+                let replacement = awaited
+                    .lineage
+                    .superseded_by
+                    .and_then(|id| self.tasks.get(&id))
+                    .map(|t| format!(" Wait on {} \"{}\", which replaced it, if you need its work.", t.id, t.title))
+                    .unwrap_or_default();
+                return Err(EngineError::NotReady {
+                    task,
+                    reason: if awaited.state == TaskState::Submitted {
+                        format!(
+                            "\"{}\" is already delivered, so there is nothing to wait for. If you need newer work, wait on the open task that holds it.{replacement}",
+                            awaited.title
+                        )
+                    } else {
+                        format!(
+                            "\"{}\" is {} and will not deliver.{replacement}",
+                            awaited.title,
+                            awaited.state.as_str()
+                        )
+                    },
+                });
+            }
+        }
         let mut events = self.transition(task, TaskTransition::Block { reason }, Some(by))?;
         // A new wait edge is the only thing that can create a deadlock, so this
         // is where it is cheapest to look for one.

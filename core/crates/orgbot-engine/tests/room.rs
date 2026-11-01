@@ -4262,3 +4262,43 @@ fn a_bot_whose_account_is_out_of_credit_waits_for_the_owner() {
     assert!(out_of_credit("Your credit balance is too low to access the Anthropic API."));
     assert!(!out_of_credit("429 Too Many Requests: rate limit, retry in 20s"));
 }
+
+/// From the live room on 1 November: @sol set its QA to wait on a proof that
+/// was delivered two hours earlier. The room released the wait seconds later,
+/// which woke @sol, which set it again, four times over. A wait on something
+/// that will never change is refused, and the refusal says why.
+#[test]
+fn a_task_cannot_wait_on_work_that_is_already_finished() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let proof = f.start_task("gas proof", worker2);
+    f.apply(Command::SubmitForReview { task: proof, by: worker2, artifacts: vec![] });
+    let qa = f.inspector;
+    f.apply(Command::RecordReview {
+        task: proof,
+        inspector: qa,
+        findings: vec![],
+        summary: "fine".into(),
+        criteria_met: vec![],
+        criteria_failed: vec![],
+        responses: vec![],
+    });
+    let lead = f.coordinator;
+    f.apply(Command::SubmitTask { task: proof, by: lead });
+    let doomed = f.open_task("old capture", None);
+    f.apply(Command::FailTask { task: doomed, reason: "abandoned".into() });
+    let open = f.open_task("new capture", None);
+
+    let task = f.start_task("combined QA", worker);
+    for (other, says) in [
+        (task, "cannot wait on itself"),
+        (proof, "already delivered"),
+        (doomed, "will not deliver"),
+    ] {
+        let err = f.reject(Command::BlockTask { task, by: worker, reason: BlockReason::AwaitingTask { task: other } });
+        assert!(err.to_string().contains(says), "{err}");
+    }
+    assert_eq!(f.state(task), TaskState::InProgress);
+    f.apply(Command::BlockTask { task, by: worker, reason: BlockReason::AwaitingTask { task: open } });
+    assert_eq!(f.state(task), TaskState::Blocked, "waiting on open work is fine");
+}
