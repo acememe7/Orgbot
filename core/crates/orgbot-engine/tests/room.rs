@@ -4302,3 +4302,62 @@ fn a_task_cannot_wait_on_work_that_is_already_finished() {
     f.apply(Command::BlockTask { task, by: worker, reason: BlockReason::AwaitingTask { task: open } });
     assert_eq!(f.state(task), TaskState::Blocked, "waiting on open work is fine");
 }
+
+/// From the owner of the live room: the Usage tab said "cost unknown" for every
+/// bot. Turns recorded without a price are worked out from their tokens at
+/// each model's list price, marked as estimated; a local model is free.
+#[test]
+fn usage_without_recorded_prices_is_estimated_from_list_prices() {
+    use orgbot_proto::agent::{AgentPolicy, AgentSpec, CliKind};
+    use orgbot_proto::spend::TokenUsage;
+    let mut f = fixture();
+    let api = AgentSpec::new("api", "Api", ProviderRef::Anthropic { model: "claude-opus-5-5".into() });
+    let plan = AgentSpec::new(
+        "plan",
+        "Plan",
+        ProviderRef::CliAgent {
+            cli: CliKind::Codex,
+            model: "gpt-6.1-sol".into(),
+            workdir: String::new(),
+            policy: AgentPolicy::ReadOnly,
+            mcp: false,
+            effort: String::new(),
+        },
+    );
+    let local = AgentSpec::new("local", "Local", ProviderRef::OpenAiCompatible { model: "glm-5.3-flash".into(), profile: "ollama".into() });
+    let unknown = AgentSpec::new("odd", "Odd", ProviderRef::OpenAiCompatible { model: "mystery-1".into(), profile: "acme".into() });
+    let ids = [api.id, plan.id, local.id, unknown.id];
+    for spec in [api, plan, local, unknown] {
+        f.apply(Command::JoinAgent { spec: Box::new(spec) });
+    }
+    let usage = TokenUsage {
+        reported: true,
+        complete: true,
+        calls: 10,
+        input_tokens: 1_000_000,
+        output_tokens: 100_000,
+        ..TokenUsage::default()
+    };
+    for agent in &ids[..3] {
+        f.apply(Command::RecordTurn { agent: *agent, usage });
+    }
+
+    let digest = f.engine.digest();
+    let of = |handle: &str| digest.agent_spend.iter().find(|s| s.handle == handle).cloned().unwrap();
+    let api = of("api");
+    // $4 a million in, $20 a million out.
+    assert_eq!((api.actual_api_cost_microusd, api.cost_estimated), (Some(6_000_000), true));
+    let plan = of("plan");
+    assert_eq!((plan.actual_api_cost_microusd, plan.api_equivalent_cost_microusd), (None, Some(3_000_000)), "a plan is not charged per token");
+    let local = of("local");
+    assert_eq!((local.api_equivalent_cost_microusd, local.local), (Some(0), true));
+    assert_eq!(digest.total_spend.api_equivalent_cost_microusd, Some(9_000_000));
+    assert_eq!(digest.total_spend.actual_api_cost_microusd, Some(6_000_000));
+    assert!(digest.total_spend.cost_estimated);
+
+    // A model with no list price stays unknown rather than guessed.
+    f.apply(Command::RecordTurn { agent: ids[3], usage });
+    let digest = f.engine.digest();
+    assert_eq!(digest.agent_spend.iter().find(|s| s.handle == "odd").unwrap().api_equivalent_cost_microusd, None);
+    assert_eq!(digest.total_spend.api_equivalent_cost_microusd, None);
+}

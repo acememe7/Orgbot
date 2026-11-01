@@ -1522,16 +1522,18 @@ class UsagePane extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              'Cost unknown: OrgBots has no price for that model. Bots signed '
-              'in through a CLI subscription report tokens, not prices, and a '
-              'price shows only when the room has rates set for the model.',
+              'Costs come from each model\'s published price per million '
+              'tokens. A bot on an API key shows what it was charged. A bot '
+              'on a subscription shows its API equivalent: what the same '
+              'tokens would cost on the API, while you pay your plan. Models '
+              'running on this computer cost nothing.',
               style: note,
             ),
             const SizedBox(height: 6),
             Text(
-              'API: what turns on an API key cost at those rates. '
-              'Equivalent: what subscription turns would have cost on an '
-              'API key.',
+              'Estimated: turns from before OrgBots priced each turn, worked '
+              'out from their token totals. Cost unknown: OrgBots has no '
+              'published price for that model yet.',
               style: note,
             ),
             const SizedBox(height: 6),
@@ -1590,12 +1592,19 @@ class _SpendStrip extends StatelessWidget {
       ? 'metered'
       : 'partial usage';
 
-  static String _cost(int? actual, int? equivalent) {
-    if (actual != null && equivalent != null) {
-      return 'API ${_money(actual)} · equivalent ${_money(equivalent)}';
+  static String _cost(
+    int? actual,
+    int? equivalent, {
+    bool estimated = false,
+    bool local = false,
+  }) {
+    if (local) return 'local, no charge';
+    final note = estimated ? ' (estimated)' : '';
+    if (actual != null && equivalent != null && actual != equivalent) {
+      return 'API ${_money(actual)} · equivalent ${_money(equivalent)}$note';
     }
-    if (actual != null) return 'API ${_money(actual)}';
-    if (equivalent != null) return 'API equivalent ${_money(equivalent)}';
+    if (actual != null) return 'API ${_money(actual)}$note';
+    if (equivalent != null) return 'API equivalent ${_money(equivalent)}$note';
     return 'cost unknown';
   }
 
@@ -1656,6 +1665,7 @@ class _SpendStrip extends StatelessWidget {
               _cost(
                 total.actualApiCostMicrousd,
                 total.apiEquivalentCostMicrousd,
+                estimated: total.costEstimated,
               ),
               style: const TextStyle(fontSize: 12),
             ),
@@ -1717,6 +1727,7 @@ class _SpendStrip extends StatelessWidget {
                 _cost(
                   account.actualApiCostMicrousd,
                   account.apiEquivalentCostMicrousd,
+                  estimated: account.costEstimated,
                 ),
                 style: const TextStyle(fontSize: 12),
               ),
@@ -1780,6 +1791,8 @@ class _SpendStrip extends StatelessWidget {
                 _cost(
                   agent.actualApiCostMicrousd,
                   agent.apiEquivalentCostMicrousd,
+                  estimated: agent.costEstimated,
+                  local: agent.local,
                 ),
                 style: const TextStyle(fontSize: 12),
               ),

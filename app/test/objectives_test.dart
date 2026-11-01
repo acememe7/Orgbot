@@ -847,9 +847,9 @@ void _viewTests() {
         );
         expect(find.text('Room · ≥4,294,967,295 turns'), findsOneWidget);
         expect(
-          find.textContaining('CLI subscription report tokens, not prices'),
+          find.textContaining('what the same tokens would cost on the API'),
           findsOneWidget,
-          reason: 'says why a cost can be unknown',
+          reason: 'says what the costs mean',
         );
 
         expect(

@@ -298,6 +298,10 @@ pub struct AccountSpend {
     pub usage_complete: bool,
     pub actual_api_cost_microusd: Option<u64>,
     pub api_equivalent_cost_microusd: Option<u64>,
+    /// Whether the costs were worked out from token totals at list prices,
+    /// for turns recorded before each turn was priced.
+    #[serde(default)]
+    pub cost_estimated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -315,6 +319,11 @@ pub struct AgentSpend {
     pub usage_complete: bool,
     pub actual_api_cost_microusd: Option<u64>,
     pub api_equivalent_cost_microusd: Option<u64>,
+    #[serde(default)]
+    pub cost_estimated: bool,
+    /// Whether the bot runs on a model on this computer, so costs nothing.
+    #[serde(default)]
+    pub local: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,6 +340,8 @@ pub struct RoomSpend {
     pub usage_complete: bool,
     pub actual_api_cost_microusd: Option<u64>,
     pub api_equivalent_cost_microusd: Option<u64>,
+    #[serde(default)]
+    pub cost_estimated: bool,
 }
 
 impl RoomDigest {

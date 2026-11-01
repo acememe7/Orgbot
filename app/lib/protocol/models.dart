@@ -911,6 +911,7 @@ class AccountSpend {
     this.usageComplete = false,
     this.actualApiCostMicrousd,
     this.apiEquivalentCostMicrousd,
+    this.costEstimated = false,
   });
 
   /// The account, as the scheduler groups it.
@@ -928,6 +929,9 @@ class AccountSpend {
   final int inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens;
   final bool usageKnown, usageComplete;
   final int? actualApiCostMicrousd, apiEquivalentCostMicrousd;
+
+  /// Worked out from token totals at list prices.
+  final bool costEstimated;
 
   /// Whether the backend reported anything at all.
   bool get isMetered => usageKnown;
@@ -948,6 +952,7 @@ class AccountSpend {
     actualApiCostMicrousd: (json['actual_api_cost_microusd'] as num?)?.toInt(),
     apiEquivalentCostMicrousd: (json['api_equivalent_cost_microusd'] as num?)
         ?.toInt(),
+    costEstimated: json['cost_estimated'] == true,
   );
 }
 
@@ -963,12 +968,20 @@ class AgentSpend {
     required this.usageComplete,
     this.actualApiCostMicrousd,
     this.apiEquivalentCostMicrousd,
+    this.costEstimated = false,
+    this.local = false,
   });
 
   final String handle;
   final int turns, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens;
   final bool usageKnown, usageComplete;
   final int? actualApiCostMicrousd, apiEquivalentCostMicrousd;
+
+  /// Worked out from token totals at list prices.
+  final bool costEstimated;
+
+  /// Runs on a model on this computer, so costs nothing.
+  final bool local;
 
   factory AgentSpend.fromJson(Map<String, Object?> json) => AgentSpend(
     handle: json['handle'] as String? ?? '',
@@ -984,6 +997,8 @@ class AgentSpend {
     actualApiCostMicrousd: (json['actual_api_cost_microusd'] as num?)?.toInt(),
     apiEquivalentCostMicrousd: (json['api_equivalent_cost_microusd'] as num?)
         ?.toInt(),
+    costEstimated: json['cost_estimated'] == true,
+    local: json['local'] == true,
   );
 }
 
@@ -998,11 +1013,16 @@ class RoomSpend {
     this.usageComplete = false,
     this.actualApiCostMicrousd,
     this.apiEquivalentCostMicrousd,
+    this.costEstimated = false,
   });
 
   final int turns, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens;
   final bool usageKnown, usageComplete;
   final int? actualApiCostMicrousd, apiEquivalentCostMicrousd;
+
+  /// Worked out from token totals at list prices, for turns recorded before
+  /// each turn was priced.
+  final bool costEstimated;
 
   factory RoomSpend.fromJson(Map<String, Object?> json) => RoomSpend(
     turns: (json['turns'] as num?)?.toInt() ?? 0,
@@ -1017,5 +1037,6 @@ class RoomSpend {
     actualApiCostMicrousd: (json['actual_api_cost_microusd'] as num?)?.toInt(),
     apiEquivalentCostMicrousd: (json['api_equivalent_cost_microusd'] as num?)
         ?.toInt(),
+    costEstimated: json['cost_estimated'] == true,
   );
 }

@@ -653,56 +653,59 @@ impl Engine {
                 count: *count,
             })
             .collect();
-        view.spend = self
-            .spend_by_backend()
-            .into_iter()
-            .map(|(backend, spend)| crate::digest::AccountSpend {
-                backend,
-                turns: spend.turns,
-                tokens: spend.usage.total(),
-                per_turn: spend.per_turn(),
-                input_tokens: spend.usage.input_tokens,
-                output_tokens: spend.usage.output_tokens,
-                cache_read_tokens: spend.usage.cache_read_tokens,
-                cache_write_tokens: spend.usage.cache_write_tokens,
-                usage_known: spend_usage_known(spend),
-                usage_complete: spend.turns > 0 && spend.usage.complete,
-                actual_api_cost_microusd: (spend.actual_cost_turns == spend.turns
-                    && spend.turns > 0)
-                    .then_some(spend.usage.actual_api_cost_microusd)
-                    .flatten(),
-                api_equivalent_cost_microusd: (spend.equivalent_cost_turns == spend.turns
-                    && spend.turns > 0)
-                    .then_some(spend.usage.api_equivalent_cost_microusd)
-                    .flatten(),
-            })
-            .collect();
-        view.agent_spend = self
+        let priced: Vec<(&AgentSpec, Spend, SpendCosts)> = self
             .specs
             .values()
             .filter(|spec| !matches!(&spec.provider, orgbot_proto::ProviderRef::Scripted { .. }))
             .map(|spec| {
                 let spend = self.spend_of(spec.id);
-                crate::digest::AgentSpend {
-                    handle: spec.handle.clone(),
+                (spec, spend, spend_costs(spec, spend))
+            })
+            .collect();
+        view.spend = self
+            .spend_by_backend()
+            .into_iter()
+            .map(|(backend, spend)| {
+                let members: Vec<&SpendCosts> = priced
+                    .iter()
+                    .filter(|(spec, spend, _)| spec.provider.backend() == backend && spend.turns > 0)
+                    .map(|(_, _, costs)| costs)
+                    .collect();
+                let (actual, equivalent, estimated) = sum_costs(&members);
+                crate::digest::AccountSpend {
+                    backend,
                     turns: spend.turns,
+                    tokens: spend.usage.total(),
+                    per_turn: spend.per_turn(),
                     input_tokens: spend.usage.input_tokens,
                     output_tokens: spend.usage.output_tokens,
                     cache_read_tokens: spend.usage.cache_read_tokens,
                     cache_write_tokens: spend.usage.cache_write_tokens,
                     usage_known: spend_usage_known(spend),
                     usage_complete: spend.turns > 0 && spend.usage.complete,
-                    actual_api_cost_microusd: (spend.actual_cost_turns == spend.turns
-                        && spend.turns > 0)
-                        .then_some(spend.usage.actual_api_cost_microusd)
-                        .flatten(),
-                    api_equivalent_cost_microusd: (spend.equivalent_cost_turns == spend.turns
-                        && spend.turns > 0)
-                        .then_some(spend.usage.api_equivalent_cost_microusd)
-                        .flatten(),
+                    actual_api_cost_microusd: actual,
+                    api_equivalent_cost_microusd: equivalent,
+                    cost_estimated: estimated,
                 }
             })
-            .filter(|spend| spend.turns > 0)
+            .collect();
+        view.agent_spend = priced
+            .iter()
+            .filter(|(_, spend, _)| spend.turns > 0)
+            .map(|(spec, spend, costs)| crate::digest::AgentSpend {
+                handle: spec.handle.clone(),
+                turns: spend.turns,
+                input_tokens: spend.usage.input_tokens,
+                output_tokens: spend.usage.output_tokens,
+                cache_read_tokens: spend.usage.cache_read_tokens,
+                cache_write_tokens: spend.usage.cache_write_tokens,
+                usage_known: spend_usage_known(*spend),
+                usage_complete: spend.usage.complete,
+                actual_api_cost_microusd: costs.actual,
+                api_equivalent_cost_microusd: costs.equivalent,
+                cost_estimated: costs.estimated,
+                local: costs.local,
+            })
             .collect();
         let mut model_turns = 0u32;
         let mut model_usage_known = false;
@@ -711,51 +714,21 @@ impl Engine {
         let mut model_output = 0u32;
         let mut model_cache_read = 0u32;
         let mut model_cache_write = 0u32;
-        let mut api_turns = 0u32;
-        let mut api_cost = 0u64;
-        let mut api_cost_known = true;
-        let mut equivalent_cost = 0u64;
-        let mut equivalent_cost_known = true;
-        for spec in self.specs.values() {
-            if matches!(&spec.provider, orgbot_proto::ProviderRef::Scripted { .. }) {
-                continue;
-            }
-            let spend = self.spend_of(spec.id);
-            if spend.turns == 0 {
-                continue;
-            }
+        for (_, spend, _) in priced.iter().filter(|(_, spend, _)| spend.turns > 0) {
             model_turns = model_turns.saturating_add(spend.turns);
-            model_usage_known |= spend_usage_known(spend);
+            model_usage_known |= spend_usage_known(*spend);
             model_usage_complete &= spend.usage.complete;
             model_input = model_input.saturating_add(spend.usage.input_tokens);
             model_output = model_output.saturating_add(spend.usage.output_tokens);
             model_cache_read = model_cache_read.saturating_add(spend.usage.cache_read_tokens);
             model_cache_write = model_cache_write.saturating_add(spend.usage.cache_write_tokens);
-            let is_api = match &spec.provider {
-                orgbot_proto::ProviderRef::Anthropic { .. }
-                | orgbot_proto::ProviderRef::DeepSeek { .. } => true,
-                orgbot_proto::ProviderRef::OpenAiCompatible { profile, .. } => {
-                    profile != "codex" && profile != "chatgpt" && profile != "ollama"
-                }
-                orgbot_proto::ProviderRef::CliAgent { .. }
-                | orgbot_proto::ProviderRef::Scripted { .. } => false,
-            };
-            if is_api {
-                api_turns = api_turns.saturating_add(spend.turns);
-                if spend.actual_cost_turns == spend.turns {
-                    api_cost = api_cost
-                        .saturating_add(spend.usage.actual_api_cost_microusd.unwrap_or_default());
-                } else {
-                    api_cost_known = false;
-                }
-            }
-            if spend.equivalent_cost_turns == spend.turns {
-                equivalent_cost = equivalent_cost
-                    .saturating_add(spend.usage.api_equivalent_cost_microusd.unwrap_or_default());
-            } else {
-                equivalent_cost_known = false;
-            }
         }
+        let active: Vec<&SpendCosts> = priced
+            .iter()
+            .filter(|(_, spend, _)| spend.turns > 0)
+            .map(|(_, _, costs)| costs)
+            .collect();
+        let (room_actual, room_equivalent, room_estimated) = sum_costs(&active);
         view.total_spend = crate::digest::RoomSpend {
             turns: model_turns,
             input_tokens: model_input,
@@ -764,9 +737,9 @@ impl Engine {
             cache_write_tokens: model_cache_write,
             usage_known: model_turns > 0 && model_usage_known,
             usage_complete: model_turns > 0 && model_usage_complete,
-            actual_api_cost_microusd: (api_turns > 0 && api_cost_known).then_some(api_cost),
-            api_equivalent_cost_microusd: (model_turns > 0 && equivalent_cost_known)
-                .then_some(equivalent_cost),
+            actual_api_cost_microusd: room_actual,
+            api_equivalent_cost_microusd: room_equivalent,
+            cost_estimated: room_estimated,
         };
 
         // Review history lives here, not on the tasks, so the digest cannot
@@ -5833,6 +5806,95 @@ const RETAINED_EVENTS: usize = 3_000;
 
 /// Chat messages kept in the saved board.
 const RETAINED_MESSAGES: usize = 1_000;
+
+/// What one bot's turns cost.
+struct SpendCosts {
+    /// What it was charged, for a bot on a paid API.
+    actual: Option<u64>,
+    /// What its tokens cost at API prices, whatever it pays.
+    equivalent: Option<u64>,
+    /// Worked out from token totals rather than recorded turn by turn.
+    estimated: bool,
+    /// On this computer, so free.
+    local: bool,
+    /// Pays per token on an API.
+    metered: bool,
+}
+
+/// Whether a bot pays per token on an API, rather than a plan or nothing.
+fn metered(provider: &orgbot_proto::ProviderRef) -> bool {
+    match provider {
+        orgbot_proto::ProviderRef::Anthropic { .. } | orgbot_proto::ProviderRef::DeepSeek { .. } => true,
+        orgbot_proto::ProviderRef::OpenAiCompatible { profile, .. } => {
+            profile != "codex" && profile != "chatgpt" && !orgbot_proto::pricing::is_local(provider)
+        }
+        orgbot_proto::ProviderRef::CliAgent { .. } | orgbot_proto::ProviderRef::Scripted { .. } => false,
+    }
+}
+
+/// A bot's costs as recorded where every turn was priced, and otherwise
+/// worked out from its token totals at its model's list price.
+///
+/// From the owner of the live room: the Usage tab said "cost unknown" for
+/// every bot. Turns are now priced as they end; turns from before that are
+/// estimated here so the totals cover the whole room.
+fn spend_costs(spec: &AgentSpec, spend: Spend) -> SpendCosts {
+    let local = orgbot_proto::pricing::is_local(&spec.provider);
+    let metered = metered(&spec.provider);
+    let all = |priced: u32| spend.turns > 0 && priced == spend.turns;
+    let recorded_actual = all(spend.actual_cost_turns).then_some(spend.usage.actual_api_cost_microusd).flatten();
+    let recorded_equivalent =
+        all(spend.equivalent_cost_turns).then_some(spend.usage.api_equivalent_cost_microusd).flatten();
+    let estimate = || {
+        if spend_usage_known(spend) {
+            orgbot_proto::pricing::list_cost(&spec.provider, spec.provider.model(), &spend.usage, Timestamp::now())
+        } else {
+            None
+        }
+    };
+    let mut estimated = false;
+    let equivalent = match recorded_equivalent {
+        Some(cost) => Some(cost),
+        None if local && spend_usage_known(spend) => Some(0),
+        None => match (metered, recorded_actual) {
+            (true, Some(cost)) => Some(cost),
+            _ => {
+                let cost = estimate();
+                estimated |= cost.is_some();
+                cost
+            }
+        },
+    };
+    let actual = if metered {
+        match recorded_actual {
+            Some(cost) => Some(cost),
+            None => {
+                let cost = estimate();
+                estimated |= cost.is_some();
+                cost
+            }
+        }
+    } else {
+        None
+    };
+    SpendCosts { actual, equivalent, estimated, local, metered }
+}
+
+/// Totals across bots: a total is known only when every bot's part is.
+fn sum_costs(costs: &[&SpendCosts]) -> (Option<u64>, Option<u64>, bool) {
+    let paid: Vec<&&SpendCosts> = costs.iter().filter(|c| c.metered).collect();
+    let actual = if paid.is_empty() {
+        None
+    } else {
+        paid.iter().try_fold(0u64, |sum, c| c.actual.map(|a| sum.saturating_add(a)))
+    };
+    let equivalent = if costs.is_empty() {
+        None
+    } else {
+        costs.iter().try_fold(0u64, |sum, c| c.equivalent.map(|e| sum.saturating_add(e)))
+    };
+    (actual, equivalent, costs.iter().any(|c| c.estimated))
+}
 
 /// Whether a backend error says the account has run out of credit, which no
 /// retry fixes: Grok's 402 "usage balance exhausted", OpenAI's

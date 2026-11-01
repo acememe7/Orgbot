@@ -557,6 +557,8 @@ struct GuardedProvider {
     allowances: Allowances,
     backend: String,
     metered: bool,
+    /// The bot's backend, for its list price when the room sets no rates.
+    reference: ProviderRef,
 }
 
 #[async_trait]
@@ -592,10 +594,25 @@ impl Provider for GuardedProvider {
         let mut result = self.inner.complete(request, sink).await;
         if let Ok(response) = &mut result {
             if response.usage.reported {
-                if let Some(rates) = token_rates(&reservation.policy, &response.model) {
-                    let cost = price_usage(response.usage, rates);
-                    if reservation.metered {
+                // The room's own rates first, then the model's list price.
+                let priced = match token_rates(&reservation.policy, &response.model) {
+                    Some(rates) => Some(price_usage(response.usage, rates)),
+                    None => orgbot_proto::pricing::list_cost(
+                        &self.reference,
+                        &response.model,
+                        &response.usage,
+                        orgbot_proto::Timestamp::now(),
+                    ),
+                };
+                if let Some(cost) = priced {
+                    if orgbot_proto::pricing::is_local(&self.reference) {
+                        // Free, and what it would cost elsewhere is not the
+                        // question for a model on this computer.
+                        response.usage.api_equivalent_cost_microusd = Some(0);
+                    } else if reservation.metered {
                         response.usage.actual_api_cost_microusd = Some(cost);
+                        // Paying the list price is also its API equivalent.
+                        response.usage.api_equivalent_cost_microusd = Some(cost);
                     } else {
                         response.usage.api_equivalent_cost_microusd = Some(cost);
                     }
@@ -633,6 +650,7 @@ pub fn wrap(
         allowances,
         backend,
         metered,
+        reference: reference.clone(),
     })
 }
 
