@@ -517,5 +517,22 @@
    "Sandbox helper 92 passed",
    "Package 7e17ea2d"
   ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r12",
+  "when": "1 Nov 17:39",
+  "day": "2026-11-01",
+  "title": "Where the network is",
+  "what": "When a check fails on a network lookup, it now says the check tool has no network by design and to use the command tool, which does.",
+  "why": "@ollama-glm, locked out of its command tool by a stray symlink, ran npm in the networkless check tool and concluded the network was denied, so Playwright was never installed.",
+  "commit": "04aa6bb",
+  "facts": [
+   "Rust 1,001 passed",
+   "App 412 passed",
+   "Sandbox helper 92 passed",
+   "Package 77f423cc"
+  ]
  }
 ]

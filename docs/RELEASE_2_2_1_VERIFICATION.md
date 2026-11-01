@@ -161,6 +161,12 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   the owner at once for what only the owner can give (network, a
   dependency, a sign-in, a permission), and no longer make an idle or
   exclusive GPU a condition on the owner's desktop.
+- **Where the network is (twelfth rebuild, 1 November).** Locked out of
+  its command tool by the stray symlink, @ollama-glm ran npm through the
+  read-only check tool, which has no network on purpose, and read the
+  failed lookup as "network is denied". A check whose output shows a
+  failed network lookup now says the check tool has no network and to use
+  the command tool, which does.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -186,7 +192,8 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   turn runs (a turn cut short by a pause ends) and the digest resent as
   turns start and end. 999 at the tenth, adding the step-limit warning. 1,000 at the eleventh, adding uncut turns
   with reminders and repeated-call notes, long notes kept whole with a
-  note to the author, and the ask-the-owner and shared-desktop rules.
+  note to the author, and the ask-the-owner and shared-desktop rules. 1,001 at the twelfth,
+  adding the network hint.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
@@ -201,14 +208,14 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   (the sixth adds what each disputed-findings answer does, the eighth the
   estimated and local cost wording); 412 at the ninth, adding every view
   taking who is working from the room, and again at the tenth and eleventh
-  (the app is unchanged).
+  (the app is unchanged), and at the twelfth.
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 92 passed at the eleventh (a symlink leading
+- Workspace sandbox helper: 92 passed at the twelfth and eleventh (a symlink leading
   outside is left out and work goes on; one replacing project files still
   stops), tenth, ninth, eighth, seventh, sixth,
   fifth and fourth 1 November rebuilds,
@@ -228,11 +235,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`08e78208f23feb8f5dc44f2318db99cd2d7fe1aea8a03cc9787cdb1b987335fd`.
+`f2a8c8f4898777b88ccae6ae9f53d4e04b1c6ea5853e1e7d4fee64e742b5b171`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `7e17ea2d1d835ae6047fb9df799817a2367ad2000d33b57f079f06d31efbf0fd` |
+| orgbots_2.2.1_amd64.deb | `77f423ccf6863cdfd5b0a16441902f9eee17b629b49f9fbf7a0064c8e4529544` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -333,6 +340,16 @@ rebuilt unchanged). Signed archive revision
 `777c6a33859893d2799b3499ba110adcffc1fd12` replaces only
 `orgbots_2.2.1_amd64.deb`;
 [Pages run 41326500783](https://github.com/acememe7/Orgbot/actions/runs/41326500783)
+published it (package
+`7e17ea2d1d835ae6047fb9df799817a2367ad2000d33b57f079f06d31efbf0fd`, engine
+`08e78208f23feb8f5dc44f2318db99cd2d7fe1aea8a03cc9787cdb1b987335fd`).
+
+The twelfth rebuild adds the network hint to the check tool (source
+`04aa6bb`; engine changed, Flutter bundle and sandbox helper rebuilt
+unchanged). Signed archive revision
+`77770b2c5bf1c0b591f79b578a3fa41cfa85b38d` replaces only
+`orgbots_2.2.1_amd64.deb`;
+[Pages run 41327519753](https://github.com/acememe7/Orgbot/actions/runs/41327519753)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits
