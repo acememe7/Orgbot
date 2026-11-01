@@ -398,5 +398,22 @@
    "Sandbox helper 92 passed",
    "Package c2aa2aab"
   ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r5",
+  "when": "1 Nov 10:24",
+  "day": "2026-11-01",
+  "title": "Assists count as work",
+  "what": "A bot running an accepted assist on another bot's task shows as working until the assist completes, fails, expires or is withdrawn.",
+  "why": "After a resume, @ollama-glm worked @mira's gas proof for minutes while the room showed it idle and @mira waiting, so it looked as if no bot was working.",
+  "commit": "4d365b1",
+  "facts": [
+   "Rust 979 passed",
+   "App 411 passed",
+   "Sandbox helper 92 passed",
+   "Package 8be8578e"
+  ]
  }
 ]

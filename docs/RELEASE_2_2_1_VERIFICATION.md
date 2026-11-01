@@ -75,6 +75,12 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   before OrgBots kept its record show the commit that brought them in and
   when; git cannot say which bot wrote them, since every commit in the live
   project is under the owner's name.
+- **A bot running an assist shows as working (fifth rebuild, 1 November).**
+  After a resume, @ollama-glm took on @mira's gas proof as an assist and
+  worked it for minutes while the room showed it idle and @mira waiting, so
+  the owner saw nobody working. A bot's status came only from tasks it
+  holds. A bot with an accepted handoff now shows as working until the
+  handoff completes, fails, expires or is withdrawn.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -86,7 +92,8 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   at release and again at the second 1 November rebuild; 977 at the third,
   adding the room's recommendation on a card, the save notice, and reading a
   CLI copy's handle back from its key; 978 at the fourth, adding a room
-  naming its bots' copies as it starts.
+  naming its bots' copies as it starts; 979 at the fifth, adding a bot
+  shown as working while it runs an accepted assist.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
@@ -97,14 +104,15 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   leftover naming and removal groups; 411 at the third (five skipped), adding
   answer effects and the recommendation line, approving chosen folders, the
   copy overview and who added a folder's files; 411 again at the fourth, with
-  the arriving commit in a folder's origin line.
+  the arriving commit in a folder's origin line, and at the fifth.
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 92 passed at the fourth 1 November rebuild,
+- Workspace sandbox helper: 92 passed at the fifth 1 November rebuild and at
+  the fourth,
   three runs in a row (naming copies at room start, the commit that brought
   older files in); 90 at the third
   (approving chosen folders only, who added and last changed removed files,
@@ -121,11 +129,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`ec3ec5c3bcadb9d8458934e03598333fb9ae2a24ebc7afa622b37c605c67cf11`.
+`92c922da50136d1012b72f7eb8b2181a120917354bfb9779e5f357f41b75f8fb`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `c2aa2aab511868778a203d0a7fe10951b303d77a1afd7883d4005585743b0e8e` |
+| orgbots_2.2.1_amd64.deb | `8be8578eccd98b8c062180db59c328d249f6a54882c59dba75c87b3a8c7be7cc` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -163,6 +171,14 @@ their commit (source `e5b29e1`; engine, Flutter bundle and sandbox helper
 rebuilt). Signed archive revision `62b88a69b46a66cbe5b39cdcab5b058f17616d9c` replaces only
 `orgbots_2.2.1_amd64.deb`;
 [Pages run 41262081457](https://github.com/acememe7/Orgbot/actions/runs/41262081457)
+published it.
+
+The fifth rebuild shows a bot running an assist as working (source
+`4d365b1`; the engine changed, the Flutter bundle and sandbox helper were
+rebuilt unchanged). Signed archive revision
+`8abab6bd93041b5e354d8a318b5ecdd1e06d4d66` replaces only
+`orgbots_2.2.1_amd64.deb`;
+[Pages run 41293219615](https://github.com/acememe7/Orgbot/actions/runs/41293219615)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits
