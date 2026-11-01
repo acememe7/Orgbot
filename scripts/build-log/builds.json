@@ -466,5 +466,22 @@
    "Sandbox helper 92 passed",
    "Package 2772bec8"
   ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r9",
+  "when": "1 Nov 16:41",
+  "day": "2026-11-01",
+  "title": "Honest costs, honest status",
+  "what": "Codex, Claude Code and Grok turns are priced at the standard rate, and the Ollama bots at Ollama's cloud prices instead of free. A bot shows as working only while its turn runs, and the chat, the team list and the Work panel all say the same thing.",
+  "why": "The owner checked the costs against DeepSeek's and Ollama's dashboards: DeepSeek matched, Ollama had charged $6.41 the app called free, and the CLI bots were billed at long-context rates. The chat and the Work panel disagreed about which bots were working.",
+  "commit": "9573acd",
+  "facts": [
+   "Rust 998 passed",
+   "App 412 passed",
+   "Sandbox helper 92 passed",
+   "Package e41aaa57"
+  ]
  }
 ]

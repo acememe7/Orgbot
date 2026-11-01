@@ -128,6 +128,19 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   CHANGES.md at the project root with 2-3 lines per change: what changed,
   why, and what errors it had. Reviewers check that each change has its
   entry.
+- **Costs corrected, and one answer for who is working (ninth rebuild, 1
+  November).** The eighth rebuild billed every Codex, Claude Code and Grok
+  turn at the long-context rate, because those CLIs report one total for a
+  turn of many requests; @astra read $321 where its tokens at the standard
+  rate come to about $164. Their turns now get the standard rate. The two
+  Ollama bots were shown as free, but OrgBots reaches Ollama's cloud, and
+  ollama.com showed $6.41 of the Pro plan's credits used; they are now
+  priced at Ollama's published rates, which put them at about $6.24-6.34.
+  The chat said @astra, @opus and @mira were thinking while the Work panel
+  called them idle, waiting and working. A bot's turn starting is now an
+  event, and working means a turn is running; the chat line, the team list
+  and the Work panel all show that one answer, with "between turns" for a
+  bot holding work that is not running.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -149,7 +162,9 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   in the health line); 996 at the eighth, adding the refused wait, list
   prices and estimates, notes that replace older versions (saved and
   replayed), the size limits, the coordinators' notice, and the CHANGES.md
-  rule.
+  rule. 998 at the ninth, adding a bot shown as working only while its
+  turn runs (a turn cut short by a pause ends) and the digest resent as
+  turns start and end.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
@@ -162,15 +177,16 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   copy overview and who added a folder's files; 411 again at the fourth, with
   the arriving commit in a folder's origin line, and at the fifth to eighth
   (the sixth adds what each disputed-findings answer does, the eighth the
-  estimated and local cost wording).
+  estimated and local cost wording); 412 at the ninth, adding every view
+  taking who is working from the room.
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 92 passed at the eighth, seventh, sixth, fifth
-  and fourth 1 November rebuilds,
+- Workspace sandbox helper: 92 passed at the ninth, eighth, seventh, sixth,
+  fifth and fourth 1 November rebuilds,
   three runs in a row (naming copies at room start, the commit that brought
   older files in); 90 at the third
   (approving chosen folders only, who added and last changed removed files,
@@ -187,11 +203,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`88080dd347f4b4d41b3e70b5005cb2efc4cf09c0e93ed84a887804e89a23e7cd`.
+`9d1d09edbbce502a1e03339c81cf0fc653ea4722a5efd7d1a0104830660537b0`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `2772bec8833c2e85857ce88410b6628a0927360cb0f2d2d082216e6490a5a0b3` |
+| orgbots_2.2.1_amd64.deb | `e41aaa575fb345cf2ba1bb01f35edc4b1d3f4321d4dfff10e5d0f30238d9d6da` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -262,6 +278,16 @@ price, keeps notes short and current, and adds the CHANGES.md rule (source
 `b52058a`; engine and Flutter bundle changed, sandbox helper rebuilt unchanged).
 Signed archive revision `1adb35223ad46b7496c2f9c3dac7ba9a6d1f8912` replaces only `orgbots_2.2.1_amd64.deb`;
 [Pages run 41313136812](https://github.com/acememe7/Orgbot/actions/runs/41313136812)
+published it (package
+`2772bec8833c2e85857ce88410b6628a0927360cb0f2d2d082216e6490a5a0b3`, engine
+`88080dd347f4b4d41b3e70b5005cb2efc4cf09c0e93ed84a887804e89a23e7cd`).
+
+The ninth rebuild corrects agent CLI and Ollama costs and shows a bot as
+working only while its turn runs (source `9573acd`; engine and Flutter
+bundle changed, sandbox helper rebuilt unchanged). Signed archive revision
+`0a6527f4e5727d13492a6ebbb9f5e61547c0d0f1` replaces only
+`orgbots_2.2.1_amd64.deb`;
+[Pages run 41322563867](https://github.com/acememe7/Orgbot/actions/runs/41322563867)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits
@@ -284,6 +310,10 @@ published it, and the public archive serves the hashes in the table above.
 - List prices are those published on 1 November 2026 and change only with a
   new build. DeepSeek's off-peak rate ignores Chinese public holidays, and a
   model with no published price still shows as unknown.
+- An agent CLI's request past a model's long-context threshold, inside a
+  turn reported as one total, is priced at the standard rate. Ollama is
+  priced as its cloud; a profile pointed at an Ollama server on this
+  computer would be priced the same.
 - Notes replaced before the eighth rebuild are not linked: the room applies
   the rule to records written from then on.
 - A bot that cannot write project files can keep a long document only by
