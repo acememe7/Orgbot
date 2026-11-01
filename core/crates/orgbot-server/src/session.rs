@@ -1299,6 +1299,11 @@ fn touches_the_board(event: &orgbot_proto::event::Event) -> bool {
             | Event::ReviewPanelChanged { .. }
             | Event::ArtifactAdded { .. }
             | Event::UsageRecorded { .. }
+            // Who is working is in the digest, and a turn starting or
+            // ending changes it.
+            | Event::TurnStarted { .. }
+            | Event::TurnEnded { .. }
+            | Event::AgentErrored { .. }
     )
 }
 
@@ -1310,6 +1315,13 @@ fn usage_updates_the_live_room_digest_without_a_task_transition() {
             usage: orgbot_proto::spend::TokenUsage::missing(),
         }
     ));
+}
+
+#[test]
+fn a_turn_starting_or_ending_updates_who_is_working() {
+    let agent = orgbot_proto::AgentId::new();
+    assert!(touches_the_board(&orgbot_proto::event::Event::TurnStarted { agent }));
+    assert!(touches_the_board(&orgbot_proto::event::Event::TurnEnded { agent }));
 }
 
 /// Tags direct attention; the room transcript remains visible to everyone.

@@ -98,9 +98,22 @@ RoomStore seeded(FakeClient client) {
 }
 
 void main() {
-  testWidgets('a retry shows thinking and retains the original failure time', (
+  testWidgets('a retry shows working and retains the original failure time', (
     tester,
   ) async {
+    // The room says who is working; the server resends it as turns start and
+    // end.
+    Map<String, Object?> doing(String iris) => {
+      'type': 'digest',
+      'digest': {
+        'utilization': {
+          'bots': [
+            {'agent': 'bot_a', 'handle': 'iris', 'doing': iris, 'holding': 1, 'free': false},
+            {'agent': 'bot_b', 'handle': 'quill', 'doing': 'idle', 'holding': 0, 'free': true},
+          ],
+        },
+      },
+    };
     final client = FakeClient();
     final store = seeded(client);
     addTearDown(store.dispose);
@@ -143,10 +156,11 @@ void main() {
       'agent': 'bot_a',
       'event': {'type': 'text_delta', 'text': 'Trying again'},
     });
+    client.emit(doing('working'));
     await tester.pump();
     expect(store.failing, isEmpty);
-    expect(find.text('@iris is thinking'), findsOneWidget);
-    expect(find.text('thinking'), findsOneWidget);
+    expect(find.text('@iris is working'), findsOneWidget);
+    expect(find.text('working'), findsOneWidget);
     expect(find.text('@iris — previous turn failed'), findsNothing);
     expect(find.text('Previous turn failed · 10m ago'), findsOneWidget);
     client.emit({
@@ -157,10 +171,10 @@ void main() {
     await tester.pump();
     expect(find.text('@iris Reconnecting (1/2)'), findsOneWidget);
     expect(find.text('Reconnecting (1/2)'), findsOneWidget);
-    expect(find.text('@iris is thinking'), findsNothing);
+    expect(find.text('@iris is working'), findsNothing);
     expect(tester.takeException(), isNull);
-    // A real new error must still stop thinking and appear, even when the bot
-    // holds a task with status "working".
+    // A real new error ends the turn and must appear, even when the bot holds
+    // a task with status "working".
     client.emit(
       event({
         'event': 'agent_errored',
@@ -169,9 +183,10 @@ void main() {
         'attempt': 2,
       }, seq: 2),
     );
+    client.emit(doing('between turns'));
     await tester.pump();
     expect(store.failing.single.lastError, 'new network failure');
-    expect(find.text('@iris is thinking'), findsNothing);
+    expect(find.text('@iris is working'), findsNothing);
     expect(find.text('@iris — previous turn failed'), findsOneWidget);
     client.emit(
       event({

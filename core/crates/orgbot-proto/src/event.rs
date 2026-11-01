@@ -63,6 +63,12 @@ pub enum Event {
         from: AgentStatus,
         to: AgentStatus,
     },
+    /// A bot's turn began. It ends with its usage being recorded, an error,
+    /// or [`Event::TurnEnded`].
+    TurnStarted { agent: AgentId },
+    /// A bot's turn was cut short, by a pause or a stop, before it recorded
+    /// any usage.
+    TurnEnded { agent: AgentId },
 
     /// A message was posted to the transcript.
     MessagePosted { message: Box<ChatMessage> },
@@ -256,6 +262,8 @@ impl Event {
             Self::AgentJoined { .. } => "agent_joined",
             Self::AgentLeft { .. } => "agent_left",
             Self::AgentStatusChanged { .. } => "agent_status_changed",
+            Self::TurnStarted { .. } => "turn_started",
+            Self::TurnEnded { .. } => "turn_ended",
             Self::MessagePosted { .. } => "message_posted",
             Self::TaskCreated { .. } => "task_created",
             Self::TaskAuthorized { .. } => "task_authorized",

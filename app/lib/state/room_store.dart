@@ -406,6 +406,27 @@ class RoomStore extends ChangeNotifier {
       .where((entry) => entry.lastError != null && !entry.streaming)
       .toList();
 
+  /// What a bot is doing right now, as the room reports it: "working" or
+  /// "reviewing" while a turn of its runs, otherwise "waiting", "between
+  /// turns", "idle", "faulted" or "offline".
+  ///
+  /// From the owner of the live room: the chat said three bots were
+  /// thinking while the Work panel called them idle, waiting and working.
+  /// The chat went by streamed text and the panel by tasks. Every view now
+  /// shows this one answer.
+  String doingOf(String agentId) {
+    for (final bot in _digest.utilization.bots) {
+      if (bot.agent == agentId) return bot.doing;
+    }
+    return 'idle';
+  }
+
+  /// Whether a turn of the bot's is running.
+  bool inTurn(String agentId) {
+    final doing = doingOf(agentId);
+    return doing == 'working' || doing == 'reviewing';
+  }
+
   /// What each bot is doing, in roster order.
   List<BotActivity> get activity => _activityView ??= List.unmodifiable(
     agents.map((a) => _activity.putIfAbsent(a.id, () => BotActivity(a))),

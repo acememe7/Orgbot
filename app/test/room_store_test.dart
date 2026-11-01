@@ -386,6 +386,47 @@ void main() {
     store.dispose();
   });
 
+  test('every view takes who is working from the room, not from streamed text', () async {
+    // From the owner of the live room: the chat said three bots were
+    // thinking while the Work panel called them idle, waiting and working.
+    final client = FakeClient();
+    final store = RoomStore(client);
+    Map<String, Object?> digest(String a, String b) => {
+      'utilization': {
+        'bots': [
+          {'agent': 'bot_a', 'handle': 'iris', 'doing': a, 'holding': 1, 'free': false},
+          {'agent': 'bot_b', 'handle': 'juno', 'doing': b, 'holding': 1, 'free': false},
+        ],
+        'idle': 0,
+        'unclaimed': 0,
+      },
+    };
+    client.emit({
+      'type': 'snapshot',
+      'roster': [
+        {'id': 'bot_a', 'handle': 'iris', 'display_name': 'Iris', 'roles': [], 'status': 'waiting'},
+        {'id': 'bot_b', 'handle': 'juno', 'display_name': 'Juno', 'roles': [], 'status': 'working'},
+      ],
+      'tasks': [],
+      'digest': digest('working', 'between turns'),
+    });
+    client.emit({
+      'type': 'stream',
+      'agent': 'bot_b',
+      'event': {'type': 'text_delta', 'text': 'late frame'},
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(store.inTurn('bot_a'), isTrue, reason: 'its turn runs, though its task waits');
+    expect(store.inTurn('bot_b'), isFalse, reason: 'a stray frame is not a turn');
+    expect(store.doingOf('bot_b'), 'between turns');
+    client.emit({'type': 'digest', 'digest': digest('waiting', 'reviewing')});
+    await Future<void>.delayed(Duration.zero);
+    expect(store.inTurn('bot_a'), isFalse);
+    expect(store.doingOf('bot_b'), 'reviewing');
+    expect(store.inTurn('bot_b'), isTrue);
+    expect(store.doingOf('bot_unknown'), 'idle');
+    store.dispose();
+  });
   test('a delayed stream completion clears the thinking indicator', () async {
     final client = FakeClient();
     final store = RoomStore(client);

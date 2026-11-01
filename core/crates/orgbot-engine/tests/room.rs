@@ -4500,3 +4500,35 @@ fn coordinators_hear_once_when_a_tasks_records_grow_too_long() {
         .unwrap();
     assert_eq!(warnings(&restored).len(), 1, "a restart does not tell them again");
 }
+
+/// From the owner of the live room: the chat said @astra, @opus and @mira
+/// were thinking while the Work panel called them idle, waiting and working.
+/// Working means a turn is running, whatever the bot's tasks say.
+#[test]
+fn a_bot_is_working_while_its_turn_runs_and_not_otherwise() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let doing = |engine: &Engine, agent: AgentId| {
+        engine.utilization().bots.iter().find(|bot| bot.agent == agent).unwrap().doing.clone()
+    };
+    f.start_task("gas proof", worker);
+    assert_eq!(doing(&f.engine, worker), "between turns", "holding work is not working");
+    assert_eq!(doing(&f.engine, worker2), "idle");
+
+    let started = f.apply(Command::BeginTurn { agent: worker2 });
+    assert!(matches!(started[..], [EventEnvelope { event: Event::TurnStarted { agent }, .. }] if agent == worker2));
+    assert!(f.engine.in_turn(worker2));
+    assert_eq!(doing(&f.engine, worker2), "working", "a turn with no task is still work");
+
+    f.apply(Command::RecordTurn { agent: worker2, usage: Default::default() });
+    assert_eq!(doing(&f.engine, worker2), "idle", "recording its usage ends the turn");
+
+    // A turn cut short by a pause, before it recorded anything.
+    f.apply(Command::BeginTurn { agent: worker });
+    assert_eq!(doing(&f.engine, worker), "working");
+    f.apply(Command::PauseRoom { reason: "owner".into() });
+    let ended = f.apply(Command::EndTurn { agent: worker });
+    assert!(matches!(ended[..], [EventEnvelope { event: Event::TurnEnded { agent }, .. }] if agent == worker));
+    assert_eq!(doing(&f.engine, worker), "between turns");
+    assert!(f.apply(Command::EndTurn { agent: worker }).is_empty(), "ending twice says nothing");
+}

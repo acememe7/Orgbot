@@ -23,7 +23,10 @@ class RosterPane extends StatelessWidget {
           child: ListView.builder(
             padding: const EdgeInsets.symmetric(vertical: 4),
             itemCount: agents.length,
-            itemBuilder: (context, i) => _AgentTile(agent: agents[i]),
+            itemBuilder: (context, i) => _AgentTile(
+              agent: agents[i],
+              doing: store.doingOf(agents[i].id),
+            ),
           ),
         ),
         if (store.openHandoffs.isNotEmpty) _HandoffStrip(store: store),
@@ -33,14 +36,17 @@ class RosterPane extends StatelessWidget {
 }
 
 class _AgentTile extends StatelessWidget {
-  const _AgentTile({required this.agent});
+  const _AgentTile({required this.agent, required this.doing});
 
   final Agent agent;
+
+  /// What the room says the bot is doing; see [RoomStore.doingOf].
+  final String doing;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final (statusColor, statusLabel) = _status(agent.status);
+    final (statusColor, statusLabel) = _status(doing);
     return ListTile(
       dense: true,
       leading: Stack(
@@ -78,22 +84,15 @@ class _AgentTile extends StatelessWidget {
     );
   }
 
-  static (Color, String) _status(AgentStatus status) {
-    switch (status) {
-      case AgentStatus.idle:
-        return (Colors.green, 'idle');
-      case AgentStatus.working:
-        return (Colors.blue, 'working');
-      case AgentStatus.waiting:
-        return (Colors.amber, 'waiting');
-      case AgentStatus.offline:
-        return (Colors.grey, 'offline');
-      case AgentStatus.faulted:
-        return (Colors.red, 'faulted');
-      case AgentStatus.unknown:
-        return (Colors.grey, 'unknown');
-    }
-  }
+  static (Color, String) _status(String doing) => switch (doing) {
+    'working' => (Colors.blue, 'working'),
+    'reviewing' => (Colors.purple, 'reviewing'),
+    'waiting' => (Colors.amber, 'waiting'),
+    'between turns' => (Colors.blueGrey, 'between turns'),
+    'faulted' => (Colors.red, 'faulted'),
+    'offline' => (Colors.grey, 'offline'),
+    _ => (Colors.green, 'idle'),
+  };
 }
 
 /// A compact strip of in-flight handoffs at the bottom of the roster.

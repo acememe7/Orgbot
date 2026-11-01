@@ -165,6 +165,14 @@ impl Orchestrator {
         for bot in self.bots.values_mut() {
             bot.finish_turn(&self.engine).await;
         }
+        // A turn cut short before it recorded anything would otherwise show
+        // its bot as working until its next turn ended.
+        let ids: Vec<AgentId> = self.bots.keys().copied().collect();
+        self.engine.with(|engine| {
+            for agent in ids {
+                let _ = engine.apply(Command::EndTurn { agent });
+            }
+        });
     }
 
     /// Complete room state and bot conversations, without provider credentials.

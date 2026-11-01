@@ -386,6 +386,9 @@ pub enum Command {
     /// and of handoffs it accepted in earlier turns, run, and
     /// [`Command::KeepAlive`] no longer holds them open.
     BeginTurn { agent: AgentId },
+    /// A bot's turn was cut short before it recorded any usage, so the room
+    /// stops showing it as working.
+    EndTurn { agent: AgentId },
     /// Charge one model turn against the room budget.
     RecordTurn {
         agent: AgentId,
@@ -462,6 +465,7 @@ impl Command {
             Self::AnswerDecision { .. } => "answer_decision",
             Self::KeepAlive { .. } => "keep_alive",
             Self::BeginTurn { .. } => "begin_turn",
+            Self::EndTurn { .. } => "end_turn",
             Self::RecordTurn { .. } => "record_turn",
             Self::ReportError { .. } => "report_error",
             Self::Tick { .. } => "tick",
@@ -513,6 +517,8 @@ impl Command {
                 | Self::Tick { .. }
                 | Self::KeepAlive { .. }
                 | Self::BeginTurn { .. }
+                // A turn cut short by a pause ends after the pause.
+                | Self::EndTurn { .. }
                 // Speaking is always allowed. A paused or finished room still
                 // has a transcript, and a message that is silently refused
                 // leaves the person staring at a chat that swallowed it.

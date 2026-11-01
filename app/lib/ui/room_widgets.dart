@@ -64,7 +64,11 @@ class ActivityRail extends StatelessWidget {
                 }
                 final row = i - (showBoard ? 2 : 1);
                 if (row < 0) return _header(context, activity.length);
-                return _BotRow(entry: activity[row]);
+                final entry = activity[row];
+                return _BotRow(
+                  entry: entry,
+                  doing: store.doingOf(entry.agent.id),
+                );
               },
             ),
           ),
@@ -161,21 +165,24 @@ class ActivityRail extends StatelessWidget {
 }
 
 class _BotRow extends StatelessWidget {
-  const _BotRow({required this.entry});
+  const _BotRow({required this.entry, required this.doing});
 
   final BotActivity entry;
+
+  /// What the room says the bot is doing; see [RoomStore.doingOf].
+  final String doing;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final activeStep = entry.activeStep;
-    final (color, label) = entry.streaming && entry.retryStatus != null
+    final live = doing == 'working' || doing == 'reviewing';
+    final (color, label) = live && entry.retryStatus != null
         ? (Colors.amber, entry.retryStatus!)
-        : entry.streaming && activeStep != null
+        : live && activeStep != null
         ? (Colors.lightBlue, activeStep.label)
-        : _status(entry.agent.status, entry.streaming, entry.lastError != null);
+        : _status(doing, entry.lastError != null && !live);
 
-    final live = entry.streaming;
     return AnimatedContainer(
       duration: motionDuration(context, 180),
       curve: Curves.easeOut,
@@ -444,26 +451,17 @@ class _BotRow extends StatelessWidget {
     );
   }
 
-  static (Color, String) _status(
-    AgentStatus status,
-    bool streaming,
-    bool failing,
-  ) {
-    if (streaming) return (Colors.lightBlue, 'thinking');
+  static (Color, String) _status(String doing, bool failing) {
     if (failing) return (Colors.red, 'last turn failed');
-    switch (status) {
-      case AgentStatus.working:
-        return (Colors.blue, 'working');
-      case AgentStatus.waiting:
-        return (Colors.amber, 'waiting');
-      case AgentStatus.idle:
-        return (Colors.green, 'ready');
-      case AgentStatus.faulted:
-        return (Colors.red, 'faulted');
-      case AgentStatus.offline:
-      case AgentStatus.unknown:
-        return (Colors.grey, 'offline');
-    }
+    return switch (doing) {
+      'working' => (Colors.blue, 'working'),
+      'reviewing' => (Colors.purple, 'reviewing'),
+      'waiting' => (Colors.amber, 'waiting'),
+      'between turns' => (Colors.blueGrey, 'between turns'),
+      'faulted' => (Colors.red, 'faulted'),
+      'offline' => (Colors.grey, 'offline'),
+      _ => (Colors.green, 'idle'),
+    };
   }
 
   static String _ago(DateTime? at) {
@@ -738,7 +736,9 @@ class _TranscriptState extends State<Transcript>
     _initialIds ??= {for (final m in messages) m.id};
     final boundary = messages.indexWhere((m) => m.id == _boundary);
     final split = boundary + 1;
-    final composing = store.activity.where((a) => a.streaming).toList();
+    final composing = store.activity
+        .where((a) => store.inTurn(a.agent.id))
+        .toList();
     final failing = store.failing;
     final failureKey = [
       for (final f in failing) '${f.agent.id}@${f.lastErrorAt}',
@@ -959,7 +959,8 @@ class _TranscriptState extends State<Transcript>
               child: _Typing(
                 handles: composing.map((a) => a.agent.handle).toList(),
                 status: composing.length == 1
-                    ? composing.single.retryStatus
+                    ? composing.single.retryStatus ??
+                          'is ${store.doingOf(composing.single.agent.id)}'
                     : null,
               ),
             ),
@@ -1084,7 +1085,7 @@ class _TranscriptPhysics extends ScrollPhysics {
         );
 }
 
-/// Shown while one or more bots are composing a reply.
+/// Shown while a turn of one or more bots is running.
 class _Typing extends StatelessWidget {
   const _Typing({required this.handles, this.status});
 
@@ -1095,10 +1096,10 @@ class _Typing extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final who = handles.length == 1
-        ? '@${handles.first} ${status ?? 'is thinking'}'
+        ? '@${handles.first} ${status ?? 'is working'}'
         : handles.length <= 3
-        ? '${handles.map((h) => '@$h').join(', ')} are thinking'
-        : '${handles.length} bots are thinking';
+        ? '${handles.map((h) => '@$h').join(', ')} are working'
+        : '${handles.length} bots are working';
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(

@@ -233,7 +233,11 @@ impl Engine {
             match &envelope.event {
                 // A report about the room, not a change to it: replaying one
                 // must not re-raise it.
-                Event::RoomOpened { .. } | Event::RoomHealthChanged { .. } => {}
+                // A replayed room has no turn running; turns are not restored.
+                Event::RoomOpened { .. }
+                | Event::RoomHealthChanged { .. }
+                | Event::TurnStarted { .. }
+                | Event::TurnEnded { .. } => {}
                 Event::RoomClosed { .. } => engine.room.phase = RoomPhase::Completed,
                 Event::AgentJoined { spec } => {
                     engine.handles.insert(spec.handle.clone(), spec.id);
@@ -778,16 +782,24 @@ impl Engine {
             .map(|spec| {
                 let holding = self.workload(spec.id);
                 let status = self.status(spec.id);
-                // The bot's own state first, then what its work says. A bot
-                // holding only blocked tasks is waiting, not working, however
-                // recently it took a turn.
+                // The bot's own state first, then whether a turn of its is
+                // running, then what its work says.
+                //
+                // From the owner of the live room: the chat said @astra,
+                // @opus and @mira were thinking while this panel called them
+                // idle, waiting and working. It went by their tasks alone, so
+                // a bot mid-turn on a blocked task read "waiting" and one
+                // holding work between turns read "working". Working now
+                // means a turn is running; the chat and the team list say the
+                // same.
                 let doing = match status {
                     AgentStatus::Offline => "offline",
                     AgentStatus::Faulted => "faulted",
+                    _ if self.in_turn(spec.id) && self.holds_a_review(spec.id) => "reviewing",
+                    _ if self.in_turn(spec.id) => "working",
                     _ if holding == 0 => "idle",
                     _ if self.holds_only_blocked(spec.id) => "waiting",
-                    _ if self.holds_a_review(spec.id) => "reviewing",
-                    _ => "working",
+                    _ => "between turns",
                 };
                 crate::digest::BotState {
                     agent: spec.id,
@@ -2281,7 +2293,14 @@ impl Engine {
                 for id in self.offers_for(agent) {
                     self.offer_shown.entry(id).or_insert(now);
                 }
-                Ok(Vec::new())
+                Ok(vec![self.emit(Event::TurnStarted { agent })])
+            }
+            Command::EndTurn { agent } => {
+                if !self.in_turn(agent) {
+                    return Ok(Vec::new());
+                }
+                self.turn_ended.insert(agent, Timestamp::now());
+                Ok(vec![self.emit(Event::TurnEnded { agent })])
             }
             Command::RecordTurn { agent, usage } => {
                 self.turn_ended.insert(agent, Timestamp::now());
@@ -4478,6 +4497,14 @@ impl Engine {
             .find(|older| older.name.trim() == artifact.name.trim())
             .or_else(|| earlier.iter().find(|older| restates(&artifact.body, &older.body)))
             .map(|older| older.id)
+    }
+
+    /// Whether a turn of `agent`'s is running: one began and has not yet
+    /// recorded its usage, failed, or been cut short.
+    pub fn in_turn(&self, agent: AgentId) -> bool {
+        self.turn_began
+            .get(&agent)
+            .is_some_and(|began| self.turn_ended.get(&agent).is_none_or(|ended| ended < began))
     }
 
     /// Tell the coordinators, once per task, when its current notes and

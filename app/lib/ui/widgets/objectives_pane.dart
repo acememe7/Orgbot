@@ -1816,6 +1816,7 @@ class _UtilizationStrip extends StatelessWidget {
     'working' => scheme.primary,
     'reviewing' => Colors.purple,
     'waiting' => Colors.amber,
+    'between turns' => Colors.blueGrey,
     'faulted' => scheme.error,
     'offline' => scheme.outline,
     _ => scheme.onSurfaceVariant,
