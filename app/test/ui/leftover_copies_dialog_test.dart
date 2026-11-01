@@ -55,7 +55,9 @@ void main() {
       containsAll(['--keep', 'bot_live', 'bot_live-verify']),
     );
     expect(
-      find.text('3.2 GB · its baseline or project could not be read'),
+      find.text(
+        '3.2 GB · OrgBots lost the record of what it started from, so it kept it in case it holds unsaved work',
+      ),
       findsOneWidget,
     );
     expect(find.text('2 MB · nothing in it is unique'), findsOneWidget);
@@ -143,6 +145,22 @@ void main() {
         'freed_bytes': 41,
       }),
       'Discarded bot_x, freeing 41 bytes. Nothing in it differed from the project.',
+    );
+  });
+
+  test('leftover copies are named as a person reads them', () {
+    expect(
+      leftoverCopyName('bot_a1740742eb994413b67d7a3bb1ed7f6e'),
+      'A bot no longer in the room (a1740742)',
+    );
+    expect(leftoverCopyName('6d697261'), "@mira's own CLI copy");
+    expect(
+      leftoverCopyName('bot_de7af1787bb740bd82ef23ac85239e90-verify'),
+      'A bot no longer in the room (de7af178), verify copy',
+    );
+    expect(
+      plainLeftoverReason('3 change(s) never merged into the project'),
+      '3 changes never reached your project',
     );
   });
 }

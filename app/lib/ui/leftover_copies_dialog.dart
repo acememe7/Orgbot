@@ -37,10 +37,14 @@ class LeftoverCopy {
     required this.agent,
     required this.bytes,
     required this.reason,
+    this.lastModified,
   });
 
   final String agent;
   final int bytes;
+
+  /// When the copy last changed, if known.
+  final DateTime? lastModified;
 
   /// Why the room kept it, or null when nothing in it is unique.
   final String? reason;
@@ -206,10 +210,14 @@ class _LeftoverCopiesDialogState extends State<LeftoverCopiesDialog> {
                     final copy = copies[index];
                     return ListTile(
                       key: ValueKey('leftover-${copy.agent}'),
-                      title: Text(copy.agent),
+                      title: Text(leftoverCopyName(copy.agent)),
                       subtitle: Text(
-                        '${formatCopyBytes(copy.bytes)} · '
-                        '${copy.reason ?? 'nothing in it is unique'}',
+                        [
+                          formatCopyBytes(copy.bytes),
+                          if (copy.lastModified != null)
+                            'last changed ${_day(copy.lastModified!)}',
+                          plainLeftoverReason(copy.reason),
+                        ].join(' · '),
                       ),
                       trailing: _working == copy.agent
                           ? const SizedBox.square(
@@ -253,10 +261,14 @@ List<LeftoverCopy> leftoverCopiesFrom(Map<String, dynamic> report) {
       final agent = row['agent'];
       if (agent is! String) continue;
       final bytes = row['bytes'];
+      final modified = row['last_modified'];
       copies.add(
         LeftoverCopy(
           agent: agent,
           bytes: bytes is int ? bytes : 0,
+          lastModified: modified is int
+              ? DateTime.fromMillisecondsSinceEpoch(modified * 1000)
+              : null,
           reason: kept
               ? (row['reason'] is String ? row['reason'] as String : 'kept')
               : null,
@@ -295,4 +307,73 @@ String discardNotice(Map<String, dynamic> result) {
       ? ' Nothing in it differed from the project.'
       : ' Saved ${saved.join(' and ')} to $folder.';
   return 'Discarded $agent, freeing ${formatCopyBytes(freed)}.$where';
+}
+
+String _day(DateTime when) {
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  final local = when.toLocal();
+  return '${local.day} ${months[local.month - 1]}';
+}
+
+/// A leftover copy's name as a person reads it. From the live room: the one
+/// leftover showed as bot_a1740742eb994413b67d7a3bb1ed7f6e.
+String leftoverCopyName(String agent) {
+  final verify = agent.endsWith('-verify');
+  final base = verify
+      ? agent.substring(0, agent.length - '-verify'.length)
+      : agent;
+  String name;
+  final bot = RegExp(r'^bot_([0-9a-f]{8})[0-9a-f]*$').firstMatch(base);
+  if (bot != null) {
+    name = 'A bot no longer in the room (${bot.group(1)})';
+  } else if (RegExp(r'^([0-9a-f]{2})+$').hasMatch(base)) {
+    final bytes = [
+      for (var i = 0; i < base.length; i += 2)
+        int.parse(base.substring(i, i + 2), radix: 16),
+    ];
+    name = "@${String.fromCharCodes(bytes)}'s own CLI copy";
+  } else {
+    name = base;
+  }
+  return verify ? '$name, verify copy' : name;
+}
+
+/// Why a copy was kept, in plain words.
+String plainLeftoverReason(String? reason) {
+  if (reason == null) return 'nothing in it is unique';
+  if (reason.contains('baseline or project could not be read')) {
+    return 'OrgBots lost the record of what it started from, so it kept it in case it holds unsaved work';
+  }
+  final unmerged = RegExp(
+    r'^(\d+) change\(s\) never merged',
+  ).firstMatch(reason);
+  if (unmerged != null) {
+    final n = int.parse(unmerged.group(1)!);
+    return n == 1
+        ? '1 change never reached your project'
+        : '$n changes never reached your project';
+  }
+  if (reason.contains('could not be checked')) {
+    return 'OrgBots could not check it for unsaved work';
+  }
+  if (reason.contains('names another project')) {
+    return 'it belongs to another project';
+  }
+  if (reason.contains('not a private directory')) {
+    return 'it is not a folder OrgBots made';
+  }
+  return reason;
 }

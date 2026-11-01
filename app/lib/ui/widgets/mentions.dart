@@ -277,3 +277,8 @@ String? messageAudience(
       : '${named.take(named.length - 1).map((h) => '@$h').join(', ')} and @${named.last}';
   return 'Goes to $who only. Add @all to reach every bot';
 }
+
+/// Whether a long draft reaches only one or two bots: worth a second look
+/// before sending.
+bool audienceIsNarrow(String? audience, String text) =>
+    audience != null && audience.contains(' only') && text.trim().length > 200;

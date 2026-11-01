@@ -119,4 +119,41 @@ void main() {
     await RoomSeen.file(dir).writeAsString('{not json');
     expect(await RoomSeen.load(dir), isNull);
   });
+
+  test(
+    'OrgBots notices are not an author, and answered decisions are counted',
+    () {
+      final recap = recapSince(
+        seen,
+        tasks: const [],
+        messages: [
+          _message('m0', 'sol', left.subtract(const Duration(minutes: 1))),
+          _message(
+            's1',
+            'system',
+            left.add(const Duration(minutes: 1)),
+            kind: 'system',
+          ),
+          _message('m1', 'sol', left.add(const Duration(minutes: 2))),
+          ChatMessage(
+            id: 'h1',
+            author: Author(kind: 'human', name: 'Aece'),
+            body: 'Aece answered: Land these commits',
+            intent: 'answer',
+            taskId: null,
+            sentAt: Timestamp(
+              left.add(const Duration(minutes: 3)).millisecondsSinceEpoch,
+            ),
+          ),
+        ],
+        digest: RoomDigest.empty(),
+        nameOf: (author) => author.isSystem ? 'OrgBots' : '@${author.name}',
+        now: now,
+      )!;
+      expect(recap.lines, [
+        '1 message, most from @sol (1).',
+        'You answered 1 decision.',
+      ]);
+    },
+  );
 }

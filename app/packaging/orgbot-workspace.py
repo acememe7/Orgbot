@@ -1108,6 +1108,40 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) 
         os.close(lock_fd)
 
 
+def _removal_groups(project: Path, entries: dict[str, dict[str, Any]], deleted: list[str]) -> list[dict[str, Any]]:
+    """What a removal review would take, by top folder: how many files, their
+    size, when the newest was last changed in the project, and how many git
+    tracks.
+
+    From the live room: the owner had to ask what 562 removals were before
+    approving them, and another session had to warn that a folder among them
+    had been written to minutes before.
+    """
+    tracked: set[str] = set()
+    if deleted and (project / ".git").is_dir() and shutil.which("git"):
+        try:
+            listed = _owner_git(project, "ls-files", "-z")
+            if listed.returncode == 0:
+                tracked = {name for name in listed.stdout.split("\0") if name}
+        except (OSError, subprocess.SubprocessError):
+            tracked = set()
+    groups: dict[str, dict[str, Any]] = {}
+    for name in deleted:
+        top, _, rest = name.partition("/")
+        key = f"{top}/" if rest else top
+        group = groups.setdefault(key, {"folder": key, "files": 0, "bytes": 0, "newest": None, "tracked": 0})
+        group["files"] += 1
+        group["bytes"] += int((entries.get(name) or {}).get("size", 0))
+        try:
+            changed = int((project / name).lstat().st_mtime)
+            group["newest"] = changed if group["newest"] is None else max(group["newest"], changed)
+        except OSError:
+            pass
+        if name in tracked:
+            group["tracked"] += 1
+    return sorted(groups.values(), key=lambda group: (-group["files"], group["folder"]))
+
+
 def _status(state_arg: str, agent_arg: str) -> dict[str, Any]:
     agent = _safe_agent(agent_arg)
     state = _canonical_directory(state_arg, "state")
@@ -1138,6 +1172,7 @@ def _status(state_arg: str, agent_arg: str) -> dict[str, Any]:
         current = _scan(project)
         agent_entries = data["entries"] if _is_shared_copy(agent, data) else _scan_workspace(workspace, data["entries"])
         diffs = _changes(data["entries"], current, agent_entries)
+        diffs["deleted_groups"] = _removal_groups(project, data["entries"], diffs["deleted"])
         diffs["ok"] = True
         diffs["workspace"] = os.fspath(workspace)
         diffs["project_id"] = _project_id(project)
@@ -1160,6 +1195,16 @@ def _tree_bytes(root: Path) -> int:
             except OSError:
                 pass
     return total
+
+
+def _last_modified(agent_root: Path) -> int | None:
+    """When a copy last changed, as Unix seconds: its project folder's time."""
+    for path in (agent_root / "project", agent_root):
+        try:
+            return int(path.lstat().st_mtime)
+        except OSError:
+            continue
+    return None
 
 
 def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, Any]:
@@ -1192,7 +1237,7 @@ def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, 
             if agent in keep_set or not AGENT_RE.fullmatch(agent):
                 continue
             if agent_root.is_symlink() or not agent_root.is_dir() or agent_root.stat().st_uid != os.getuid():
-                kept.append({"agent": agent, "reason": "not a private directory"})
+                kept.append({"agent": agent, "last_modified": _last_modified(agent_root), "reason": "not a private directory"})
                 continue
             manifest = state / "manifests" / project_dir.name / f"{agent}.json"
             try:
@@ -1202,10 +1247,10 @@ def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, 
                     raise WorkspaceError("no project identity")
                 project = _canonical_directory(project_value, "project")
             except (WorkspaceError, OSError, ValueError, json.JSONDecodeError):
-                kept.append({"agent": agent, "reason": "its baseline or project could not be read", "bytes": _tree_bytes(agent_root)})
+                kept.append({"agent": agent, "last_modified": _last_modified(agent_root), "reason": "its baseline or project could not be read", "bytes": _tree_bytes(agent_root)})
                 continue
             if _project_id(project) != project_dir.name:
-                kept.append({"agent": agent, "reason": "its baseline names another project", "bytes": _tree_bytes(agent_root)})
+                kept.append({"agent": agent, "last_modified": _last_modified(agent_root), "reason": "its baseline names another project", "bytes": _tree_bytes(agent_root)})
                 continue
             try:
                 data = _manifest_read(manifest, project, agent)
@@ -1220,17 +1265,18 @@ def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, 
                         current = project_scans[project_dir.name] = _scan(project)
                     diffs = _changes(data["entries"], current, _scan_workspace(workspace, data["entries"]))
             except (WorkspaceError, OSError, ValueError, json.JSONDecodeError):
-                kept.append({"agent": agent, "reason": "its changes could not be checked", "bytes": _tree_bytes(agent_root)})
+                kept.append({"agent": agent, "last_modified": _last_modified(agent_root), "reason": "its changes could not be checked", "bytes": _tree_bytes(agent_root)})
                 continue
             pending = len(diffs["changed"]) + len(diffs["added"]) + len(diffs["deleted"])
             if pending:
-                kept.append({"agent": agent, "reason": f"{pending} change(s) never merged into the project", "bytes": _tree_bytes(agent_root)})
+                kept.append({"agent": agent, "last_modified": _last_modified(agent_root), "reason": f"{pending} change(s) never merged into the project", "bytes": _tree_bytes(agent_root)})
                 continue
             size = _tree_bytes(agent_root)
+            modified = _last_modified(agent_root)
             if not dry_run:
                 shutil.rmtree(agent_root)
                 manifest.unlink(missing_ok=True)
-            removed.append({"agent": agent, "bytes": size})
+            removed.append({"agent": agent, "bytes": size, "last_modified": modified})
     return {"ok": True, "dry_run": dry_run, "removed": removed, "kept": kept, "freed_bytes": sum(item["bytes"] for item in removed)}
 
 

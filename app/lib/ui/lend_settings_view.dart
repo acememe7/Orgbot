@@ -73,19 +73,32 @@ class _LendSettingsViewState extends State<LendSettingsView> {
           ),
         ),
         if (_error != null) ListTile(title: Text(_error!)),
+        // From the live room: all 33 tools showed, each with a risk menu,
+        // most of them "not found here", and three appeared twice. Turned-on
+        // tools come first, then those signed in here, then the rest folded.
+        if (settings != null)
+          ..._section('Turned on', [
+            for (final entry in settings.entries.where((e) => e.enabled))
+              _tile(settings, entry),
+          ]),
         if (settings != null) ..._found(settings),
         if (settings != null)
-          for (final entry in settings.entries)
-            _LendTile(
-              key: ValueKey('lend-${entry.name}'),
-              entry: entry,
-              present: settings.isPresent(entry),
-              onEnabled: (value) => _change(() => entry.enabled = value),
-              onRisk: (risk) => _change(() => entry.risk = risk),
-              onRemove: entry.builtIn
-                  ? null
-                  : () => _change(() => settings.entries.remove(entry)),
+          Theme(
+            data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+            child: ExpansionTile(
+              key: const ValueKey('lend-other-tools'),
+              title: Text(
+                'Other tools OrgBots knows (${settings.entries.where((e) => !e.enabled && !settings.isPresent(e)).length})',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              children: [
+                for (final entry in settings.entries.where(
+                  (e) => !e.enabled && !settings.isPresent(e),
+                ))
+                  _tile(settings, entry),
+              ],
             ),
+          ),
         Align(
           alignment: Alignment.centerRight,
           child: Wrap(
@@ -106,6 +119,28 @@ class _LendSettingsViewState extends State<LendSettingsView> {
         ),
       ],
     );
+  }
+
+  Widget _tile(LendSettings settings, LendEntry entry) => _LendTile(
+    key: ValueKey('lend-${entry.name}'),
+    entry: entry,
+    present: settings.isPresent(entry),
+    onEnabled: (value) => _change(() => entry.enabled = value),
+    onRisk: (risk) => _change(() => entry.risk = risk),
+    onRemove: entry.builtIn
+        ? null
+        : () => _change(() => settings.entries.remove(entry)),
+  );
+
+  List<Widget> _section(String title, List<Widget> rows) {
+    if (rows.isEmpty) return const [];
+    return [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+        child: Text(title, style: Theme.of(context).textTheme.titleSmall),
+      ),
+      ...rows,
+    ];
   }
 
   /// Sign-ins on this computer that are not turned on, and tools installed
@@ -179,17 +214,26 @@ class _LendTile extends StatelessWidget {
     trailing: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        DropdownButton<LendRisk>(
-          value: entry.risk,
-          underline: const SizedBox.shrink(),
-          items: [
-            for (final risk in LendRisk.values)
-              DropdownMenuItem(value: risk, child: Text(risk.label)),
-          ],
-          onChanged: (risk) {
-            if (risk != null) onRisk(risk);
-          },
-        ),
+        if (entry.enabled)
+          DropdownButton<LendRisk>(
+            value: entry.risk,
+            underline: const SizedBox.shrink(),
+            items: [
+              for (final risk in LendRisk.values)
+                DropdownMenuItem(value: risk, child: Text(risk.label)),
+            ],
+            onChanged: (risk) {
+              if (risk != null) onRisk(risk);
+            },
+          )
+        else
+          Text(
+            entry.risk.label,
+            style: TextStyle(
+              fontSize: 12,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
         if (onRemove != null)
           IconButton(
             tooltip: 'Remove ${entry.label}',

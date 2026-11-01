@@ -524,12 +524,123 @@ class Transcript extends StatefulWidget {
   State<Transcript> createState() => _TranscriptState();
 }
 
+/// A run of consecutive bot replies that only check in.
+class CheckInRun {
+  const CheckInRun(this.start, this.members);
+  final String start;
+  final List<ChatMessage> members;
+}
+
+final _checkInPhrase = RegExp(
+  r"nothing (?:else )?needs you|nothing is needed from you|no decision is needed|"
+  r"nothing needs your|i hold no task|i'?m holding no task|i am holding no task|holding no tasks?|"
+  r"no new review is ready|i(?:'m| am) not starting|not starting (?:any )?(?:new )?work|"
+  r"not changing anything|nobody is waiting on me",
+  caseSensitive: false,
+);
+
+/// Whether `message` is a bot checking in with nothing to report.
+///
+/// From the live room: four of the last six messages said some version of
+/// "nothing needs you" or "I hold no task". Only short replies count, so a
+/// message that opens that way and then says something real is never folded.
+bool isCheckIn(ChatMessage message) =>
+    message.author.isAgent &&
+    message.body.length <= 280 &&
+    !message.body.contains('**') &&
+    !message.body.contains('\n') &&
+    _checkInPhrase.hasMatch(message.body);
+
+/// Runs of two or more consecutive check-ins, by each member's id.
+Map<String, CheckInRun> checkInRuns(List<ChatMessage> messages) {
+  final runs = <String, CheckInRun>{};
+  var i = 0;
+  while (i < messages.length) {
+    if (!isCheckIn(messages[i])) {
+      i++;
+      continue;
+    }
+    var j = i;
+    while (j < messages.length && isCheckIn(messages[j])) {
+      j++;
+    }
+    if (j - i >= 2) {
+      final run = CheckInRun(messages[i].id, messages.sublist(i, j));
+      for (final member in run.members) {
+        runs[member.id] = run;
+      }
+    }
+    i = j;
+  }
+  return runs;
+}
+
+/// One line standing in for a folded run of check-ins.
+class _CheckInLine extends StatelessWidget {
+  const _CheckInLine({
+    required this.run,
+    required this.store,
+    required this.onOpen,
+  });
+
+  final CheckInRun run;
+  final RoomStore store;
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final handles = <String>[];
+    for (final m in run.members) {
+      final handle = '@${store.handleFor(m.author.agentId)}';
+      if (!handles.contains(handle)) handles.add(handle);
+    }
+    final bots = handles.length == 1 ? '1 bot' : '${handles.length} bots';
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: InkWell(
+        key: ValueKey('checkins-${run.start}'),
+        borderRadius: BorderRadius.circular(8),
+        onTap: onOpen,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Row(
+            children: [
+              Icon(Icons.done_all, size: 15, color: scheme.onSurfaceVariant),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '$bots checked in. Nothing needs you. ${handles.join(', ')}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              Text(
+                'Show',
+                style: TextStyle(fontSize: 12, color: scheme.primary),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _TranscriptState extends State<Transcript>
     with AutomaticKeepAliveClientMixin {
   final _center = UniqueKey();
   String? _boundary;
   List<ChatMessage> _messages = [];
   Map<String, int> _messageIndices = const {};
+
+  /// Runs of bot check-ins, by message, and the runs the owner opened.
+  Map<String, CheckInRun> _runs = const {};
+  final Set<String> _openRuns = {};
   bool _following = true;
   bool _interacting = false;
   bool _scheduled = false;
@@ -613,6 +724,7 @@ class _TranscriptState extends State<Transcript>
         _messageIndices = {
           for (var i = 0; i < current.length; i++) current[i].id: i,
         };
+        _runs = checkInRuns(current);
       }
     }
     final messages = _messages;
@@ -634,7 +746,31 @@ class _TranscriptState extends State<Transcript>
       return SliverChildBuilderDelegate(
         (context, i) {
           final message = messages[index(i)];
-          final bubble = _Bubble(
+          final run = _runs[message.id];
+          if (run != null && !_openRuns.contains(run.start)) {
+            if (message.id != run.start) {
+              return KeyedSubtree(
+                key: ValueKey(message.id),
+                child: const SizedBox.shrink(),
+              );
+            }
+            final line = _CheckInLine(
+              run: run,
+              store: store,
+              onOpen: () => setState(() => _openRuns.add(run.start)),
+            );
+            return widget.desktop
+                ? Align(
+                    key: ValueKey(message.id),
+                    alignment: Alignment.center,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 880),
+                      child: line,
+                    ),
+                  )
+                : KeyedSubtree(key: ValueKey(message.id), child: line);
+          }
+          Widget bubble = _Bubble(
             message: message,
             store: store,
             desktop: widget.desktop,
@@ -644,6 +780,26 @@ class _TranscriptState extends State<Transcript>
             onReply: widget.onReply,
             onRetry: widget.onRetry,
           );
+          if (run != null && message.id == run.start) {
+            bubble = Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(left: 12),
+                  child: TextButton(
+                    key: ValueKey('fold-checkins-${run.start}'),
+                    onPressed: () =>
+                        setState(() => _openRuns.remove(run.start)),
+                    child: Text(
+                      'Fold ${run.members.length} check-ins',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
+                bubble,
+              ],
+            );
+          }
           final animate =
               !_initialIds!.contains(message.id) && _arrived.add(message.id);
           final arriving = _Arrival(animate: animate, child: bubble);
@@ -2839,7 +2995,14 @@ class _ComposerState extends State<Composer> {
             key: const ValueKey('composer-audience'),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+            // Amber when a long message, likely meant for everyone, reaches
+            // only one or two bots: the 20:58 update in the live room.
+            style: TextStyle(
+              fontSize: 11,
+              color: audienceIsNarrow(audience, value.text)
+                  ? Colors.amber.shade400
+                  : scheme.onSurfaceVariant,
+            ),
           );
         },
       ),

@@ -619,11 +619,34 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
               fontWeight: FontWeight.w600,
             ),
           ),
-          Text(
-            '${widget.room.bots.length} ${widget.room.bots.length == 1 ? 'bot' : 'bots'} · $state',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // The room's health at a glance: green when it is working,
+              // amber when it is pausing, reconnecting or not responding.
+              AnimatedContainer(
+                key: const ValueKey('room-health'),
+                duration: motionDuration(context, 240),
+                width: 7,
+                height: 7,
+                margin: const EdgeInsets.only(right: 6),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: roomHealthColor(state, scheme),
+                ),
+              ),
+              Flexible(
+                child: Text(
+                  '${widget.room.bots.length} ${widget.room.bots.length == 1 ? 'bot' : 'bots'} · $state',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -781,7 +804,8 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   }
 
   Widget _room(RoomStore store, bool wide) {
-    final problem = _controller.error ?? store.lastError;
+    final raw = _controller.error ?? store.lastError;
+    final problem = raw == null ? null : friendlyRoomError(raw);
     final chat = Column(
       key: _desktop ? _conversationKey : null,
       children: [
@@ -1164,18 +1188,36 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
               const SizedBox(height: 8),
               for (final (index, tool) in _tools.indexed)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 5),
-                  child: IconButton(
-                    key: ValueKey('workspace-tool-$index'),
-                    tooltip: tool.$2,
-                    isSelected: _showInspector && _inspector == index,
-                    style: IconButton.styleFrom(
-                      backgroundColor: _showInspector && _inspector == index
-                          ? scheme.primaryContainer
-                          : Colors.transparent,
-                    ),
-                    onPressed: () => _selectInspector(index),
-                    icon: Icon(tool.$1, size: 19),
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        key: ValueKey('workspace-tool-$index'),
+                        tooltip: tool.$2,
+                        isSelected: _showInspector && _inspector == index,
+                        style: IconButton.styleFrom(
+                          backgroundColor: _showInspector && _inspector == index
+                              ? scheme.primaryContainer
+                              : Colors.transparent,
+                        ),
+                        onPressed: () => _selectInspector(index),
+                        icon: Icon(tool.$1, size: 19),
+                      ),
+                      // Named under the icon, not only on hover.
+                      Text(
+                        tool.$2,
+                        maxLines: 1,
+                        overflow: TextOverflow.fade,
+                        softWrap: false,
+                        style: TextStyle(
+                          fontSize: 9.5,
+                          color: _showInspector && _inspector == index
+                              ? scheme.primary
+                              : scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
             ],
@@ -1431,4 +1473,16 @@ String workspaceChangesTooltip(RoomDigest? digest) {
       '@${row.handle} (${row.copy}): ${row.count} ${row.count == 1 ? 'removal' : 'removals'} to review',
   ];
   return lines.join('\n');
+}
+
+/// The colour of the room's health dot for a header state.
+Color roomHealthColor(String state, ColorScheme scheme) {
+  if (state == 'Active') return const Color(0xFF4CAF7D);
+  if (state == 'Could not start') return scheme.error;
+  if (state.startsWith('Not responding') ||
+      state.startsWith('Reconnecting') ||
+      state.startsWith('Pausing')) {
+    return Colors.amber;
+  }
+  return scheme.onSurfaceVariant;
 }

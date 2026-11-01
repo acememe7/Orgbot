@@ -506,7 +506,14 @@ class RoomStore extends ChangeNotifier {
     bool deliverAttention = true,
   }) {
     _invalidateViews();
-    switch (message['type'] as String?) {
+    final type = message['type'] as String?;
+    if (type == 'snapshot' ||
+        type == 'event' ||
+        type == 'digest' ||
+        type == 'phase') {
+      _notResponding = false;
+    }
+    switch (type) {
       case 'snapshot':
         _applySnapshot(message);
       case 'digest':
@@ -617,6 +624,7 @@ class RoomStore extends ChangeNotifier {
         // A lag notice: ask for a fresh snapshot to catch back up.
         lastError = message['message'] as String?;
         if (lastError?.contains('control queue') == true) {
+          _notResponding = true;
           _markUnsent(List.of(_pending));
         }
         _notifyChanged();
@@ -933,7 +941,14 @@ class RoomStore extends ChangeNotifier {
       _closedReason == 'the room spent its turn budget';
 
   /// Older checkpoints called exhausted budgets completed; don't claim success.
+  /// Whether the room said it is not taking messages, and nothing has come
+  /// from it since. From the live room: the room's task had died, and the
+  /// header still said Active.
+  bool get notResponding => _notResponding;
+  bool _notResponding = false;
+
   String get runStateLabel {
+    if (_notResponding) return 'Not responding, restarting';
     if (isPausing) return 'Pausing after current turns';
     if (isActive) return 'Active';
     if (isCompleted && _limitReached) {
@@ -947,4 +962,17 @@ class RoomStore extends ChangeNotifier {
         ? 'Paused'
         : 'Saved';
   }
+}
+
+/// A room error in words the owner can act on. Engine wording such as
+/// "room control queue is full or closed" says nothing about what happened
+/// or what to do.
+String friendlyRoomError(String raw) {
+  if (raw.contains('control queue')) {
+    return 'The room is not taking messages right now. OrgBots restarts it on its own; anything you sent is marked Not sent, so you can send it again.';
+  }
+  if (raw.contains('project memory request timed out')) {
+    return 'Project memory did not answer in time. Try again in a moment.';
+  }
+  return raw;
 }

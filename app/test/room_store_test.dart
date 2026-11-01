@@ -275,8 +275,24 @@ void main() {
       });
       await Future<void>.delayed(Duration.zero);
       expect(store.isUnsent(pending), isTrue);
+      expect(
+        store.runStateLabel,
+        'Not responding, restarting',
+        reason: 'not Active while nothing takes input',
+      );
+      expect(
+        friendlyRoomError(store.lastError!),
+        contains('not taking messages'),
+      );
       store.removePending(pending);
       expect(store.messages, isEmpty);
+      client.emit({'type': 'phase', 'phase': 'running'});
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        store.notResponding,
+        isFalse,
+        reason: 'anything from the room clears it',
+      );
       store.dispose();
     },
   );

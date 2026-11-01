@@ -548,6 +548,19 @@ class WorkspaceTests(unittest.TestCase):
         workspace._prepare(os.fspath(self.project), os.fspath(self.state), "dev", False)
         self.assertFalse((work / "probe").exists())
 
+    def test_a_removal_review_says_what_each_folder_holds(self):
+        for name in (".freeze-probe/a.js", ".freeze-probe/b.js", "note.txt"):
+            path = self.project / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x" * 10, encoding="utf-8")
+        work = self.prepare()
+        for name in (".freeze-probe/a.js", ".freeze-probe/b.js", "note.txt"):
+            (work / name).unlink()
+        groups = workspace._status(os.fspath(self.state), "dev")["deleted_groups"]
+        self.assertEqual([(g["folder"], g["files"], g["bytes"]) for g in groups], [(".freeze-probe/", 2, 20), ("note.txt", 1, 10)])
+        self.assertIsNotNone(groups[0]["newest"])
+        self.assertEqual(groups[0]["tracked"], 0, "no git here, so nothing is tracked")
+
     def test_deletion_requires_explicit_owner_approval(self):
         work = self.prepare()
         (work / "README.md").unlink()

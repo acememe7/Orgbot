@@ -74,6 +74,7 @@ class RoomRecap {
     required this.stuck,
     required this.waiting,
     required this.removals,
+    this.answered = 0,
   });
 
   final Duration away;
@@ -96,11 +97,19 @@ class RoomRecap {
   /// File removals waiting for the owner's review now.
   final int removals;
 
+  /// Decisions the owner answered while the room ran, from this app or
+  /// another.
+  final int answered;
+
   List<String> get lines => [
     if (messages > 0)
       '${allMessages ? 'At least ' : ''}$messages '
           '${messages == 1 ? 'message' : 'messages'}'
           '${busiest.isEmpty ? '' : ', most from ${busiest.map((b) => '${b.$1} (${b.$2})').join(', ')}'}.',
+    if (answered > 0)
+      answered == 1
+          ? 'You answered 1 decision.'
+          : 'You answered $answered decisions.',
     if (finished.isNotEmpty) 'Done: ${_titles(finished)}.',
     if (added.isNotEmpty) 'New: ${_titles(added)}.',
     if (stuck.isNotEmpty) 'Blocked or failed: ${_titles(stuck)}.',
@@ -148,10 +157,20 @@ RoomRecap? recapSince(
   final away = (now ?? DateTime.now()).difference(seen.at);
   if (away < minimum) return null;
   final since = seen.at.millisecondsSinceEpoch;
+  // Bots only: from the live room, OrgBots' own notices were counted as an
+  // author ("OrgBots (10)").
   final newer = [
     for (final message in messages)
-      if (message.sentAt.millis > since && !message.author.isHuman) message,
+      if (message.sentAt.millis > since && message.author.isAgent) message,
   ];
+  final answered = messages
+      .where(
+        (m) =>
+            m.sentAt.millis > since &&
+            m.author.isHuman &&
+            m.body.contains(' answered: '),
+      )
+      .length;
   final counts = <String, int>{};
   for (final message in newer) {
     final name = nameOf(message.author);
@@ -186,6 +205,7 @@ RoomRecap? recapSince(
     stuck: stuck,
     waiting: digest.needsYou.length,
     removals: digest.pendingRemovalTotal,
+    answered: answered,
   );
   return recap.lines.isEmpty ? null : recap;
 }

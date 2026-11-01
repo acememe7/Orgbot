@@ -335,6 +335,58 @@ void main() {
       expect(find.text('@grok-quick · room tools · 2 removals'), findsWidgets);
     },
   );
+
+  testWidgets(
+    'a removal review says what each folder holds and flags recent changes',
+    (tester) async {
+      // From the live room: .freeze-probe/ was among 562 removals and had been
+      // written to minutes before.
+      final now = DateTime(2026, 10, 31, 23, 40);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: RemovalGroups(
+              now: now,
+              groups: [
+                {
+                  'folder': '.freeze-probe/',
+                  'files': 560,
+                  'bytes': 135000000,
+                  'tracked': 0,
+                  'newest':
+                      now
+                          .subtract(const Duration(minutes: 12))
+                          .millisecondsSinceEpoch ~/
+                      1000,
+                },
+                {
+                  'folder': 'lint-rerun-note.txt',
+                  'files': 1,
+                  'bytes': 900,
+                  'tracked': 1,
+                  'newest':
+                      now
+                          .subtract(const Duration(hours: 3))
+                          .millisecondsSinceEpoch ~/
+                      1000,
+                },
+              ],
+            ),
+          ),
+        ),
+      );
+      expect(
+        find.textContaining('560 files · 135 MB · not in git'),
+        findsOneWidget,
+      );
+      expect(find.text('changed 12 min ago, may be in use'), findsOneWidget);
+      expect(
+        find.textContaining('1 file · 900 bytes · in git'),
+        findsOneWidget,
+      );
+      expect(find.text('changed 3 h ago'), findsOneWidget);
+    },
+  );
 }
 
 Widget _host({required WorkspaceProcessRunner runner}) => MaterialApp(

@@ -257,7 +257,14 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
                       : 'These ${removals.length} project files will be moved to your configured recovery folder before the changes are applied:',
                 ),
                 const SizedBox(height: 8),
-                PathSummary(paths: removals),
+                if (displayed['deleted_groups'] is List)
+                  RemovalGroups(
+                    groups: (displayed['deleted_groups'] as List)
+                        .whereType<Map>()
+                        .toList(),
+                  )
+                else
+                  PathSummary(paths: removals),
                 const SizedBox(height: 8),
                 Expanded(
                   child: PathList(
@@ -442,6 +449,34 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
                 padding: EdgeInsets.only(top: 8),
                 child: Text(
                   'Resolve conflicts in the project before applying any changes.',
+                ),
+              ),
+            if (_status != null &&
+                deleted.isNotEmpty &&
+                _status!['deleted_groups'] is List)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: RemovalGroups(
+                  groups: (_status!['deleted_groups'] as List)
+                      .whereType<Map>()
+                      .toList(),
+                ),
+              ),
+            if (_status != null &&
+                !_busy &&
+                (conflicts.isNotEmpty ||
+                    (changed.isEmpty && added.isEmpty && deleted.isEmpty)))
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  conflicts.isNotEmpty
+                      ? 'Apply is off until the conflicts are resolved.'
+                      : 'Apply is off: there is nothing to apply.',
+                  key: const ValueKey('apply-off-reason'),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
                 ),
               ),
             if (_status != null)
@@ -643,3 +678,109 @@ String? workspaceProgressText(String line) {
 String workspaceCopyLabel(String label, int removals) => removals <= 0
     ? label
     : '$label · $removals ${removals == 1 ? 'removal' : 'removals'}';
+
+/// What a removal review would take, by folder: files, size, when the newest
+/// was last changed and whether git tracks them. Recent changes are marked:
+/// from the live room, a folder among 562 removals had been written to
+/// minutes before, and only another session noticed.
+class RemovalGroups extends StatelessWidget {
+  const RemovalGroups({super.key, required this.groups, this.now});
+
+  final List<Map> groups;
+
+  /// The time to measure "changed … ago" from; the clock if not given.
+  final DateTime? now;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final clock = now ?? DateTime.now();
+    return Column(
+      key: const ValueKey('removal-groups'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final group in groups.take(8))
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Builder(
+              builder: (context) {
+                final files = group['files'] is int ? group['files'] as int : 0;
+                final bytes = group['bytes'] is int ? group['bytes'] as int : 0;
+                final tracked = group['tracked'] is int
+                    ? group['tracked'] as int
+                    : 0;
+                final newest = group['newest'] is int
+                    ? DateTime.fromMillisecondsSinceEpoch(
+                        (group['newest'] as int) * 1000,
+                      )
+                    : null;
+                final age = newest == null ? null : clock.difference(newest);
+                final recent = age != null && age < const Duration(hours: 1);
+                final git = tracked == 0
+                    ? 'not in git'
+                    : tracked == files
+                    ? 'in git'
+                    : '$tracked of $files in git';
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Text.rich(
+                        TextSpan(
+                          children: [
+                            TextSpan(
+                              text: '${group['folder']}  ',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            TextSpan(
+                              text:
+                                  '$files ${files == 1 ? 'file' : 'files'} · ${_size(bytes)} · $git',
+                              style: TextStyle(color: scheme.onSurfaceVariant),
+                            ),
+                          ],
+                        ),
+                        style: const TextStyle(fontSize: 12.5),
+                      ),
+                    ),
+                    if (age != null)
+                      Text(
+                        recent
+                            ? 'changed ${_ago(age)}, may be in use'
+                            : 'changed ${_ago(age)}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: recent
+                              ? Colors.amber.shade400
+                              : scheme.onSurfaceVariant,
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+        if (groups.length > 8)
+          Text(
+            'and ${groups.length - 8} more',
+            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+          ),
+      ],
+    );
+  }
+
+  static String _size(int bytes) {
+    if (bytes >= 1e9) return '${(bytes / 1e9).toStringAsFixed(1)} GB';
+    if (bytes >= 1e6) return '${(bytes / 1e6).toStringAsFixed(0)} MB';
+    if (bytes >= 1e3) return '${(bytes / 1e3).toStringAsFixed(0)} KB';
+    return '$bytes bytes';
+  }
+
+  static String _ago(Duration age) {
+    if (age.inMinutes < 1) return 'just now';
+    if (age.inHours < 1) return '${age.inMinutes} min ago';
+    if (age.inDays < 1) return '${age.inHours} h ago';
+    return '${age.inDays} d ago';
+  }
+}
