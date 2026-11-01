@@ -362,7 +362,7 @@ unchanged). Signed archive revision
 published it (package
 `77f423ccf6863cdfd5b0a16441902f9eee17b629b49f9fbf7a0064c8e4529544`, engine
 `f2a8c8f4898777b88ccae6ae9f53d4e04b1c6ea5853e1e7d4fee64e742b5b171`); the
-owner installed the thirteenth instead.
+thirteenth, which includes it, followed eleven minutes later.
 
 The thirteenth rebuild refuses circular waits at the source (source
 `7b46fdc`; engine changed, Flutter bundle and sandbox helper rebuilt
