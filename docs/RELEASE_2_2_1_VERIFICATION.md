@@ -94,6 +94,40 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   used to approve the work. A review-only bot can now answer the review
   handoffs sent to it; in the live room @astra could only reply in chat and
   @mira's offer sat until it expired.
+- **An account out of credit holds its bot (seventh rebuild, 1 November).**
+  @grok-quick's Grok account ran out of credit (402, "Grok Build usage
+  balance exhausted"), and the room retried it a minute later and on a
+  growing timer after that, each time flipping the room's health. An error
+  that says the account is out of credit now halts the bot with no automatic
+  retry; the room posts why, the health line names it, and a resume or the
+  bot's next good turn brings it back.
+- **No waiting on finished work (eighth rebuild, 1 November).** @sol set its
+  combined QA to wait on the gas proof, delivered two hours earlier; the
+  room released the wait, which woke @sol, which set it again, four times
+  in three minutes. A task can no longer wait on itself, on delivered work
+  or on closed work, and the refusal says why.
+- **Costs from list prices (eighth rebuild).** Usage said "cost unknown" for
+  every bot, because a price existed only where a room's settings named one.
+  Each turn is now priced at its model's published per-million-token rate
+  (taken 1 November 2026), with long-context tiers and DeepSeek's off-peak
+  half price; a room's own rates still win. Bots on a model server on this
+  computer cost nothing, and a subscription bot shows what the same tokens
+  would cost on the API. Usage recorded before this is estimated from the
+  same table and labelled as an estimate.
+- **Shorter, current notes (eighth rebuild).** The live room held 429
+  records with 3.7 MB of text, most of it notes about the work; each rework
+  round added a fresh full verification note and reviewers read every
+  record each round. A record written again under the same name, or one
+  that mostly repeats the author's earlier record on the task, now replaces
+  it: the older one stays, reviewers are shown only the newest, and opening
+  an old one says what replaced it. Notes and JSON records are capped at
+  8,000 characters, and a document the task or owner asked for at 40,000;
+  code and raw data go in project files. Coordinators are told once when a
+  task's current notes pass 60,000 characters.
+- **CHANGES.md (eighth rebuild).** At the owner's request, bots keep a
+  CHANGES.md at the project root with 2-3 lines per change: what changed,
+  why, and what errors it had. Reviewers check that each change has its
+  entry.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -111,6 +145,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   replayed), reviewers who check fixes and do not write them, an end-to-end
   room run, strict review input, and review-only bots answering review
   handoffs.
+  987 at the seventh, adding bots halted for credit (no retry, saved, named
+  in the health line); 996 at the eighth, adding the refused wait, list
+  prices and estimates, notes that replace older versions (saved and
+  replayed), the size limits, the coordinators' notice, and the CHANGES.md
+  rule.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
@@ -121,16 +160,17 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   leftover naming and removal groups; 411 at the third (five skipped), adding
   answer effects and the recommendation line, approving chosen folders, the
   copy overview and who added a folder's files; 411 again at the fourth, with
-  the arriving commit in a folder's origin line, and at the fifth and sixth
-  (the sixth adds what each disputed-findings answer does).
+  the arriving commit in a folder's origin line, and at the fifth to eighth
+  (the sixth adds what each disputed-findings answer does, the eighth the
+  estimated and local cost wording).
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 92 passed at the sixth, fifth and fourth
-  1 November rebuilds,
+- Workspace sandbox helper: 92 passed at the eighth, seventh, sixth, fifth
+  and fourth 1 November rebuilds,
   three runs in a row (naming copies at room start, the commit that brought
   older files in); 90 at the third
   (approving chosen folders only, who added and last changed removed files,
@@ -147,11 +187,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`c08381d95e80350d4996f10425a51648b9e1510f1701b356be1b3277d114b231`.
+`88080dd347f4b4d41b3e70b5005cb2efc4cf09c0e93ed84a887804e89a23e7cd`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `7829e8e9c1e836b2ebc014ef3d2640a55651222ef50ec8eb815867de55873cbc` |
+| orgbots_2.2.1_amd64.deb | `2772bec8833c2e85857ce88410b6628a0927360cb0f2d2d082216e6490a5a0b3` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -205,6 +245,23 @@ changed, sandbox helper rebuilt unchanged). Signed archive revision
 `167f93a4501288e85f9653cb6ef9409f10af6bfb` replaces only
 `orgbots_2.2.1_amd64.deb`;
 [Pages run 41305958035](https://github.com/acememe7/Orgbot/actions/runs/41305958035)
+published it.
+
+The seventh rebuild holds a bot whose account is out of credit (source
+`1764c7e`; engine changed, Flutter bundle and sandbox helper rebuilt
+unchanged). Signed archive revision
+`179375c783d5773a3f13b282a183d47e7897e4a5` replaces only
+`orgbots_2.2.1_amd64.deb` (SHA-256
+`d37b545ee80739354d5e690f1d7ddc65214e2f875fc57086f5e7e625047a1fb5`, engine
+`98f287255fa4993f9f357d30439e4719c01ccc81e64e3bceb14a99f28bb14f3c`);
+[Pages run 41309807470](https://github.com/acememe7/Orgbot/actions/runs/41309807470)
+published it.
+
+The eighth rebuild refuses waits on finished work, prices turns at list
+price, keeps notes short and current, and adds the CHANGES.md rule (source
+`b52058a`; engine and Flutter bundle changed, sandbox helper rebuilt unchanged).
+Signed archive revision `1adb35223ad46b7496c2f9c3dac7ba9a6d1f8912` replaces only `orgbots_2.2.1_amd64.deb`;
+[Pages run 41313136812](https://github.com/acememe7/Orgbot/actions/runs/41313136812)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits
@@ -224,4 +281,11 @@ published it, and the public archive serves the hashes in the table above.
   id is in no roster the room recorded, and its baseline is missing.
 - Verify copies share files; copies a bot can write do not, because ext4 has
   no copy-on-write.
+- List prices are those published on 1 November 2026 and change only with a
+  new build. DeepSeek's off-peak rate ignores Chinese public holidays, and a
+  model with no published price still shows as unknown.
+- Notes replaced before the eighth rebuild are not linked: the room applies
+  the rule to records written from then on.
+- A bot that cannot write project files can keep a long document only by
+  marking it as the document the task asked for (up to 40,000 characters).
 - The website still names 2.2.0 as the current package.

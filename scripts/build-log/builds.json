@@ -432,5 +432,39 @@
    "Sandbox helper 92 passed",
    "Package 7829e8e9"
   ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r7",
+  "when": "1 Nov 14:08",
+  "day": "2026-11-01",
+  "title": "Out of credit means wait",
+  "what": "A bot whose account says it is out of credit stops and waits for the owner instead of being retried on a timer. The room posts the backend's reason and the health line names it; a resume or a good turn brings it back.",
+  "why": "@grok-quick's Grok account ran out of credit, and the room kept retrying it, flipping the room's health each time.",
+  "commit": "1764c7e",
+  "facts": [
+   "Rust 987 passed",
+   "App 411 passed",
+   "Sandbox helper 92 passed",
+   "Package d37b545e"
+  ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r8",
+  "when": "1 Nov 14:48",
+  "day": "2026-11-01",
+  "title": "Real costs, shorter notes",
+  "what": "Every turn is priced at its model's list price, so Usage shows costs instead of \"unknown\". A note written again replaces the older one and reviewers read only the newest; notes stay under 8,000 characters. Bots keep a CHANGES.md, and a task can no longer wait on finished work.",
+  "why": "The owner asked for real costs and a CHANGES.md. The live room had piled up 429 records, 3.7 MB of text, mostly notes reviewers reread every round, and @sol looped four times waiting on work delivered two hours earlier.",
+  "commit": "b52058a",
+  "facts": [
+   "Rust 996 passed",
+   "App 411 passed",
+   "Sandbox helper 92 passed",
+   "Package 2772bec8"
+  ]
  }
 ]
