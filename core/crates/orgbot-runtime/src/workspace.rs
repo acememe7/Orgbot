@@ -246,12 +246,46 @@ impl Workspace {
         )
         .await
         {
+            Ok(Ok(outcome)) if name == "workspace_verify" => {
+                let can_run = self.definitions().iter().any(|tool| tool.name == "workspace_run");
+                with_network_hint(outcome, can_run)
+            }
             Ok(Ok(outcome)) => outcome,
             _ => failure(
                 "Workspace operation interrupted or timed out; its effects may already have occurred. Inspect before retrying.",
             ),
         }
     }
+}
+
+/// Signs in a command's output that it tried to reach the network.
+const NETWORK_FAILURES: &[&str] = &[
+    "EAI_AGAIN",
+    "ENOTFOUND",
+    "getaddrinfo",
+    "Temporary failure in name resolution",
+    "Could not resolve host",
+    "Name or service not known",
+    "Network is unreachable",
+];
+
+/// Say where the network is, when a check failed for want of it.
+///
+/// From the live room: @ollama-glm ran npm through workspace_verify, which
+/// has no network on purpose, read EAI_AGAIN as "network is denied", and
+/// never installed Playwright, though workspace_run had the network.
+fn with_network_hint(mut outcome: ToolOutcome, can_run: bool) -> ToolOutcome {
+    if NETWORK_FAILURES.iter().any(|sign| outcome.content.contains(sign)) {
+        outcome.content.push_str(if can_run {
+            "\n\n[OrgBots] workspace_verify has no network, by design. For anything that \
+             needs the network, such as installing dependencies, use workspace_run."
+        } else {
+            "\n\n[OrgBots] workspace_verify has no network, by design, and you cannot run \
+             other commands. Hand anything that needs the network to a teammate who can, or \
+             ask the owner."
+        });
+    }
+    outcome
 }
 
 fn command_timeout_seconds(arguments: &Value) -> Result<u64, &'static str> {
@@ -303,6 +337,15 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn a_check_that_needed_the_network_says_where_the_network_is() {
+        let failed = ToolOutcome { content: "npm error code EAI_AGAIN".into(), is_error: true };
+        assert!(with_network_hint(failed.clone(), true).content.contains("use workspace_run"));
+        assert!(with_network_hint(failed, false).content.contains("Hand anything that needs the network"));
+        let passed = ToolOutcome { content: "12 tests passed".into(), is_error: false };
+        assert_eq!(with_network_hint(passed, true).content, "12 tests passed");
     }
 
     #[tokio::test]
