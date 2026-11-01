@@ -483,5 +483,22 @@
    "Sandbox helper 92 passed",
    "Package e41aaa57"
   ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r10",
+  "when": "1 Nov 17:12",
+  "day": "2026-11-01",
+  "title": "Wrap up before the limit",
+  "what": "Two model calls before a turn hits its step limit, the bot is told how many are left and to record its result: finish or fail an accepted handoff, add its artifact, or post what it found.",
+  "why": "@ollama-glm accepted a second-opinion review, ran out of steps three turns in a row while still reading code, and the review expired unanswered.",
+  "commit": "23afc60",
+  "facts": [
+   "Rust 999 passed",
+   "App 412 passed",
+   "Sandbox helper 92 passed",
+   "Package f59489f1"
+  ]
  }
 ]

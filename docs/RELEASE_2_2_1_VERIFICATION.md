@@ -141,6 +141,12 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   event, and working means a turn is running; the chat line, the team list
   and the Work panel all show that one answer, with "between turns" for a
   bot holding work that is not running.
+- **A warning before the step limit (tenth rebuild, 1 November).**
+  @ollama-glm accepted a second-opinion review at 16:31, and each of its
+  next turns ended at exactly 24 model calls while it was still reading
+  code; nothing told it the turn was ending, and the review expired at
+  16:43. Two calls before the limit, a bot is now told how many are left
+  and to record its result.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -164,7 +170,7 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   replayed), the size limits, the coordinators' notice, and the CHANGES.md
   rule. 998 at the ninth, adding a bot shown as working only while its
   turn runs (a turn cut short by a pause ends) and the digest resent as
-  turns start and end.
+  turns start and end. 999 at the tenth, adding the step-limit warning.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
@@ -178,14 +184,14 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   the arriving commit in a folder's origin line, and at the fifth to eighth
   (the sixth adds what each disputed-findings answer does, the eighth the
   estimated and local cost wording); 412 at the ninth, adding every view
-  taking who is working from the room.
+  taking who is working from the room, and again at the tenth.
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 92 passed at the ninth, eighth, seventh, sixth,
+- Workspace sandbox helper: 92 passed at the tenth, ninth, eighth, seventh, sixth,
   fifth and fourth 1 November rebuilds,
   three runs in a row (naming copies at room start, the commit that brought
   older files in); 90 at the third
@@ -203,11 +209,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`9d1d09edbbce502a1e03339c81cf0fc653ea4722a5efd7d1a0104830660537b0`.
+`91b48b6363ef43d61aa54d0669aba68707ac503b88b1ba863163c72ff0c42c80`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `e41aaa575fb345cf2ba1bb01f35edc4b1d3f4321d4dfff10e5d0f30238d9d6da` |
+| orgbots_2.2.1_amd64.deb | `f59489f16c1eb9bd59a691ccfea755106d4a9cf9e874d9f7129b88159292cb4d` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -288,6 +294,16 @@ bundle changed, sandbox helper rebuilt unchanged). Signed archive revision
 `0a6527f4e5727d13492a6ebbb9f5e61547c0d0f1` replaces only
 `orgbots_2.2.1_amd64.deb`;
 [Pages run 41322563867](https://github.com/acememe7/Orgbot/actions/runs/41322563867)
+published it (package
+`e41aaa575fb345cf2ba1bb01f35edc4b1d3f4321d4dfff10e5d0f30238d9d6da`, engine
+`9d1d09edbbce502a1e03339c81cf0fc653ea4722a5efd7d1a0104830660537b0`).
+
+The tenth rebuild warns a bot two calls before its turn hits the step
+limit (source `23afc60`; engine changed, Flutter bundle and sandbox helper
+rebuilt unchanged). Signed archive revision
+`e2377b197e937fe26beba1f4e88775a50086eecd` replaces only
+`orgbots_2.2.1_amd64.deb`;
+[Pages run 41323985391](https://github.com/acememe7/Orgbot/actions/runs/41323985391)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits
