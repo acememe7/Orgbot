@@ -45,6 +45,17 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   owner could not tell which bot owned them; 1,588 were in a copy that had none
   left. The review now names each copy with its count, opens on the copy with
   the most, and re-checks every other non-zero count.
+- **A clearer room (rebuilt 1 November, after a UI review of the live
+  room).** The task list has Active, Waiting, Done and Closed tabs. Decision
+  cards lead with who asked, the risk and a short summary, with the bot's
+  full text under Details. Runs of "nothing needs you" check-ins fold into one
+  line. The header shows the room's health in plain words. A removal review
+  groups files by folder with size, when each was last changed and whether
+  git tracks it. Leftover copies, sign-ins and the Work panel read plainly,
+  and tabs, cards and details animate subtly, respecting reduced motion. An
+  offer to a bot now stays open while the turn that first shows it runs: in
+  the live room a review done in that turn expired eight seconds after it
+  was posted.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -52,20 +63,24 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 974 passed, zero failures, three ignored.
+- Full Rust workspace (`--locked`): 974 passed, zero failures, three ignored,
+  at release and again at the second 1 November rebuild.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
   while the room is paused.
-- Full Flutter tests: 397 passed, five skipped, at release; 398 at the
-  1 November rebuild, adding per-copy counts and stale-count correction.
+- Full Flutter tests: 397 passed, five skipped, at release; 398 at the first
+  1 November rebuild; 407 at the second, adding task tabs, decision-card
+  parsing, check-in folding, the health line, the recap's answered decisions,
+  leftover naming and removal groups.
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 86 passed at the 1 November rebuild (84 at
+- Workspace sandbox helper: 87 passed at the second 1 November rebuild, 86
+  at the first (84 at
   release), adding folder cleanup after approved removals in the project and
   in a copy; including unchanged files not being read
   again while an edit with its modification time set back is still seen, and
@@ -77,11 +92,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`74697632a2def43299860a1f0064dedbd4a22a179a3a916f12550dcc4b770698`.
+`c9a8542f8e1fd6e1cff71ca7c851b6d2b34e17dbfcaa31ae86a7d9737d8d0a79`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `e8500d128dfb7ecd0d4e6afcb2ea2f632632389ecbcf40b57426f643690da224` |
+| orgbots_2.2.1_amd64.deb | `b8eab4d48c73b8be65488e8cf2032fe857ea8d7ff13981768451abea84ea89f5` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
