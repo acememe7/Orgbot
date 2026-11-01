@@ -69,6 +69,12 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   Park sits in a task's row menu with Resume. Usage has its own tab and says
   why a cost can be unknown. A leftover copy names the bot it belonged to.
   Folded check-ins unfold in place.
+- **Copies named at room start, and older files traced (fourth rebuild, 1
+  November).** A room names every bot's existing copies as it starts, so a
+  bot that leaves before its next turn still leaves a named copy. Files from
+  before OrgBots kept its record show the commit that brought them in and
+  when; git cannot say which bot wrote them, since every commit in the live
+  project is under the owner's name.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -79,7 +85,8 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - Full Rust workspace (`--locked`): 974 passed, zero failures, three ignored,
   at release and again at the second 1 November rebuild; 977 at the third,
   adding the room's recommendation on a card, the save notice, and reading a
-  CLI copy's handle back from its key.
+  CLI copy's handle back from its key; 978 at the fourth, adding a room
+  naming its bots' copies as it starts.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
@@ -89,14 +96,17 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   parsing, check-in folding, the health line, the recap's answered decisions,
   leftover naming and removal groups; 411 at the third (five skipped), adding
   answer effects and the recommendation line, approving chosen folders, the
-  copy overview and who added a folder's files.
+  copy overview and who added a folder's files; 411 again at the fourth, with
+  the arriving commit in a folder's origin line.
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 90 passed at the third 1 November rebuild
+- Workspace sandbox helper: 92 passed at the fourth 1 November rebuild,
+  three runs in a row (naming copies at room start, the commit that brought
+  older files in); 90 at the third
   (approving chosen folders only, who added and last changed removed files,
   a leftover copy's bot name), 87 at the second, 86
   at the first (84 at
@@ -111,11 +121,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`2819819280b252e3b8f30176159e31dadc4e4c53549cac56857e3f724ebb50dd`.
+`ec3ec5c3bcadb9d8458934e03598333fb9ae2a24ebc7afa622b37c605c67cf11`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `12ca84899fd42975cbf19475647a637726540a9bd8cdad2ad22c1aa299d3cf8b` |
+| orgbots_2.2.1_amd64.deb | `c2aa2aab511868778a203d0a7fe10951b303d77a1afd7883d4005585743b0e8e` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -146,6 +156,13 @@ engine, Flutter bundle and sandbox helper rebuilt). Signed archive revision
 `7f7a2a10038816d2a4f8db2e8b35437a11c8d5f9` replaces only
 `orgbots_2.2.1_amd64.deb`;
 [Pages run 41261051646](https://github.com/acememe7/Orgbot/actions/runs/41261051646)
+published it.
+
+The fourth rebuild names copies at room start and traces older files to
+their commit (source `e5b29e1`; engine, Flutter bundle and sandbox helper
+rebuilt). Signed archive revision `62b88a69b46a66cbe5b39cdcab5b058f17616d9c` replaces only
+`orgbots_2.2.1_amd64.deb`;
+[Pages run 41262081457](https://github.com/acememe7/Orgbot/actions/runs/41262081457)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits
@@ -156,9 +173,11 @@ published it, and the public archive serves the hashes in the table above.
   service when it happens.
 - The first scan of each copy after installing 2.2.1 still reads every file
   once, to build its hash cache.
-- The record of who added a file starts with this rebuild, so files already
-  in the project show no maker. Copies made before it show their bot's name
-  only after that bot's next turn.
+- Which bot added a file is known only from the third rebuild on. Older
+  tracked files show the commit that brought them in; untracked ones show
+  nothing.
+- One leftover copy in the live room (`bot_a1740742…`) cannot be named: its
+  id is in no roster the room recorded, and its baseline is missing.
 - Verify copies share files; copies a bot can write do not, because ext4 has
   no copy-on-write.
 - The website still names 2.2.0 as the current package.
