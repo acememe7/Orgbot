@@ -301,6 +301,7 @@ fn a_deliverable_lives_beside_the_board_and_comes_back_whole() {
                 text: document.clone(),
             },
             authority_bearing: false,
+            document: true,
         })
         .unwrap();
     let artifact = added

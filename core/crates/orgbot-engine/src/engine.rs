@@ -139,6 +139,10 @@ pub struct Engine {
     /// as an account out of credit. Cleared by a resume or a good turn.
     #[serde(default)]
     halted_for: BTreeMap<AgentId, String>,
+    /// Tasks whose notes and records the coordinators were told had grown
+    /// past what a review round should read. Told once per task.
+    #[serde(default)]
+    records_warned: BTreeSet<TaskId>,
     /// When each bot's latest turn began: everything offered to it before
     /// then has been in front of it. Not saved, because a turn cut short by a
     /// restart never got to answer, so after one every offer counts as unread.
@@ -249,6 +253,10 @@ impl Engine {
                     // Phase notices live in the journal/UI, outside model conversation.
                     if !matches!(message.author, orgbot_proto::chat::Author::System) {
                         engine.transcript.push(*message.clone());
+                    } else if message.body.starts_with(RECORDS_WARNING) {
+                        if let Some(task) = message.task {
+                            engine.records_warned.insert(task);
+                        }
                     }
                 }
                 Event::TaskCreated { task } => {
@@ -371,6 +379,9 @@ impl Engine {
                     if !task.artifacts.contains(&artifact.id) {
                         task.artifacts.push(artifact.id);
                     }
+                    if let Some(older) = artifact.supersedes.and_then(|id| engine.artifacts.get_mut(&id)) {
+                        older.superseded_by = Some(artifact.id);
+                    }
                     engine.artifacts.insert(artifact.id, *artifact.clone());
                 }
                 Event::ReviewRecorded { review } => engine.reviews.push(*review.clone()),
@@ -464,6 +475,7 @@ impl Engine {
             error_streak: BTreeMap::new(),
             fault_retry: BTreeMap::new(),
             halted_for: BTreeMap::new(),
+            records_warned: BTreeSet::new(),
             turn_began: BTreeMap::new(),
             offer_shown: BTreeMap::new(),
             turn_ended: BTreeMap::new(),
@@ -2160,7 +2172,8 @@ impl Engine {
                 name,
                 body,
                 authority_bearing,
-            } => self.add_artifact(task, author, name, body, authority_bearing),
+                document,
+            } => self.add_artifact(task, author, name, body, authority_bearing, document),
             Command::RecordReview {
                 task,
                 inspector,
@@ -4397,6 +4410,7 @@ impl Engine {
         name: String,
         body: ArtifactBody,
         authority_bearing: bool,
+        document: bool,
     ) -> Result<Vec<EventEnvelope>> {
         self.require_agent(author)?;
         self.require_review_only_assignment(task, author)?;
@@ -4409,20 +4423,105 @@ impl Engine {
         if self.require_task(task)?.state == TaskState::Parked {
             return Err(parked_refusal(task));
         }
+        if let Some(reason) = too_long(&name, &body, document) {
+            return Err(EngineError::ArtifactTooLong { reason });
+        }
         let revision = self.require_task(task)?.revision;
         let mut artifact = Artifact::new(task, author, name, body);
         artifact.revision = revision;
         artifact.room = Some(self.room.id);
         artifact.authority_bearing = authority_bearing;
+        artifact.supersedes = self.replaced_record(&artifact);
         let id = artifact.id;
+        if let Some(older) = artifact.supersedes.and_then(|older| self.artifacts.get_mut(&older)) {
+            older.superseded_by = Some(id);
+        }
         self.artifacts.insert(id, artifact.clone());
         if let Some(record) = self.tasks.get_mut(&task) {
             record.artifacts.push(id);
             record.updated_at = Timestamp::now();
         }
-        Ok(vec![self.emit(Event::ArtifactAdded {
+        let mut events = vec![self.emit(Event::ArtifactAdded {
             artifact: Box::new(artifact),
-        })])
+        })];
+        events.extend(self.warn_of_records(task));
+        Ok(events)
+    }
+
+    /// The earlier record that `artifact` is a newer version of, if any: the
+    /// author's current one on the same task with the same name, or else the
+    /// latest whose lines it mostly repeats.
+    ///
+    /// From the live room: each rework round added a fresh full verification
+    /// note (v10, v12, v14 and five "v14 preflight" notes, each longer than
+    /// the last), and reviewers read every one of them each round. The older
+    /// version stays for the record; reviewers are shown only the newest.
+    fn replaced_record(&self, artifact: &Artifact) -> Option<ArtifactId> {
+        if artifact.authority_bearing || !artifact.body.is_inline() {
+            return None;
+        }
+        let record = self.tasks.get(&artifact.task)?;
+        let earlier: Vec<&Artifact> = record
+            .artifacts
+            .iter()
+            .rev()
+            .filter_map(|id| self.artifacts.get(id))
+            .filter(|older| {
+                older.author == artifact.author
+                    && older.is_current()
+                    && !older.authority_bearing
+                    && older.body.kind() == artifact.body.kind()
+            })
+            .collect();
+        earlier
+            .iter()
+            .find(|older| older.name.trim() == artifact.name.trim())
+            .or_else(|| earlier.iter().find(|older| restates(&artifact.body, &older.body)))
+            .map(|older| older.id)
+    }
+
+    /// Tell the coordinators, once per task, when its current notes and
+    /// records grow past what one review round should have to read.
+    fn warn_of_records(&mut self, task: TaskId) -> Vec<EventEnvelope> {
+        if self.records_warned.contains(&task) {
+            return vec![];
+        }
+        let Some(record) = self.tasks.get(&task) else {
+            return vec![];
+        };
+        let current: Vec<usize> = record
+            .artifacts
+            .iter()
+            .filter_map(|id| self.artifacts.get(id))
+            .filter(|artifact| {
+                artifact.is_current() && matches!(artifact.body, ArtifactBody::Text { .. } | ArtifactBody::Json { .. })
+            })
+            .map(|artifact| artifact.body.full_text().chars().count())
+            .collect();
+        let chars: usize = current.iter().sum();
+        if chars <= RECORDS_WARN_CHARS {
+            return vec![];
+        }
+        let title = record.title.clone();
+        self.records_warned.insert(task);
+        let mut message = ChatMessage::system(
+            self.room.id,
+            format!(
+                "{RECORDS_WARNING} \"{title}\" holds {chars} characters in {} current notes and \
+                 records, and every review round reads them all. Coordinators: ask its authors to \
+                 fold their notes into one short verification note each, and to move code, logs \
+                 and raw data into project files.",
+                current.len()
+            ),
+        );
+        message.audience = orgbot_proto::chat::Audience::Roles {
+            roles: vec!["coordinator".into()],
+        };
+        message.task = Some(task);
+        self.apply(Command::PostMessage {
+            message: Box::new(message),
+        })
+        .unwrap_or_default()
     }
 
     /// Review-only bots can report and submit work only on a task they were
@@ -5806,6 +5905,76 @@ const RETAINED_EVENTS: usize = 3_000;
 
 /// Chat messages kept in the saved board.
 const RETAINED_MESSAGES: usize = 1_000;
+
+/// Longest note or record kept inline: one part, so a reviewer reads it in
+/// a single call.
+const RECORD_CHARS: usize = orgbot_proto::artifact::PART_CHARS;
+/// Longest document kept inline, when the task or the owner asked for one.
+const DOCUMENT_CHARS: usize = 40_000;
+/// Current notes and records on one task past which the coordinators hear.
+const RECORDS_WARN_CHARS: usize = 60_000;
+/// How that notice begins, so a replayed room knows it was already sent.
+const RECORDS_WARNING: &str = "Too much to read:";
+
+/// Why `body` is too long to keep inline, if it is.
+///
+/// From the live room: one task held 55 records and 712,000 characters,
+/// including test code pasted whole as text and capture data as JSON. Notes
+/// and records stay short; code and raw data go in project files, which the
+/// note names. Patches are the work itself and are not limited.
+fn too_long(name: &str, body: &ArtifactBody, document: bool) -> Option<String> {
+    if !matches!(body, ArtifactBody::Text { .. } | ArtifactBody::Json { .. }) {
+        return None;
+    }
+    let chars = body.full_text().chars().count();
+    let limit = if document { DOCUMENT_CHARS } else { RECORD_CHARS };
+    if chars <= limit {
+        return None;
+    }
+    Some(if document {
+        format!(
+            "`{name}` is {chars} characters, and a document is at most {DOCUMENT_CHARS}. \
+             Write it into the project as a file and record its path and sha256 instead, \
+             or shorten it."
+        )
+    } else {
+        format!(
+            "`{name}` is {chars} characters, and a note or record is at most {RECORD_CHARS}. \
+             Keep to what changed, the commands you ran and their results. Put code, logs, \
+             captures and other raw data in project files and give their paths and sha256 \
+             here. If this is the document the task or the owner asked for, set document \
+             to true (up to {DOCUMENT_CHARS})."
+        )
+    })
+}
+
+/// Whether `new` repeats most of `old`: a rewrite that carries the earlier
+/// version forward, rather than a separate record.
+fn restates(new: &ArtifactBody, old: &ArtifactBody) -> bool {
+    fn lines(body: &ArtifactBody) -> String {
+        match body {
+            ArtifactBody::Json { value } => serde_json::to_string_pretty(value).unwrap_or_default(),
+            other => other.full_text(),
+        }
+    }
+    let (new, old) = (lines(new), lines(old));
+    // Short lines such as `}` or `---` say nothing about whether two
+    // records are the same.
+    let significant = |text: &str| -> BTreeSet<String> {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| line.chars().count() >= 12)
+            .map(str::to_owned)
+            .collect()
+    };
+    let older = significant(&old);
+    if older.len() < 4 {
+        return false;
+    }
+    let newer = significant(&new);
+    let kept = older.iter().filter(|line| newer.contains(*line)).count();
+    kept * 10 >= older.len() * 6
+}
 
 /// What one bot's turns cost.
 struct SpendCosts {

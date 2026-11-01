@@ -1065,6 +1065,7 @@ impl Orchestrator {
                         .artifacts
                         .iter()
                         .filter_map(|id| engine.artifact(*id))
+                        .filter(|artifact| artifact.is_current())
                         .collect::<Vec<_>>();
                     let names = artifacts
                         .iter()

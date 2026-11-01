@@ -142,7 +142,8 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             "Record a deliverable against a task: the text you wrote, the data you \
              gathered, the patch you produced. Artifacts are what an inspector reads \
              and what a handoff carries, so put the actual work here rather than in a \
-             chat message.",
+             chat message. Recording again under the same name replaces your earlier \
+             version; inspectors read only the newest.",
             schema::object(
                 vec![
                     ("task", schema::string("The task id.")),
@@ -162,6 +163,14 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                              be re-derived — keys, signatures, schemas, protocol \
                              constants, wire values. Nothing will then try to \
                              reconstruct it from memory, and only you can re-emit it.",
+                        ),
+                    ),
+                    (
+                        "document",
+                        schema::boolean(
+                            "Set true only when this is the document the task or the \
+                             owner asked for. It may then run to 40,000 characters; \
+                             notes and other text or JSON stay under 8,000.",
                         ),
                     ),
                 ],
@@ -1372,17 +1381,23 @@ fn add_artifact(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
             .get("exact")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        document: input.get("document").and_then(|v| v.as_bool()).unwrap_or(false),
     }) {
         Ok(events) => {
-            let id = events
-                .iter()
-                .find_map(|e| match &e.event {
-                    orgbot_proto::Event::ArtifactAdded { artifact } => Some(artifact.id),
-                    _ => None,
-                })
-                .map(|id| id.to_string())
-                .unwrap_or_default();
-            ToolOutcome::ok(format!("Recorded `{name}` as {id}."))
+            let Some(artifact) = events.iter().find_map(|e| match &e.event {
+                orgbot_proto::Event::ArtifactAdded { artifact } => Some(artifact),
+                _ => None,
+            }) else {
+                return ToolOutcome::ok(format!("Recorded `{name}`."));
+            };
+            match artifact.supersedes.and_then(|older| engine.artifact(older)) {
+                Some(older) => ToolOutcome::ok(format!(
+                    "Recorded `{name}` as {}. It replaces your earlier `{}` ({}), which \
+                     inspectors will no longer be shown.",
+                    artifact.id, older.name, older.id
+                )),
+                None => ToolOutcome::ok(format!("Recorded `{name}` as {}.", artifact.id)),
+            }
         }
         Err(error) => explain(error),
     }
@@ -1565,12 +1580,21 @@ fn read_artifact(engine: &Engine, input: &Value) -> ToolOutcome {
     let Some(artifact) = engine.artifact(id) else {
         return ToolOutcome::error(format!("There is no artifact {id}."));
     };
-    let heading = format!(
+    let mut heading = format!(
         "{} ({}), by {}:",
         artifact.name,
         artifact.body.kind(),
         artifact.author.short(),
     );
+    if let Some(newer) = artifact.superseded_by.and_then(|newer| engine.artifact(newer)) {
+        heading.insert_str(
+            0,
+            &format!(
+                "REPLACED by `{}` ({}); read that one unless you need the history.\n",
+                newer.name, newer.id
+            ),
+        );
+    }
     // Never a bare preview. A reviewer who reads two thirds of a document with
     // no sign that anything is missing, and approves it, has approved
     // something nobody read.

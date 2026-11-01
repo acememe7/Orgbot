@@ -34,6 +34,9 @@ pub enum EngineError {
     #[error("no artifact {artifact}")]
     UnknownArtifact { artifact: ArtifactId },
 
+    #[error("too long to record: {reason}")]
+    ArtifactTooLong { reason: String },
+
     #[error(transparent)]
     Transition(#[from] TransitionError),
 

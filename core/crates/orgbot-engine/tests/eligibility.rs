@@ -291,6 +291,7 @@ fn review_only_artifacts_and_submission_require_assigned_review_work() {
                 text: "report".into()
             },
             authority_bearing: false,
+            document: false,
         }),
         Err(EngineError::NotPermitted { .. })
     ));
@@ -320,6 +321,7 @@ fn review_only_artifacts_and_submission_require_assigned_review_work() {
                 text: "findings".into(),
             },
             authority_bearing: false,
+            document: false,
         })
         .iter()
         .find_map(|event| match &event.event {
@@ -1381,6 +1383,7 @@ fn the_board_itself_survives_the_tidying() {
             text: "the thing that was built".into(),
         },
         authority_bearing: false,
+        document: false,
     });
 
     for index in 0..4_200 {

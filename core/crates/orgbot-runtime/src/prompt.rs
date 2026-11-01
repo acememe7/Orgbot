@@ -101,10 +101,17 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
         "Verification before review:\n\
          - Workers run focused checks for their changes before submit_for_review. \
            Put the exact commands, exit results, tested files or revision, and \
-           any checks that could not run in one short verification note per \
-           submission. A resubmission adds a note of what changed, not a new full \
-           report. Never infer a passing test from a planned command or missing \
-           output.\n\
+           any checks that could not run in one verification note per task, under \
+           8,000 characters. When the work changes, record the note again under \
+           the same name: the newer one replaces the older, and reviewers read \
+           only the newest. Put code, logs, captures and other raw data in project \
+           files and give their paths and sha256 in the note; do not paste them. \
+           Never infer a passing test from a planned command or missing output.\n\
+         - Keep a CHANGES.md at the project root. For every change you make to \
+           the project, add an entry of 2-3 lines at its end: what changed, why, \
+           and what errors or failed checks it ran into on the way. Commit the \
+           entry with the change. If .gitattributes has no `CHANGES.md merge=union` \
+           line, add it, so entries from several copies merge cleanly.\n\
          - Use a QA/tester teammate for reproduction, broader coverage, or a \
            combined suite when changes interact. Reuse current evidence instead \
            of making every teammate repeat the same full audit.\n\
@@ -123,13 +130,15 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            each blocking finding whether it really blocks and why, and offer a \
            better workaround if you see one. When work you sent back returns, \
            check each fix you asked for and run the checks that show the \
-           workaround works.\n\
+           workaround works. Check that each change has its CHANGES.md entry and \
+           that the entry matches the change; a missing one is a major finding.\n\
          - Every document costs the owner tokens to write and teammates tokens to \
            read. Do not write plan, checkpoint, status, audit, handover or summary \
            documents, as artifacts or as project files: status goes in one short \
            room message, and what a teammate needs goes in the verification note \
            or the handoff brief. Write a document, or add a Markdown file to the \
-           project, only when the owner or the task asks for one.\n\n",
+           project, only when the owner or the task asks for one; the owner has \
+           asked for CHANGES.md.\n\n",
     );
 
     out.push_str(
@@ -513,14 +522,27 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
                         task.acceptance_criteria.join("; ")
                     ));
                 }
-                if !task.artifacts.is_empty() {
+                // Only current versions: a note written again replaces the
+                // older one, which stays for the record.
+                let (current, replaced): (Vec<_>, Vec<_>) = task
+                    .artifacts
+                    .iter()
+                    .filter_map(|id| engine.artifact(*id))
+                    .partition(|artifact| artifact.is_current());
+                if !current.is_empty() {
                     out.push_str(&format!(
                         "    artifacts: {}\n",
-                        task.artifacts
+                        current
                             .iter()
-                            .map(|a| a.to_string())
+                            .map(|artifact| format!("{} ({})", artifact.name, artifact.id))
                             .collect::<Vec<_>>()
                             .join(", ")
+                    ));
+                }
+                if !replaced.is_empty() {
+                    out.push_str(&format!(
+                        "    ({} earlier versions were replaced by those; read them only if you need the history)\n",
+                        replaced.len()
                     ));
                 }
             }
@@ -803,7 +825,11 @@ fn recent_messages(engine: &Engine, agent: AgentId, since: Seq) -> String {
                 )));
             }
             Event::ArtifactAdded { artifact } => {
-                entries.push((false, format!("  [artifact available] {}: {} (task {}). Read it with read_artifact if relevant.\n",
+                let replacing = artifact
+                    .supersedes
+                    .map(|older| format!(", replacing {older}"))
+                    .unwrap_or_default();
+                entries.push((false, format!("  [artifact available] {}: {} (task {}{replacing}). Read it with read_artifact if relevant.\n",
                     artifact.id, artifact.name, artifact.task)));
             }
             Event::TaskTransitioned { task, to, .. } if *to == TaskState::Submitted => {
@@ -997,9 +1023,30 @@ mod tests {
             },
         );
         let prompt = system_prompt(&engine, &spec);
-        assert!(prompt.contains("one short verification note per submission"));
+        assert!(prompt.contains("one verification note per task, under 8,000 characters"));
+        assert!(prompt.contains("record the note again under the same name"));
         assert!(prompt.contains("Do not write plan, checkpoint, status, audit, handover or summary"));
         assert!(prompt.contains("only when the owner or the task asks for one"));
+    }
+
+    #[test]
+    fn bots_keep_a_changes_file_and_reviewers_check_it() {
+        // From the owner: every change gets 2-3 lines in CHANGES.md saying
+        // what changed, why, and what errors it had.
+        let engine = Engine::new(RoomSpec {
+            name: "changes".into(),
+            goal: "ship".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        let spec = AgentSpec::new("dev", "Dev", ProviderRef::Scripted { script: "test".into() });
+        let prompt = system_prompt(&engine, &spec);
+        assert!(prompt.contains("Keep a CHANGES.md at the project root"));
+        assert!(prompt.contains("what changed, why, and what errors or failed checks it ran into"));
+        assert!(prompt.contains("CHANGES.md merge=union"));
+        assert!(prompt.contains("Check that each change has its CHANGES.md entry"));
     }
 
     #[test]

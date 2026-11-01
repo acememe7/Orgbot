@@ -1277,6 +1277,7 @@ fn a_long_artifact_is_handed_over_in_named_parts() {
             "task": task,
             "name": "architecture.md",
             "content": "x".repeat(20_000),
+            "document": true,
         }),
     );
     let artifact = id_in(&told, "art");
@@ -1312,6 +1313,7 @@ fn the_final_part_closes_the_document() {
             "task": task,
             "name": "architecture.md",
             "content": "x".repeat(20_000),
+            "document": true,
         }),
     );
     let artifact = id_in(&told, "art");
@@ -1505,7 +1507,7 @@ fn artifact_of(f: &mut Fixture, chars: usize, title: &str) -> String {
     let recorded = f.ok(
         worker,
         "add_artifact",
-        json!({"task": task, "name": "long.md", "content": body}),
+        json!({"task": task, "name": "long.md", "content": body, "document": true}),
     );
     id_in(&recorded, "art")
 }
@@ -1803,3 +1805,30 @@ fn a_review_only_bot_answers_review_handoffs_but_takes_no_other_work() {
     assert!(refused.is_error && refused.content.contains("review"), "{}", refused.content);
 }
 
+
+/// From the live room: each rework round added another full verification
+/// note. Recording it again under the same name replaces the older one, and
+/// the older one says so when it is opened.
+#[test]
+fn a_note_recorded_again_says_what_it_replaced() {
+    let mut f = fixture();
+    let task = f.make(json!({"title":"gas proof", "brief":"prove the gas wall"}));
+    f.ok(f.worker, "claim_task", json!({"task":task}));
+    f.ok(f.worker, "start_task", json!({"task":task}));
+    let first = id_in(
+        &f.ok(f.worker, "add_artifact", json!({"task":task, "name":"verification.md", "content":"cargo test: 12 passed"})),
+        "art",
+    );
+    let told = f.ok(f.worker, "add_artifact", json!({"task":task, "name":"verification.md", "content":"cargo test: 14 passed"}));
+    let second = id_in(&told, "art");
+    assert!(told.contains("replaces your earlier `verification.md`") && told.contains(&first), "{told}");
+    let old = f.ok(f.inspector, "read_artifact", json!({"artifact":first}));
+    assert!(old.starts_with("REPLACED by `verification.md`") && old.contains(&second), "{old}");
+    let new = f.ok(f.inspector, "read_artifact", json!({"artifact":second}));
+    assert!(!new.contains("REPLACED"));
+
+    let long = "x".repeat(9_000);
+    let refused = f.call(f.worker, "add_artifact", json!({"task":task, "name":"capture.md", "content":long}));
+    assert!(refused.is_error && refused.content.contains("at most 8000"), "{}", refused.content);
+    f.ok(f.worker, "add_artifact", json!({"task":task, "name":"design.md", "content":long, "document":true}));
+}

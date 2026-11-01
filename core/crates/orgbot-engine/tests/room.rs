@@ -122,6 +122,7 @@ impl Fixture {
                 text: "the release notes".into(),
             },
             authority_bearing: false,
+            document: false,
         });
         added_artifact(&events)
     }
@@ -2565,6 +2566,7 @@ fn authority_bearing_content_cannot_be_replaced_by_another_bot() {
             text: "-----BEGIN PUBLIC KEY-----".into(),
         },
         authority_bearing: true,
+        document: false,
     });
     let key = added_artifact(&events);
 
@@ -2817,8 +2819,9 @@ fn work_built_on_a_replaced_input_is_flagged() {
     let mut f = fixture();
     let worker = f.worker;
     let source = f.start_task("write the schema", worker);
-    let original = f.add_artifact(source, worker);
-    let corrected = f.add_artifact(source, worker);
+    // Separate names, so the room does not link the two by itself.
+    let original = record(&mut f, source, worker, "schema.sql", note("schema", 60)).unwrap();
+    let corrected = record(&mut f, source, worker, "schema-fixed.sql", note("fixed", 60)).unwrap();
 
     let dependent = f.open_task("build on the schema", None);
     f.engine.task_mut(dependent).unwrap().requires_artifacts = vec![original];
@@ -3811,6 +3814,7 @@ fn work_the_owner_parks_is_left_alone_until_they_resume_it() {
         name: "notes.md".into(),
         body: ArtifactBody::Text { text: "still on it".into() },
         authority_bearing: false,
+        document: false,
     });
     let asking = f.reject(Command::AskOwner {
         by: worker,
@@ -4185,6 +4189,7 @@ mod second_opinions {
             name: "fix.md".into(),
             body: ArtifactBody::Text { text: "the fix".into() },
             authority_bearing: false,
+            document: false,
         });
         assert!(matches!(err, EngineError::NotPermitted { .. }), "{err}");
         let offered = f.apply(Command::OfferHandoff {
@@ -4360,4 +4365,138 @@ fn usage_without_recorded_prices_is_estimated_from_list_prices() {
     let digest = f.engine.digest();
     assert_eq!(digest.agent_spend.iter().find(|s| s.handle == "odd").unwrap().api_equivalent_cost_microusd, None);
     assert_eq!(digest.total_spend.api_equivalent_cost_microusd, None);
+}
+
+// ------------------------------------------------------- notes and records
+
+/// A note of about `chars` characters whose lines belong to `topic` alone.
+fn note(topic: &str, chars: usize) -> ArtifactBody {
+    let mut text = String::new();
+    let mut line = 0;
+    while text.len() < chars {
+        text.push_str(&format!("{topic} check {line}: exit 0 after {} ms\n", line * 7));
+        line += 1;
+    }
+    text.truncate(chars);
+    ArtifactBody::Text { text }
+}
+
+fn record(f: &mut Fixture, task: TaskId, author: AgentId, name: &str, body: ArtifactBody) -> Result<ArtifactId, EngineError> {
+    f.engine
+        .apply(Command::AddArtifact {
+            task,
+            author,
+            name: name.into(),
+            body,
+            authority_bearing: false,
+            document: false,
+        })
+        .map(|events| added_artifact(&events))
+}
+
+/// From the live room: every rework round added a fresh full verification
+/// note, and reviewers read all of them each round.
+#[test]
+fn a_note_recorded_again_replaces_the_older_one() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let task = f.start_task("gas proof", worker);
+    let first = record(&mut f, task, worker, "verification.md", note("first run", 2_000)).unwrap();
+    let again = record(&mut f, task, worker, "verification.md", note("second run", 2_000)).unwrap();
+    assert_eq!(f.engine.artifact(first).unwrap().superseded_by, Some(again), "the same name is a newer version");
+    assert_eq!(f.engine.artifact(again).unwrap().supersedes, Some(first));
+
+    // A renamed rewrite that carries the old note forward replaces it too.
+    let ArtifactBody::Text { text } = note("second run", 2_000) else { unreachable!() };
+    let carried = ArtifactBody::Text { text: format!("{text}\nthird run check: exit 0\n") };
+    let v3 = record(&mut f, task, worker, "verification-v3.md", carried).unwrap();
+    assert_eq!(f.engine.artifact(again).unwrap().superseded_by, Some(v3));
+
+    // A separate record, or someone else's note, stands on its own.
+    let separate = record(&mut f, task, worker, "baseline-correction.md", note("baseline", 1_000)).unwrap();
+    assert!(f.engine.artifact(separate).unwrap().supersedes.is_none());
+    assert!(f.engine.artifact(v3).unwrap().is_current());
+    let theirs = record(&mut f, task, worker2, "verification-v3.md", note("second run", 2_000)).unwrap();
+    assert!(f.engine.artifact(theirs).unwrap().supersedes.is_none());
+    assert!(f.engine.artifact(v3).unwrap().is_current());
+
+    // A restart remembers which versions were replaced.
+    let restored = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec()).unwrap();
+    assert_eq!(restored.artifact(first).unwrap().superseded_by, Some(again));
+    assert_eq!(restored.artifact(again).unwrap().superseded_by, Some(v3));
+    assert!(restored.artifact(v3).unwrap().is_current());
+}
+
+/// From the live room: test code was pasted whole into notes, up to 98,577
+/// characters, and capture data into JSON records.
+#[test]
+fn notes_and_records_past_their_limit_are_refused() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("gas proof", worker);
+    let refused = record(&mut f, task, worker, "verification.md", note("run", 8_001)).unwrap_err();
+    assert!(matches!(&refused, EngineError::ArtifactTooLong { reason } if reason.contains("project files")), "{refused}");
+    assert!(record(&mut f, task, worker, "verification.md", note("run", 8_000)).is_ok());
+    let data = ArtifactBody::Json { value: serde_json::json!({ "samples": vec![123_456_789u64; 1_000] }) };
+    assert!(matches!(record(&mut f, task, worker, "capture.json", data), Err(EngineError::ArtifactTooLong { .. })));
+
+    // The document the task asked for may run longer, within a limit.
+    let document = |f: &mut Fixture, chars| {
+        f.engine.apply(Command::AddArtifact {
+            task,
+            author: worker,
+            name: "design.md".into(),
+            body: note("design", chars),
+            authority_bearing: false,
+            document: true,
+        })
+    };
+    assert!(document(&mut f, 30_000).is_ok());
+    assert!(matches!(document(&mut f, 40_001), Err(EngineError::ArtifactTooLong { .. })));
+
+    // A patch is the work itself.
+    let ArtifactBody::Text { text } = note("diff", 60_000) else { unreachable!() };
+    assert!(record(&mut f, task, worker, "change.patch", ArtifactBody::Patch { diff: text }).is_ok());
+}
+
+#[test]
+fn coordinators_hear_once_when_a_tasks_records_grow_too_long() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("gas proof", worker);
+    let warnings = |engine: &Engine| {
+        engine
+            .log()
+            .iter()
+            .filter_map(|envelope| match &envelope.event {
+                Event::MessagePosted { message } if message.body.starts_with("Too much to read:") => Some(message.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    for n in 0..7 {
+        record(&mut f, task, worker, &format!("record-{n}.md"), note(&format!("topic {n}"), 8_000)).unwrap();
+    }
+    assert!(warnings(&f.engine).is_empty(), "56,000 characters is still readable");
+    record(&mut f, task, worker, "record-7.md", note("topic 7", 8_000)).unwrap();
+    let told = warnings(&f.engine);
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0].task, Some(task));
+    assert!(matches!(&told[0].audience, orgbot_proto::chat::Audience::Roles { roles } if roles == &["coordinator".to_string()]));
+    assert!(told[0].body.contains("8 current notes"), "{}", told[0].body);
+
+    record(&mut f, task, worker, "record-8.md", note("topic 8", 8_000)).unwrap();
+    assert_eq!(warnings(&f.engine).len(), 1, "told once");
+    let mut restored = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec()).unwrap();
+    restored
+        .apply(Command::AddArtifact {
+            task,
+            author: worker,
+            name: "record-9.md".into(),
+            body: note("topic 9", 8_000),
+            authority_bearing: false,
+            document: false,
+        })
+        .unwrap();
+    assert_eq!(warnings(&restored).len(), 1, "a restart does not tell them again");
 }
