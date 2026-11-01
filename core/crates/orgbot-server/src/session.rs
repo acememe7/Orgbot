@@ -2738,6 +2738,78 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), running).await;
     }
 
+    /// Copies made before 2.2.1 kept no name, so a bot leaving before its next
+    /// turn left a copy listed by id alone. A room names its bots' copies as
+    /// its workspace attaches.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_room_names_its_bots_existing_copies_when_it_starts() {
+        let dir = std::env::home_dir().unwrap().join(format!(
+            "orgbot-label-{}",
+            orgbot_proto::RoomId::new()
+        ));
+        let project = dir.join("project");
+        let workspaces = dir.join("state").join("workspaces");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&workspaces).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for private in [&dir, &dir.join("state"), &workspaces] {
+            std::fs::set_permissions(private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::write(project.join("README.md"), "hello\n").unwrap();
+        let mut config = RoomConfig::parse(SCRIPTED_ROOM, "label.toml").unwrap();
+        config.room.state_path = Some(dir.join("state").join("state.json"));
+        let (mut session, _handle) = RoomSession::build(config.resolve().unwrap()).unwrap();
+        let (bot, handle) = session.agent_handles().into_iter().next().unwrap();
+        // A copy from before copies kept their bot's name.
+        let helper = orgbot_providers::workspace_guard::helper().unwrap();
+        let prepared = std::process::Command::new("/usr/bin/python3")
+            .arg(&helper)
+            .args(["prepare", "--project"])
+            .arg(&project)
+            .arg("--state")
+            .arg(&workspaces)
+            .arg("--agent")
+            .arg(bot.to_string())
+            .output()
+            .unwrap();
+        assert!(prepared.status.success(), "{}", String::from_utf8_lossy(&prepared.stderr));
+        let manifest = std::fs::read_dir(workspaces.join("manifests"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join(format!("{bot}.json"));
+        let label = || -> Option<String> {
+            let raw: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&manifest).ok()?).ok()?;
+            raw.get("label")?.as_str().map(str::to_owned)
+        };
+        assert_eq!(label(), None);
+
+        let _host = crate::local_workspace::LocalWorkspaceHost::attach(
+            orgbot_runtime::workspace::WorkspaceSpec {
+                label: "test".into(),
+                root: project.to_string_lossy().into_owned(),
+                writable: true,
+                commands: false,
+            },
+            &mut session,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while label().is_none() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the copy is named without waiting for a turn");
+        assert_eq!(label().as_deref(), Some(format!("@{handle}").as_str()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// From the live room: copies left by bot ids no longer in the room had
     /// grown to 38 GB. A room cleans up the ones holding no unmerged work when
     /// it starts, keeps its own bots' copies, and says what it freed.

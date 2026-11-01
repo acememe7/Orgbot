@@ -401,7 +401,36 @@ void main() {
         'last_by': '@mira',
         'last_at': at ~/ 1000,
       }, now),
-      'added by @sol (30), @mira (4); 6 from before OrgBots kept a record · last changed by @mira 2 h ago',
+      'added by @sol (30), @mira (4) · 6 with no record · last changed by @mira 2 h ago',
+    );
+    // Older files, from before OrgBots kept a record: git says when they
+    // came, though not which bot wrote them.
+    final came = DateTime(2026, 10, 29, 18).millisecondsSinceEpoch ~/ 1000;
+    expect(
+      removalOrigin({
+        'files': 560,
+        'git_files': 558,
+        'git_added': {
+          'commit': '9c92486',
+          'at': came,
+          'subject': 'Curfew squads',
+          'commits': 1,
+        },
+      }, now),
+      '558 came in with 9c92486 "Curfew squads" on 29 Oct · 2 with no record',
+    );
+    expect(
+      removalOrigin({
+        'files': 4,
+        'git_files': 4,
+        'git_added': {
+          'commit': 'cf4f8f3',
+          'at': came,
+          'subject': 'Protocol 5',
+          'commits': 3,
+        },
+      }, now),
+      'came in over 3 commits, latest cf4f8f3 "Protocol 5" on 29 Oct',
     );
     expect(
       removalOrigin({

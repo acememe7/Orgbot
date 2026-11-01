@@ -613,6 +613,32 @@ class WorkspaceTests(unittest.TestCase):
             workspace._apply(os.fspath(self.state), "dev", review_token=reviewed["review_token"])
         self.assertNotIn("notes/a.txt", workspace._ledger_read(self.state, self.project.resolve()), "a removed file leaves the record")
 
+    def test_files_from_before_the_record_say_which_commit_brought_them(self):
+        # From the live room: every commit was made under the owner's name, so
+        # git cannot say which bot wrote a file, but it can say when it came.
+        if not shutil.which("git"):
+            self.skipTest("git is not installed")
+        def git(*args):
+            subprocess.run(["git", "-C", os.fspath(self.project), "-c", "user.name=Owner", "-c", "user.email=o@example.invalid", *args], check=True, capture_output=True)
+        git("init", "-q")
+        git("add", "-A")
+        git("commit", "-q", "-m", "Start")
+        (self.project / "curfew").mkdir()
+        (self.project / "curfew/squads.ts").write_text("squads", encoding="utf-8")
+        (self.project / "curfew/roles.ts").write_text("roles", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", "Curfew squads and roles")
+        (self.project / "curfew/scratch.txt").write_text("untracked", encoding="utf-8")
+        work = self.prepare()
+        for name in ("curfew/squads.ts", "curfew/roles.ts", "curfew/scratch.txt"):
+            (work / name).unlink()
+        group = workspace._status(os.fspath(self.state), "dev")["deleted_groups"][0]
+        self.assertEqual(group["folder"], "curfew/")
+        self.assertEqual(group["git_files"], 2, "the untracked file has no commit")
+        self.assertEqual(group["git_added"]["subject"], "Curfew squads and roles")
+        self.assertEqual(group["git_added"]["commits"], 1)
+        self.assertIsInstance(group["git_added"]["at"], int)
+
     def test_deletion_requires_explicit_owner_approval(self):
         work = self.prepare()
         (work / "README.md").unlink()
@@ -1137,6 +1163,23 @@ Path('/tmp/private.txt').write_text('temporary')
         self.assertEqual(kept["bot_gone_with_work"]["label"], "@sol")
         self.assertNotIn("label", removed["bot_gone"])
         self.assertEqual(removed["bot_renamed"]["label"], "@oldnamescript", "only plain characters are kept")
+
+    def test_a_copy_is_named_at_room_start_without_waiting_for_its_bots_turn(self):
+        # Copies made before 2.2.1 kept no name, so a bot that left before its
+        # next turn would have left an unnamed copy.
+        self.assertEqual(workspace._label(os.fspath(self.state), "bot_sol", "@sol")["copies"], 0, "no copies yet is fine")
+        self.prepare("bot_sol")
+        self.prepare("bot_sol-verify", read_only=True)
+        self.assertEqual(workspace._label(os.fspath(self.state), "bot_sol", "@sol")["copies"], 1)
+        self.assertEqual(workspace._label(os.fspath(self.state), "bot_sol-verify", "@sol")["copies"], 1)
+        with self.assertRaisesRegex(workspace.WorkspaceError, "plain character"):
+            workspace._label(os.fspath(self.state), "bot_sol", "<>")
+        result = workspace._prune(os.fspath(self.state), [], dry_run=True)
+        self.assertEqual({item["agent"]: item.get("label") for item in result["removed"]}, {"bot_sol": "@sol", "bot_sol-verify": "@sol"})
+        # The main entry point answers, rather than falling through.
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(workspace.main(["label", "--state", os.fspath(self.state), "--agent", "bot_sol", "--label", "@sol"]), 0)
+        self.assertEqual(json.loads(out.getvalue())["copies"], 1)
 
     def test_bots_run_the_packaged_trash_helper_not_a_stale_per_user_copy(self):
         packaged_dir = self.root / "usr-bin"

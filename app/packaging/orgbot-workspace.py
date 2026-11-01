@@ -1022,6 +1022,39 @@ def _copy_label(value: str | None) -> str | None:
     return label or None
 
 
+def _label(state_arg: str, agent_arg: str, label_arg: str) -> dict[str, Any]:
+    """Keep a bot's handle with its copy now, rather than at its next turn,
+    so a copy whose bot leaves the room still says whose it was."""
+    agent = _safe_agent(agent_arg)
+    label = _copy_label(label_arg)
+    if label is None:
+        _fail("A copy label needs at least one plain character")
+    state = _canonical_directory(state_arg, "state")
+    _check_private_dir(state)
+    labelled = 0
+    if not (state / "manifests").is_dir():
+        return {"ok": True, "agent": agent, "label": label, "copies": 0}
+    for manifest_path in _manifest_candidates(state, agent):
+        raw = _read_private_json(manifest_path, "workspace baseline manifest")
+        if not isinstance(raw, dict) or not isinstance(raw.get("project"), str):
+            continue
+        try:
+            project = _canonical_directory(raw["project"], "project")
+        except WorkspaceError:
+            continue
+        # Under the project lock: prepare and apply rewrite this manifest.
+        lock_fd = _lock(project)
+        try:
+            data = _manifest_read(manifest_path, project, agent)
+            if data.get("label") != label:
+                data["label"] = label
+                _atomic_json(manifest_path, data)
+            labelled += 1
+        finally:
+            os.close(lock_fd)
+    return {"ok": True, "agent": agent, "label": label, "copies": labelled}
+
+
 def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool, label_arg: str | None = None) -> dict[str, Any]:
     agent = _safe_agent(agent_arg)
     label = _copy_label(label_arg)
@@ -1183,6 +1216,33 @@ def _ledger_order(row: dict[str, Any]) -> int:
     return int(row.get("last_at") or 0) * 1_000_000_000 if isinstance(row.get("last_at"), int) else 0
 
 
+def _git_added(project: Path, names: set[str]) -> dict[str, tuple[str, int, str]]:
+    """The commit that brought each of these tracked files into the project:
+    its short hash, time and subject, newest add first.
+
+    For files from before OrgBots kept its own record. From the live room:
+    every commit was made under the owner's name, so git cannot say which
+    bot wrote a file, but it can say when and why it arrived.
+    """
+    if not names:
+        return {}
+    try:
+        log = _owner_git(project, "-c", "core.quotePath=false", "log", "--diff-filter=A", "--no-renames", "--format=@@%h%x09%at%x09%s", "--name-only")
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if log.returncode != 0:
+        return {}
+    found: dict[str, tuple[str, int, str]] = {}
+    commit: tuple[str, int, str] | None = None
+    for line in log.stdout.splitlines():
+        if line.startswith("@@"):
+            parts = line[2:].split("\t", 2)
+            commit = (parts[0], int(parts[1]), parts[2][:100]) if len(parts) == 3 and parts[1].isdigit() else None
+        elif line and commit is not None and line in names and line not in found:
+            found[line] = commit
+    return found
+
+
 def _removal_folder(name: str) -> str:
     """The folder a removal is grouped and approved under: its top folder
     with a trailing slash, or the file itself at the top."""
@@ -1212,6 +1272,8 @@ def _removal_groups(project: Path, entries: dict[str, dict[str, Any]], deleted: 
     groups: dict[str, dict[str, Any]] = {}
     makers: dict[str, dict[str, int]] = {}
     latest: dict[str, int] = {}
+    arrived = _git_added(project, {name for name in deleted if name in tracked and not isinstance((ledger.get(name) or {}).get("made_by"), str)})
+    commits: dict[str, dict[str, tuple[str, int, str]]] = {}
     for name in deleted:
         key = _removal_folder(name)
         group = groups.setdefault(key, {"folder": key, "files": 0, "bytes": 0, "newest": None, "tracked": 0})
@@ -1219,6 +1281,9 @@ def _removal_groups(project: Path, entries: dict[str, dict[str, Any]], deleted: 
         if isinstance(origin.get("made_by"), str):
             counts = makers.setdefault(key, {})
             counts[origin["made_by"]] = counts.get(origin["made_by"], 0) + 1
+        elif name in arrived:
+            group["git_files"] = group.get("git_files", 0) + 1
+            commits.setdefault(key, {})[arrived[name][0]] = arrived[name]
         if isinstance(origin.get("last_by"), str) and isinstance(origin.get("last_at"), int) and _ledger_order(origin) > latest.get(key, -1):
             latest[key] = _ledger_order(origin)
             group["last_by"] = origin["last_by"]
@@ -1234,6 +1299,9 @@ def _removal_groups(project: Path, entries: dict[str, dict[str, Any]], deleted: 
             group["tracked"] += 1
     for key, counts in makers.items():
         groups[key]["made_by"] = sorted(([who, n] for who, n in counts.items()), key=lambda row: (-row[1], row[0]))
+    for key, seen in commits.items():
+        newest = max(seen.values(), key=lambda commit: commit[1])
+        groups[key]["git_added"] = {"commit": newest[0], "at": newest[1], "subject": newest[2], "commits": len(seen)}
     return sorted(groups.values(), key=lambda group: (-group["files"], group["folder"]))
 
 
@@ -3499,6 +3567,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--mcp-relay")
     run.add_argument("--agent-cli", choices=("opencode", "agy"))
     run.add_argument("program", nargs=argparse.REMAINDER)
+    label = sub.add_parser("label", help="Keep a bot's handle with its existing copies")
+    label.add_argument("--state", required=True)
+    label.add_argument("--agent", required=True)
+    label.add_argument("--label", required=True)
     prune = sub.add_parser("prune", help="Remove working copies of bots no longer in the room that hold no unmerged work")
     prune.add_argument("--state", required=True)
     prune.add_argument("--keep", action="append", default=[])
@@ -3521,6 +3593,9 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "label":
+            _json(_label(args.state, args.agent, args.label))
+            return 0
         if args.command == "prepare":
             _json(_prepare(args.project, args.state, args.agent, args.read_only, args.label))
             return 0

@@ -100,6 +100,7 @@ impl LocalWorkspaceHost {
         runtime_spec.root = root.display().to_string();
         let (tx, rx) = mpsc::channel::<WorkspaceCall>(8);
         session.attach_workspace(Workspace::with_capabilities(runtime_spec, tx, capabilities));
+        host.label_copies();
         Ok(tokio::spawn(Arc::new(host).serve(rx)))
     }
 
@@ -186,6 +187,51 @@ impl LocalWorkspaceHost {
                     });
             let _ = call.reply.send(outcome);
         }
+    }
+
+    /// Keep each bot's handle with the copies it already has, now rather
+    /// than at its next turn, so a copy whose bot leaves the room still says
+    /// whose it was. In the background: a slow disk must not hold up the room.
+    #[cfg(target_os = "linux")]
+    fn label_copies(&self) {
+        let Some(state) = self.guard_state.clone() else {
+            return;
+        };
+        let guards: Vec<_> = self
+            .handles
+            .iter()
+            .flat_map(|(agent, handle)| {
+                [agent.to_string(), format!("{agent}-verify")].map(|copy| {
+                    orgbot_providers::workspace_guard::WorkspaceGuard {
+                        project: self.root.clone(),
+                        state: state.clone(),
+                        agent: copy,
+                        read_only: true,
+                        label: Some(format!("@{handle}")),
+                    }
+                })
+            })
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            for guard in guards {
+                let Some(label) = guard.label.clone() else { continue };
+                let outcome = guard
+                    .command("label")
+                    .and_then(|mut command| {
+                        command.arg("--label").arg(label);
+                        command.output().map_err(|e| e.to_string())
+                    });
+                match outcome {
+                    Ok(output) if output.status.success() => {}
+                    Ok(output) => tracing::warn!(
+                        agent = %guard.agent,
+                        error = %String::from_utf8_lossy(&output.stderr).chars().take(300).collect::<String>(),
+                        "could not name a bot's copy"
+                    ),
+                    Err(error) => tracing::warn!(agent = %guard.agent, %error, "could not name a bot's copy"),
+                }
+            }
+        });
     }
 
     #[cfg(target_os = "linux")]

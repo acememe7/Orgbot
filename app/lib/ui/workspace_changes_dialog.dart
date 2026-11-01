@@ -798,7 +798,8 @@ class RemovalGroups extends StatelessWidget {
 }
 
 /// Which bots added a removal group's files and which last changed one, as
-/// far as OrgBots applied their work, or null when it has no record.
+/// far as OrgBots applied their work, and for older tracked files the commit
+/// that brought them in, or null when nothing is known.
 String? removalOrigin(Map group, DateTime now) {
   final files = group['files'] is int ? group['files'] as int : 0;
   final parts = <String>[];
@@ -807,17 +808,36 @@ String? removalOrigin(Map group, DateTime now) {
       if (row is List && row.length == 2 && row[0] is String && row[1] is int)
         (row[0] as String, row[1] as int),
   ];
+  final known = makers.fold<int>(0, (sum, m) => sum + m.$2);
   if (makers.isNotEmpty) {
-    final known = makers.fold<int>(0, (sum, m) => sum + m.$2);
-    final names = makers.length == 1 && known == files
-        ? makers.single.$1
-        : makers.map((m) => '${m.$1} (${m.$2})').join(', ');
     parts.add(
-      known < files
-          ? 'added by $names; ${files - known} from before OrgBots kept a record'
-          : 'added by $names',
+      makers.length == 1 && known == files
+          ? 'added by ${makers.single.$1}'
+          : 'added by ${makers.map((m) => '${m.$1} (${m.$2})').join(', ')}',
     );
   }
+  final arrived = group['git_added'];
+  final gitFiles = group['git_files'] is int ? group['git_files'] as int : 0;
+  if (arrived is Map &&
+      arrived['commit'] is String &&
+      arrived['at'] is int &&
+      gitFiles > 0) {
+    final commits = arrived['commits'] is int ? arrived['commits'] as int : 1;
+    final subject = arrived['subject'] is String
+        ? ' "${arrived['subject']}"'
+        : '';
+    final when = _day(
+      DateTime.fromMillisecondsSinceEpoch((arrived['at'] as int) * 1000),
+    );
+    final which = gitFiles == files ? '' : '$gitFiles ';
+    parts.add(
+      commits > 1
+          ? '${which}came in over $commits commits, latest ${arrived['commit']}$subject on $when'
+          : '${which}came in with ${arrived['commit']}$subject on $when',
+    );
+  }
+  final rest = files - known - gitFiles;
+  if (rest > 0 && parts.isNotEmpty) parts.add('$rest with no record');
   final lastBy = group['last_by'];
   final lastAt = group['last_at'];
   if (lastBy is String && lastAt is int) {
@@ -827,6 +847,25 @@ String? removalOrigin(Map group, DateTime now) {
     parts.add('last changed by $lastBy ${RemovalGroups._ago(age)}');
   }
   return parts.isEmpty ? null : parts.join(' · ');
+}
+
+String _day(DateTime when) {
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  final local = when.toLocal();
+  return '${local.day} ${months[local.month - 1]}';
 }
 
 /// Approve a removal review whole, or only some of its folders.
