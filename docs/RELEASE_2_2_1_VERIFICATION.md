@@ -56,6 +56,19 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   offer to a bot now stays open while the turn that first shows it runs: in
   the live room a review done in that turn expired eight seconds after it
   was posted.
+- **The rest of the UI review (third rebuild, 1 November).** Decision cards
+  say what each fixed answer does ("Land these commits" merges exactly those
+  commits; anything newer needs asking again) and show the room's
+  recommendation with its reason: the latest review for a land or push, the
+  proposer for a retirement. The removal review names which bots added each
+  folder's files and which last changed one, from a private record the
+  sandbox helper keeps as it applies bots' work (files from before the record
+  have no maker). The owner can approve some folders and leave the rest
+  waiting, and every copy with removals waiting is listed with its count. A
+  room that stops responding says "restarting from the last save at HH:MM".
+  Park sits in a task's row menu with Resume. Usage has its own tab and says
+  why a cost can be unknown. A leftover copy names the bot it belonged to.
+  Folded check-ins unfold in place.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -64,7 +77,9 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 ## Release checks
 
 - Full Rust workspace (`--locked`): 974 passed, zero failures, three ignored,
-  at release and again at the second 1 November rebuild.
+  at release and again at the second 1 November rebuild; 977 at the third,
+  adding the room's recommendation on a card, the save notice, and reading a
+  CLI copy's handle back from its key.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
@@ -72,14 +87,18 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - Full Flutter tests: 397 passed, five skipped, at release; 398 at the first
   1 November rebuild; 407 at the second, adding task tabs, decision-card
   parsing, check-in folding, the health line, the recap's answered decisions,
-  leftover naming and removal groups.
+  leftover naming and removal groups; 411 at the third (five skipped), adding
+  answer effects and the recommendation line, approving chosen folders, the
+  copy overview and who added a folder's files.
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 87 passed at the second 1 November rebuild, 86
+- Workspace sandbox helper: 90 passed at the third 1 November rebuild
+  (approving chosen folders only, who added and last changed removed files,
+  a leftover copy's bot name), 87 at the second, 86
   at the first (84 at
   release), adding folder cleanup after approved removals in the project and
   in a copy; including unchanged files not being read
@@ -92,11 +111,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`c9a8542f8e1fd6e1cff71ca7c851b6d2b34e17dbfcaa31ae86a7d9737d8d0a79`.
+`2819819280b252e3b8f30176159e31dadc4e4c53549cac56857e3f724ebb50dd`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `b8eab4d48c73b8be65488e8cf2032fe857ea8d7ff13981768451abea84ea89f5` |
+| orgbots_2.2.1_amd64.deb | `12ca84899fd42975cbf19475647a637726540a9bd8cdad2ad22c1aa299d3cf8b` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -120,6 +139,13 @@ handoff fix (source `335ab11`; engine, Flutter bundle and sandbox helper
 rebuilt). Signed archive revision `0efa65e69650942f8690fa6525906a26e4719b08`
 replaces only `orgbots_2.2.1_amd64.deb`;
 [Pages run 41258525703](https://github.com/acememe7/Orgbot/actions/runs/41258525703)
+published it.
+
+A third rebuild followed with the rest of the UI review (source `edd5b75`;
+engine, Flutter bundle and sandbox helper rebuilt). Signed archive revision
+`7f7a2a10038816d2a4f8db2e8b35437a11c8d5f9` replaces only
+`orgbots_2.2.1_amd64.deb`;
+[Pages run 41261051646](https://github.com/acememe7/Orgbot/actions/runs/41261051646)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits
@@ -130,6 +156,9 @@ published it, and the public archive serves the hashes in the table above.
   service when it happens.
 - The first scan of each copy after installing 2.2.1 still reads every file
   once, to build its hash cache.
+- The record of who added a file starts with this rebuild, so files already
+  in the project show no maker. Copies made before it show their bot's name
+  only after that bot's next turn.
 - Verify copies share files; copies a bot can write do not, because ext4 has
   no copy-on-write.
 - The website still names 2.2.0 as the current package.
