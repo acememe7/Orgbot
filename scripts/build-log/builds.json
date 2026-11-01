@@ -1,0 +1,402 @@
+[
+ {
+  "kind": "origin",
+  "tag": "engine",
+  "when": "3 Sep",
+  "title": "The engine",
+  "what": "Protocol and orchestration, backends for Anthropic, DeepSeek and OpenAI-compatible models, and a tool surface for bots that plan, work, hand off, inspect and ship.",
+  "commit": "29f6059",
+  "day": "2026-09-03"
+ },
+ {
+  "kind": "origin",
+  "tag": "desktop",
+  "when": "25 Oct",
+  "title": "The desktop app",
+  "what": "Desktop sessions with targeted replies and local tools.",
+  "commit": "0c3eaaa",
+  "day": "2026-10-25"
+ },
+ {
+  "kind": "release",
+  "tag": "2.0.0",
+  "when": "26 Oct 16:18",
+  "title": "Linux 2.0",
+  "what": "Workspace safeguards, usage accounting, backups and a signed APT archive.",
+  "commit": "cc100d5",
+  "day": "2026-10-26"
+ },
+ {
+  "kind": "release",
+  "tag": "2.0.1",
+  "when": "26 Oct 20:00",
+  "title": "Installer and website",
+  "what": "A signed installer, the product website, and a Pages fix that kept the signed archive intact.",
+  "commit": "e004b23",
+  "day": "2026-10-26"
+ },
+ {
+  "kind": "release",
+  "tag": "2.0.2",
+  "when": "27 Oct 10:23",
+  "title": "Verified resume",
+  "what": "CLI sessions that resume, usage accounting and scoped capabilities, all verified.",
+  "commit": "72492bc",
+  "day": "2026-10-27"
+ },
+ {
+  "kind": "release",
+  "tag": "2.0.3",
+  "when": "27 Oct 16:33",
+  "title": "Gemini runtime",
+  "what": "Proof that the Gemini runtime works end to end.",
+  "commit": "f1931cf",
+  "day": "2026-10-27"
+ },
+ {
+  "kind": "release",
+  "tag": "2.1.0",
+  "when": "29 Oct 04:13",
+  "title": "Live-room proof",
+  "what": "The first live ten-bot room on record, and the PolyForm Noncommercial license.",
+  "commit": "8a4227d",
+  "day": "2026-10-29"
+ },
+ {
+  "kind": "release",
+  "tag": "2.1.1",
+  "when": "29 Oct 12:19",
+  "title": "Patient handoffs",
+  "what": "Handoffs that wait for busy bots. Folded into 2.2.0 and never published on its own.",
+  "why": "13 of 15 handoff offers had expired.",
+  "commit": "e22b050",
+  "day": "2026-10-29"
+ },
+ {
+  "kind": "release",
+  "tag": "2.2.0",
+  "when": "29 Oct 16:45",
+  "title": "Server access by permission",
+  "what": "The bot server key only for a task the owner allowed, a pause that lets turns finish, and retiring stale tasks.",
+  "why": "A bot installed a server release while the room had it on hold.",
+  "commit": "4540c2f",
+  "day": "2026-10-29"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r1",
+  "when": "29 Oct 18:05",
+  "title": "Access that reaches the server",
+  "what": "The owner's server approval now reaches commands sent through the room. Leftover copies are cleaned up: 41.7 GB freed.",
+  "why": "An approved bot still could not reach the server.",
+  "commit": "e803d87",
+  "day": "2026-10-29",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r2",
+  "when": "29 Oct 22:07",
+  "title": "Assists that wait",
+  "what": "An accepted assist is held while its bot waits on the owner.",
+  "why": "A waiting bot was rerun nine times in 23 minutes.",
+  "commit": "9e734a3",
+  "day": "2026-10-29",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r3",
+  "when": "29 Oct 23:32",
+  "title": "Bounded catch-up",
+  "what": "A bot back from a long absence sees the newest 32 KB of what it missed, messages to it first.",
+  "why": "Grok: \"Argument list too long\" after 133 KB of catch-up.",
+  "commit": "f225c61",
+  "day": "2026-10-29",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r4",
+  "when": "30 Oct 02:09",
+  "title": "Access modes and lent sign-ins",
+  "what": "Approval, half approval, auto and full write. The owner's sign-ins lent for one approved task at a time.",
+  "why": "Publishing stalled: Wrangler was signed in on the owner's PC only.",
+  "commit": "d25e9f3",
+  "day": "2026-10-30",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r5",
+  "when": "30 Oct 03:27",
+  "title": "Working through conflicts",
+  "what": "Clashing files are set aside for review and everything else merges. A lent sign-in that is missing is skipped.",
+  "why": "Every command reported failed, with its output thrown away.",
+  "commit": "95d458a",
+  "day": "2026-10-30",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r6",
+  "when": "30 Oct 10:01",
+  "title": "Resting a looping bot",
+  "what": "A bot that ends three turns without doing anything rests until something changes. Ticks that free work wake the room.",
+  "why": "26 turns in an hour, nothing changed.",
+  "commit": "0b128f3",
+  "day": "2026-10-30",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r7",
+  "when": "30 Oct 18:53",
+  "title": "amend_task",
+  "what": "Coordinators change what a task asks for, on the record, and the holder is told.",
+  "why": "A requirement waived in chat kept sending work back.",
+  "commit": "6c69cdf",
+  "day": "2026-10-30",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r8",
+  "when": "30 Oct 22:28",
+  "title": "Wake only to deliver",
+  "what": "Coordinators are woken only for approved work that can actually go out.",
+  "why": "Half an hour of \"nothing needs you\".",
+  "commit": "d1dacc8",
+  "day": "2026-10-30",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "site",
+  "tag": "website",
+  "when": "30 Oct 23:21",
+  "title": "The daily log",
+  "what": "A public page for every day the room runs: what shipped, what reviewers sent back, what broke.",
+  "commit": "ce3c7ce",
+  "day": "2026-10-30"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r9",
+  "when": "30 Oct 23:54",
+  "title": "Parked tasks and keyring sign-ins",
+  "what": "Work the owner parks stays parked: no claims, no questions. GitHub sign-ins lent from the desktop keyring.",
+  "why": "A parked card was claimed and asked about again. A push got a 401.",
+  "commit": "1e3c268",
+  "day": "2026-10-30",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r10",
+  "when": "31 Oct 15:09",
+  "title": "See the board before planning",
+  "what": "A bot is shown the tasks others added during its turn before it creates more.",
+  "why": "Two coordinators split one message; five duplicates.",
+  "commit": "a800543",
+  "day": "2026-10-31",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r11",
+  "when": "31 Oct 15:43",
+  "title": "Landing commits",
+  "what": "Bots land their commits on the owner's branch after one approval. Fast-forward only, no push, no files touched.",
+  "why": "A bot had to hand the owner a script to run.",
+  "commit": "ac26558",
+  "day": "2026-10-31",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r12",
+  "when": "31 Oct 17:18",
+  "title": "Wait on the owner properly",
+  "what": "Asking the owner starts a claimed task and waits on the answer.",
+  "why": "Eleven wake-ups while the owner had the card.",
+  "commit": "60446e4",
+  "day": "2026-10-31",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r13",
+  "when": "31 Oct 17:38",
+  "title": "Land in the real repo",
+  "what": "Landing acts on the owner's project, never the bot's copy.",
+  "why": "\"Landed\", while main never moved.",
+  "commit": "349bc86",
+  "day": "2026-10-31",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r14",
+  "when": "31 Oct 17:46",
+  "title": "Codex gets a network",
+  "what": "Codex bots allowed to write can start local servers. Writes outside the project are still refused.",
+  "why": "Browser captures failed with EPERM.",
+  "commit": "e1aa139",
+  "day": "2026-10-31",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r15",
+  "when": "31 Oct 18:08",
+  "title": "Reviews that stay responsive",
+  "what": "Long change lists build only the rows on screen and open with a folder summary.",
+  "why": "1,570 removals froze the app.",
+  "commit": "0903ec5",
+  "day": "2026-10-31",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r16",
+  "when": "31 Oct 18:20",
+  "title": "No copy at every start",
+  "what": "A room start no longer copies the whole project to look for settings it could never see.",
+  "why": "14 restarts, 14 copies of 4.6 GB, each deleted.",
+  "commit": "ae36218",
+  "day": "2026-10-31",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r17",
+  "when": "31 Oct 20:02",
+  "title": "Easier long runs",
+  "what": "Eleven changes in one install: removals trashed in batches with a live count, a \"since you left\" card, leftover copies you can discard, copies whose git history keeps up, verify copies that share their files, tasks that wait on others, one question per task, checks named on landing cards, pushes the owner always approves, and bots that stop repeating themselves.",
+  "why": "1,549 removals took 13 minutes behind a bare progress bar.",
+  "commit": "832f6a3",
+  "day": "2026-10-31",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r18",
+  "when": "31 Oct 20:13",
+  "title": "Older copies catch up",
+  "what": "Copies made before the update move to the landed commit too, because the project already holds theirs. Asked before the owner even restarted.",
+  "why": "Mira could not prove her run on the real branch: her copy sat on an older commit.",
+  "commit": "9dcc0f7",
+  "day": "2026-10-31",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "rebuild",
+  "tag": "2.2.0 r19",
+  "when": "31 Oct 20:45",
+  "title": "Sign-ins bots can ask for",
+  "what": "Every request card says why, what, the commands and what happens if denied. Bots can ask for a sign-in that is not listed, and only the owner can say yes. Settings finds 33 tools on the computer. Switched-off sign-ins stay hidden.",
+  "why": "A switched-off sign-in was not hidden, and bots had no way to ask for one.",
+  "commit": "9c991cf",
+  "day": "2026-10-31",
+  "line": "2.2.0"
+ },
+ {
+  "kind": "release",
+  "tag": "2.2.1",
+  "when": "31 Oct 22:09",
+  "title": "A room that does not fall over",
+  "what": "The crash at the room's save is fixed, a failed save pauses the room instead of killing it, and a dead room restarts itself. Handoffs keep their time through a pause. The composer says who a message reaches, unsent messages say so, workspace commands read only files that changed, and task cards fold.",
+  "why": "The room crashed twice in 20 minutes: a map keyed by (bot, copy) pairs could not be saved as JSON.",
+  "commit": "0a89b21",
+  "day": "2026-10-31",
+  "facts": [
+   "Rust 974 passed",
+   "App 397 passed",
+   "Sandbox helper 84 passed"
+  ]
+ },
+ {
+  "kind": "site",
+  "tag": "website",
+  "when": "1 Nov 00:18",
+  "title": "The 31 October daily log",
+  "what": "The day bots landed their own commits: 8 tasks delivered, 9 of 17 reviews sent back, and an honest account of the two room crashes, with the commit that fixed them.",
+  "why": "Every claim cites a time and an event number in the room's own log.",
+  "commit": "61e0c90",
+  "day": "2026-11-01"
+ },
+ {
+  "kind": "site",
+  "tag": "website",
+  "when": "1 Nov 00:36",
+  "title": "The site moves to 2.2.1",
+  "what": "Every page names 2.2.1, the Evidence page records what 2.2.1 showed in the live room, and the install page's release note lines up with the page again.",
+  "why": "A margin rule cancelled the note's centring, so it hugged the window edge.",
+  "commit": "71db3a8",
+  "day": "2026-11-01"
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r1",
+  "when": "1 Nov 00:47",
+  "day": "2026-11-01",
+  "title": "Folders go with their files",
+  "what": "Folders an approved removal leaves empty are removed too, in the project and in the bot's copy. The review names each copy with its count, opens on the copy with the most, and re-checks every other count.",
+  "why": "The badge said 2,177 removals and nobody could tell whose: 1,588 were in a copy that had none left.",
+  "commit": "ed5b5fc",
+  "facts": [
+   "App 398 passed",
+   "Sandbox helper 86 passed"
+  ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r2",
+  "when": "1 Nov 01:49",
+  "day": "2026-11-01",
+  "title": "A clearer room",
+  "what": "Active, Waiting, Done and Closed tabs for tasks. Decision cards that lead with who asked, the risk and a short summary. Runs of check-ins folded into one line, the room's health in plain words, and removal reviews grouped by folder. An offer stays open while the turn that shows it runs.",
+  "why": "A review done in the same turn expired eight seconds after it was posted.",
+  "commit": "335ab11",
+  "facts": [
+   "Rust 974 passed",
+   "App 407 passed",
+   "Sandbox helper 87 passed"
+  ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r3",
+  "when": "1 Nov 02:21",
+  "day": "2026-11-01",
+  "title": "Answers that say what they do",
+  "what": "Decision cards say what each answer does and what the room recommends, with the reason. Approve some folders of a removal review and leave the rest waiting, and see which bot added the files. A stopped room says when it last saved. Usage has its own tab.",
+  "why": "One approval had to take all 562 removals or none, while a folder among them had just been written to.",
+  "commit": "edd5b75",
+  "facts": [
+   "Rust 977 passed",
+   "App 411 passed",
+   "Sandbox helper 90 passed"
+  ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r4",
+  "when": "1 Nov 02:36",
+  "day": "2026-11-01",
+  "title": "Copies named from the start",
+  "what": "Every bot's copy carries its name from the moment the room starts. Files from before OrgBots kept a record show the commit that brought them in.",
+  "why": "Every commit in the live project is under the owner's name, so git can say when a file arrived but not which bot wrote it.",
+  "commit": "e5b29e1",
+  "facts": [
+   "Rust 978 passed",
+   "App 411 passed",
+   "Sandbox helper 92 passed",
+   "Package c2aa2aab"
+  ]
+ }
+]

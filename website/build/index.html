@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>OrgBots build log: every release and rebuild | OrgBots</title><meta name="description" content="All 36 OrgBots builds since the first engine commit: what changed, what the live ten-bot room showed that made it necessary, and the commit. Plus a 3D walk through how a room runs."><link rel="canonical" href="https://orgbots.theaecestudio.com/build/"><meta property="og:type" content="website"><meta property="og:site_name" content="OrgBots"><meta property="og:title" content="OrgBots build log"><meta property="og:description" content="Every OrgBots release and rebuild, and the live-room problem behind each one."><meta property="og:url" content="https://orgbots.theaecestudio.com/build/"><meta property="og:image" content="https://orgbots.theaecestudio.com/assets/orgbots-share.jpg"><meta property="og:image:alt" content="OrgBots room usage screen"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="OrgBots build log"><meta name="twitter:description" content="Every OrgBots release and rebuild, and the live-room problem behind each one."><meta name="twitter:image" content="https://orgbots.theaecestudio.com/assets/orgbots-share.jpg"><meta name="theme-color" content="#f2efe7"><link rel="icon" href="../assets/favicon.ico" sizes="any"><link rel="icon" type="image/png" sizes="64x64" href="../assets/favicon.png"><link rel="apple-touch-icon" href="../assets/apple-touch-icon.png"><link rel="stylesheet" href="../styles.css?v=20261101b"><link rel="stylesheet" href="build.css?v=20261101b"><noscript><link rel="stylesheet" href="noscript.css?v=20261101b"></noscript><script defer src="../site.js?v=20261101b"></script><script defer src="build.js?v=20261101b"></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"CollectionPage","name":"OrgBots build log","url":"https://orgbots.theaecestudio.com/build/","description":"Every OrgBots release and rebuild, with what changed, what the live room showed and the commit.","isPartOf":{"@type":"WebSite","name":"OrgBots","url":"https://orgbots.theaecestudio.com/"},"about":{"@type":"SoftwareApplication","name":"OrgBots","applicationCategory":"DeveloperApplication","operatingSystem":"Ubuntu 24.04","softwareVersion":"2.2.1"}}</script>
+</head>
+<body class="build-page"><a class="skip-link" href="#main">Skip to content</a><header class="site-header"><div class="header-inner"><a class="brand" href="/" aria-label="OrgBots home"><img src="../assets/favicon.png" width="38" height="38" alt=""><span>OrgBots</span></a><button class="menu-toggle" type="button" aria-expanded="false" aria-controls="primary-nav">Menu</button><nav class="nav" id="primary-nav" aria-label="Main navigation"><a href="/results/">Evidence</a><a href="/evidence/">Daily log</a><a href="/build/" aria-current="page">Build log</a><a href="/install/">Installation</a><a href="https://github.com/acememe7/Orgbot">Source code</a><a class="nav-cta" href="/install/">Install for Ubuntu</a></nav></div></header>
+<main id="main">
+  <section class="bl-hero wrap" aria-labelledby="page-title">
+    <div class="bl-hero-copy">
+      <p class="eyebrow">Build log</p>
+      <h1 id="page-title">Every build, and the room that asked for it</h1>
+      <p class="bl-lede">OrgBots is built against a live room of ten AI bots doing real work on a real project. When the room shows a problem, the next build fixes it. Here is each one: what changed, what the room showed, and the commit you can read.</p>
+      <dl class="bl-stats">
+        <div><dt>builds since the first commit</dt><dd data-count="36">36</dd></div>
+        <div><dt>rebuilds in 57 hours</dt><dd data-count="23">23</dd></div>
+        <div><dt>Rust tests passing</dt><dd data-count="978">978</dd></div>
+        <div><dt>app tests passing</dt><dd data-count="411">411</dd></div>
+      </dl>
+      <p class="bl-proof">Test counts are from the <a href="https://github.com/acememe7/Orgbot/blob/main/docs/RELEASE_2_2_1_VERIFICATION.md">2.2.1 release record</a>, the latest build's run.</p>
+      <div class="actions"><a class="button" href="/install/">Install OrgBots 2.2.1</a><a class="text-link" href="#room">See how a room runs</a></div>
+    </div>
+    <section class="latest" aria-roledescription="carousel" aria-labelledby="latest-title">
+      <div class="latest-head">
+        <h2 id="latest-title">Latest builds</h2>
+        <div class="latest-controls">
+          <button class="icon-btn" type="button" data-latest="prev" aria-label="Previous build"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3L5 8l5 5" /></svg></button>
+          <button class="icon-btn latest-play" type="button" data-latest="toggle" aria-label="Pause automatic switching"><svg class="i-pause" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3v10M11 3v10" /></svg><svg class="i-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3l8 5-8 5z" /></svg></button>
+          <button class="icon-btn" type="button" data-latest="next" aria-label="Next build"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5" /></svg></button>
+        </div>
+      </div>
+      <div class="latest-viewport">
+        <article class="slide is-active" id="slide-0" role="tabpanel" aria-roledescription="slide" aria-label="1 of 6">
+          <p class="slide-meta"><span class="badge k-r221">2.2.1 r4</span><time>1 Nov 02:36</time></p>
+          <h3>Copies named from the start</h3>
+          <p class="slide-what">Every bot&#x27;s copy carries its name from the moment the room starts. Files from before OrgBots kept a record show the commit that brought them in.</p>
+          <p class="slide-why"><span>What the room showed</span>Every commit in the live project is under the owner&#x27;s name, so git can say when a file arrived but not which bot wrote it.</p>
+          <div class="slide-foot"><ul class="facts" aria-label="Checks for this build"><li>Rust 978 passed</li><li>App 411 passed</li><li>Sandbox helper 92 passed</li><li>Package c2aa2aab</li></ul><a class="commit" href="https://github.com/acememe7/Orgbot/commit/e5b29e1">commit e5b29e1</a></div>
+        </article>
+        <article class="slide" id="slide-1" role="tabpanel" aria-roledescription="slide" aria-label="2 of 6" hidden>
+          <p class="slide-meta"><span class="badge k-r221">2.2.1 r3</span><time>1 Nov 02:21</time></p>
+          <h3>Answers that say what they do</h3>
+          <p class="slide-what">Decision cards say what each answer does and what the room recommends, with the reason. Approve some folders of a removal review and leave the rest waiting, and see which bot added the files. A stopped room says when it last saved. Usage has its own tab.</p>
+          <p class="slide-why"><span>What the room showed</span>One approval had to take all 562 removals or none, while a folder among them had just been written to.</p>
+          <div class="slide-foot"><ul class="facts" aria-label="Checks for this build"><li>Rust 977 passed</li><li>App 411 passed</li><li>Sandbox helper 90 passed</li></ul><a class="commit" href="https://github.com/acememe7/Orgbot/commit/edd5b75">commit edd5b75</a></div>
+        </article>
+        <article class="slide" id="slide-2" role="tabpanel" aria-roledescription="slide" aria-label="3 of 6" hidden>
+          <p class="slide-meta"><span class="badge k-r221">2.2.1 r2</span><time>1 Nov 01:49</time></p>
+          <h3>A clearer room</h3>
+          <p class="slide-what">Active, Waiting, Done and Closed tabs for tasks. Decision cards that lead with who asked, the risk and a short summary. Runs of check-ins folded into one line, the room&#x27;s health in plain words, and removal reviews grouped by folder. An offer stays open while the turn that shows it runs.</p>
+          <p class="slide-why"><span>What the room showed</span>A review done in the same turn expired eight seconds after it was posted.</p>
+          <div class="slide-foot"><ul class="facts" aria-label="Checks for this build"><li>Rust 974 passed</li><li>App 407 passed</li><li>Sandbox helper 87 passed</li></ul><a class="commit" href="https://github.com/acememe7/Orgbot/commit/335ab11">commit 335ab11</a></div>
+        </article>
+        <article class="slide" id="slide-3" role="tabpanel" aria-roledescription="slide" aria-label="4 of 6" hidden>
+          <p class="slide-meta"><span class="badge k-r221">2.2.1 r1</span><time>1 Nov 00:47</time></p>
+          <h3>Folders go with their files</h3>
+          <p class="slide-what">Folders an approved removal leaves empty are removed too, in the project and in the bot&#x27;s copy. The review names each copy with its count, opens on the copy with the most, and re-checks every other count.</p>
+          <p class="slide-why"><span>What the room showed</span>The badge said 2,177 removals and nobody could tell whose: 1,588 were in a copy that had none left.</p>
+          <div class="slide-foot"><ul class="facts" aria-label="Checks for this build"><li>App 398 passed</li><li>Sandbox helper 86 passed</li></ul><a class="commit" href="https://github.com/acememe7/Orgbot/commit/ed5b5fc">commit ed5b5fc</a></div>
+        </article>
+        <article class="slide" id="slide-4" role="tabpanel" aria-roledescription="slide" aria-label="5 of 6" hidden>
+          <p class="slide-meta"><span class="badge k-site">website</span><time>1 Nov 00:36</time></p>
+          <h3>The site moves to 2.2.1</h3>
+          <p class="slide-what">Every page names 2.2.1, the Evidence page records what 2.2.1 showed in the live room, and the install page&#x27;s release note lines up with the page again.</p>
+          <p class="slide-why"><span>What the room showed</span>A margin rule cancelled the note&#x27;s centring, so it hugged the window edge.</p>
+          <div class="slide-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/71db3a8">commit 71db3a8</a></div>
+        </article>
+        <article class="slide" id="slide-5" role="tabpanel" aria-roledescription="slide" aria-label="6 of 6" hidden>
+          <p class="slide-meta"><span class="badge k-site">website</span><time>1 Nov 00:18</time></p>
+          <h3>The 31 October daily log</h3>
+          <p class="slide-what">The day bots landed their own commits: 8 tasks delivered, 9 of 17 reviews sent back, and an honest account of the two room crashes, with the commit that fixed them.</p>
+          <p class="slide-why"><span>What the room showed</span>Every claim cites a time and an event number in the room&#x27;s own log.</p>
+          <div class="slide-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/61e0c90">commit 61e0c90</a></div>
+        </article>
+      </div>
+      <div class="latest-tabs" role="tablist" aria-label="Choose a build"><button class="dot is-active" type="button" role="tab" aria-selected="true" aria-controls="slide-0" tabindex="0"><span class="dot-tag">2.2.1 r4</span><span class="dot-bar"><span></span></span></button><button class="dot" type="button" role="tab" aria-selected="false" aria-controls="slide-1" tabindex="-1"><span class="dot-tag">2.2.1 r3</span><span class="dot-bar"><span></span></span></button><button class="dot" type="button" role="tab" aria-selected="false" aria-controls="slide-2" tabindex="-1"><span class="dot-tag">2.2.1 r2</span><span class="dot-bar"><span></span></span></button><button class="dot" type="button" role="tab" aria-selected="false" aria-controls="slide-3" tabindex="-1"><span class="dot-tag">2.2.1 r1</span><span class="dot-bar"><span></span></span></button><button class="dot" type="button" role="tab" aria-selected="false" aria-controls="slide-4" tabindex="-1"><span class="dot-tag">website</span><span class="dot-bar"><span></span></span></button><button class="dot" type="button" role="tab" aria-selected="false" aria-controls="slide-5" tabindex="-1"><span class="dot-tag">website</span><span class="dot-bar"><span></span></span></button></div>
+    </section>
+  </section>
+
+  <section class="room" id="room" aria-labelledby="room-title">
+    <div class="wrap">
+      <div class="room-head">
+        <div>
+          <p class="eyebrow">In 3D</p>
+          <h2 id="room-title">How a room runs</h2>
+        </div>
+        <p>Ten bots share one board. Each works in its own copy of your project, hands work to the others, asks you before anything risky, and lands only what a reviewer approved. This is an illustration of that flow with the live room's real roster, not a recording.</p>
+      </div>
+      <div class="room-scenarios" role="group" aria-label="Choose what to watch"><button type="button" class="scenario is-on" data-scenario="run" aria-pressed="true">A full run</button><button type="button" class="scenario" data-scenario="handoff" aria-pressed="false">Handoffs</button><button type="button" class="scenario" data-scenario="ask" aria-pressed="false">Asking you</button><button type="button" class="scenario" data-scenario="land" aria-pressed="false">Review and land</button><button type="button" class="scenario" data-scenario="removal" aria-pressed="false">Removal review</button></div>
+      <div class="room-grid">
+        <div class="room-stage" id="room-stage" data-scene-src="scene.js?v=20261101b">
+          <div class="room-skeleton" aria-hidden="true"><span class="sk-board"></span><span class="sk-ring"></span><span class="sk-line sk-a"></span><span class="sk-line sk-b"></span></div>
+          <canvas id="room-canvas" aria-hidden="true"></canvas>
+          <div class="room-labels" id="room-labels" aria-hidden="true"></div>
+          <div class="room-hud">
+            <p class="room-caption" id="room-caption">Loading the room.</p>
+            <div class="room-transport">
+              <button class="icon-btn" type="button" data-room="toggle" aria-label="Pause the room"><svg class="i-pause" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3v10M11 3v10" /></svg><svg class="i-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3l8 5-8 5z" /></svg></button>
+              <button class="icon-btn" type="button" data-room="step" aria-label="Next step"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3l6 5-6 5zM12 3v10" /></svg></button>
+              <button class="icon-btn" type="button" data-room="restart" aria-label="Start this run again"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8a4.5 4.5 0 1 0 1.6-3.4M3 2.5v3h3" /></svg></button>
+              <button class="speed" type="button" data-room="speed" aria-label="Playback speed">1x</button>
+            </div>
+          </div>
+          <div class="room-fallback" id="room-fallback" hidden><p><strong>This browser could not start the 3D view.</strong> The same run is written out below the room, step by step.</p></div>
+        </div>
+        <aside class="room-side" aria-label="About the room">
+          <div class="room-info" id="room-info" aria-live="polite"><h3>Pick anyone</h3><p>Choose a bot, you, your project or the board, in the list below or in the room, to see what it does.</p></div>
+          <h3 class="room-side-h">What just happened</h3>
+          <ol class="room-log" id="room-log"><li class="log-empty">The run starts when the room loads.</li></ol>
+          <h3 class="room-side-h">Who is in the room</h3>
+          <ul class="room-cast" id="room-cast"><li><button type="button" data-target="bot:opus"><span class="cast-dot"></span><span class="cast-name">@opus</span><span class="cast-role">architect, designer, product manager, coordinator</span></button></li><li><button type="button" data-target="bot:astra"><span class="cast-dot"></span><span class="cast-name">@astra</span><span class="cast-role">security, reviewer, coordinator</span></button></li><li><button type="button" data-target="bot:sol"><span class="cast-dot"></span><span class="cast-name">@sol</span><span class="cast-role">engineer, ops</span></button></li><li><button type="button" data-target="bot:mira"><span class="cast-dot"></span><span class="cast-name">@mira</span><span class="cast-role">engineer, frontend</span></button></li><li><button type="button" data-target="bot:grok-quick"><span class="cast-dot"></span><span class="cast-name">@grok-quick</span><span class="cast-role">engineer, generalist</span></button></li><li><button type="button" data-target="bot:deepseek-builder"><span class="cast-dot"></span><span class="cast-name">@deepseek-builder</span><span class="cast-role">engineer, backend, data</span></button></li><li><button type="button" data-target="bot:ollama-glm"><span class="cast-dot"></span><span class="cast-name">@ollama-glm</span><span class="cast-role">QA</span></button></li><li><button type="button" data-target="bot:ollama-deepseek"><span class="cast-dot"></span><span class="cast-name">@ollama-deepseek</span><span class="cast-role">researcher, analyst</span></button></li><li><button type="button" data-target="bot:ellis"><span class="cast-dot"></span><span class="cast-name">@ellis</span><span class="cast-role">writer, editor, documenter</span></button></li><li><button type="button" data-target="bot:grok"><span class="cast-dot"></span><span class="cast-name">@grok</span><span class="cast-role">support</span></button></li><li><button type="button" data-target="owner"><span class="cast-dot cast-owner"></span><span class="cast-name">You</span><span class="cast-role">the owner</span></button></li><li><button type="button" data-target="project"><span class="cast-dot cast-project"></span><span class="cast-name">Your project</span><span class="cast-role">where approved work lands</span></button></li><li><button type="button" data-target="board"><span class="cast-dot cast-board"></span><span class="cast-name">The board</span><span class="cast-role">every task and who holds it</span></button></li></ul>
+        </aside>
+      </div>
+      <details class="room-steps"><summary>The same run, written out</summary><ol><li>You post a goal. With no bot named, it reaches one coordinator.</li><li>The coordinator splits it into tasks on the shared board.</li><li>Bots claim the tasks that match their roles and walk them back to their own copy of your project.</li><li>Each bot works and commits inside its copy. Your project is not touched.</li><li>A bot offers another an assist. If that bot is busy, the offer waits for it instead of expiring.</li><li>A bot that needs a sign-in or a risky command asks you, saying why, what it will run and what happens if you say no. A yes lasts for that task only.</li><li>A reviewer checks the work. Changes go back to the author; an approval clears the way.</li><li>Approved commits land on your branch. Files a bot deleted wait at a gate until you approve them, folder by folder if you like.</li><li>When nothing needs doing, bots rest and their check-ins fold into one line.</li></ol></details>
+    </div>
+  </section>
+
+  <section class="bl-all wrap" id="builds" aria-labelledby="all-title">
+    <div class="section-heading">
+      <h2 id="all-title">Every build</h2>
+      <p>Filter by kind or day, search for a fix, and open any card for what the room showed.</p>
+    </div>
+    <div class="days" aria-label="Builds per day"><ol><li><button class="day" type="button" data-day="2026-09-03" data-n="1" data-max="11" aria-pressed="false" aria-label="3 Sep: 1 build"><span class="day-bar"><span class="seg seg-origin" data-n="1"></span></span><span class="day-n">1</span><span class="day-label">3 Sep</span></button></li><li><button class="day" type="button" data-day="2026-10-25" data-n="1" data-max="11" aria-pressed="false" aria-label="25 Oct: 1 build"><span class="day-bar"><span class="seg seg-origin" data-n="1"></span></span><span class="day-n">1</span><span class="day-label">25 Oct</span></button></li><li><button class="day" type="button" data-day="2026-10-26" data-n="2" data-max="11" aria-pressed="false" aria-label="26 Oct: 2 builds"><span class="day-bar"><span class="seg seg-release" data-n="2"></span></span><span class="day-n">2</span><span class="day-label">26 Oct</span></button></li><li><button class="day" type="button" data-day="2026-10-27" data-n="2" data-max="11" aria-pressed="false" aria-label="27 Oct: 2 builds"><span class="day-bar"><span class="seg seg-release" data-n="2"></span></span><span class="day-n">2</span><span class="day-label">27 Oct</span></button></li><li><button class="day" type="button" data-day="2026-10-29" data-n="6" data-max="11" aria-pressed="false" aria-label="29 Oct: 6 builds"><span class="day-bar"><span class="seg seg-release" data-n="3"></span><span class="seg seg-r220" data-n="3"></span></span><span class="day-n">6</span><span class="day-label">29 Oct</span></button></li><li><button class="day" type="button" data-day="2026-10-30" data-n="7" data-max="11" aria-pressed="false" aria-label="30 Oct: 7 builds"><span class="day-bar"><span class="seg seg-r220" data-n="6"></span><span class="seg seg-site" data-n="1"></span></span><span class="day-n">7</span><span class="day-label">30 Oct</span></button></li><li><button class="day" type="button" data-day="2026-10-31" data-n="11" data-max="11" aria-pressed="false" aria-label="31 Oct: 11 builds"><span class="day-bar"><span class="seg seg-release" data-n="1"></span><span class="seg seg-r220" data-n="10"></span></span><span class="day-n">11</span><span class="day-label">31 Oct</span></button></li><li><button class="day" type="button" data-day="2026-11-01" data-n="6" data-max="11" aria-pressed="false" aria-label="1 Nov: 6 builds"><span class="day-bar"><span class="seg seg-r221" data-n="4"></span><span class="seg seg-site" data-n="2"></span></span><span class="day-n">6</span><span class="day-label">1 Nov</span></button></li></ol></div>
+    <div class="filters">
+      <div class="chips" role="group" aria-label="Filter by kind"><button class="chip is-on" type="button" data-kind="all" aria-pressed="true">All<span class="chip-count">36</span></button><button class="chip" type="button" data-kind="release" aria-pressed="false"><i class=dot-release></i>Versions<span class="chip-count">8</span></button><button class="chip" type="button" data-kind="r220" aria-pressed="false"><i class=dot-r220></i>2.2.0 rebuilds<span class="chip-count">19</span></button><button class="chip" type="button" data-kind="r221" aria-pressed="false"><i class=dot-r221></i>2.2.1 rebuilds<span class="chip-count">4</span></button><button class="chip" type="button" data-kind="site" aria-pressed="false"><i class=dot-site></i>Website<span class="chip-count">3</span></button><button class="chip" type="button" data-kind="origin" aria-pressed="false"><i class=dot-origin></i>Beginnings<span class="chip-count">2</span></button></div>
+      <label class="search"><span class="visually-hidden">Search builds</span><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5L14 14" /></svg><input id="build-search" type="search" placeholder="Search, for example removals" autocomplete="off"></label>
+    </div>
+    <p class="filter-status" id="filter-status" role="status">Showing all 36 builds.</p>
+    <div class="timeline" id="timeline">
+        <section class="day-group" data-day="2026-11-01" aria-labelledby="d-2026-11-01">
+          <h3 id="d-2026-11-01"><span>1 November 2026</span><span class="day-group-n">6 builds</span></h3>
+          <ol class="builds">
+          <li class="build k-r221" data-kind="r221" data-day="2026-11-01" data-search="2.2.1 r4 copies named from the start every bot&#x27;s copy carries its name from the moment the room starts. files from before orgbots kept a record show the commit that brought them in. every commit in the live project is under the owner&#x27;s name, so git can say when a file arrived but not which bot wrote it. e5b29e1 rust 978 passed app 411 passed sandbox helper 92 passed package c2aa2aab">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-e5b29e1"><span class="badge k-r221">2.2.1 r4</span><span class="build-title">Copies named from the start</span><time class="build-when">02:36</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-e5b29e1"><div class="build-inner">
+              <p>Every bot&#x27;s copy carries its name from the moment the room starts. Files from before OrgBots kept a record show the commit that brought them in.</p>
+              <p class="why"><strong>What the room showed:</strong> Every commit in the live project is under the owner&#x27;s name, so git can say when a file arrived but not which bot wrote it.</p>
+              <div class="build-foot"><ul class="facts" aria-label="Checks for this build"><li>Rust 978 passed</li><li>App 411 passed</li><li>Sandbox helper 92 passed</li><li>Package c2aa2aab</li></ul><a class="commit" href="https://github.com/acememe7/Orgbot/commit/e5b29e1">commit e5b29e1</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r221" data-kind="r221" data-day="2026-11-01" data-search="2.2.1 r3 answers that say what they do decision cards say what each answer does and what the room recommends, with the reason. approve some folders of a removal review and leave the rest waiting, and see which bot added the files. a stopped room says when it last saved. usage has its own tab. one approval had to take all 562 removals or none, while a folder among them had just been written to. edd5b75 rust 977 passed app 411 passed sandbox helper 90 passed">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-edd5b75"><span class="badge k-r221">2.2.1 r3</span><span class="build-title">Answers that say what they do</span><time class="build-when">02:21</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-edd5b75"><div class="build-inner">
+              <p>Decision cards say what each answer does and what the room recommends, with the reason. Approve some folders of a removal review and leave the rest waiting, and see which bot added the files. A stopped room says when it last saved. Usage has its own tab.</p>
+              <p class="why"><strong>What the room showed:</strong> One approval had to take all 562 removals or none, while a folder among them had just been written to.</p>
+              <div class="build-foot"><ul class="facts" aria-label="Checks for this build"><li>Rust 977 passed</li><li>App 411 passed</li><li>Sandbox helper 90 passed</li></ul><a class="commit" href="https://github.com/acememe7/Orgbot/commit/edd5b75">commit edd5b75</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r221" data-kind="r221" data-day="2026-11-01" data-search="2.2.1 r2 a clearer room active, waiting, done and closed tabs for tasks. decision cards that lead with who asked, the risk and a short summary. runs of check-ins folded into one line, the room&#x27;s health in plain words, and removal reviews grouped by folder. an offer stays open while the turn that shows it runs. a review done in the same turn expired eight seconds after it was posted. 335ab11 rust 974 passed app 407 passed sandbox helper 87 passed">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-335ab11"><span class="badge k-r221">2.2.1 r2</span><span class="build-title">A clearer room</span><time class="build-when">01:49</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-335ab11"><div class="build-inner">
+              <p>Active, Waiting, Done and Closed tabs for tasks. Decision cards that lead with who asked, the risk and a short summary. Runs of check-ins folded into one line, the room&#x27;s health in plain words, and removal reviews grouped by folder. An offer stays open while the turn that shows it runs.</p>
+              <p class="why"><strong>What the room showed:</strong> A review done in the same turn expired eight seconds after it was posted.</p>
+              <div class="build-foot"><ul class="facts" aria-label="Checks for this build"><li>Rust 974 passed</li><li>App 407 passed</li><li>Sandbox helper 87 passed</li></ul><a class="commit" href="https://github.com/acememe7/Orgbot/commit/335ab11">commit 335ab11</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r221" data-kind="r221" data-day="2026-11-01" data-search="2.2.1 r1 folders go with their files folders an approved removal leaves empty are removed too, in the project and in the bot&#x27;s copy. the review names each copy with its count, opens on the copy with the most, and re-checks every other count. the badge said 2,177 removals and nobody could tell whose: 1,588 were in a copy that had none left. ed5b5fc app 398 passed sandbox helper 86 passed">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-ed5b5fc"><span class="badge k-r221">2.2.1 r1</span><span class="build-title">Folders go with their files</span><time class="build-when">00:47</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-ed5b5fc"><div class="build-inner">
+              <p>Folders an approved removal leaves empty are removed too, in the project and in the bot&#x27;s copy. The review names each copy with its count, opens on the copy with the most, and re-checks every other count.</p>
+              <p class="why"><strong>What the room showed:</strong> The badge said 2,177 removals and nobody could tell whose: 1,588 were in a copy that had none left.</p>
+              <div class="build-foot"><ul class="facts" aria-label="Checks for this build"><li>App 398 passed</li><li>Sandbox helper 86 passed</li></ul><a class="commit" href="https://github.com/acememe7/Orgbot/commit/ed5b5fc">commit ed5b5fc</a></div>
+            </div></div>
+          </li>
+          <li class="build k-site" data-kind="site" data-day="2026-11-01" data-search="website the site moves to 2.2.1 every page names 2.2.1, the evidence page records what 2.2.1 showed in the live room, and the install page&#x27;s release note lines up with the page again. a margin rule cancelled the note&#x27;s centring, so it hugged the window edge. 71db3a8 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-71db3a8"><span class="badge k-site">website</span><span class="build-title">The site moves to 2.2.1</span><time class="build-when">00:36</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-71db3a8"><div class="build-inner">
+              <p>Every page names 2.2.1, the Evidence page records what 2.2.1 showed in the live room, and the install page&#x27;s release note lines up with the page again.</p>
+              <p class="why"><strong>What the room showed:</strong> A margin rule cancelled the note&#x27;s centring, so it hugged the window edge.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/71db3a8">commit 71db3a8</a></div>
+            </div></div>
+          </li>
+          <li class="build k-site" data-kind="site" data-day="2026-11-01" data-search="website the 31 october daily log the day bots landed their own commits: 8 tasks delivered, 9 of 17 reviews sent back, and an honest account of the two room crashes, with the commit that fixed them. every claim cites a time and an event number in the room&#x27;s own log. 61e0c90 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-61e0c90"><span class="badge k-site">website</span><span class="build-title">The 31 October daily log</span><time class="build-when">00:18</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-61e0c90"><div class="build-inner">
+              <p>The day bots landed their own commits: 8 tasks delivered, 9 of 17 reviews sent back, and an honest account of the two room crashes, with the commit that fixed them.</p>
+              <p class="why"><strong>What the room showed:</strong> Every claim cites a time and an event number in the room&#x27;s own log.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/61e0c90">commit 61e0c90</a></div>
+            </div></div>
+          </li>
+          </ol>
+        </section>
+        <section class="day-group" data-day="2026-10-31" aria-labelledby="d-2026-10-31">
+          <h3 id="d-2026-10-31"><span>31 October 2026</span><span class="day-group-n">11 builds</span></h3>
+          <ol class="builds">
+          <li class="build k-release" data-kind="release" data-day="2026-10-31" data-search="2.2.1 a room that does not fall over the crash at the room&#x27;s save is fixed, a failed save pauses the room instead of killing it, and a dead room restarts itself. handoffs keep their time through a pause. the composer says who a message reaches, unsent messages say so, workspace commands read only files that changed, and task cards fold. the room crashed twice in 20 minutes: a map keyed by (bot, copy) pairs could not be saved as json. 0a89b21 rust 974 passed app 397 passed sandbox helper 84 passed">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-0a89b21"><span class="badge k-release">2.2.1</span><span class="build-title">A room that does not fall over</span><time class="build-when">22:09</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-0a89b21"><div class="build-inner">
+              <p>The crash at the room&#x27;s save is fixed, a failed save pauses the room instead of killing it, and a dead room restarts itself. Handoffs keep their time through a pause. The composer says who a message reaches, unsent messages say so, workspace commands read only files that changed, and task cards fold.</p>
+              <p class="why"><strong>What the room showed:</strong> The room crashed twice in 20 minutes: a map keyed by (bot, copy) pairs could not be saved as JSON.</p>
+              <div class="build-foot"><ul class="facts" aria-label="Checks for this build"><li>Rust 974 passed</li><li>App 397 passed</li><li>Sandbox helper 84 passed</li></ul><a class="commit" href="https://github.com/acememe7/Orgbot/commit/0a89b21">commit 0a89b21</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-31" data-search="2.2.0 r19 sign-ins bots can ask for every request card says why, what, the commands and what happens if denied. bots can ask for a sign-in that is not listed, and only the owner can say yes. settings finds 33 tools on the computer. switched-off sign-ins stay hidden. a switched-off sign-in was not hidden, and bots had no way to ask for one. 9c991cf ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-9c991cf"><span class="badge k-r220">2.2.0 r19</span><span class="build-title">Sign-ins bots can ask for</span><time class="build-when">20:45</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-9c991cf"><div class="build-inner">
+              <p>Every request card says why, what, the commands and what happens if denied. Bots can ask for a sign-in that is not listed, and only the owner can say yes. Settings finds 33 tools on the computer. Switched-off sign-ins stay hidden.</p>
+              <p class="why"><strong>What the room showed:</strong> A switched-off sign-in was not hidden, and bots had no way to ask for one.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/9c991cf">commit 9c991cf</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-31" data-search="2.2.0 r18 older copies catch up copies made before the update move to the landed commit too, because the project already holds theirs. asked before the owner even restarted. mira could not prove her run on the real branch: her copy sat on an older commit. 9dcc0f7 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-9dcc0f7"><span class="badge k-r220">2.2.0 r18</span><span class="build-title">Older copies catch up</span><time class="build-when">20:13</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-9dcc0f7"><div class="build-inner">
+              <p>Copies made before the update move to the landed commit too, because the project already holds theirs. Asked before the owner even restarted.</p>
+              <p class="why"><strong>What the room showed:</strong> Mira could not prove her run on the real branch: her copy sat on an older commit.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/9dcc0f7">commit 9dcc0f7</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-31" data-search="2.2.0 r17 easier long runs eleven changes in one install: removals trashed in batches with a live count, a &quot;since you left&quot; card, leftover copies you can discard, copies whose git history keeps up, verify copies that share their files, tasks that wait on others, one question per task, checks named on landing cards, pushes the owner always approves, and bots that stop repeating themselves. 1,549 removals took 13 minutes behind a bare progress bar. 832f6a3 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-832f6a3"><span class="badge k-r220">2.2.0 r17</span><span class="build-title">Easier long runs</span><time class="build-when">20:02</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-832f6a3"><div class="build-inner">
+              <p>Eleven changes in one install: removals trashed in batches with a live count, a &quot;since you left&quot; card, leftover copies you can discard, copies whose git history keeps up, verify copies that share their files, tasks that wait on others, one question per task, checks named on landing cards, pushes the owner always approves, and bots that stop repeating themselves.</p>
+              <p class="why"><strong>What the room showed:</strong> 1,549 removals took 13 minutes behind a bare progress bar.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/832f6a3">commit 832f6a3</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-31" data-search="2.2.0 r16 no copy at every start a room start no longer copies the whole project to look for settings it could never see. 14 restarts, 14 copies of 4.6 gb, each deleted. ae36218 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-ae36218"><span class="badge k-r220">2.2.0 r16</span><span class="build-title">No copy at every start</span><time class="build-when">18:20</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-ae36218"><div class="build-inner">
+              <p>A room start no longer copies the whole project to look for settings it could never see.</p>
+              <p class="why"><strong>What the room showed:</strong> 14 restarts, 14 copies of 4.6 GB, each deleted.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/ae36218">commit ae36218</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-31" data-search="2.2.0 r15 reviews that stay responsive long change lists build only the rows on screen and open with a folder summary. 1,570 removals froze the app. 0903ec5 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-0903ec5"><span class="badge k-r220">2.2.0 r15</span><span class="build-title">Reviews that stay responsive</span><time class="build-when">18:08</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-0903ec5"><div class="build-inner">
+              <p>Long change lists build only the rows on screen and open with a folder summary.</p>
+              <p class="why"><strong>What the room showed:</strong> 1,570 removals froze the app.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/0903ec5">commit 0903ec5</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-31" data-search="2.2.0 r14 codex gets a network codex bots allowed to write can start local servers. writes outside the project are still refused. browser captures failed with eperm. e1aa139 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-e1aa139"><span class="badge k-r220">2.2.0 r14</span><span class="build-title">Codex gets a network</span><time class="build-when">17:46</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-e1aa139"><div class="build-inner">
+              <p>Codex bots allowed to write can start local servers. Writes outside the project are still refused.</p>
+              <p class="why"><strong>What the room showed:</strong> Browser captures failed with EPERM.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/e1aa139">commit e1aa139</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-31" data-search="2.2.0 r13 land in the real repo landing acts on the owner&#x27;s project, never the bot&#x27;s copy. &quot;landed&quot;, while main never moved. 349bc86 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-349bc86"><span class="badge k-r220">2.2.0 r13</span><span class="build-title">Land in the real repo</span><time class="build-when">17:38</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-349bc86"><div class="build-inner">
+              <p>Landing acts on the owner&#x27;s project, never the bot&#x27;s copy.</p>
+              <p class="why"><strong>What the room showed:</strong> &quot;Landed&quot;, while main never moved.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/349bc86">commit 349bc86</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-31" data-search="2.2.0 r12 wait on the owner properly asking the owner starts a claimed task and waits on the answer. eleven wake-ups while the owner had the card. 60446e4 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-60446e4"><span class="badge k-r220">2.2.0 r12</span><span class="build-title">Wait on the owner properly</span><time class="build-when">17:18</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-60446e4"><div class="build-inner">
+              <p>Asking the owner starts a claimed task and waits on the answer.</p>
+              <p class="why"><strong>What the room showed:</strong> Eleven wake-ups while the owner had the card.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/60446e4">commit 60446e4</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-31" data-search="2.2.0 r11 landing commits bots land their commits on the owner&#x27;s branch after one approval. fast-forward only, no push, no files touched. a bot had to hand the owner a script to run. ac26558 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-ac26558"><span class="badge k-r220">2.2.0 r11</span><span class="build-title">Landing commits</span><time class="build-when">15:43</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-ac26558"><div class="build-inner">
+              <p>Bots land their commits on the owner&#x27;s branch after one approval. Fast-forward only, no push, no files touched.</p>
+              <p class="why"><strong>What the room showed:</strong> A bot had to hand the owner a script to run.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/ac26558">commit ac26558</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-31" data-search="2.2.0 r10 see the board before planning a bot is shown the tasks others added during its turn before it creates more. two coordinators split one message; five duplicates. a800543 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-a800543"><span class="badge k-r220">2.2.0 r10</span><span class="build-title">See the board before planning</span><time class="build-when">15:09</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-a800543"><div class="build-inner">
+              <p>A bot is shown the tasks others added during its turn before it creates more.</p>
+              <p class="why"><strong>What the room showed:</strong> Two coordinators split one message; five duplicates.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/a800543">commit a800543</a></div>
+            </div></div>
+          </li>
+          </ol>
+        </section>
+        <section class="day-group" data-day="2026-10-30" aria-labelledby="d-2026-10-30">
+          <h3 id="d-2026-10-30"><span>30 October 2026</span><span class="day-group-n">7 builds</span></h3>
+          <ol class="builds">
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-30" data-search="2.2.0 r9 parked tasks and keyring sign-ins work the owner parks stays parked: no claims, no questions. github sign-ins lent from the desktop keyring. a parked card was claimed and asked about again. a push got a 401. 1e3c268 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-1e3c268"><span class="badge k-r220">2.2.0 r9</span><span class="build-title">Parked tasks and keyring sign-ins</span><time class="build-when">23:54</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-1e3c268"><div class="build-inner">
+              <p>Work the owner parks stays parked: no claims, no questions. GitHub sign-ins lent from the desktop keyring.</p>
+              <p class="why"><strong>What the room showed:</strong> A parked card was claimed and asked about again. A push got a 401.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/1e3c268">commit 1e3c268</a></div>
+            </div></div>
+          </li>
+          <li class="build k-site" data-kind="site" data-day="2026-10-30" data-search="website the daily log a public page for every day the room runs: what shipped, what reviewers sent back, what broke.  ce3c7ce ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-ce3c7ce"><span class="badge k-site">website</span><span class="build-title">The daily log</span><time class="build-when">23:21</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-ce3c7ce"><div class="build-inner">
+              <p>A public page for every day the room runs: what shipped, what reviewers sent back, what broke.</p>
+              
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/ce3c7ce">commit ce3c7ce</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-30" data-search="2.2.0 r8 wake only to deliver coordinators are woken only for approved work that can actually go out. half an hour of &quot;nothing needs you&quot;. d1dacc8 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-d1dacc8"><span class="badge k-r220">2.2.0 r8</span><span class="build-title">Wake only to deliver</span><time class="build-when">22:28</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-d1dacc8"><div class="build-inner">
+              <p>Coordinators are woken only for approved work that can actually go out.</p>
+              <p class="why"><strong>What the room showed:</strong> Half an hour of &quot;nothing needs you&quot;.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/d1dacc8">commit d1dacc8</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-30" data-search="2.2.0 r7 amend_task coordinators change what a task asks for, on the record, and the holder is told. a requirement waived in chat kept sending work back. 6c69cdf ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-6c69cdf"><span class="badge k-r220">2.2.0 r7</span><span class="build-title">amend_task</span><time class="build-when">18:53</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-6c69cdf"><div class="build-inner">
+              <p>Coordinators change what a task asks for, on the record, and the holder is told.</p>
+              <p class="why"><strong>What the room showed:</strong> A requirement waived in chat kept sending work back.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/6c69cdf">commit 6c69cdf</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-30" data-search="2.2.0 r6 resting a looping bot a bot that ends three turns without doing anything rests until something changes. ticks that free work wake the room. 26 turns in an hour, nothing changed. 0b128f3 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-0b128f3"><span class="badge k-r220">2.2.0 r6</span><span class="build-title">Resting a looping bot</span><time class="build-when">10:01</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-0b128f3"><div class="build-inner">
+              <p>A bot that ends three turns without doing anything rests until something changes. Ticks that free work wake the room.</p>
+              <p class="why"><strong>What the room showed:</strong> 26 turns in an hour, nothing changed.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/0b128f3">commit 0b128f3</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-30" data-search="2.2.0 r5 working through conflicts clashing files are set aside for review and everything else merges. a lent sign-in that is missing is skipped. every command reported failed, with its output thrown away. 95d458a ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-95d458a"><span class="badge k-r220">2.2.0 r5</span><span class="build-title">Working through conflicts</span><time class="build-when">03:27</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-95d458a"><div class="build-inner">
+              <p>Clashing files are set aside for review and everything else merges. A lent sign-in that is missing is skipped.</p>
+              <p class="why"><strong>What the room showed:</strong> Every command reported failed, with its output thrown away.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/95d458a">commit 95d458a</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-30" data-search="2.2.0 r4 access modes and lent sign-ins approval, half approval, auto and full write. the owner&#x27;s sign-ins lent for one approved task at a time. publishing stalled: wrangler was signed in on the owner&#x27;s pc only. d25e9f3 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-d25e9f3"><span class="badge k-r220">2.2.0 r4</span><span class="build-title">Access modes and lent sign-ins</span><time class="build-when">02:09</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-d25e9f3"><div class="build-inner">
+              <p>Approval, half approval, auto and full write. The owner&#x27;s sign-ins lent for one approved task at a time.</p>
+              <p class="why"><strong>What the room showed:</strong> Publishing stalled: Wrangler was signed in on the owner&#x27;s PC only.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/d25e9f3">commit d25e9f3</a></div>
+            </div></div>
+          </li>
+          </ol>
+        </section>
+        <section class="day-group" data-day="2026-10-29" aria-labelledby="d-2026-10-29">
+          <h3 id="d-2026-10-29"><span>29 October 2026</span><span class="day-group-n">6 builds</span></h3>
+          <ol class="builds">
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-29" data-search="2.2.0 r3 bounded catch-up a bot back from a long absence sees the newest 32 kb of what it missed, messages to it first. grok: &quot;argument list too long&quot; after 133 kb of catch-up. f225c61 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-f225c61"><span class="badge k-r220">2.2.0 r3</span><span class="build-title">Bounded catch-up</span><time class="build-when">23:32</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-f225c61"><div class="build-inner">
+              <p>A bot back from a long absence sees the newest 32 KB of what it missed, messages to it first.</p>
+              <p class="why"><strong>What the room showed:</strong> Grok: &quot;Argument list too long&quot; after 133 KB of catch-up.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/f225c61">commit f225c61</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-29" data-search="2.2.0 r2 assists that wait an accepted assist is held while its bot waits on the owner. a waiting bot was rerun nine times in 23 minutes. 9e734a3 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-9e734a3"><span class="badge k-r220">2.2.0 r2</span><span class="build-title">Assists that wait</span><time class="build-when">22:07</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-9e734a3"><div class="build-inner">
+              <p>An accepted assist is held while its bot waits on the owner.</p>
+              <p class="why"><strong>What the room showed:</strong> A waiting bot was rerun nine times in 23 minutes.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/9e734a3">commit 9e734a3</a></div>
+            </div></div>
+          </li>
+          <li class="build k-r220" data-kind="r220" data-day="2026-10-29" data-search="2.2.0 r1 access that reaches the server the owner&#x27;s server approval now reaches commands sent through the room. leftover copies are cleaned up: 41.7 gb freed. an approved bot still could not reach the server. e803d87 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-e803d87"><span class="badge k-r220">2.2.0 r1</span><span class="build-title">Access that reaches the server</span><time class="build-when">18:05</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-e803d87"><div class="build-inner">
+              <p>The owner&#x27;s server approval now reaches commands sent through the room. Leftover copies are cleaned up: 41.7 GB freed.</p>
+              <p class="why"><strong>What the room showed:</strong> An approved bot still could not reach the server.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/e803d87">commit e803d87</a></div>
+            </div></div>
+          </li>
+          <li class="build k-release" data-kind="release" data-day="2026-10-29" data-search="2.2.0 server access by permission the bot server key only for a task the owner allowed, a pause that lets turns finish, and retiring stale tasks. a bot installed a server release while the room had it on hold. 4540c2f ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-4540c2f"><span class="badge k-release">2.2.0</span><span class="build-title">Server access by permission</span><time class="build-when">16:45</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-4540c2f"><div class="build-inner">
+              <p>The bot server key only for a task the owner allowed, a pause that lets turns finish, and retiring stale tasks.</p>
+              <p class="why"><strong>What the room showed:</strong> A bot installed a server release while the room had it on hold.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/4540c2f">commit 4540c2f</a></div>
+            </div></div>
+          </li>
+          <li class="build k-release" data-kind="release" data-day="2026-10-29" data-search="2.1.1 patient handoffs handoffs that wait for busy bots. folded into 2.2.0 and never published on its own. 13 of 15 handoff offers had expired. e22b050 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-e22b050"><span class="badge k-release">2.1.1</span><span class="build-title">Patient handoffs</span><time class="build-when">12:19</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-e22b050"><div class="build-inner">
+              <p>Handoffs that wait for busy bots. Folded into 2.2.0 and never published on its own.</p>
+              <p class="why"><strong>What the room showed:</strong> 13 of 15 handoff offers had expired.</p>
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/e22b050">commit e22b050</a></div>
+            </div></div>
+          </li>
+          <li class="build k-release" data-kind="release" data-day="2026-10-29" data-search="2.1.0 live-room proof the first live ten-bot room on record, and the polyform noncommercial license.  8a4227d ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-8a4227d"><span class="badge k-release">2.1.0</span><span class="build-title">Live-room proof</span><time class="build-when">04:13</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-8a4227d"><div class="build-inner">
+              <p>The first live ten-bot room on record, and the PolyForm Noncommercial license.</p>
+              
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/8a4227d">commit 8a4227d</a></div>
+            </div></div>
+          </li>
+          </ol>
+        </section>
+        <section class="day-group" data-day="2026-10-27" aria-labelledby="d-2026-10-27">
+          <h3 id="d-2026-10-27"><span>27 October 2026</span><span class="day-group-n">2 builds</span></h3>
+          <ol class="builds">
+          <li class="build k-release" data-kind="release" data-day="2026-10-27" data-search="2.0.3 gemini runtime proof that the gemini runtime works end to end.  f1931cf ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-f1931cf"><span class="badge k-release">2.0.3</span><span class="build-title">Gemini runtime</span><time class="build-when">16:33</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-f1931cf"><div class="build-inner">
+              <p>Proof that the Gemini runtime works end to end.</p>
+              
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/f1931cf">commit f1931cf</a></div>
+            </div></div>
+          </li>
+          <li class="build k-release" data-kind="release" data-day="2026-10-27" data-search="2.0.2 verified resume cli sessions that resume, usage accounting and scoped capabilities, all verified.  72492bc ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-72492bc"><span class="badge k-release">2.0.2</span><span class="build-title">Verified resume</span><time class="build-when">10:23</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-72492bc"><div class="build-inner">
+              <p>CLI sessions that resume, usage accounting and scoped capabilities, all verified.</p>
+              
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/72492bc">commit 72492bc</a></div>
+            </div></div>
+          </li>
+          </ol>
+        </section>
+        <section class="day-group" data-day="2026-10-26" aria-labelledby="d-2026-10-26">
+          <h3 id="d-2026-10-26"><span>26 October 2026</span><span class="day-group-n">2 builds</span></h3>
+          <ol class="builds">
+          <li class="build k-release" data-kind="release" data-day="2026-10-26" data-search="2.0.1 installer and website a signed installer, the product website, and a pages fix that kept the signed archive intact.  e004b23 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-e004b23"><span class="badge k-release">2.0.1</span><span class="build-title">Installer and website</span><time class="build-when">20:00</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-e004b23"><div class="build-inner">
+              <p>A signed installer, the product website, and a Pages fix that kept the signed archive intact.</p>
+              
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/e004b23">commit e004b23</a></div>
+            </div></div>
+          </li>
+          <li class="build k-release" data-kind="release" data-day="2026-10-26" data-search="2.0.0 linux 2.0 workspace safeguards, usage accounting, backups and a signed apt archive.  cc100d5 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-cc100d5"><span class="badge k-release">2.0.0</span><span class="build-title">Linux 2.0</span><time class="build-when">16:18</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-cc100d5"><div class="build-inner">
+              <p>Workspace safeguards, usage accounting, backups and a signed APT archive.</p>
+              
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/cc100d5">commit cc100d5</a></div>
+            </div></div>
+          </li>
+          </ol>
+        </section>
+        <section class="day-group" data-day="2026-10-25" aria-labelledby="d-2026-10-25">
+          <h3 id="d-2026-10-25"><span>25 October 2026</span><span class="day-group-n">1 build</span></h3>
+          <ol class="builds">
+          <li class="build k-origin" data-kind="origin" data-day="2026-10-25" data-search="desktop the desktop app desktop sessions with targeted replies and local tools.  0c3eaaa ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-0c3eaaa"><span class="badge k-origin">desktop</span><span class="build-title">The desktop app</span><time class="build-when">25 Oct</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-0c3eaaa"><div class="build-inner">
+              <p>Desktop sessions with targeted replies and local tools.</p>
+              
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/0c3eaaa">commit 0c3eaaa</a></div>
+            </div></div>
+          </li>
+          </ol>
+        </section>
+        <section class="day-group" data-day="2026-09-03" aria-labelledby="d-2026-09-03">
+          <h3 id="d-2026-09-03"><span>3 September 2026</span><span class="day-group-n">1 build</span></h3>
+          <ol class="builds">
+          <li class="build k-origin" data-kind="origin" data-day="2026-09-03" data-search="engine the engine protocol and orchestration, backends for anthropic, deepseek and openai-compatible models, and a tool surface for bots that plan, work, hand off, inspect and ship.  29f6059 ">
+            <h4 class="build-head"><button class="build-toggle" type="button" aria-expanded="false" aria-controls="b-29f6059"><span class="badge k-origin">engine</span><span class="build-title">The engine</span><time class="build-when">3 Sep</time><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg></button></h4>
+            <div class="build-body" id="b-29f6059"><div class="build-inner">
+              <p>Protocol and orchestration, backends for Anthropic, DeepSeek and OpenAI-compatible models, and a tool surface for bots that plan, work, hand off, inspect and ship.</p>
+              
+              <div class="build-foot"><a class="commit" href="https://github.com/acememe7/Orgbot/commit/29f6059">commit 29f6059</a></div>
+            </div></div>
+          </li>
+          </ol>
+        </section>
+    </div>
+    <div class="no-match" id="no-match" hidden><p>No build matches that. Try another word, or show everything again.</p><button class="button button-quiet" type="button" data-clear>Show every build</button></div>
+  </section>
+
+  <section class="bl-close surface-band" aria-labelledby="close-title">
+    <div class="wrap bl-close-inner">
+      <div>
+        <h2 id="close-title">Run a room of your own</h2>
+        <ul class="bl-close-list">
+          <li><strong>Ubuntu 24.04, amd64.</strong> Installed from a signed APT archive, the same one these builds were published to.</li>
+          <li><strong>Nothing lands without you.</strong> Bots work in private copies; sign-ins, pushes, risky commands and removals wait for your answer.</li>
+          <li><strong>Read every line.</strong> The source is on GitHub under the PolyForm Shield License 1.0.0.</li>
+        </ul>
+      </div>
+      <div class="bl-close-cta"><a class="button" href="/install/">Install OrgBots 2.2.1</a><p>Version 2.2.1, rebuilt 1 Nov 02:36.</p></div>
+    </div>
+  </section>
+<div class="privacy-notice" role="region" aria-label="Privacy choices" data-analytics-enabled="false" hidden><p>Optional analytics is disabled. Hosting security logs may apply. <a href="/privacy/">Privacy policy</a></p><div class="privacy-actions"><button type="button" data-analytics-choice="reject" hidden>Reject analytics</button><button type="button" data-analytics-choice="allow" hidden>Allow analytics</button><button type="button" data-dismiss-notice>Close</button></div><p data-privacy-status role="status"></p></div></main>
+<footer class="site-footer"><div class="footer-inner"><p class="footer-note">OrgBots · © 2026 The AECE Studio<br>Linux 2.2.1 · Ubuntu 24.04 amd64</p><nav class="footer-links" aria-label="Footer"><a href="/results/">Evidence</a><a href="/evidence/">Daily log</a><a href="/build/" aria-current="page">Build log</a><a href="/install/">Installation</a><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a><a href="mailto:theaece@theaecestudio.com">Contact</a><button class="privacy-reopen" type="button" data-open-notice>Privacy choices</button></nav></div></footer></body></html>

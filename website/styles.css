@@ -227,3 +227,9 @@ html.js .gallery-list{display:grid}
 html.js .gallery-stage[data-state="loading"] img{opacity:0}
 html:not(.js) .gallery-stage .gallery-skeleton{display:none}
 html:not(.js) .gallery-stage img{opacity:1}
+@media(min-width:621px) and (max-width:880px){.menu-toggle{display:block}
+.nav,html.js .nav{display:none;position:absolute;z-index:4;top:83px;left:0;right:0;background:var(--paper);border-bottom:1px solid var(--line);padding:1rem;align-items:stretch;flex-direction:column;gap:0}
+.nav[data-open="true"],html.js .nav[data-open="true"]{display:flex}
+.nav a{padding:.75rem .25rem}
+.nav .nav-cta{text-align:center;margin-top:.5rem}
+}

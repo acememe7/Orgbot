@@ -1,0 +1,5 @@
+/* Without JavaScript: every card open, and nothing that needs a script. */
+.build-body{grid-template-rows:1fr}
+.chev,.days,.chips,.search,.filter-status,.latest-controls,.latest-tabs,.room-scenarios,.room-stage,.room-side{display:none}
+.room-grid{display:block}
+.room-steps{border-top:0;padding-top:0}

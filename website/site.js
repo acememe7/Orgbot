@@ -12,7 +12,7 @@ if (menuButton && nav) {
     nav.dataset.open = String(open);
   });
   nav.addEventListener('click', (event) => {
-    if (event.target instanceof HTMLAnchorElement && window.matchMedia('(max-width: 620px)').matches) closeMenu();
+    if (event.target instanceof HTMLAnchorElement && window.matchMedia('(max-width: 880px)').matches) closeMenu();
   });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && menuButton.getAttribute('aria-expanded') === 'true') {
