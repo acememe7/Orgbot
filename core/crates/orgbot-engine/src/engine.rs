@@ -5995,7 +5995,11 @@ fn metered(provider: &orgbot_proto::ProviderRef) -> bool {
     match provider {
         orgbot_proto::ProviderRef::Anthropic { .. } | orgbot_proto::ProviderRef::DeepSeek { .. } => true,
         orgbot_proto::ProviderRef::OpenAiCompatible { profile, .. } => {
-            profile != "codex" && profile != "chatgpt" && !orgbot_proto::pricing::is_local(provider)
+            // Ollama's cloud draws on the plan's monthly credits first.
+            profile != "codex"
+                && profile != "chatgpt"
+                && profile != "ollama"
+                && !orgbot_proto::pricing::is_local(provider)
         }
         orgbot_proto::ProviderRef::CliAgent { .. } | orgbot_proto::ProviderRef::Scripted { .. } => false,
     }

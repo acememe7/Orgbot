@@ -4329,7 +4329,7 @@ fn usage_without_recorded_prices_is_estimated_from_list_prices() {
             effort: String::new(),
         },
     );
-    let local = AgentSpec::new("local", "Local", ProviderRef::OpenAiCompatible { model: "glm-5.3-flash".into(), profile: "ollama".into() });
+    let local = AgentSpec::new("local", "Local", ProviderRef::OpenAiCompatible { model: "glm-5.3-flash".into(), profile: "lmstudio".into() });
     let unknown = AgentSpec::new("odd", "Odd", ProviderRef::OpenAiCompatible { model: "mystery-1".into(), profile: "acme".into() });
     let ids = [api.id, plan.id, local.id, unknown.id];
     for spec in [api, plan, local, unknown] {

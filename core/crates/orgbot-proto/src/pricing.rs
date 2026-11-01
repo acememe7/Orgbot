@@ -4,7 +4,8 @@
 //! every bot, because a price existed only where a room's settings named
 //! one, and none did. These are the makers' published API list prices in US
 //! dollars per million tokens, taken from their pricing pages on 1 November
-//! 2026, so a turn is priced the moment it ends. A room's own rates still
+//! 2026 (Ollama's cloud models from ollama.com/pricing), so a turn is priced
+//! the moment it ends. A room's own rates still
 //! win where it sets them. A bot on a subscription pays its plan, not these;
 //! for it they say what the same tokens would cost on the API.
 
@@ -56,6 +57,8 @@ struct Listing {
     rates: Rates,
     /// Tokens per call past which the long-context rates apply.
     long: Option<(u32, Rates)>,
+    /// Half price off-peak, on the schedule of whoever serves it.
+    off_peak: bool,
 }
 
 const fn usd(input: u64, output: u64, cache_read: u64, cache_write: u64) -> Rates {
@@ -66,58 +69,79 @@ const fn usd(input: u64, output: u64, cache_read: u64, cache_write: u64) -> Rate
 // uses. OpenAI: cached input as listed, 30-minute cache writes as listed (1.25x
 // input). xAI and DeepSeek list no write premium, so writes cost input.
 const LISTINGS: &[Listing] = &[
-    Listing { model: "claude-fable-5-1", rates: usd(10_000_000, 50_000_000, 250_000, 12_500_000), long: None },
-    Listing { model: "claude-opus-5-5", rates: usd(4_000_000, 20_000_000, 200_000, 5_000_000), long: None },
-    Listing { model: "claude-sonnet-5-5", rates: usd(2_000_000, 10_000_000, 200_000, 2_500_000), long: None },
+    Listing { model: "claude-fable-5-1", rates: usd(10_000_000, 50_000_000, 250_000, 12_500_000), long: None, off_peak: false },
+    Listing { model: "claude-opus-5-5", rates: usd(4_000_000, 20_000_000, 200_000, 5_000_000), long: None, off_peak: false },
+    Listing { model: "claude-sonnet-5-5", rates: usd(2_000_000, 10_000_000, 200_000, 2_500_000), long: None, off_peak: false },
     Listing {
         model: "claude-haiku-5-5",
         rates: usd(100_000, 500_000, 10_000, 125_000),
         long: Some((100_000, usd(500_000, 2_500_000, 50_000, 625_000))),
+        off_peak: false,
     },
     Listing {
         model: "gpt-6-astra",
         rates: usd(10_000_000, 50_000_000, 1_000_000, 12_500_000),
         long: Some((272_000, usd(20_000_000, 75_000_000, 2_000_000, 25_000_000))),
+        off_peak: false,
     },
     Listing {
         model: "gpt-6.1-sol",
         rates: usd(2_000_000, 10_000_000, 100_000, 2_500_000),
         long: Some((272_000, usd(4_000_000, 15_000_000, 200_000, 5_000_000))),
+        off_peak: false,
     },
-    Listing { model: "gpt-6-sol", rates: usd(2_000_000, 10_000_000, 200_000, 2_500_000), long: None },
-    Listing { model: "gpt-6.1-terra", rates: usd(1_000_000, 5_000_000, 50_000, 1_250_000), long: None },
+    Listing { model: "gpt-6-sol", rates: usd(2_000_000, 10_000_000, 200_000, 2_500_000), long: None, off_peak: false },
+    Listing { model: "gpt-6.1-terra", rates: usd(1_000_000, 5_000_000, 50_000, 1_250_000), long: None, off_peak: false },
     Listing {
         model: "gpt-6-luna",
         rates: usd(100_000, 500_000, 10_000, 125_000),
         long: Some((272_000, usd(200_000, 750_000, 20_000, 250_000))),
+        off_peak: false,
     },
     Listing {
         model: "grok-4.7",
         rates: usd(2_000_000, 6_000_000, 500_000, 2_000_000),
         long: Some((200_000, usd(4_000_000, 12_000_000, 1_000_000, 4_000_000))),
+        off_peak: false,
     },
     Listing {
         model: "grok-build-0.1",
         rates: usd(1_000_000, 2_000_000, 200_000, 1_000_000),
         long: Some((200_000, usd(2_000_000, 4_000_000, 400_000, 2_000_000))),
+        off_peak: false,
     },
     // DeepSeek's peak rates; the rest of the week is half price.
-    Listing { model: "deepseek-flash", rates: usd(300_000, 1_200_000, 6_000, 300_000), long: None },
-    Listing { model: "deepseek-v4-flash", rates: usd(300_000, 1_200_000, 6_000, 300_000), long: None },
-    Listing { model: "deepseek-v4-pro", rates: usd(1_320_000, 3_960_000, 44_000, 1_320_000), long: None },
+    Listing { model: "deepseek-flash", rates: usd(300_000, 1_200_000, 6_000, 300_000), long: None, off_peak: true },
+    Listing { model: "deepseek-v4-flash", rates: usd(300_000, 1_200_000, 6_000, 300_000), long: None, off_peak: true },
+    Listing { model: "deepseek-v4-pro", rates: usd(1_320_000, 3_960_000, 44_000, 1_320_000), long: None, off_peak: true },
+    // Ollama's cloud models: no cache-write price is published, so writes
+    // cost input.
+    Listing { model: "deepseek-v4.1-flash", rates: usd(300_000, 1_200_000, 6_000, 300_000), long: None, off_peak: true },
+    Listing { model: "glm-5.3-flash", rates: usd(150_000, 500_000, 30_000, 150_000), long: None, off_peak: false },
+    Listing { model: "glm-5.3", rates: usd(1_400_000, 4_400_000, 260_000, 1_400_000), long: None, off_peak: false },
+    Listing { model: "glm-5.2", rates: usd(1_400_000, 4_400_000, 260_000, 1_400_000), long: None, off_peak: false },
 ];
 
 /// Whether a bot runs on a model server on this computer.
+///
+/// Not Ollama: OrgBots reaches Ollama's cloud at ollama.com, and from the
+/// owner of the live room, its two Ollama bots had used $6.41 of the
+/// account's credits while the Usage tab called them free.
 pub fn is_local(provider: &ProviderRef) -> bool {
     match provider {
         ProviderRef::OpenAiCompatible { profile, .. } => {
             let profile = profile.to_ascii_lowercase();
-            ["ollama", "local", "lmstudio", "llamacpp", "llama.cpp", "vllm"]
+            ["local", "lmstudio", "llamacpp", "llama.cpp", "vllm"]
                 .iter()
                 .any(|name| profile.contains(name))
         }
         _ => false,
     }
+}
+
+/// Whether a bot is served by Ollama's cloud.
+fn is_ollama(provider: &ProviderRef) -> bool {
+    matches!(provider, ProviderRef::OpenAiCompatible { profile, .. } if profile.eq_ignore_ascii_case("ollama"))
 }
 
 /// The list price of one turn of `model` for the bot behind `provider`.
@@ -139,7 +163,8 @@ pub fn list_price(provider: &ProviderRef, model: &str, usage: &TokenUsage, at: T
         Some((threshold, long)) if counts_requests(provider) && prompt_per_call > u64::from(threshold) => long,
         _ => listing.rates,
     };
-    if listing.model.starts_with("deepseek") && deepseek_off_peak(at) {
+    let off_peak = if is_ollama(provider) { ollama_off_peak(at) } else { deepseek_off_peak(at) };
+    if listing.off_peak && off_peak {
         rates = rates.halved();
     }
     Some(ListPrice::Paid(rates))
@@ -196,6 +221,14 @@ fn deepseek_off_peak(at: Timestamp) -> bool {
     !peak
 }
 
+/// Ollama charges its off-peak rate outside 12:00–18:00 UTC on weekdays.
+fn ollama_off_peak(at: Timestamp) -> bool {
+    let millis = at.0.max(0);
+    let weekday = (millis / 86_400_000 + 4) % 7; // 0 = Sunday
+    let hour = (millis / 3_600_000) % 24;
+    weekday == 0 || weekday == 6 || !(12..18).contains(&hour)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +261,8 @@ mod tests {
     // A Saturday, so DeepSeek is off-peak, and a Monday at 07:00 UTC, peak.
     const SATURDAY: Timestamp = Timestamp(1_793_448_000_000);
     const MONDAY_PEAK: Timestamp = Timestamp(1_793_602_800_000);
+    // Monday at 13:00 UTC, Ollama's peak.
+    const MONDAY_AFTERNOON: Timestamp = Timestamp(1_793_624_400_000);
 
     #[test]
     fn a_turn_is_priced_at_its_models_list_price() {
@@ -259,8 +294,16 @@ mod tests {
     fn long_prompts_local_models_and_deepseek_hours_are_priced_as_listed() {
         let grok = ProviderRef::OpenAiCompatible { model: "grok-4.7".into(), profile: "xai".into() };
         assert_eq!(list_cost(&grok, "grok-4.7", &usage(300_000, 0, 0, 0), SATURDAY), Some(1_200_000), "past 200k, $4 per million");
-        let local = ProviderRef::OpenAiCompatible { model: "glm-5.3-flash".into(), profile: "ollama".into() };
+        let local = ProviderRef::OpenAiCompatible { model: "glm-5.3-flash".into(), profile: "lmstudio".into() };
         assert_eq!(list_price(&local, "glm-5.3-flash", &usage(1, 1, 0, 0), SATURDAY), Some(ListPrice::Free));
+        // Ollama's cloud bills its credits per token, with its own off-peak hours.
+        let glm = ProviderRef::OpenAiCompatible { model: "glm-5.3-flash".into(), profile: "ollama".into() };
+        assert!(!is_local(&glm));
+        assert_eq!(list_cost(&glm, "glm-5.3-flash", &usage(1_000_000, 1_000_000, 1_000_000, 0), SATURDAY), Some(680_000));
+        let flash = ProviderRef::OpenAiCompatible { model: "deepseek-v4.1-flash:1017".into(), profile: "ollama".into() };
+        let out = usage(0, 1_000_000, 0, 0);
+        assert_eq!(list_cost(&flash, "deepseek-v4.1-flash:1017", &out, MONDAY_PEAK), Some(600_000), "07:00 UTC is off-peak on Ollama");
+        assert_eq!(list_cost(&flash, "deepseek-v4.1-flash:1017", &out, MONDAY_AFTERNOON), Some(1_200_000));
         let deepseek = ProviderRef::DeepSeek { model: "deepseek-flash".into() };
         let million_out = usage(0, 1_000_000, 0, 0);
         assert_eq!(list_cost(&deepseek, "deepseek-flash", &million_out, MONDAY_PEAK), Some(1_200_000));
