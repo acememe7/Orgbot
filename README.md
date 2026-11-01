@@ -162,6 +162,27 @@ requirements.
 3. **Start a room** with a goal and a project folder, add your bots, and press
    play. Open **Work** to see the board and **What this has drawn** for usage.
 
+### Say when it's done
+
+A room works like a development team: it keeps going until someone says the
+work is good enough. Give it only "build me a game" and it will keep building,
+testing and raising its own bar, because nothing tells it where to stop. In our
+own room, a tear-gas effect ran past 11 hours while the bots tightened their
+own test, version after version, until the owner set the bar.
+
+So fill in **Done when** next to the goal, in plain words:
+
+- **What must work:** "a player can join, play a full match and see the
+  results screen".
+- **Where and how well:** "runs at 60 fps on this PC on the Low and High
+  presets".
+- **What you will judge yourself:** "I approve the look from screenshots".
+
+The bar becomes the first task's acceptance criteria, which every reviewer
+checks against. When a goal or task has no bar, a coordinator asks you for one
+before the work grows, and the bots do not raise a bar you have set: more
+polish becomes a new task for you to approve.
+
 To let bots deploy, create a private folder at
 `~/.local/share/orgbot/bot-ssh` (mode 0700) with a dedicated bot key and host
 entries. Bots can then ask you for access per task; see

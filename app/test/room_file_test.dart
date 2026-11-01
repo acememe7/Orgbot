@@ -457,6 +457,18 @@ void main() {
     expect(file.toml, contains('Draft the notes'));
   });
 
+  test("the owner's bar for done becomes the first task's acceptance criteria", () {
+    // From the owner of the live room: given no bar, the bots kept raising
+    // their own for over 11 hours.
+    final goal = joinDoneWhen('Build the tear-gas wall', 'Visible on Low and High; under 1 ms');
+    expect(splitDoneWhen(goal), (goal: 'Build the tear-gas wall', doneWhen: 'Visible on Low and High; under 1 ms'));
+    expect(joinDoneWhen('Build it', '  '), 'Build it', reason: 'no bar, no marker');
+    expect(splitDoneWhen('Build it').doneWhen, '');
+    final file = buildRoomFile(room(tasks: [goal]), [BotDef(name: 'a', handle: 'a')]);
+    expect(file.toml, contains('title = "Build the tear-gas wall"'));
+    expect(file.toml, contains('acceptance_criteria = ["Visible on Low and High; under 1 ms"]'));
+  });
+
   group('a device with no CLIs', () {
     /// Signed in the way the app really is: through the stored-credential
     /// API, not by reaching past it.

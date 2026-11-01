@@ -1365,7 +1365,9 @@ class _OrgBotScreenState extends State<OrgBotScreen>
   Future<void> _roomDialog([RoomDef? existing]) async {
     final id = existing?.id ?? genId('room');
     final name = TextEditingController(text: existing?.name);
-    final goal = TextEditingController(text: existing?.goal ?? '');
+    final brief = splitDoneWhen(existing?.goal);
+    final goal = TextEditingController(text: brief.goal);
+    final doneWhen = TextEditingController(text: brief.doneWhen);
     final path = TextEditingController(text: existing?.path);
     var workspace = existing?.workspace.copy() ?? WorkspaceConfig();
     final desktopRoom = _desktopClis;
@@ -1417,6 +1419,21 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                         controller: goal,
                         maxLines: 3,
                         decoration: const InputDecoration(labelText: 'Goal'),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: doneWhen,
+                        maxLines: 3,
+                        decoration: const InputDecoration(
+                          labelText: 'Done when',
+                          hintText:
+                              'A player can finish a match; 60 fps on this PC; '
+                              'I approve the look from screenshots',
+                          helperText:
+                              'What you would accept as finished. Without it the '
+                              'team keeps raising its own bar until you set one.',
+                          helperMaxLines: 2,
+                        ),
                       ),
                       const SizedBox(height: 12),
                       // A spend control, not a deadline. It was fixed at 500,
@@ -1664,12 +1681,14 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                   workspace: workspace,
                   memory: existing?.memory ?? '',
                   name: name.text.trim(),
-                  goal: goal.text.trim(),
+                  goal: joinDoneWhen(goal.text, doneWhen.text),
                   path: path.text.trim(),
                   maxTurns: maxTurns,
                   parallelTurns: parallelTurns,
                   access: access,
-                  tasks: [goal.text.trim()].where((t) => t.isNotEmpty).toList(),
+                  tasks: [joinDoneWhen(goal.text, doneWhen.text)]
+                      .where((t) => t.isNotEmpty)
+                      .toList(),
                   bots: selected.keys.map(RoomSlot.new).toList(),
                 );
                 if (existing == null) {
@@ -1701,6 +1720,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
     await route.completed;
     name.dispose();
     goal.dispose();
+    doneWhen.dispose();
     path.dispose();
   }
 

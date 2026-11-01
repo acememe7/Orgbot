@@ -325,11 +325,14 @@ RoomFile buildRoomFile(
   }
 
   for (final task in room.tasks.where((t) => t.trim().isNotEmpty)) {
+    final bar = splitDoneWhen(task).doneWhen.trim();
     buffer
       ..writeln('[[tasks]]')
       ..writeln('title = ' + _s(_firstLine(task)))
-      ..writeln('brief = ' + _s(task))
-      ..writeln();
+      ..writeln('brief = ' + _s(task));
+    // The owner's bar is what reviewers check the work against.
+    if (bar.isNotEmpty) buffer.writeln('acceptance_criteria = [' + _s(bar) + ']');
+    buffer.writeln();
   }
 
   if (runsClis) {

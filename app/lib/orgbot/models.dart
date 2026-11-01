@@ -239,6 +239,28 @@ enum AccessMode {
       values.firstWhere((mode) => mode.wire == raw, orElse: () => approval);
 }
 
+/// How a room's "done when" bar sits in its goal text.
+///
+/// From the owner of the live room: given no bar, the bots kept raising their
+/// own for over 11 hours. The bar travels in the goal, so every bot reads it,
+/// and becomes the first task's acceptance criteria.
+const doneWhenMarker = '\n\nDone when: ';
+
+/// A goal split into what to do and the bar for done.
+({String goal, String doneWhen}) splitDoneWhen(String? text) {
+  final value = text ?? '';
+  final at = value.indexOf(doneWhenMarker);
+  if (at < 0) return (goal: value, doneWhen: '');
+  return (
+    goal: value.substring(0, at),
+    doneWhen: value.substring(at + doneWhenMarker.length),
+  );
+}
+
+/// A goal with its bar for done, when there is one.
+String joinDoneWhen(String goal, String doneWhen) =>
+    doneWhen.trim().isEmpty ? goal.trim() : '${goal.trim()}$doneWhenMarker${doneWhen.trim()}';
+
 class RoomDef {
   final String id;
   String name;

@@ -162,6 +162,13 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            teammate already has it, ask the owner with ask_owner at once: say exactly what \
            is missing, the command and its error, and what it unblocks. Do not record it \
            as a blocker and wait.\n\
+         - Build to the owner's bar, not past it. The room's goal and each task say what \
+           done looks like; when they do not, a coordinator asks the owner once, with \
+           ask_owner, offering 2-4 concrete bars to choose from, before the work grows. \
+           Once the owner has set or accepted a bar, do not raise it: more polish or a \
+           stricter check is a new task for the owner to approve. When a check the owner \
+           did not ask for keeps failing, bring the owner the result instead of building \
+           another version of the check.\n\
          - This room runs on the owner's own computer. Its GPU, CPU, memory and network \
            are shared with the owner's desktop and apps and are never idle, so never make \
            an idle or exclusive machine a condition for a run: run under normal load and \
@@ -1062,6 +1069,26 @@ mod tests {
         let prompt = system_prompt(&engine, &spec);
         assert!(prompt.contains("ask the owner with ask_owner at once"));
         assert!(prompt.contains("never make an idle or exclusive machine a condition"));
+    }
+
+    #[test]
+    fn bots_build_to_the_owners_bar_and_ask_for_one_when_there_is_none() {
+        // From the owner of the live room: with no bar set, the bots kept
+        // raising their own on a tear-gas effect for over 11 hours.
+        let engine = Engine::new(RoomSpec {
+            name: "bar".into(),
+            goal: "ship".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        let spec = AgentSpec::new("dev", "Dev", ProviderRef::Scripted { script: "test".into() });
+        let prompt = system_prompt(&engine, &spec);
+        assert!(prompt.contains("Build to the owner's bar, not past it"));
+        assert!(prompt.contains("offering 2-4 concrete bars"));
+        assert!(prompt.contains("do not raise it"));
+        assert!(prompt.contains("instead of building another version of the check"));
     }
 
     #[test]
