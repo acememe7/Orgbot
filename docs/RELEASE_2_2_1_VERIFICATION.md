@@ -175,6 +175,14 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   sender, who is told why, and a wait on work that already waits on the
   waiting task is refused with the reason. A circle that forms another way
   is still found and broken.
+- **Room tools keep answering during workspace copies (fourteenth
+  rebuild, 1 November).** At 18:01 four agent-CLI bots started together,
+  two of them (@iris and @dennis) new, so each needed a full copy of the
+  project. Every running turn is driven by one task, and the copy ran as a
+  blocking call inside it: while it ran no bot's room tools answered,
+  @iris's Claude Code gave up on them after 30 seconds and @mira lost them
+  for a while. The copy before a turn and the merge after it now run on
+  the blocking pool.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -202,7 +210,8 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   with reminders and repeated-call notes, long notes kept whole with a
   note to the author, and the ask-the-owner and shared-desktop rules. 1,001 at the twelfth,
   adding the network hint. 1,002 at the thirteenth, adding circular
-  waits refused at the source.
+  waits refused at the source. 1,002 again at the fourteenth; the
+  workspace copy moving off the shared task has no test of its own.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
@@ -217,14 +226,14 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   (the sixth adds what each disputed-findings answer does, the eighth the
   estimated and local cost wording); 412 at the ninth, adding every view
   taking who is working from the room, and again at the tenth and eleventh
-  (the app is unchanged), and at the twelfth and thirteenth.
+  (the app is unchanged), and at the twelfth to fourteenth.
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 92 passed at the thirteenth, twelfth and eleventh (a symlink leading
+- Workspace sandbox helper: 92 passed at the fourteenth, thirteenth, twelfth and eleventh (a symlink leading
   outside is left out and work goes on; one replacing project files still
   stops), tenth, ninth, eighth, seventh, sixth,
   fifth and fourth 1 November rebuilds,
@@ -244,11 +253,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`2b272ef5311b2cd46834ea92aa896c3676de0a8e7b4952709e97df01852b207d`.
+`8c364cc74ef430761577fdd76e8e4141faa3ae9a51ad2d5dce2ec9dabe39305a`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `80ab4f8a39e16007f4c5604153bcb834b7d746394f963f1c41d9e2918ec1ef11` |
+| orgbots_2.2.1_amd64.deb | `c45ddf80bf804459d4400f184211711a5fc1a94e9f9a431ea623e6e6e7ca9277` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -370,6 +379,16 @@ unchanged). Signed archive revision
 `ad2e01481f350fc30c661b934c2127f180ad0077` replaces only
 `orgbots_2.2.1_amd64.deb`;
 [Pages run 41328436236](https://github.com/acememe7/Orgbot/actions/runs/41328436236)
+published it (package
+`80ab4f8a39e16007f4c5604153bcb834b7d746394f963f1c41d9e2918ec1ef11`, engine
+`2b272ef5311b2cd46834ea92aa896c3676de0a8e7b4952709e97df01852b207d`).
+
+The fourteenth rebuild copies and merges an agent-CLI bot's workspace off
+the room's shared task (source `a359ca1`; engine changed, Flutter bundle
+and sandbox helper rebuilt unchanged). Signed archive revision
+`e025a08b0136a9367b9f3b359c9d015fa29df1fb` replaces only
+`orgbots_2.2.1_amd64.deb`;
+[Pages run 41330930416](https://github.com/acememe7/Orgbot/actions/runs/41330930416)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits

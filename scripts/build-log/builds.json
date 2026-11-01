@@ -551,5 +551,22 @@
    "Sandbox helper 92 passed",
    "Package 80ab4f8a"
   ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r14",
+  "when": "1 Nov 18:19",
+  "day": "2026-11-01",
+  "title": "Room tools that keep answering",
+  "what": "Copying the project for a bot's turn, and merging its work after, no longer holds up the room, so every bot's room tools keep answering while a new bot's copy is made.",
+  "why": "At 18:01 two new bots needed full project copies at once; while they were made no bot's room tools answered, @iris's Claude Code timed out after 30 seconds, and @mira lost its room tools for a while.",
+  "commit": "a359ca1",
+  "facts": [
+   "Rust 1,002 passed",
+   "App 412 passed",
+   "Sandbox helper 92 passed",
+   "Package c45ddf80"
+  ]
  }
 ]
