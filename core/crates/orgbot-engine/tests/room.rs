@@ -647,7 +647,23 @@ fn an_offer_waits_for_a_busy_recipient_to_have_a_turn_before_it_can_expire() {
         "an offer its recipient has not yet been shown must not run out"
     );
 
-    // Its next turn shows it the offer, and from then the timeout runs, however
+    // Its next turn shows it the offer. From the live room: @astra did the
+    // review she was offered in that very turn, without accepting first, and
+    // the offer expired eight seconds after she posted the result. The turn
+    // that shows an offer keeps it open, however long it runs.
+    f.apply(Command::BeginTurn { agent: worker2 });
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    f.apply(Command::KeepAlive { agent: worker2 });
+    f.apply(Command::Tick {
+        now: Timestamp::now(),
+    });
+    assert_eq!(
+        f.engine.handoff(handoff).unwrap().state,
+        HandoffState::Offered,
+        "the turn that shows an offer is the bot's chance to act on it"
+    );
+
+    // A further turn without an answer: from then the timeout runs, however
     // busy the bot stays.
     f.apply(Command::BeginTurn { agent: worker2 });
     f.apply(Command::KeepAlive { agent: worker2 });

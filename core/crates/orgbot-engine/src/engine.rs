@@ -135,6 +135,13 @@ pub struct Engine {
     /// restart never got to answer, so after one every offer counts as unread.
     #[serde(skip)]
     turn_began: BTreeMap<AgentId, Timestamp>,
+    /// When each pending offer was first shown to its recipient: the start of
+    /// the first turn it began after the offer. Not saved, like `turn_began`.
+    #[serde(skip)]
+    offer_shown: BTreeMap<HandoffId, Timestamp>,
+    /// When each bot's latest turn ended, recorded or failed. Not saved.
+    #[serde(skip)]
+    turn_ended: BTreeMap<AgentId, Timestamp>,
     /// When a bot was last shown the tasks others added during its turn, so
     /// the same tasks never stop it twice. Not saved, like `turn_began`.
     #[serde(skip)]
@@ -439,6 +446,8 @@ impl Engine {
             error_streak: BTreeMap::new(),
             fault_retry: BTreeMap::new(),
             turn_began: BTreeMap::new(),
+            offer_shown: BTreeMap::new(),
+            turn_ended: BTreeMap::new(),
             board_shown: BTreeMap::new(),
             created_by: BTreeMap::new(),
             pending_removals: BTreeMap::new(),
@@ -2099,16 +2108,26 @@ impl Engine {
                 Ok(Vec::new())
             }
             Command::BeginTurn { agent } => {
-                self.turn_began.insert(agent, Timestamp::now());
+                let now = Timestamp::now();
+                self.turn_began.insert(agent, now);
+                for id in self.offers_for(agent) {
+                    self.offer_shown.entry(id).or_insert(now);
+                }
                 Ok(Vec::new())
             }
-            Command::RecordTurn { agent, usage } => self.record_turn(agent, usage),
+            Command::RecordTurn { agent, usage } => {
+                self.turn_ended.insert(agent, Timestamp::now());
+                self.record_turn(agent, usage)
+            }
             Command::ReportError {
                 agent,
                 task,
                 error,
                 permanent,
-            } => self.report_error(agent, task, error, permanent),
+            } => {
+                self.turn_ended.insert(agent, Timestamp::now());
+                self.report_error(agent, task, error, permanent)
+            }
             Command::Tick { now } => self.tick(now),
         };
         // Any command may have moved a task, and a task moving can free
@@ -4062,6 +4081,14 @@ impl Engine {
             .map(|h| h.id)
             .collect::<Vec<_>>();
         for id in self.offers_for(agent).into_iter().chain(taken_on) {
+            // From the live room: @astra was offered a review, did it in the
+            // turn that showed her the offer without accepting first, and the
+            // offer expired eight seconds after she posted the result. The
+            // turn that first shows an offer is the bot's chance to act on
+            // it, so the offer is held while that turn runs; once it ends
+            // without an answer, the timeout runs as before.
+            let running = began.is_some_and(|began| self.turn_ended.get(&agent).is_none_or(|ended| *ended < began));
+            let shown_this_turn = running && self.offer_shown.get(&id) == began.as_ref();
             let Some(handoff) = self.handoffs.get_mut(&id) else {
                 continue;
             };
@@ -4073,7 +4100,7 @@ impl Engine {
             };
             // In the same millisecond as the turn began, it may or may not
             // have been part of that turn: hold it, at the cost of one more.
-            if began.is_none_or(|began| came >= began) {
+            if began.is_none_or(|began| came >= began) || (shown_this_turn && handoff.state == HandoffState::Offered) {
                 handoff.hold_open(now);
             }
         }
@@ -4443,6 +4470,8 @@ impl Engine {
 
     /// Expire stale handoffs and look for deadlocks.
     fn tick(&mut self, now: Timestamp) -> Result<Vec<EventEnvelope>> {
+        let handoffs = &self.handoffs;
+        self.offer_shown.retain(|id, _| handoffs.get(id).is_some_and(|h| h.state == HandoffState::Offered));
         // From the live room: a bot accepted an assist, asked the owner what it
         // needed to finish, and the assist ran out while the owner had the
         // question. The sender offered it again, and again. Until the answer
