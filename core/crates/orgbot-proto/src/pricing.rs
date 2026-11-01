@@ -136,7 +136,7 @@ pub fn list_price(provider: &ProviderRef, model: &str, usage: &TokenUsage, at: T
         + u64::from(usage.cache_write_tokens))
         / u64::from(usage.calls.max(1));
     let mut rates = match listing.long {
-        Some((threshold, long)) if prompt_per_call > u64::from(threshold) => long,
+        Some((threshold, long)) if counts_requests(provider) && prompt_per_call > u64::from(threshold) => long,
         _ => listing.rates,
     };
     if listing.model.starts_with("deepseek") && deepseek_off_peak(at) {
@@ -150,6 +150,21 @@ pub fn list_cost(provider: &ProviderRef, model: &str, usage: &TokenUsage, at: Ti
     match list_price(provider, model, usage, at)? {
         ListPrice::Paid(rates) => Some(rates.cost(usage)),
         ListPrice::Free => Some(0),
+    }
+}
+
+/// Whether `usage.calls` counts the model requests behind the tokens.
+///
+/// From the live room: Codex, Claude Code, Grok and Antigravity report one
+/// total for a turn of many requests, so a turn counted as one call of a
+/// million tokens and every turn was billed at the long-context rate,
+/// roughly doubling @astra's cost. Their requests' sizes are unknown, so
+/// they get the standard rate; a request past the threshold inside such a
+/// turn is priced low. OpenCode reports each request.
+fn counts_requests(provider: &ProviderRef) -> bool {
+    match provider {
+        ProviderRef::CliAgent { cli, .. } => *cli == crate::agent::CliKind::OpenCode,
+        _ => true,
     }
 }
 
@@ -220,7 +235,7 @@ mod tests {
         // 1M in, 100k out, 2M cache read, 200k cache write at $4 / $20 / $0.20 / $5.
         let cost = list_cost(&opus, "claude-opus-5-5", &usage(1_000_000, 100_000, 2_000_000, 200_000), SATURDAY);
         assert_eq!(cost, Some(4_000_000 + 2_000_000 + 400_000 + 1_000_000));
-        let astra = cli(CliKind::Codex, "gpt-6-astra");
+        let astra = ProviderRef::OpenAiCompatible { model: "gpt-6-astra".into(), profile: "openai".into() };
         let mut ten_calls = usage(1_000_000, 0, 0, 0);
         ten_calls.calls = 10;
         assert_eq!(list_cost(&astra, "gpt-6-astra", &ten_calls, SATURDAY), Some(10_000_000));
@@ -229,13 +244,20 @@ mod tests {
             Some(20_000_000),
             "one call past 272k is billed at the long-context rate"
         );
+        // An agent CLI's turn is many requests reported as one.
+        let codex = cli(CliKind::Codex, "gpt-6-astra");
+        assert_eq!(list_cost(&codex, "gpt-6-astra", &usage(1_000_000, 0, 0, 0), SATURDAY), Some(10_000_000));
+        let haiku = cli(CliKind::Claude, "claude-haiku-5-5");
+        assert_eq!(list_cost(&haiku, "claude-haiku-5-5", &usage(0, 0, 1_000_000, 0), SATURDAY), Some(10_000));
+        let opencode = cli(CliKind::OpenCode, "gpt-6-astra");
+        assert_eq!(list_cost(&opencode, "gpt-6-astra", &usage(1_000_000, 0, 0, 0), SATURDAY), Some(20_000_000), "OpenCode reports each request");
         let grok = cli(CliKind::Grok, "grok-4.7");
         assert_eq!(list_cost(&grok, "", &usage(0, 1_000_000, 0, 0), SATURDAY), Some(6_000_000), "the configured model stands in");
     }
 
     #[test]
     fn long_prompts_local_models_and_deepseek_hours_are_priced_as_listed() {
-        let grok = cli(CliKind::Grok, "grok-4.7");
+        let grok = ProviderRef::OpenAiCompatible { model: "grok-4.7".into(), profile: "xai".into() };
         assert_eq!(list_cost(&grok, "grok-4.7", &usage(300_000, 0, 0, 0), SATURDAY), Some(1_200_000), "past 200k, $4 per million");
         let local = ProviderRef::OpenAiCompatible { model: "glm-5.3-flash".into(), profile: "ollama".into() };
         assert_eq!(list_price(&local, "glm-5.3-flash", &usage(1, 1, 0, 0), SATURDAY), Some(ListPrice::Free));
