@@ -488,7 +488,7 @@
   "kind": "rebuild",
   "line": "2.2.1",
   "tag": "2.2.1 r10",
-  "when": "1 Nov 17:12",
+  "when": "1 Nov 16:58",
   "day": "2026-11-01",
   "title": "Wrap up before the limit",
   "what": "Two model calls before a turn hits its step limit, the bot is told how many are left and to record its result: finish or fail an accepted handoff, add its artifact, or post what it found.",
