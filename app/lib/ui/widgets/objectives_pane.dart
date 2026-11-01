@@ -470,7 +470,56 @@ class _NeedsYouPanelState extends State<NeedsYouPanel> {
   }
 }
 
-class _DecisionAnswerCard extends StatelessWidget {
+/// A decision card's parts, read from the bot's own wording: who asked, how
+/// risky it was rated, a short summary, and the full text for Details.
+class DecisionParts {
+  const DecisionParts({
+    required this.asker,
+    required this.risk,
+    required this.summary,
+    required this.details,
+  });
+
+  final String? asker;
+  final String? risk;
+  final String summary;
+  final String details;
+
+  static DecisionParts of(PendingDecision decision) {
+    final text = decision.because.trim();
+    final asker = RegExp(r'^@([A-Za-z0-9_.-]+)').firstMatch(text)?.group(1);
+    final risk = RegExp(
+      r'rated (regular|risky|critical)',
+    ).firstMatch(text)?.group(1);
+    var summary = text.split('\n').first;
+    if (decision.title.isNotEmpty) {
+      summary = summary
+          .replaceAll(' for "${decision.title}"', '')
+          .replaceAll('"${decision.title}"', 'this task');
+    }
+    if (asker != null) {
+      summary = summary.replaceFirst('@$asker ', '');
+    }
+    summary = summary.replaceFirst(
+      RegExp(
+        r' \((inspect|change|release|destroy|spend), rated (regular|risky|critical)\)',
+      ),
+      '',
+    );
+    summary = summary.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (asker != null && summary.isNotEmpty) {
+      summary = summary[0].toUpperCase() + summary.substring(1);
+    }
+    return DecisionParts(
+      asker: asker,
+      risk: risk,
+      summary: summary,
+      details: text,
+    );
+  }
+}
+
+class _DecisionAnswerCard extends StatefulWidget {
   const _DecisionAnswerCard({
     super.key,
     required this.decision,
@@ -487,78 +536,202 @@ class _DecisionAnswerCard extends StatelessWidget {
   final void Function(String chosen, String note) onAnswer;
 
   @override
+  State<_DecisionAnswerCard> createState() => _DecisionAnswerCardState();
+}
+
+/// From the live room: cards repeated the task title in their body, ran six
+/// to twelve lines of the bot's wording, buried the risk rating, and gave
+/// every answer the same weight; the owner picked the wrong one once. The
+/// card now leads with who asked, the risk and a short summary, keeps the
+/// full text under Details, marks the recommended answer and any that takes
+/// effect at once, and keeps a custom answer one tap away.
+class _DecisionAnswerCardState extends State<_DecisionAnswerCard> {
+  bool _details = false;
+  late bool _custom = widget.response.text.isNotEmpty;
+
+  @override
   Widget build(BuildContext context) {
+    final decision = widget.decision;
+    final busy = widget.busy;
     final scheme = Theme.of(context).colorScheme;
+    final parts = DecisionParts.of(decision);
+    final riskColor = switch (parts.risk) {
+      'critical' => scheme.error,
+      'risky' => Colors.amber.shade400,
+      _ => scheme.onSurfaceVariant,
+    };
+    Widget chip(String label, {Color? color}) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: (color ?? scheme.onSurfaceVariant).withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          color: color ?? scheme.onSurfaceVariant,
+        ),
+      ),
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (decision.task.isNotEmpty) ...[
           Text(
             decision.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
           ),
-          const SizedBox(height: 3),
+          const SizedBox(height: 5),
         ],
-        Text(
-          decision.because,
-          style: const TextStyle(fontSize: 12.5, height: 1.35),
+        if (parts.asker != null || parts.risk != null) ...[
+          Wrap(
+            spacing: 6,
+            runSpacing: 4,
+            children: [
+              if (parts.asker != null) chip('@${parts.asker}'),
+              if (parts.risk != null)
+                chip('Rated ${parts.risk}', color: riskColor),
+            ],
+          ),
+          const SizedBox(height: 6),
+        ],
+        AnimatedSize(
+          duration: motionDuration(context, 200),
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.topLeft,
+          child: Text(
+            _details ? parts.details : parts.summary,
+            maxLines: _details ? null : 3,
+            overflow: _details ? null : TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 12.5, height: 1.35),
+          ),
         ),
+        if (parts.details != parts.summary)
+          TextButton(
+            key: ValueKey('decision-details-${decision.id}'),
+            style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+            ),
+            onPressed: () => setState(() => _details = !_details),
+            child: Text(
+              _details ? 'Hide details' : 'Details',
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
         if (decision.options.isNotEmpty) ...[
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
           Wrap(
             spacing: 8,
             runSpacing: 6,
             children: [
               for (final option in decision.options)
-                OutlinedButton(
-                  onPressed: busy ? null : () => onAnswer(option, ''),
-                  style: OutlinedButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
+                if (option.contains('(Recommended)'))
+                  FilledButton.icon(
+                    onPressed: busy ? null : () => widget.onAnswer(option, ''),
+                    style: FilledButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    icon: const Icon(Icons.star_rounded, size: 15),
+                    label: Text(option),
+                  )
+                else
+                  OutlinedButton.icon(
+                    onPressed: busy ? null : () => widget.onAnswer(option, ''),
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    icon: decision.grantsWith == option
+                        ? Icon(
+                            Icons.lock_outline,
+                            size: 14,
+                            semanticLabel: 'Asks you to confirm',
+                            color: riskColor,
+                          )
+                        : const SizedBox.shrink(),
+                    label: Text(option),
                   ),
-                  child: Text(option),
+              if (busy)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    'Sending…',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
                 ),
             ],
           ),
         ],
-        const SizedBox(height: 8),
-        ValueListenableBuilder<TextEditingValue>(
-          valueListenable: response,
-          builder: (context, value, _) => Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: response,
-                  enabled: !busy,
-                  maxLength: 1000,
-                  minLines: 1,
-                  maxLines: 3,
-                  decoration: InputDecoration(
-                    labelText: 'Custom answer',
-                    isDense: true,
-                    counterText: '',
-                    border: const OutlineInputBorder(),
-                    focusedBorder: OutlineInputBorder(
-                      borderSide: BorderSide(color: scheme.primary),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              FilledButton(
-                onPressed: busy || value.text.trim().isEmpty
-                    ? null
-                    : () => onAnswer('Custom answer', value.text.trim()),
-                child: Text(busy ? 'Sending…' : 'Send'),
-              ),
-            ],
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            key: ValueKey('decision-custom-${decision.id}'),
+            style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+            ),
+            onPressed: busy ? null : () => setState(() => _custom = !_custom),
+            child: Text(
+              _custom ? 'Hide your own answer' : 'Answer in your own words',
+              style: const TextStyle(fontSize: 12),
+            ),
           ),
         ),
-        if (busy || retryReady)
+        AnimatedSize(
+          duration: motionDuration(context, 200),
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.topLeft,
+          child: !_custom
+              ? const SizedBox(width: double.infinity)
+              : ValueListenableBuilder<TextEditingValue>(
+                  valueListenable: widget.response,
+                  builder: (context, value, _) => Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: widget.response,
+                          enabled: !busy,
+                          maxLength: 1000,
+                          minLines: 1,
+                          maxLines: 3,
+                          decoration: InputDecoration(
+                            labelText: 'Custom answer',
+                            isDense: true,
+                            counterText: '',
+                            border: const OutlineInputBorder(),
+                            focusedBorder: OutlineInputBorder(
+                              borderSide: BorderSide(color: scheme.primary),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        onPressed: busy || value.text.trim().isEmpty
+                            ? null
+                            : () => widget.onAnswer(
+                                'Custom answer',
+                                value.text.trim(),
+                              ),
+                        child: Text(busy ? 'Sending…' : 'Send'),
+                      ),
+                    ],
+                  ),
+                ),
+        ),
+        if (busy || widget.retryReady)
           Padding(
             padding: const EdgeInsets.only(top: 4),
             child: Text(
-              retryReady
+              widget.retryReady
                   ? 'No update arrived. Choose an answer to retry.'
                   : 'Answer sent. Waiting for the room to update.',
               style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant),
@@ -683,20 +856,20 @@ class _ObjectiveTileState extends State<_ObjectiveTile> {
                     ),
                   ),
                 ],
-                // Said outright on every card. Not knowing this was the thing
-                // that made the old board tiring.
-                const SizedBox(height: 7),
-                Text(
-                  card.needsOperator ? 'Needs you: YES' : 'Needs you: no',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.4,
-                    color: card.needsOperator
-                        ? scheme.error
-                        : scheme.onSurfaceVariant.withValues(alpha: 0.75),
+                // Said only when it is so: "Needs you: no" on every card was
+                // noise, and the summary above already says nothing needs you.
+                if (card.needsOperator) ...[
+                  const SizedBox(height: 7),
+                  Text(
+                    'Waiting on you',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.4,
+                      color: scheme.error,
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
@@ -715,7 +888,7 @@ class _ObjectiveTileState extends State<_ObjectiveTile> {
                   Text(
                     _open
                         ? 'Hide the work behind it'
-                        : '${card.records.length} records behind it',
+                        : '${card.records.length} ${card.records.length == 1 ? 'task' : 'tasks'} behind it',
                     style: const TextStyle(fontSize: 12),
                   ),
                 ],
@@ -1000,26 +1173,27 @@ class _ViewPicker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: [
-          for (final view in WorkView.values)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: _Chip(
-                label: '${view.label} ${_count(view)}',
-                selected: view == current,
-                // The one view that means something is expected of you gets
-                // the only colour on the row.
-                tone: view == WorkView.needsMe && counts.needsYou > 0
-                    ? scheme.error
-                    : null,
-                onTap: () => onPick(view),
-              ),
+    // Wrapped, not scrolled sideways: at panel width the last chips were cut
+    // off at the edge.
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final view in WorkView.values)
+          Padding(
+            padding: EdgeInsets.zero,
+            child: _Chip(
+              label: '${view.label} ${_count(view)}',
+              selected: view == current,
+              // The one view that means something is expected of you gets
+              // the only colour on the row.
+              tone: view == WorkView.needsMe && counts.needsYou > 0
+                  ? scheme.error
+                  : null,
+              onTap: () => onPick(view),
             ),
-        ],
-      ),
+          ),
+      ],
     );
   }
 }
@@ -1260,10 +1434,17 @@ class _SpendStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
+    // Folded by default: token counts in the billions, "partial usage" and
+    // "cost unknown" filled the panel and answered no question the owner had
+    // mid-run. One tap opens them.
+    return Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        key: const ValueKey('usage-fold'),
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: EdgeInsets.zero,
+        expandedCrossAxisAlignment: CrossAxisAlignment.start,
+        title: Text(
           'What this has drawn',
           style: TextStyle(
             fontSize: 11,
@@ -1272,93 +1453,33 @@ class _SpendStrip extends StatelessWidget {
             color: scheme.onSurfaceVariant,
           ),
         ),
-        const SizedBox(height: 6),
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Room · ${_grouped(total.turns)} turns',
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              Text(
-                _tokens(
-                  known:
-                      total.usageKnown ||
-                      total.inputTokens +
-                              total.outputTokens +
-                              total.cacheReadTokens +
-                              total.cacheWriteTokens >
-                          0,
-                  input: total.inputTokens,
-                  output: total.outputTokens,
-                  read: total.cacheReadTokens,
-                  write: total.cacheWriteTokens,
-                ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
-              ),
-              Text(
-                _metering(
-                  known:
-                      total.usageKnown ||
-                      total.inputTokens +
-                              total.outputTokens +
-                              total.cacheReadTokens +
-                              total.cacheWriteTokens >
-                          0,
-                  complete: total.usageComplete,
-                ),
-                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
-              ),
-              Text(
-                _cost(
-                  total.actualApiCostMicrousd,
-                  total.apiEquivalentCostMicrousd,
-                ),
-                style: const TextStyle(fontSize: 12),
-              ),
-            ],
-          ),
-        ),
-        for (final account in spend)
+        children: [
+          const SizedBox(height: 6),
           Padding(
-            padding: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.symmetric(vertical: 4),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        account.backend,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    Text(
-                      '${_grouped(account.turns)} turns',
-                      style: TextStyle(color: scheme.onSurfaceVariant),
-                    ),
-                  ],
+                Text(
+                  'Room · ${_grouped(total.turns)} turns',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
                 Text(
                   _tokens(
                     known:
-                        account.usageKnown ||
-                        account.inputTokens +
-                                account.outputTokens +
-                                account.cacheReadTokens +
-                                account.cacheWriteTokens >
+                        total.usageKnown ||
+                        total.inputTokens +
+                                total.outputTokens +
+                                total.cacheReadTokens +
+                                total.cacheWriteTokens >
                             0,
-                    input: account.inputTokens,
-                    output: account.outputTokens,
-                    read: account.cacheReadTokens,
-                    write: account.cacheWriteTokens,
+                    input: total.inputTokens,
+                    output: total.outputTokens,
+                    read: total.cacheReadTokens,
+                    write: total.cacheWriteTokens,
                   ),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
@@ -1370,13 +1491,13 @@ class _SpendStrip extends StatelessWidget {
                 Text(
                   _metering(
                     known:
-                        account.usageKnown ||
-                        account.inputTokens +
-                                account.outputTokens +
-                                account.cacheReadTokens +
-                                account.cacheWriteTokens >
+                        total.usageKnown ||
+                        total.inputTokens +
+                                total.outputTokens +
+                                total.cacheReadTokens +
+                                total.cacheWriteTokens >
                             0,
-                    complete: account.usageComplete,
+                    complete: total.usageComplete,
                   ),
                   style: TextStyle(
                     fontSize: 11,
@@ -1385,84 +1506,152 @@ class _SpendStrip extends StatelessWidget {
                 ),
                 Text(
                   _cost(
-                    account.actualApiCostMicrousd,
-                    account.apiEquivalentCostMicrousd,
+                    total.actualApiCostMicrousd,
+                    total.apiEquivalentCostMicrousd,
                   ),
                   style: const TextStyle(fontSize: 12),
                 ),
               ],
             ),
           ),
-        if (agents.isNotEmpty) const SizedBox(height: 6),
-        for (final agent in agents)
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        agent.handle,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 12),
+          for (final account in spend)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          account.backend,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
+                      Text(
+                        '${_grouped(account.turns)} turns',
+                        style: TextStyle(color: scheme.onSurfaceVariant),
+                      ),
+                    ],
+                  ),
+                  Text(
+                    _tokens(
+                      known:
+                          account.usageKnown ||
+                          account.inputTokens +
+                                  account.outputTokens +
+                                  account.cacheReadTokens +
+                                  account.cacheWriteTokens >
+                              0,
+                      input: account.inputTokens,
+                      output: account.outputTokens,
+                      read: account.cacheReadTokens,
+                      write: account.cacheWriteTokens,
                     ),
-                    Text(
-                      '${_grouped(agent.turns)} turns',
-                      style: TextStyle(color: scheme.onSurfaceVariant),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: scheme.onSurfaceVariant,
                     ),
-                  ],
-                ),
-                Text(
-                  _tokens(
-                    known:
-                        agent.usageKnown ||
-                        agent.inputTokens +
-                                agent.outputTokens +
-                                agent.cacheReadTokens +
-                                agent.cacheWriteTokens >
-                            0,
-                    input: agent.inputTokens,
-                    output: agent.outputTokens,
-                    read: agent.cacheReadTokens,
-                    write: agent.cacheWriteTokens,
                   ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: scheme.onSurfaceVariant,
+                  Text(
+                    _metering(
+                      known:
+                          account.usageKnown ||
+                          account.inputTokens +
+                                  account.outputTokens +
+                                  account.cacheReadTokens +
+                                  account.cacheWriteTokens >
+                              0,
+                      complete: account.usageComplete,
+                    ),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
-                ),
-                Text(
-                  _metering(
-                    known:
-                        agent.usageKnown ||
-                        agent.inputTokens +
-                                agent.outputTokens +
-                                agent.cacheReadTokens +
-                                agent.cacheWriteTokens >
-                            0,
-                    complete: agent.usageComplete,
+                  Text(
+                    _cost(
+                      account.actualApiCostMicrousd,
+                      account.apiEquivalentCostMicrousd,
+                    ),
+                    style: const TextStyle(fontSize: 12),
                   ),
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-                Text(
-                  _cost(
-                    agent.actualApiCostMicrousd,
-                    agent.apiEquivalentCostMicrousd,
-                  ),
-                  style: const TextStyle(fontSize: 12),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-      ],
+          if (agents.isNotEmpty) const SizedBox(height: 6),
+          for (final agent in agents)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          agent.handle,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      Text(
+                        '${_grouped(agent.turns)} turns',
+                        style: TextStyle(color: scheme.onSurfaceVariant),
+                      ),
+                    ],
+                  ),
+                  Text(
+                    _tokens(
+                      known:
+                          agent.usageKnown ||
+                          agent.inputTokens +
+                                  agent.outputTokens +
+                                  agent.cacheReadTokens +
+                                  agent.cacheWriteTokens >
+                              0,
+                      input: agent.inputTokens,
+                      output: agent.outputTokens,
+                      read: agent.cacheReadTokens,
+                      write: agent.cacheWriteTokens,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                  Text(
+                    _metering(
+                      known:
+                          agent.usageKnown ||
+                          agent.inputTokens +
+                                  agent.outputTokens +
+                                  agent.cacheReadTokens +
+                                  agent.cacheWriteTokens >
+                              0,
+                      complete: agent.usageComplete,
+                    ),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                  Text(
+                    _cost(
+                      agent.actualApiCostMicrousd,
+                      agent.apiEquivalentCostMicrousd,
+                    ),
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

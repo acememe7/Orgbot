@@ -483,8 +483,7 @@ class Progress {
   double? get fraction => total > 0 ? done / total : null;
 
   /// `7 / 10 stages`, or a plain phrase when nothing is broken down yet.
-  String get label =>
-      total == 0 ? 'not broken down yet' : '$done / $total stages';
+  String get label => total == 0 ? 'no steps yet' : '$done / $total stages';
 
   factory Progress.fromJson(Map<String, Object?> json) => Progress(
     done: (json['done'] as num?)?.toInt() ?? 0,
@@ -514,7 +513,7 @@ class ObjectiveCard {
   /// How far along.
   final Progress progress;
 
-  /// A short state line: "in progress", "internal remediation", "needs you".
+  /// A short state line: "in progress", "waiting on the team", "needs you".
   final String status;
 
   /// What is holding it up right now, if anything.

@@ -179,7 +179,7 @@ void main() {
     test('progress with nothing broken down says so', () {
       const nothing = Progress(done: 0, total: 0);
       expect(nothing.fraction, isNull);
-      expect(nothing.label, 'not broken down yet');
+      expect(nothing.label, 'no steps yet');
     });
 
     test(
@@ -308,8 +308,8 @@ void main() {
       ]);
       await tester.pumpWidget(wrap(store));
 
-      expect(find.text('Needs you: YES'), findsOneWidget);
-      expect(find.text('Needs you: no'), findsOneWidget);
+      expect(find.text('Waiting on you'), findsOneWidget);
+      expect(find.text('Needs you: no'), findsNothing, reason: 'said only when it is so');
     });
 
     testWidgets('the records behind an objective are one tap away', (
@@ -320,8 +320,8 @@ void main() {
       ]);
       await tester.pumpWidget(wrap(store));
 
-      expect(find.text('2 records behind it'), findsNWidgets(2));
-      await tester.tap(find.text('2 records behind it').first);
+      expect(find.text('2 tasks behind it'), findsNWidgets(2));
+      await tester.tap(find.text('2 tasks behind it').first);
       await tester.pumpAndSettle();
       expect(find.text('Hide the work behind it'), findsOneWidget);
     });
@@ -409,47 +409,57 @@ void _answerTests() {
       );
     });
 
-    testWidgets('an answer that grants access is confirmed, others stay one tap', (
-      tester,
-    ) async {
-      // From the live room: a bot reached a server it should not have, and
-      // the owner approved a workspace action by mistake with one tap.
-      final client = _Silent();
-      final store = RoomStore(client);
-      final digest = digestJson(needsYou: 1);
-      final pending = (digest['needs_you'] as List).single as Map<String, Object?>;
-      pending['because'] = '@ops asks to use the bot server key: deploy';
-      pending['options'] = ['Allow server access for this task', 'Deny'];
-      pending['grants_with'] = 'Allow server access for this task';
-      store.restore([
-        {'type': 'digest', 'digest': digest},
-      ]);
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(body: ObjectivesPane(store: store)),
-        ),
-      );
+    testWidgets(
+      'an answer that grants access is confirmed, others stay one tap',
+      (tester) async {
+        // From the live room: a bot reached a server it should not have, and
+        // the owner approved a workspace action by mistake with one tap.
+        final client = _Silent();
+        final store = RoomStore(client);
+        final digest = digestJson(needsYou: 1);
+        final pending =
+            (digest['needs_you'] as List).single as Map<String, Object?>;
+        pending['because'] = '@ops asks to use the bot server key: deploy';
+        pending['options'] = ['Allow server access for this task', 'Deny'];
+        pending['grants_with'] = 'Allow server access for this task';
+        store.restore([
+          {'type': 'digest', 'digest': digest},
+        ]);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(body: ObjectivesPane(store: store)),
+          ),
+        );
 
-      await tester.tap(find.text('Allow server access for this task'));
-      await tester.pumpAndSettle();
-      expect(find.text('Confirm this answer?'), findsOneWidget);
-      expect(client.answered, isEmpty, reason: 'nothing is sent before confirming');
-      await tester.tap(find.byKey(const ValueKey('grant-cancel')));
-      await tester.pumpAndSettle();
-      expect(client.answered, isEmpty, reason: 'cancelling sends nothing');
+        await tester.tap(find.text('Allow server access for this task'));
+        await tester.pumpAndSettle();
+        expect(find.text('Confirm this answer?'), findsOneWidget);
+        expect(
+          client.answered,
+          isEmpty,
+          reason: 'nothing is sent before confirming',
+        );
+        await tester.tap(find.byKey(const ValueKey('grant-cancel')));
+        await tester.pumpAndSettle();
+        expect(client.answered, isEmpty, reason: 'cancelling sends nothing');
 
-      await tester.tap(find.text('Allow server access for this task'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('grant-confirm')));
-      await tester.pumpAndSettle();
-      expect(client.answered.single.chosen, 'Allow server access for this task');
-    });
+        await tester.tap(find.text('Allow server access for this task'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('grant-confirm')));
+        await tester.pumpAndSettle();
+        expect(
+          client.answered.single.chosen,
+          'Allow server access for this task',
+        );
+      },
+    );
 
     testWidgets('a refusal of access is sent at once', (tester) async {
       final client = _Silent();
       final store = RoomStore(client);
       final digest = digestJson(needsYou: 1);
-      final pending = (digest['needs_you'] as List).single as Map<String, Object?>;
+      final pending =
+          (digest['needs_you'] as List).single as Map<String, Object?>;
       pending['options'] = ['Allow server access for this task', 'Deny'];
       pending['grants_with'] = 'Allow server access for this task';
       store.restore([
@@ -480,6 +490,9 @@ void _answerTests() {
         ),
       );
 
+      // A custom answer is one tap away, not open under every card.
+      await tester.tap(find.text('Answer in your own words'));
+      await tester.pumpAndSettle();
       final customAnswer = find.byWidgetPredicate(
         (widget) =>
             widget is TextField &&
@@ -770,6 +783,9 @@ void _viewTests() {
           250,
           scrollable: find.byType(Scrollable).first,
         );
+        // Folded by default; one tap opens it.
+        await tester.tap(find.text('What this has drawn'));
+        await tester.pumpAndSettle();
         expect(find.text('Room · ≥4,294,967,295 turns'), findsOneWidget);
 
         expect(
@@ -882,7 +898,7 @@ void _graphTests() {
       final store = withBoard();
       await tester.pumpWidget(wrap(store));
 
-      await tester.tap(find.text('2 records behind it'));
+      await tester.tap(find.text('2 tasks behind it'));
       await tester.pumpAndSettle();
 
       expect(find.text('rebuild'), findsOneWidget);
@@ -926,7 +942,7 @@ void _graphTests() {
       ]);
       await tester.pumpWidget(wrap(store));
 
-      await tester.tap(find.text('2 records behind it'));
+      await tester.tap(find.text('2 tasks behind it'));
       await tester.pumpAndSettle();
 
       expect(
@@ -960,4 +976,40 @@ void _graphTests() {
       expect(accepted.progress, 'accepted and being worked on');
     });
   });
+
+  test(
+    'a decision card reads who asked, the risk and a short summary from the bot\'s text',
+    () {
+      // Wording from the live room's cards on 31 October.
+      final access = DecisionParts.of(
+        PendingDecision.fromJson({
+          'id': 'dec_a',
+          'task': 'task_1',
+          'title': 'Commit and push the released game state',
+          'because':
+              '@sol asks to use GitHub CLI for "Commit and push the released game state" (release, rated risky): Use GitHub\'s git-push credential.',
+          'options': ['Allow for this task', 'Deny'],
+        }),
+      );
+      expect(access.asker, 'sol');
+      expect(access.risk, 'risky');
+      expect(
+        access.summary,
+        'Asks to use GitHub CLI: Use GitHub\'s git-push credential.',
+      );
+      final retire = DecisionParts.of(
+        PendingDecision.fromJson({
+          'id': 'dec_r',
+          'task': 'task_2',
+          'title': 'Halden freeze check',
+          'because':
+              '@opus proposes retiring "Halden freeze check": Duplicate.',
+          'options': ['Retire this task', 'Keep it'],
+        }),
+      );
+      expect(retire.asker, 'opus');
+      expect(retire.risk, isNull);
+      expect(retire.summary, 'Proposes retiring this task: Duplicate.');
+    },
+  );
 }

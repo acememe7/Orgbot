@@ -87,7 +87,7 @@ pub struct ObjectiveCard {
     pub title: String,
     /// How far along, counted in carrying work.
     pub progress: Progress,
-    /// A short state line: "internal remediation", "waiting", "needs you".
+    /// A short state line: "waiting on the team", "in progress", "needs you".
     pub status: String,
     /// What is holding it up right now, if anything.
     pub blocker: Option<String>,
@@ -585,7 +585,9 @@ fn card_for(objective: &Task, records: &[&Task]) -> ObjectiveCard {
     let status = if needs_operator {
         "needs you".into()
     } else if blocker.is_some() {
-        "internal remediation".into()
+        // Said plainly: from the live room, "internal remediation" was
+        // shown on cards the owner had nothing to do with.
+        "waiting on the team".into()
     } else if !owners.is_empty() {
         "in progress".into()
     } else {
@@ -917,7 +919,7 @@ mod tests {
             Some("waiting on B3-C source recovery")
         );
         assert!(!card.needs_operator);
-        assert_eq!(card.status, "internal remediation");
+        assert_eq!(card.status, "waiting on the team");
     }
 
     /// Replaced and retired work leaves the person's view but stays countable.

@@ -1910,8 +1910,36 @@ class BoardStrip extends StatefulWidget {
 /// From the live room: the owner asked for collapsible task cards, with 48
 /// tasks of up to five lines each in the list. A task that needs the owner
 /// (waiting on their reply, or parked) starts open, so its buttons show.
+/// The task list's tabs. Delivered and closed work no longer buries the
+/// tasks that matter: from the live room, 37 of 52 tasks were done.
+enum _TaskTab {
+  active('Active'),
+  waiting('Waiting'),
+  done('Done'),
+  closed('Closed');
+
+  const _TaskTab(this.label);
+  final String label;
+
+  static _TaskTab of(TaskState state) => switch (state) {
+    TaskState.blocked || TaskState.parked => waiting,
+    TaskState.submitted => done,
+    TaskState.failed ||
+    TaskState.cancelled ||
+    TaskState.superseded ||
+    TaskState.retired ||
+    TaskState.archived ||
+    TaskState.unknown => closed,
+    _ => active,
+  };
+}
+
 class _BoardStripState extends State<BoardStrip> {
   final Map<String, bool> _open = {};
+
+  /// The tab the owner picked, or null to follow the work: the first tab
+  /// holding a task that needs them, otherwise Active.
+  _TaskTab? _picked;
 
   bool _needsOwner(Task task) =>
       task.state == TaskState.parked ||
@@ -1990,10 +2018,28 @@ class _BoardStripState extends State<BoardStrip> {
     if (park == true) widget.store.parkTask(task.id, reason: reason.trim());
   }
 
+  _TaskTab _tabFor(List<Task> tasks) {
+    if (_picked != null) return _picked!;
+    for (final task in tasks) {
+      if (_needsOwner(task)) return _TaskTab.of(task.state);
+    }
+    return _TaskTab.active;
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final tasks = widget.store.tasks;
+    final tab = _tabFor(tasks);
+    final counts = {for (final t in _TaskTab.values) t: 0};
+    for (final task in tasks) {
+      counts[_TaskTab.of(task.state)] = counts[_TaskTab.of(task.state)]! + 1;
+    }
+    final shown = [
+      for (final task in tasks)
+        if (_TaskTab.of(task.state) == tab) task,
+    ];
+    final anyOpen = shown.any(_isOpen);
     return Container(
       constraints: widget.embedded
           ? null
@@ -2018,7 +2064,7 @@ class _BoardStripState extends State<BoardStrip> {
               padding: const EdgeInsets.all(12),
               children: [
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 18, top: 4),
+                  padding: const EdgeInsets.only(bottom: 10, top: 4),
                   child: Row(
                     children: [
                       Expanded(
@@ -2027,136 +2073,312 @@ class _BoardStripState extends State<BoardStrip> {
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                       ),
-                      Builder(
-                        builder: (context) {
-                          final anyOpen = tasks.any(_isOpen);
-                          return TextButton(
-                            key: const ValueKey('tasks-fold-all'),
-                            onPressed: () => setState(() {
-                              for (final task in tasks) {
-                                _open[task.id] = !anyOpen;
-                              }
-                            }),
-                            child: Text(
-                              anyOpen ? 'Collapse all' : 'Expand all',
-                            ),
-                          );
-                        },
-                      ),
+                      if (shown.isNotEmpty)
+                        TextButton(
+                          key: const ValueKey('tasks-fold-all'),
+                          onPressed: () => setState(() {
+                            for (final task in shown) {
+                              _open[task.id] = !anyOpen;
+                            }
+                          }),
+                          child: Text(anyOpen ? 'Collapse all' : 'Expand all'),
+                        ),
                     ],
                   ),
                 ),
-                for (final task in tasks)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Row(
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final t in _TaskTab.values)
+                        _TaskTabChip(
+                          key: ValueKey('tasks-tab-${t.name}'),
+                          label: t.label,
+                          count: counts[t]!,
+                          selected: t == tab,
+                          attention: tasks.any(
+                            (task) =>
+                                _TaskTab.of(task.state) == t &&
+                                _needsOwner(task),
+                          ),
+                          onTap: () => setState(() => _picked = t),
+                        ),
+                    ],
+                  ),
+                ),
+                AnimatedSwitcher(
+                  duration: motionDuration(context, 220),
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeInCubic,
+                  transitionBuilder: (child, animation) => FadeTransition(
+                    opacity: animation,
+                    child: SlideTransition(
+                      position: Tween(
+                        begin: const Offset(0, 0.015),
+                        end: Offset.zero,
+                      ).animate(animation),
+                      child: child,
+                    ),
+                  ),
+                  layoutBuilder: (current, previous) => Stack(
+                    alignment: Alignment.topCenter,
+                    children: [...previous, ?current],
+                  ),
+                  child: Column(
+                    key: ValueKey(tab),
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (shown.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          child: Text(
+                            'Nothing ${tab == _TaskTab.active ? 'under way' : tab.label.toLowerCase()} right now.',
+                            style: TextStyle(
+                              color: scheme.onSurfaceVariant,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                      for (final task in shown) _taskRow(context, task),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+
+  Widget _taskRow(BuildContext context, Task task) {
+    final scheme = Theme.of(context).colorScheme;
+    final open = _isOpen(task);
+    final color = taskColor(task.state);
+    return Padding(
+      key: ValueKey('task-row-${task.id}'),
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          key: ValueKey('task-fold-${task.id}'),
+          borderRadius: BorderRadius.circular(8),
+          onTap: () => setState(() => _open[task.id] = !open),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 8, 2, 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 5, right: 10),
+                  child: Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: AnimatedSize(
+                    duration: motionDuration(context, 200),
+                    curve: Curves.easeOutCubic,
+                    alignment: Alignment.topLeft,
+                    child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        StatusPill(
-                          color: taskColor(task.state),
-                          label: task.state.label,
+                        Text(
+                          task.title,
+                          maxLines: open ? null : 2,
+                          overflow: open ? null : TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            height: 1.3,
+                          ),
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              InkWell(
-                                key: ValueKey('task-fold-${task.id}'),
-                                onTap: () => setState(
-                                  () => _open[task.id] = !_isOpen(task),
-                                ),
-                                child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        task.title,
-                                        maxLines: _isOpen(task) ? null : 1,
-                                        overflow: _isOpen(task)
-                                            ? null
-                                            : TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ),
-                                    Icon(
-                                      _isOpen(task)
-                                          ? Icons.expand_less
-                                          : Icons.expand_more,
-                                      size: 16,
-                                      semanticLabel: _isOpen(task)
-                                          ? 'Collapse task'
-                                          : 'Expand task',
-                                    ),
-                                  ],
+                        const SizedBox(height: 3),
+                        Row(
+                          children: [
+                            Text(
+                              task.state.label,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: color,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            if (task.assignee != null) ...[
+                              Text(
+                                ' · ',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: scheme.onSurfaceVariant,
                                 ),
                               ),
-                              if (task.assignee != null)
-                                Text(
+                              Flexible(
+                                child: Text(
                                   '@' + widget.store.handleFor(task.assignee),
+                                  overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                     fontSize: 11,
                                     color: scheme.onSurfaceVariant,
                                   ),
                                 ),
-                              if (_isOpen(task))
-                                for (final reason in task.blockReasons)
-                                  Padding(
-                                    padding: const EdgeInsets.only(top: 6),
-                                    child: Text(
-                                      (reason['prompt'] ??
-                                              reason['description'] ??
-                                              reason['detail'] ??
-                                              reason['kind'] ??
-                                              'Waiting for input')
-                                          .toString(),
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: scheme.onSurfaceVariant,
-                                      ),
-                                    ),
-                                  ),
-                              if (_isOpen(task) &&
-                                  task.state == TaskState.parked &&
-                                  widget.canAnswer)
-                                TextButton(
-                                  onPressed: () =>
-                                      widget.store.resumeTask(task.id),
-                                  child: const Text('Resume task'),
-                                ),
-                              if (_isOpen(task) &&
-                                  task.blockReasons.any(
-                                    (r) => r['kind'] == 'awaiting_human',
-                                  ))
-                                TextButton(
-                                  onPressed: widget.canAnswer
-                                      ? () => _answer(context, task)
-                                      : null,
-                                  child: Text(
-                                    widget.canAnswer
-                                        ? 'Reply to unblock'
-                                        : 'Open the room to reply',
-                                  ),
-                                ),
+                              ),
                             ],
-                          ),
+                          ],
                         ),
-                        if (widget.canAnswer && task.state.isParkable)
-                          IconButton(
-                            tooltip: 'Park until you resume it',
-                            visualDensity: VisualDensity.compact,
-                            iconSize: 18,
-                            icon: const Icon(Icons.pause_circle_outline),
-                            onPressed: () => _park(context, task),
+                        if (open)
+                          for (final reason in task.blockReasons)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Text(
+                                (reason['prompt'] ??
+                                        reason['description'] ??
+                                        reason['detail'] ??
+                                        reason['kind'] ??
+                                        'Waiting for input')
+                                    .toString(),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: scheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
+                        if (open &&
+                            task.state == TaskState.parked &&
+                            widget.canAnswer)
+                          TextButton(
+                            onPressed: () => widget.store.resumeTask(task.id),
+                            child: const Text('Resume task'),
+                          ),
+                        if (open &&
+                            task.blockReasons.any(
+                              (r) => r['kind'] == 'awaiting_human',
+                            ))
+                          TextButton(
+                            onPressed: widget.canAnswer
+                                ? () => _answer(context, task)
+                                : null,
+                            child: Text(
+                              widget.canAnswer
+                                  ? 'Reply to unblock'
+                                  : 'Open the room to reply',
+                            ),
                           ),
                       ],
                     ),
                   ),
+                ),
+                AnimatedRotation(
+                  turns: open ? 0.5 : 0,
+                  duration: motionDuration(context, 200),
+                  child: Icon(
+                    Icons.expand_more,
+                    size: 18,
+                    color: scheme.onSurfaceVariant,
+                    semanticLabel: open ? 'Collapse task' : 'Expand task',
+                  ),
+                ),
+                if (widget.canAnswer && task.state.isParkable)
+                  IconButton(
+                    tooltip: 'Park until you resume it',
+                    visualDensity: VisualDensity.compact,
+                    iconSize: 17,
+                    color: scheme.onSurfaceVariant,
+                    icon: const Icon(Icons.pause_circle_outline),
+                    onPressed: () => _park(context, task),
+                  )
+                else
+                  const SizedBox(width: 8),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One of the task list's tabs, with its count.
+class _TaskTabChip extends StatelessWidget {
+  const _TaskTabChip({
+    super.key,
+    required this.label,
+    required this.count,
+    required this.selected,
+    required this.attention,
+    required this.onTap,
+  });
+
+  final String label;
+  final int count;
+  final bool selected;
+  final bool attention;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Semantics(
+      selected: selected,
+      button: true,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: motionDuration(context, 180),
+          curve: Curves.easeOutCubic,
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+          decoration: BoxDecoration(
+            color: selected ? scheme.secondaryContainer : Colors.transparent,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(
+              color: selected
+                  ? scheme.secondaryContainer
+                  : scheme.outlineVariant,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                  color: selected
+                      ? scheme.onSecondaryContainer
+                      : scheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(width: 5),
+              Text(
+                '$count',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: selected
+                      ? scheme.onSecondaryContainer
+                      : scheme.onSurfaceVariant,
+                ),
+              ),
+              if (attention) ...[
+                const SizedBox(width: 5),
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: const BoxDecoration(
+                    color: Colors.amber,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

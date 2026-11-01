@@ -411,6 +411,9 @@ void main() {
       ),
     );
     await tester.pump();
+    // A blocked task lives under Waiting.
+    await tester.tap(find.byKey(const ValueKey('tasks-tab-waiting')));
+    await tester.pumpAndSettle();
     expect(find.text('Write the notes'), findsOneWidget);
     expect(
       find.text('@iris'),
@@ -438,7 +441,8 @@ void main() {
           home: Scaffold(body: BoardStrip(store: store)),
         ),
       );
-      await tester.pump();
+      // The tab change fades; wait for it.
+      await tester.pumpAndSettle();
     }
 
     await show();
