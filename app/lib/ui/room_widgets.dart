@@ -544,12 +544,15 @@ final _checkInPhrase = RegExp(
 /// From the live room: four of the last six messages said some version of
 /// "nothing needs you" or "I hold no task". Only short replies count, so a
 /// message that opens that way and then says something real is never folded.
-bool isCheckIn(ChatMessage message) =>
-    message.author.isAgent &&
-    message.body.length <= 280 &&
-    !message.body.contains('**') &&
-    !message.body.contains('\n') &&
-    _checkInPhrase.hasMatch(message.body);
+bool isCheckIn(ChatMessage message) {
+  if (!message.author.isAgent) return false;
+  final body = message.body.trim();
+  return body.length <= 280 &&
+      !body.contains('**') &&
+      !body.contains('\n\n') &&
+      !RegExp(r'\n\s*(?:[-*]|\d+\.)\s').hasMatch(body) &&
+      _checkInPhrase.hasMatch(body);
+}
 
 /// Runs of two or more consecutive check-ins, by each member's id.
 Map<String, CheckInRun> checkInRuns(List<ChatMessage> messages) {
@@ -2097,11 +2100,14 @@ class _BoardStripState extends State<BoardStrip> {
   /// holding a task that needs them, otherwise Active.
   _TaskTab? _picked;
 
+  /// Waiting on the owner's reply: this pulls the list to its tab and marks
+  /// the tab. Parked work is the owner's own choice and does neither.
   bool _needsOwner(Task task) =>
-      task.state == TaskState.parked ||
       task.blockReasons.any((r) => r['kind'] == 'awaiting_human');
 
-  bool _isOpen(Task task) => _open[task.id] ?? _needsOwner(task);
+  /// Opens unfolded, so its buttons show: a reply to give, or a resume.
+  bool _isOpen(Task task) =>
+      _open[task.id] ?? (_needsOwner(task) || task.state == TaskState.parked);
 
   Future<void> _answer(BuildContext context, Task task) async {
     var reply = '';
@@ -2171,7 +2177,11 @@ class _BoardStripState extends State<BoardStrip> {
         ],
       ),
     );
-    if (park == true) widget.store.parkTask(task.id, reason: reason.trim());
+    if (park == true) {
+      widget.store.parkTask(task.id, reason: reason.trim());
+      // Show it where it went.
+      if (mounted) setState(() => _picked = _TaskTab.waiting);
+    }
   }
 
   _TaskTab _tabFor(List<Task> tasks) {

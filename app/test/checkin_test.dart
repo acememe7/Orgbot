@@ -67,4 +67,13 @@ void main() {
     ]);
     expect(runs, isEmpty);
   });
+
+  test('real replies end with a newline and still count', () {
+    // From the live room: every bot message body ended with a newline.
+    final runs = checkInRuns([
+      bot('a', 'finn', 'I hold no task, so I am not starting work.\n'),
+      bot('b', 'astra', 'Aece, no new review is ready.\n'),
+    ]);
+    expect(runs.keys, ['a', 'b']);
+  });
 }
