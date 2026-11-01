@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{AgentId, ArtifactId, ReviewId, TaskId};
+use crate::ids::{AgentId, ArtifactId, DecisionId, ReviewId, TaskId};
 use crate::time::Timestamp;
 
 /// How serious a finding is.
@@ -76,6 +76,87 @@ pub enum Verdict {
     Reject,
 }
 
+/// Where a review stands when work that was sent back gets a second opinion.
+///
+/// From the owner of the live room: no single reviewer should decide that
+/// work goes back. A strict reviewer and an easier one see different things,
+/// so a send-back is checked by a reviewer on a different model before it
+/// reaches the author, and the two settle what the author must fix.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStage {
+    /// A review whose verdict took effect on its own.
+    #[default]
+    Decision,
+    /// A review that would send the work back, waiting on a second opinion.
+    Opening,
+    /// A second reviewer's view of each blocking finding.
+    SecondOpinion,
+    /// The first reviewer's answer to the findings the second disputed.
+    Reply,
+    /// What the reviewers settled on, or what the owner decided between them.
+    Outcome,
+}
+
+/// One reviewer's view of whether a finding really blocks the work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingResponse {
+    /// Which finding of the review that sent the work back, counting from 1.
+    pub finding: u32,
+    /// Whether it blocks approval.
+    pub blocks: bool,
+    /// Why.
+    pub reason: String,
+    /// A better fix or workaround, if this reviewer sees one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+}
+
+/// Whose turn it is in a second-opinion check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelStage {
+    /// The second reviewer has to weigh in.
+    AwaitingSecond,
+    /// The first reviewer has to answer what the second disputed.
+    AwaitingReply,
+    /// The reviewers still disagree; the owner decides.
+    AwaitingOwner,
+}
+
+/// Two reviewers settling whether work goes back, and what the author fixes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewPanel {
+    pub task: TaskId,
+    /// The revision under review.
+    pub revision: u32,
+    /// The review that would send the work back.
+    pub opening: ReviewId,
+    /// Who wrote it.
+    pub first: AgentId,
+    /// The reviewer on a different model asked for a second opinion.
+    pub second: AgentId,
+    pub stage: PanelStage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_opinion: Option<ReviewId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<ReviewId>,
+    /// The owner's decision, once the reviewers could not agree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<DecisionId>,
+}
+
+impl ReviewPanel {
+    /// The reviewer whose turn it is, if it is a reviewer's.
+    pub fn awaiting(&self) -> Option<AgentId> {
+        match self.stage {
+            PanelStage::AwaitingSecond => Some(self.second),
+            PanelStage::AwaitingReply => Some(self.first),
+            PanelStage::AwaitingOwner => None,
+        }
+    }
+}
+
 /// A completed inspection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Review {
@@ -96,6 +177,15 @@ pub struct Review {
     /// The artifacts that were inspected.
     pub inspected: Vec<ArtifactId>,
     pub at: Timestamp,
+    /// Where this review stands in a second-opinion check.
+    #[serde(default)]
+    pub stage: ReviewStage,
+    /// For a second opinion or a reply: the view of each finding in question.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub responses: Vec<FindingResponse>,
+    /// For an outcome: the other reviewers whose view it settles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub with: Vec<AgentId>,
 }
 
 impl Review {
@@ -129,7 +219,16 @@ impl Review {
             criteria_failed: Vec::new(),
             inspected: Vec::new(),
             at: Timestamp::now(),
+            stage: ReviewStage::Decision,
+            responses: Vec::new(),
+            with: Vec::new(),
         }
+    }
+
+    /// Whether this review's verdict took effect, rather than being a step
+    /// in a second-opinion check. Only these count as review rounds.
+    pub fn decides(&self) -> bool {
+        matches!(self.stage, ReviewStage::Decision | ReviewStage::Outcome)
     }
 
     /// The blocking findings, in descending severity.

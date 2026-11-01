@@ -501,10 +501,47 @@ fn a_blocking_finding_sends_the_work_back_without_the_inspector_choosing_a_verdi
         json!({
             "task": task,
             "summary": "not ready",
-            "findings": [{"severity": "major", "summary": "the version is wrong"}]
+            "findings": [{"severity": "major", "summary": "the version is wrong", "suggestion": "use the version in Cargo.toml"}]
         }),
     );
     assert!(reviewed.contains("in_progress"), "got: {reviewed}");
+}
+
+/// From the code review of 1 November: a severity the tool did not know became
+/// a note, so a reviewer who wrote "high" approved the work, and a blocking
+/// finding could leave the author guessing what to do.
+#[test]
+fn a_review_must_name_a_known_severity_and_say_how_to_fix_what_blocks() {
+    let mut f = fixture();
+    let (lead, worker, inspector) = (f.lead, f.worker, f.inspector);
+    let task = id_in(
+        &f.ok(lead, "create_task", json!({"title": "notes", "brief": "write them"})),
+        "task",
+    );
+    f.ok(worker, "claim_task", json!({"task": task}));
+    f.ok(worker, "start_task", json!({"task": task}));
+    f.ok(worker, "submit_for_review", json!({"task": task, "artifacts": []}));
+
+    let unknown = f.call(
+        inspector,
+        "record_review",
+        json!({"task": task, "summary": "no", "findings": [{"severity": "high", "summary": "wrong version"}]}),
+    );
+    assert!(unknown.is_error && unknown.content.contains("note, minor, major or critical"), "{}", unknown.content);
+    let no_fix = f.call(
+        inspector,
+        "record_review",
+        json!({"task": task, "summary": "no", "findings": [{"severity": "Major", "summary": "wrong version"}]}),
+    );
+    assert!(no_fix.is_error && no_fix.content.contains("suggestion"), "{}", no_fix.content);
+    let criteria_only = f.call(
+        inspector,
+        "record_review",
+        json!({"task": task, "summary": "no", "criteria_failed": ["has a changelog"]}),
+    );
+    assert!(criteria_only.is_error && criteria_only.content.contains("blocking finding"), "{}", criteria_only.content);
+    let id: orgbot_proto::TaskId = task.parse().unwrap();
+    assert_eq!(f.engine.task(id).unwrap().state, TaskState::InReview, "nothing was recorded");
 }
 
 // -------------------------------------------------------------- handoffs

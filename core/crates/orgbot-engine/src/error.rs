@@ -25,6 +25,9 @@ pub enum EngineError {
     #[error("invalid owner answer: {reason}")]
     InvalidOwnerAnswer { reason: String },
 
+    #[error("invalid review: {reason}")]
+    InvalidReview { reason: String },
+
     #[error("no handoff {handoff}")]
     UnknownHandoff { handoff: HandoffId },
 

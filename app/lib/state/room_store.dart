@@ -788,8 +788,15 @@ class RoomStore extends ChangeNotifier {
         final review = (event['review'] as Map?)?.cast<String, Object?>();
         final inspector = review?['inspector'] as String?;
         final verdict = review?['verdict'] as String?;
-        if (inspector != null) {
-          _note(inspector, 'reviewed work — $verdict');
+        // An outcome settles reviews already counted, so it is not another.
+        final stage = review?['stage'] as String? ?? 'decision';
+        if (inspector != null && stage != 'outcome') {
+          _note(inspector, switch (stage) {
+            'opening' => 'asked for a second opinion before sending work back',
+            'second_opinion' => 'gave a second opinion on a review',
+            'reply' => 'answered a second opinion',
+            _ => 'reviewed work — $verdict',
+          });
           _activity[inspector]?.reviewsGiven += 1;
         }
       case 'agent_errored':

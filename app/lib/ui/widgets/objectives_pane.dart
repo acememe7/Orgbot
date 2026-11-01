@@ -554,6 +554,10 @@ String? answerEffect(String option) => switch (option) {
   'Retire this task' =>
     'Closes the task. It moves to the Closed tab with its history.',
   'Keep it' => 'The task stays open as it is.',
+  'Keep the disputed findings' =>
+    'The work goes back with these findings to fix, as the stricter reviewer asked.',
+  'Drop the disputed findings' =>
+    'These findings are dropped. The work passes unless other findings still send it back.',
   _ => null,
 };
 

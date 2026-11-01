@@ -133,6 +133,38 @@ impl ProviderRef {
         }
     }
 
+    /// The family of model behind this bot, such as `claude`, `openai` or
+    /// `glm`, so a second opinion can come from a model that thinks
+    /// differently. Read from the model name where the backend serves many.
+    pub fn family(&self) -> String {
+        let from_model = |model: &str| {
+            let name = model.to_ascii_lowercase();
+            let known = [
+                ("claude", "claude"), ("gpt", "openai"), ("codex", "openai"), ("o1", "openai"),
+                ("o3", "openai"), ("o4", "openai"), ("glm", "glm"), ("deepseek", "deepseek"),
+                ("grok", "grok"), ("gemini", "gemini"), ("qwen", "qwen"), ("llama", "llama"),
+                ("mistral", "mistral"), ("kimi", "kimi"),
+            ];
+            known
+                .iter()
+                .find(|(prefix, _)| name.starts_with(prefix) || name.contains(&format!("/{prefix}")))
+                .map(|(_, family)| (*family).to_string())
+                .unwrap_or_else(|| name.split(['-', ':', '/']).next().unwrap_or_default().to_string())
+        };
+        match self {
+            Self::Anthropic { .. } => "claude".into(),
+            Self::DeepSeek { .. } => "deepseek".into(),
+            Self::OpenAiCompatible { model, .. } => from_model(model),
+            Self::Scripted { script } => format!("scripted:{script}"),
+            Self::CliAgent { cli, model, .. } => match cli {
+                CliKind::Claude => "claude".into(),
+                CliKind::Codex => "openai".into(),
+                CliKind::Grok => "grok".into(),
+                CliKind::OpenCode | CliKind::Antigravity => from_model(model),
+            },
+        }
+    }
+
     /// The model identifier, for display and logging.
     pub fn model(&self) -> &str {
         match self {

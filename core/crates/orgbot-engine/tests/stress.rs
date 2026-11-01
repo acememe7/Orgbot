@@ -414,8 +414,28 @@ fn a_recurring_invariant_is_still_caught_in_a_busy_room() {
                 summary: "needs work".into(),
                 criteria_met: vec![],
                 criteria_failed: vec![],
+                responses: vec![],
             })
             .expect("review");
+        // A second reviewer agrees before it goes back.
+        if let Some(panel) = room.engine.review_panel(task).cloned() {
+            room.engine
+                .apply(Command::RecordReview {
+                    task,
+                    inspector: panel.second,
+                    findings: vec![],
+                    summary: "agreed".into(),
+                    criteria_met: vec![],
+                    criteria_failed: vec![],
+                    responses: vec![orgbot_proto::review::FindingResponse {
+                        finding: 1,
+                        blocks: true,
+                        reason: "the mutation is still stale".into(),
+                        suggestion: None,
+                    }],
+                })
+                .expect("second opinion");
+        }
     }
 
     assert!(

@@ -19,13 +19,15 @@ use orgbot_proto::decision::{
     Governance, Request, Settled, ACCESS_ALLOW, RETIRE_TASK, RETIRE_TASK_ALLOW, RETIRE_TASK_KEEP,
     SERVER_ACCESS, SERVER_ACCESS_ALLOW, SERVER_ACCESS_DENY, SERVER_ITEM, land_action,
     push_action, LAND_COMMITS_ALLOW, LAND_COMMITS_DENY, NEW_SIGN_IN_ALLOW, PUSH_COMMITS_ALLOW,
-    PUSH_COMMITS_DENY,
+    PUSH_COMMITS_DENY, REVIEW_DISPUTE, REVIEW_DISPUTE_DROP, REVIEW_DISPUTE_KEEP,
 };
 use orgbot_proto::event::{DeadlockResolution, Event, EventEnvelope, Seq};
 use orgbot_proto::graph::{AuthorizationState, DependencyState, Readiness, TaskKind, TaskOrigin};
 use orgbot_proto::handoff::{Handoff, HandoffKind, HandoffState, HandoffTransition, Recipient};
-use orgbot_proto::ids::DecisionId;
-use orgbot_proto::review::{Finding, Review, Verdict};
+use orgbot_proto::ids::{DecisionId, ReviewId};
+use orgbot_proto::review::{
+    Finding, FindingResponse, PanelStage, Review, ReviewPanel, ReviewStage, Severity, Verdict,
+};
 use orgbot_proto::roles::{Eligibility as RoleFit, RoleTable};
 use orgbot_proto::room::{Room, RoomPhase, RoomSpec};
 use orgbot_proto::skill::Skill;
@@ -119,6 +121,9 @@ pub struct Engine {
     handoffs: BTreeMap<HandoffId, Handoff>,
     artifacts: BTreeMap<ArtifactId, Artifact>,
     reviews: Vec<Review>,
+    /// Second-opinion checks under way, by task.
+    #[serde(default)]
+    review_panels: BTreeMap<TaskId, ReviewPanel>,
     transcript: Vec<ChatMessage>,
     log: Vec<EventEnvelope>,
     seq: Seq,
@@ -365,6 +370,14 @@ impl Engine {
                     engine.artifacts.insert(artifact.id, *artifact.clone());
                 }
                 Event::ReviewRecorded { review } => engine.reviews.push(*review.clone()),
+                Event::ReviewPanelChanged { task, panel } => match panel {
+                    Some(panel) => {
+                        engine.review_panels.insert(*task, *panel.clone());
+                    }
+                    None => {
+                        engine.review_panels.remove(task);
+                    }
+                },
                 Event::AgentErrored { agent, attempt, .. } => {
                     engine.error_streak.insert(*agent, *attempt);
                 }
@@ -440,6 +453,7 @@ impl Engine {
             handoffs: BTreeMap::new(),
             artifacts: BTreeMap::new(),
             reviews: Vec::new(),
+            review_panels: BTreeMap::new(),
             transcript: Vec::new(),
             log: Vec::new(),
             seq: Seq::ZERO,
@@ -588,7 +602,7 @@ impl Engine {
         let moves_commits = allowed.iter().any(|a| a.starts_with("land-commits:") || a.starts_with("push-commits:"));
         if moves_commits {
             let task = decision.task?;
-            let review = self.reviews.iter().filter(|r| r.task == task).max_by_key(|r| r.revision)?;
+            let review = self.reviews.iter().filter(|r| r.task == task && r.decides()).max_by_key(|r| r.revision)?;
             let pushing = allowed.iter().any(|a| a.starts_with("push-commits:"));
             let (allow, deny) = if pushing {
                 (PUSH_COMMITS_ALLOW, PUSH_COMMITS_DENY)
@@ -851,6 +865,89 @@ impl Engine {
     /// Every inspection, oldest first.
     pub fn reviews(&self) -> &[Review] {
         &self.reviews
+    }
+
+    /// One inspection by id.
+    pub fn review(&self, id: ReviewId) -> Option<&Review> {
+        self.reviews.iter().find(|review| review.id == id)
+    }
+
+    /// The second-opinion check under way on `task`, if any.
+    pub fn review_panel(&self, task: TaskId) -> Option<&ReviewPanel> {
+        self.review_panels.get(&task)
+    }
+
+    /// Whether `agent` reviewed `task` at any stage, including as the second
+    /// reviewer an outcome speaks for.
+    ///
+    /// From the owner of the live room: a reviewer that does not write the
+    /// fix stays strict about it, so a bot that reviewed a task describes
+    /// what to change and does not take the work on.
+    pub fn reviewed_by(&self, task: TaskId, agent: AgentId) -> bool {
+        self.reviews
+            .iter()
+            .any(|review| review.task == task && (review.inspector == agent || review.with.contains(&agent)))
+    }
+
+    /// The reviewers who sent `task` back last round and can still check
+    /// the fix: they asked for it, so they review and test it.
+    ///
+    /// Empty for a first submission, or when none of them is available, in
+    /// which case any reviewer may take it.
+    pub fn last_round_reviewers(&self, task: TaskId) -> Vec<AgentId> {
+        let Some(record) = self.tasks.get(&task) else {
+            return Vec::new();
+        };
+        if record.revision == 0 {
+            return Vec::new();
+        }
+        let Some(last) = self
+            .reviews
+            .iter()
+            .filter(|review| review.task == task && review.decides() && review.revision + 1 == record.revision)
+            .last()
+        else {
+            return Vec::new();
+        };
+        std::iter::once(last.inspector)
+            .chain(last.with.iter().copied())
+            .filter(|agent| {
+                self.specs.get(agent).is_some_and(|spec| spec.autonomy.may_inspect)
+                    && self.status(*agent).is_available()
+                    && record.assignee != Some(*agent)
+                    && !self.authored_review_artifact(record, *agent)
+            })
+            .collect()
+    }
+
+    /// Who gives a second opinion on work `first` would send back: another
+    /// reviewer, preferably on a different family of model, who is free and
+    /// had no hand in the work.
+    pub fn second_reviewer_for(&self, task: TaskId, first: AgentId) -> Option<AgentId> {
+        let record = self.tasks.get(&task)?;
+        let first_family = self.specs.get(&first).map(|spec| spec.provider.family());
+        let awaiting = |agent: AgentId| {
+            self.review_panels
+                .values()
+                .filter(|panel| panel.awaiting() == Some(agent))
+                .count()
+        };
+        let mut candidates: Vec<&AgentSpec> = self
+            .specs
+            .values()
+            .filter(|spec| spec.autonomy.may_inspect && spec.id != first)
+            .filter(|spec| record.assignee != Some(spec.id))
+            .filter(|spec| !self.authored_review_artifact(record, spec.id))
+            .filter(|spec| self.status(spec.id).is_available())
+            .collect();
+        candidates.sort_by_key(|spec| {
+            (
+                Some(spec.provider.family()) == first_family,
+                awaiting(spec.id),
+                spec.handle.clone(),
+            )
+        });
+        candidates.first().map(|spec| spec.id)
     }
 
     /// The room transcript, oldest first.
@@ -1139,6 +1236,15 @@ impl Engine {
         let Some(record) = self.tasks.get(&task) else {
             return result;
         };
+        if self.reviewed_by(task, agent) {
+            result.eligible = false;
+            result.reason = Reason::ReviewedIt;
+            result.detail = format!(
+                "{} reviewed this task, so it says what to change and leaves the writing to others",
+                spec.handle
+            );
+            return result;
+        }
         if spec.autonomy.review_only
             && !review_only_task(record.kind, record.required_role.as_deref())
         {
@@ -1180,6 +1286,10 @@ impl Engine {
             Reason::ReviewOnly => EngineError::NotPermitted {
                 agent,
                 action: "claim work outside review-only scope".into(),
+            },
+            Reason::ReviewedIt => EngineError::NotPermitted {
+                agent,
+                action: "take on work it reviewed; describe the change in a finding instead".into(),
             },
             Reason::RoleMismatch => EngineError::RoleMismatch {
                 task,
@@ -1456,9 +1566,10 @@ impl Engine {
 
     /// Every review of `task`, oldest first, as blocking-finding sets.
     pub fn review_cycles(&self, task: TaskId) -> Vec<Vec<Finding>> {
+        // A second opinion or a reply is part of one round, not another.
         self.reviews
             .iter()
-            .filter(|review| review.task == task)
+            .filter(|review| review.task == task && review.decides())
             .map(|review| review.findings.clone())
             .collect()
     }
@@ -1673,13 +1784,25 @@ impl Engine {
         if !spec.autonomy.may_inspect {
             return Vec::new();
         }
-        self.tasks
-            .values()
-            .filter(|t| t.state == TaskState::InReview)
-            .filter(|t| t.assignee != Some(inspector))
-            .filter(|t| !self.authored_review_artifact(t, inspector))
-            .map(|t| t.id)
-            .collect()
+        let mut queue = Vec::new();
+        for task in self.tasks.values().filter(|t| t.state == TaskState::InReview) {
+            // A second-opinion check is one reviewer's to answer at a time.
+            if let Some(panel) = self.review_panels.get(&task.id) {
+                if panel.awaiting() == Some(inspector) {
+                    queue.push(task.id);
+                }
+                continue;
+            }
+            if task.assignee == Some(inspector) || self.authored_review_artifact(task, inspector) {
+                continue;
+            }
+            let checkers = self.last_round_reviewers(task.id);
+            if !checkers.is_empty() && !checkers.contains(&inspector) {
+                continue;
+            }
+            queue.push(task.id);
+        }
+        queue
     }
 
     /// Tasks that have passed inspection and are waiting to be delivered.
@@ -2066,6 +2189,7 @@ impl Engine {
                 summary,
                 criteria_met,
                 criteria_failed,
+                responses,
             } => self.record_review(
                 task,
                 inspector,
@@ -2073,6 +2197,7 @@ impl Engine {
                 summary,
                 criteria_met,
                 criteria_failed,
+                responses,
             ),
 
             Command::SupersedeTask {
@@ -3752,6 +3877,25 @@ impl Engine {
             }
         }
 
+        // Two reviewers who could not agree, settled by the owner.
+        if settled.envelope.allowed.iter().any(|action| action == REVIEW_DISPUTE) {
+            if let Some(task) = settled.task {
+                let panel = self
+                    .review_panels
+                    .get(&task)
+                    .cloned()
+                    .filter(|panel| panel.decision == Some(decision));
+                if let Some(panel) = panel {
+                    if self.tasks.get(&task).is_some_and(|t| t.state == TaskState::InReview) {
+                        // Anything but an explicit drop keeps them: the
+                        // stricter view stands unless the owner says otherwise.
+                        let keep = answer.chosen != REVIEW_DISPUTE_DROP;
+                        events.extend(self.settle_panel(panel, keep, true)?);
+                    }
+                }
+            }
+        }
+
         let held_questions: Vec<TaskId> = self
             .tasks
             .values()
@@ -3959,6 +4103,12 @@ impl Engine {
             .handoffs
             .get(&handoff)
             .ok_or(EngineError::UnknownHandoff { handoff })?;
+        if offer.kind != HandoffKind::Review && self.reviewed_by(offer.task, by) {
+            return Err(EngineError::NotPermitted {
+                agent: by,
+                action: "help write work it reviewed; describe the change in a finding instead".into(),
+            });
+        }
         if offer.kind.transfers_ownership() {
             self.require_assignee(offer.task, offer.from)?;
             let task = self.require_task(offer.task)?;
@@ -4229,6 +4379,12 @@ impl Engine {
     ) -> Result<Vec<EventEnvelope>> {
         self.require_agent(author)?;
         self.require_review_only_assignment(task, author)?;
+        if self.reviewed_by(task, author) {
+            return Err(EngineError::NotPermitted {
+                agent: author,
+                action: "write work for a task it reviewed; describe the change in a finding instead".into(),
+            });
+        }
         if self.require_task(task)?.state == TaskState::Parked {
             return Err(parked_refusal(task));
         }
@@ -4277,12 +4433,23 @@ impl Engine {
         summary: String,
         criteria_met: Vec<String>,
         criteria_failed: Vec<String>,
+        responses: Vec<FindingResponse>,
     ) -> Result<Vec<EventEnvelope>> {
         let spec = self.require_agent(inspector)?;
         if !spec.autonomy.may_inspect {
             return Err(EngineError::NotPermitted {
                 agent: inspector,
                 action: "inspect work".into(),
+            });
+        }
+        if let Some(panel) = self.review_panels.get(&task).cloned() {
+            if self.require_task(task)?.state == TaskState::InReview {
+                return self.review_in_panel(panel, inspector, findings, summary, criteria_met, criteria_failed, responses);
+            }
+        }
+        if !responses.is_empty() {
+            return Err(EngineError::InvalidReview {
+                reason: "responses are for a second opinion or a reply; this is a first review, so report findings".into(),
             });
         }
         let record = self.require_task(task)?;
@@ -4324,12 +4491,31 @@ impl Engine {
             .state
             .apply(&TaskTransition::Approve { by: inspector })?;
         let (revision, artifacts) = (record.revision, record.artifacts.clone());
+        // The reviewers who asked for the fix check it.
+        let checkers = self.last_round_reviewers(task);
+        if !checkers.is_empty() && !checkers.contains(&inspector) {
+            return Err(EngineError::NotPermitted {
+                agent: inspector,
+                action: format!(
+                    "review this round: {} asked for the fix last round and checks it",
+                    self.handles_of(&checkers)
+                ),
+            });
+        }
 
         let mut review = Review::from_findings(task, inspector, revision, findings, summary);
         review.criteria_met = criteria_met;
         review.criteria_failed = criteria_failed;
         review.inspected = artifacts;
         let verdict = review.verdict;
+
+        // No single reviewer sends work back: another reviewer, on a
+        // different model where there is one, gives a second opinion first.
+        if verdict != Verdict::Approve {
+            if let Some(second) = self.second_reviewer_for(task, inspector) {
+                return Ok(self.open_panel(review, second));
+            }
+        }
         let reason = review
             .blockers()
             .first()
@@ -4365,6 +4551,375 @@ impl Engine {
                 Some(inspector),
             )?,
         });
+        Ok(events)
+    }
+
+    fn handle_of(&self, agent: AgentId) -> String {
+        self.specs
+            .get(&agent)
+            .map_or_else(|| "a reviewer".into(), |spec| format!("@{}", spec.handle))
+    }
+
+    fn handles_of(&self, agents: &[AgentId]) -> String {
+        agents
+            .iter()
+            .map(|agent| self.handle_of(*agent))
+            .collect::<Vec<_>>()
+            .join(" and ")
+    }
+
+    fn title_of(&self, task: TaskId) -> String {
+        self.tasks.get(&task).map_or_else(String::new, |t| t.title.clone())
+    }
+
+    /// Tell the room how a review stands, without waking anyone for it.
+    fn post_room_note(&mut self, task: TaskId, body: String) -> Vec<EventEnvelope> {
+        let message = ChatMessage {
+            id: orgbot_proto::MessageId::new(),
+            room: self.room.id,
+            author: orgbot_proto::chat::Author::System,
+            audience: orgbot_proto::chat::Audience::Everyone,
+            intent: orgbot_proto::chat::MessageIntent::Status,
+            body,
+            task: Some(task),
+            handoff: None,
+            reply_to: None,
+            attachments: vec![],
+            files: vec![],
+            sent_at: Timestamp::now(),
+        };
+        self.apply(Command::PostMessage {
+            message: Box::new(message),
+        })
+        .unwrap_or_default()
+    }
+
+    /// Hold work that `review` would send back until `second` has looked.
+    fn open_panel(&mut self, mut review: Review, second: AgentId) -> Vec<EventEnvelope> {
+        let (task, first) = (review.task, review.inspector);
+        review.stage = ReviewStage::Opening;
+        let blockers = review.blockers().len();
+        let panel = ReviewPanel {
+            task,
+            revision: review.revision,
+            opening: review.id,
+            first,
+            second,
+            stage: PanelStage::AwaitingSecond,
+            second_opinion: None,
+            reply: None,
+            decision: None,
+        };
+        self.reviews.push(review.clone());
+        let mut events = vec![self.emit(Event::ReviewRecorded {
+            review: Box::new(review),
+        })];
+        self.review_panels.insert(task, panel.clone());
+        events.push(self.emit(Event::ReviewPanelChanged {
+            task,
+            panel: Some(Box::new(panel)),
+        }));
+        let note = format!(
+            "{} would send \"{}\" back with {blockers} blocking {}. {} gives a second opinion before it goes back.",
+            self.handle_of(first),
+            self.title_of(task),
+            if blockers == 1 { "finding" } else { "findings" },
+            self.handle_of(second),
+        );
+        events.extend(self.post_room_note(task, note));
+        events
+    }
+
+    /// A second opinion, or the first reviewer's reply to one.
+    #[allow(clippy::too_many_arguments)]
+    fn review_in_panel(
+        &mut self,
+        mut panel: ReviewPanel,
+        inspector: AgentId,
+        findings: Vec<Finding>,
+        summary: String,
+        criteria_met: Vec<String>,
+        criteria_failed: Vec<String>,
+        responses: Vec<FindingResponse>,
+    ) -> Result<Vec<EventEnvelope>> {
+        match panel.awaiting() {
+            Some(who) if who == inspector => {}
+            Some(who) => {
+                return Err(EngineError::NotPermitted {
+                    agent: inspector,
+                    action: format!(
+                        "review this now: it is waiting on {} from {}",
+                        if panel.stage == PanelStage::AwaitingSecond { "a second opinion" } else { "a reply" },
+                        self.handle_of(who)
+                    ),
+                })
+            }
+            None => {
+                return Err(EngineError::NotPermitted {
+                    agent: inspector,
+                    action: "review this now: its reviewers disagree and the owner is deciding".into(),
+                })
+            }
+        }
+        let task = panel.task;
+        let opening = self.review(panel.opening).cloned().ok_or_else(|| EngineError::InvalidReview {
+            reason: "the review that sent this back is missing".into(),
+        })?;
+        let blocking: Vec<u32> = opening
+            .findings
+            .iter()
+            .enumerate()
+            .filter(|(_, finding)| finding.severity.blocks_approval())
+            .map(|(i, _)| i as u32 + 1)
+            .collect();
+        let (first, second) = (self.handle_of(panel.first), self.handle_of(panel.second));
+
+        if panel.stage == PanelStage::AwaitingSecond {
+            check_responses(&responses, &blocking, &format!("{first}'s blocking findings"))?;
+            let mut review = Review::from_findings(task, inspector, panel.revision, findings, summary);
+            review.stage = ReviewStage::SecondOpinion;
+            review.responses = responses.clone();
+            review.criteria_met = criteria_met;
+            review.criteria_failed = criteria_failed;
+            review.inspected = opening.inspected.clone();
+            panel.second_opinion = Some(review.id);
+            self.reviews.push(review.clone());
+            let mut events = vec![self.emit(Event::ReviewRecorded {
+                review: Box::new(review),
+            })];
+            let disputed: Vec<u32> = responses.iter().filter(|r| !r.blocks).map(|r| r.finding).collect();
+            if disputed.is_empty() {
+                events.extend(self.settle_panel(panel, false, false)?);
+                return Ok(events);
+            }
+            panel.stage = PanelStage::AwaitingReply;
+            self.review_panels.insert(task, panel.clone());
+            events.push(self.emit(Event::ReviewPanelChanged {
+                task,
+                panel: Some(Box::new(panel)),
+            }));
+            let note = format!(
+                "{second} agrees with {} and disputes {} of {first}'s findings on \"{}\". {first} answers before anything goes back.",
+                blocking.len() - disputed.len(),
+                disputed.len(),
+                self.title_of(task),
+            );
+            events.extend(self.post_room_note(task, note));
+            return Ok(events);
+        }
+
+        // The first reviewer answers what the second disputed.
+        let opinion = panel
+            .second_opinion
+            .and_then(|id| self.review(id).cloned())
+            .ok_or_else(|| EngineError::InvalidReview {
+                reason: "the second opinion this replies to is missing".into(),
+            })?;
+        if !findings.is_empty() {
+            return Err(EngineError::InvalidReview {
+                reason: "a reply answers the disputed findings only; report new problems when you review the next revision".into(),
+            });
+        }
+        let disputed: Vec<u32> = opinion.responses.iter().filter(|r| !r.blocks).map(|r| r.finding).collect();
+        check_responses(&responses, &disputed, &format!("the findings {second} disputed"))?;
+        let mut review = Review::from_findings(task, inspector, panel.revision, Vec::new(), summary);
+        review.stage = ReviewStage::Reply;
+        review.responses = responses.clone();
+        review.inspected = opening.inspected.clone();
+        panel.reply = Some(review.id);
+        self.reviews.push(review.clone());
+        let mut events = vec![self.emit(Event::ReviewRecorded {
+            review: Box::new(review),
+        })];
+        let kept: Vec<u32> = responses.iter().filter(|r| r.blocks).map(|r| r.finding).collect();
+        if kept.is_empty() {
+            events.extend(self.settle_panel(panel, false, false)?);
+            return Ok(events);
+        }
+
+        // Still apart: the owner decides, seeing both sides.
+        let clip = |text: &str| {
+            let text = text.trim();
+            match text.char_indices().nth(220) {
+                Some((cut, _)) => format!("{}…", text[..cut].trim_end()),
+                None => text.to_string(),
+            }
+        };
+        let mut sides = Vec::new();
+        for n in &kept {
+            let finding = &opening.findings[*n as usize - 1];
+            let keep = responses.iter().find(|r| r.finding == *n).map(|r| clip(&r.reason)).unwrap_or_default();
+            let drop = opinion.responses.iter().find(|r| r.finding == *n).map(|r| clip(&r.reason)).unwrap_or_default();
+            sides.push(format!(
+                "Finding {n}: {}. {first} says it blocks: {keep}. {second} says it does not: {drop}.",
+                clip(&finding.summary)
+            ));
+        }
+        let agreed = blocking.len() - disputed.len() + opinion.blockers().len();
+        let either_way = if agreed == 0 {
+            String::new()
+        } else {
+            format!(
+                " Either way, {agreed} other {} go back.",
+                if agreed == 1 { "finding" } else { "findings" }
+            )
+        };
+        let mut proposed = Decision::ask(
+            self.room.id,
+            format!(
+                "{first} and {second} disagree about \"{}\". {}{either_way}",
+                self.title_of(task),
+                sides.join(" ")
+            ),
+        );
+        proposed.owner_question = true;
+        proposed.options = vec![REVIEW_DISPUTE_KEEP.into(), REVIEW_DISPUTE_DROP.into()];
+        proposed.envelope.allowed = vec![REVIEW_DISPUTE.into()];
+        proposed.envelope.environment = task_scope(task);
+        proposed.task = Some(task);
+        let asked = self.put_to_owner(panel.first, None, proposed)?;
+        panel.decision = asked.iter().find_map(|envelope| match &envelope.event {
+            Event::DecisionAsked { decision } => Some(decision.id),
+            Event::DecisionQuestionJoined { decision, .. } => Some(*decision),
+            _ => None,
+        });
+        events.extend(asked);
+        panel.stage = PanelStage::AwaitingOwner;
+        self.review_panels.insert(task, panel.clone());
+        events.push(self.emit(Event::ReviewPanelChanged {
+            task,
+            panel: Some(Box::new(panel)),
+        }));
+        let note = format!(
+            "{first} and {second} still disagree on {} of the findings on \"{}\". The owner decides.",
+            kept.len(),
+            self.title_of(task)
+        );
+        events.extend(self.post_room_note(task, note));
+        Ok(events)
+    }
+
+    /// Close a second-opinion check and act on what it settled.
+    ///
+    /// `keep_disputed` keeps the findings the first reviewer still stood by
+    /// after the second disputed them; `by_owner` says the owner decided.
+    fn settle_panel(&mut self, panel: ReviewPanel, keep_disputed: bool, by_owner: bool) -> Result<Vec<EventEnvelope>> {
+        let task = panel.task;
+        let opening = self.review(panel.opening).cloned().ok_or_else(|| EngineError::InvalidReview {
+            reason: "the review that sent this back is missing".into(),
+        })?;
+        let opinion = panel.second_opinion.and_then(|id| self.review(id).cloned());
+        let reply = panel.reply.and_then(|id| self.review(id).cloned());
+        let (first, second) = (self.handle_of(panel.first), self.handle_of(panel.second));
+        let mut standing = Vec::new();
+        let (mut upheld, mut dropped) = (0usize, 0usize);
+        for (i, finding) in opening.findings.iter().enumerate() {
+            let n = i as u32 + 1;
+            let mut finding = finding.clone();
+            if !finding.severity.blocks_approval() {
+                standing.push(finding);
+                continue;
+            }
+            let view = opinion.as_ref().and_then(|o| o.responses.iter().find(|r| r.finding == n));
+            let blocks = match view {
+                Some(view) if !view.blocks => {
+                    keep_disputed
+                        && reply
+                            .as_ref()
+                            .and_then(|r| r.responses.iter().find(|r| r.finding == n))
+                            .is_some_and(|r| r.blocks)
+                }
+                _ => true,
+            };
+            if blocks {
+                if let Some(better) = view.and_then(|v| v.suggestion.as_deref()).map(str::trim).filter(|s| !s.is_empty()) {
+                    finding.suggestion = Some(match finding.suggestion.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                        Some(own) => format!("{own} {second} adds: {better}"),
+                        None => better.to_string(),
+                    });
+                }
+                upheld += 1;
+            } else {
+                finding.severity = Severity::Note;
+                finding.summary = format!(
+                    "{} (not required: {})",
+                    finding.summary.trim(),
+                    if by_owner {
+                        format!("the owner sided with {second}")
+                    } else {
+                        format!("{second} showed it does not block and {first} agreed")
+                    }
+                );
+                dropped += 1;
+            }
+            standing.push(finding);
+        }
+        if let Some(opinion) = &opinion {
+            standing.extend(opinion.findings.iter().cloned());
+        }
+        let decided = if by_owner { ", with the owner's call" } else { "" };
+        let summary = if dropped == 0 {
+            format!("{first} and {second} agree{decided}. {}", opening.summary.trim())
+        } else {
+            format!(
+                "{first} and {second} settled it{decided}: {upheld} of {first}'s blocking findings stand and {dropped} {} dropped. {}",
+                if dropped == 1 { "was" } else { "were" },
+                opening.summary.trim()
+            )
+        };
+        let mut outcome = Review::from_findings(task, panel.first, panel.revision, standing, summary);
+        outcome.stage = ReviewStage::Outcome;
+        outcome.with = vec![panel.second];
+        outcome.criteria_met = opening.criteria_met.clone();
+        if outcome.verdict != Verdict::Approve {
+            outcome.criteria_failed = opening.criteria_failed.clone();
+        }
+        outcome.inspected = opening.inspected.clone();
+        let verdict = outcome.verdict;
+        let blockers = outcome.blockers().len();
+        let reason = outcome
+            .blockers()
+            .first()
+            .map(|f| f.summary.clone())
+            .unwrap_or_else(|| outcome.summary.clone());
+        self.reviews.push(outcome.clone());
+        self.review_panels.remove(&task);
+        let mut events = vec![
+            self.emit(Event::ReviewRecorded {
+                review: Box::new(outcome),
+            }),
+            self.emit(Event::ReviewPanelChanged { task, panel: None }),
+        ];
+        let title = self.title_of(task);
+        let author = self
+            .tasks
+            .get(&task)
+            .and_then(|t| t.assignee)
+            .map_or_else(|| "its author".into(), |agent| self.handle_of(agent));
+        let note = match verdict {
+            Verdict::Approve => format!("\"{title}\" passes review: {second} showed the blocking findings do not hold{decided}."),
+            Verdict::RequestChanges => format!(
+                "\"{title}\" goes back to {author} with {blockers} {} both reviewers stand behind{decided}.",
+                if blockers == 1 { "finding" } else { "findings" }
+            ),
+            Verdict::Reject => format!("\"{title}\" fails review: both reviewers found a critical problem{decided}."),
+        };
+        events.extend(match verdict {
+            Verdict::Approve => self.transition(task, TaskTransition::Approve { by: panel.second }, Some(panel.second))?,
+            Verdict::RequestChanges => {
+                let mut back = self.request_changes(task, panel.first, reason)?;
+                back.extend(self.report_convergence(task, false));
+                back
+            }
+            Verdict::Reject => self.transition(
+                task,
+                TaskTransition::Fail {
+                    reason: format!("rejected on inspection: {reason}"),
+                },
+                Some(panel.first),
+            )?,
+        });
+        events.extend(self.post_room_note(task, note));
         Ok(events)
     }
 
@@ -5027,6 +5582,11 @@ impl Engine {
             transition: Box::new(transition),
             actor,
         })];
+        // Work that left review some other way, cancelled or failed by its
+        // owner, takes its second-opinion check with it.
+        if from == TaskState::InReview && to != TaskState::InReview && self.review_panels.remove(&task).is_some() {
+            events.push(self.emit(Event::ReviewPanelChanged { task, panel: None }));
+        }
 
         // Whoever held the task before and whoever holds it now may both have
         // changed availability.
@@ -5187,3 +5747,42 @@ const RETAINED_EVENTS: usize = 3_000;
 
 /// Chat messages kept in the saved board.
 const RETAINED_MESSAGES: usize = 1_000;
+
+/// Check a second opinion or a reply answers exactly the findings in question,
+/// each with a reason.
+fn check_responses(responses: &[FindingResponse], expected: &[u32], whose: &str) -> Result<()> {
+    let list = |numbers: &[u32]| numbers.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+    let mut seen = Vec::new();
+    for response in responses {
+        if !expected.contains(&response.finding) {
+            return Err(EngineError::InvalidReview {
+                reason: format!(
+                    "finding {} is not one of {whose}; answer findings {} only",
+                    response.finding,
+                    list(expected)
+                ),
+            });
+        }
+        if seen.contains(&response.finding) {
+            return Err(EngineError::InvalidReview {
+                reason: format!("finding {} is answered twice", response.finding),
+            });
+        }
+        if response.reason.trim().is_empty() {
+            return Err(EngineError::InvalidReview {
+                reason: format!("say why for finding {}", response.finding),
+            });
+        }
+        seen.push(response.finding);
+    }
+    let missing: Vec<u32> = expected.iter().copied().filter(|n| !seen.contains(n)).collect();
+    if !missing.is_empty() {
+        return Err(EngineError::InvalidReview {
+            reason: format!(
+                "give your view on findings {} of {whose}: whether each really blocks the work, and why",
+                list(&missing)
+            ),
+        });
+    }
+    Ok(())
+}

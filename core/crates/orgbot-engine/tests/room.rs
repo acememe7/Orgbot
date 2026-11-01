@@ -199,6 +199,7 @@ fn a_task_is_worked_inspected_and_submitted() {
         summary: "matches the criteria".into(),
         criteria_met: vec!["it is correct".into()],
         criteria_failed: vec![],
+        responses: vec![],
     });
     assert_eq!(f.state(task), TaskState::Approved);
 
@@ -225,6 +226,7 @@ fn a_blocking_finding_sends_the_work_back_and_costs_a_revision() {
         summary: "needs another pass".into(),
         criteria_met: vec![],
         criteria_failed: vec!["it is correct".into()],
+        responses: vec![],
     });
 
     assert_eq!(f.state(task), TaskState::InProgress, "rework returns to the author");
@@ -260,6 +262,7 @@ fn a_bot_cannot_inspect_its_own_work() {
         summary: "looks great to me".into(),
         criteria_met: vec![],
         criteria_failed: vec![],
+        responses: vec![],
     });
     assert_eq!(
         err,
@@ -326,6 +329,7 @@ fn an_artifact_author_cannot_review_after_delegating_the_task() {
             summary: "looks good".into(),
             criteria_met: vec![],
             criteria_failed: vec![],
+            responses: vec![],
         }),
         EngineError::SelfInspection { task, agent: author }
     );
@@ -339,6 +343,7 @@ fn an_artifact_author_cannot_review_after_delegating_the_task() {
             summary: "also looks good".into(),
             criteria_met: vec![],
             criteria_failed: vec![],
+            responses: vec![],
         }),
         EngineError::SelfInspection {
             task,
@@ -354,6 +359,7 @@ fn an_artifact_author_cannot_review_after_delegating_the_task() {
         summary: "independent review passed".into(),
         criteria_met: vec![],
         criteria_failed: vec![],
+        responses: vec![],
     });
     assert_eq!(f.state(task), TaskState::Approved);
 }
@@ -377,6 +383,7 @@ fn a_worker_cannot_record_a_review_at_all() {
         summary: "fine by me".into(),
         criteria_met: vec![],
         criteria_failed: vec![],
+        responses: vec![],
     });
     assert!(matches!(err, EngineError::NotPermitted { .. }));
 }
@@ -399,6 +406,7 @@ fn an_inspector_cannot_perform_the_final_submit() {
         summary: "good".into(),
         criteria_met: vec![],
         criteria_failed: vec![],
+        responses: vec![],
     });
 
     let err = f.reject(Command::SubmitTask {
@@ -1222,6 +1230,7 @@ fn rework_stops_once_the_revision_budget_is_spent() {
             summary: "again".into(),
             criteria_met: vec![],
             criteria_failed: vec![],
+            responses: vec![],
         });
         assert_eq!(
             f.state(task),
@@ -1244,6 +1253,7 @@ fn rework_stops_once_the_revision_budget_is_spent() {
         summary: "giving up".into(),
         criteria_met: vec![],
         criteria_failed: vec![],
+        responses: vec![],
     });
     assert_eq!(
         f.state(task),
@@ -1300,6 +1310,7 @@ fn a_task_cannot_start_before_its_dependency_is_submitted() {
         summary: "good".into(),
         criteria_met: vec![],
         criteria_failed: vec![],
+        responses: vec![],
     });
     f.apply(Command::SubmitTask {
         task: first,
@@ -1379,6 +1390,7 @@ fn the_event_log_is_gapless_and_replayable_from_any_point() {
         summary: "good".into(),
         criteria_met: vec![],
         criteria_failed: vec![],
+        responses: vec![],
     });
     f.apply(Command::SubmitTask { task, by: lead });
 
@@ -1502,6 +1514,7 @@ impl Fixture {
             summary: "fine".into(),
             criteria_met: vec![],
             criteria_failed: vec![],
+            responses: vec![],
         });
         self.apply(Command::SubmitTask {
             task,
@@ -2431,6 +2444,7 @@ impl Fixture {
             summary: "needs work".into(),
             criteria_met: vec![],
             criteria_failed: vec![],
+            responses: vec![],
         });
     }
 }
@@ -3550,6 +3564,7 @@ fn a_card_carries_the_rooms_recommendation_when_it_has_grounds() {
         summary: "needs another pass".into(),
         criteria_met: vec![],
         criteria_failed: vec!["checks before each commit".into()],
+        responses: vec![],
     });
     f.apply(Command::RequestLanding {
         by: worker,
@@ -3964,6 +3979,7 @@ fn an_approved_goal_is_ready_to_deliver_only_once_nothing_under_it_is_unfinished
             summary: "matches the criteria".into(),
             criteria_met: vec!["it is correct".into()],
             criteria_failed: vec![],
+            responses: vec![],
         });
     };
     approve(&mut f, goal, worker);
@@ -3975,4 +3991,231 @@ fn an_approved_goal_is_ready_to_deliver_only_once_nothing_under_it_is_unfinished
     approve(&mut f, child, worker2);
     f.apply(Command::SubmitTask { task: child, by: lead });
     assert_eq!(f.engine.ready_for_delivery(), vec![goal], "ready once its subtask has landed");
+}
+
+// ------------------------------------------------- second opinions on review
+
+mod second_opinions {
+    use super::*;
+    use orgbot_engine::eligibility::Reason;
+    use orgbot_proto::agent::AgentSpec;
+    use orgbot_proto::decision::{Answer, REVIEW_DISPUTE_DROP, REVIEW_DISPUTE_KEEP};
+    use orgbot_proto::review::{FindingResponse, PanelStage, ReviewStage, Severity, Verdict};
+
+    fn reviewer(handle: &str, provider: ProviderRef) -> AgentSpec {
+        AgentSpec::new(handle, handle, provider)
+            .with_roles(["reviewer"])
+            .with_autonomy(Autonomy::inspector())
+    }
+
+    /// The owner's room in miniature: a strict reviewer on Claude and an easier
+    /// one on an OpenAI model, beside the fixture's own scripted `qa`.
+    fn two_reviewers() -> (Fixture, AgentId, AgentId) {
+        let mut f = fixture();
+        let strict = reviewer("strict", ProviderRef::Anthropic { model: "claude-haiku-5-5".into() });
+        let easy = reviewer(
+            "easy",
+            ProviderRef::OpenAiCompatible { model: "gpt-6-astra".into(), profile: "codex".into() },
+        );
+        let ids = (strict.id, easy.id);
+        for spec in [strict, easy] {
+            f.apply(Command::JoinAgent { spec: Box::new(spec) });
+        }
+        (f, ids.0, ids.1)
+    }
+
+    fn submitted(f: &mut Fixture, title: &str) -> TaskId {
+        let worker = f.worker;
+        let task = f.start_task(title, worker);
+        f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![] });
+        task
+    }
+
+    fn blocking(summary: &str, fix: &str) -> Finding {
+        Finding {
+            severity: Severity::Major,
+            summary: summary.into(),
+            locus: Some("notes.md".into()),
+            suggestion: Some(fix.into()),
+        }
+    }
+
+    fn respond(finding: u32, blocks: bool, reason: &str) -> FindingResponse {
+        FindingResponse { finding, blocks, reason: reason.into(), suggestion: None }
+    }
+
+    fn review(task: TaskId, inspector: AgentId, findings: Vec<Finding>, responses: Vec<FindingResponse>) -> Command {
+        Command::RecordReview {
+            task,
+            inspector,
+            findings,
+            summary: "checked".into(),
+            criteria_met: vec![],
+            criteria_failed: vec![],
+            responses,
+        }
+    }
+
+    fn outcome(f: &Fixture, task: TaskId) -> orgbot_proto::review::Review {
+        f.engine
+            .reviews()
+            .iter()
+            .filter(|r| r.task == task && r.decides())
+            .last()
+            .cloned()
+            .expect("a deciding review")
+    }
+
+    fn answer(f: &mut Fixture, decision: orgbot_proto::ids::DecisionId, chosen: &str) {
+        f.apply(Command::AnswerDecision {
+            decision,
+            answer: Answer { chosen: chosen.into(), note: String::new(), at: Timestamp::now() },
+        });
+    }
+
+    /// From the owner of the live room: the strict reviewer sent the gas proof
+    /// back, and no one checked whether it was right before the author redid
+    /// the work. A send-back now waits for a reviewer on another model.
+    #[test]
+    fn a_send_back_waits_for_a_second_opinion_from_another_model() {
+        let (mut f, strict, easy) = two_reviewers();
+        let task = submitted(&mut f, "gas proof");
+        f.apply(review(
+            task,
+            strict,
+            vec![
+                blocking("the timing cannot show 1 ms", "time whole frames with a GPU timer"),
+                blocking("the far view is under 80 m", "move the camera back to 82 m"),
+            ],
+            vec![],
+        ));
+        let panel = f.engine.review_panel(task).cloned().expect("a second opinion is under way");
+        assert_eq!((panel.first, panel.second, panel.stage), (strict, easy, PanelStage::AwaitingSecond));
+        assert_eq!(f.state(task), TaskState::InReview, "the author does not have it back yet");
+        assert_eq!(f.engine.review_queue_for(easy), vec![task]);
+        assert!(f.engine.review_queue_for(f.inspector).is_empty(), "nobody else picks it up");
+        assert!(f.engine.review_queue_for(strict).is_empty());
+
+        let mut agree = respond(2, true, "82 m is the requirement");
+        agree.suggestion = Some("and say the distance in the note".into());
+        f.apply(review(task, easy, vec![], vec![respond(1, true, "frames hide sub-frame cost"), agree]));
+
+        assert_eq!(f.state(task), TaskState::InProgress, "both agree, so it goes back");
+        assert!(f.engine.review_panel(task).is_none());
+        let settled = outcome(&f, task);
+        assert_eq!((settled.stage, settled.with.clone(), settled.verdict), (ReviewStage::Outcome, vec![easy], Verdict::RequestChanges));
+        assert_eq!(settled.blockers().len(), 2);
+        assert!(settled.findings[1].suggestion.as_deref().unwrap().contains("adds: and say the distance"));
+        assert_eq!(f.engine.review_cycles(task).len(), 1, "a second opinion is part of one round");
+    }
+
+    #[test]
+    fn the_first_reviewer_can_withdraw_what_the_second_disputes() {
+        let (mut f, strict, easy) = two_reviewers();
+        let task = submitted(&mut f, "notes");
+        f.apply(review(task, strict, vec![blocking("no changelog link", "link the changelog")], vec![]));
+        f.apply(review(task, easy, vec![], vec![respond(1, false, "the brief never asked for a link")]));
+        assert_eq!(f.engine.review_panel(task).unwrap().stage, PanelStage::AwaitingReply);
+        assert_eq!(f.engine.review_queue_for(strict), vec![task], "the first reviewer answers");
+
+        f.apply(review(task, strict, vec![], vec![respond(1, false, "fair, the brief does not ask for it")]));
+        assert_eq!(f.state(task), TaskState::Approved);
+        let settled = outcome(&f, task);
+        assert_eq!(settled.findings[0].severity, Severity::Note);
+        assert!(settled.findings[0].summary.contains("not required"));
+    }
+
+    #[test]
+    fn reviewers_who_still_disagree_leave_it_to_the_owner() {
+        let (mut f, strict, easy) = two_reviewers();
+        for (title, chosen) in [("drop it", REVIEW_DISPUTE_DROP), ("keep it", REVIEW_DISPUTE_KEEP)] {
+            let task = submitted(&mut f, title);
+            f.apply(review(
+                task,
+                strict,
+                vec![blocking("tests are missing", "add a test per case"), blocking("the wording is stiff", "rewrite the intro")],
+                vec![],
+            ));
+            f.apply(review(
+                task,
+                easy,
+                vec![],
+                vec![respond(1, true, "no tests at all"), respond(2, false, "style is not a blocker")],
+            ));
+            f.apply(review(task, strict, vec![], vec![respond(2, true, "the brief asks for plain words")]));
+
+            let panel = f.engine.review_panel(task).cloned().unwrap();
+            assert_eq!(panel.stage, PanelStage::AwaitingOwner);
+            let card = f.engine.digest().needs_you.into_iter().find(|d| d.task == Some(task)).expect("a card for the owner");
+            assert_eq!(card.options, vec![REVIEW_DISPUTE_KEEP.to_string(), REVIEW_DISPUTE_DROP.to_string()]);
+            assert!(card.because.contains("@strict says it blocks") && card.because.contains("@easy says it does not"), "{}", card.because);
+            assert!(card.because.contains("Either way, 1 other finding go"), "{}", card.because);
+
+            // The panel survives a save and an older journal alike.
+            let saved: Engine = serde_json::from_str(&serde_json::to_string(&f.engine).unwrap()).unwrap();
+            assert_eq!(saved.review_panel(task), Some(&panel));
+            let replayed = Engine::from_archive(f.engine.room().clone(), f.engine.log().to_vec()).unwrap();
+            assert_eq!(replayed.review_panel(task), Some(&panel));
+
+            answer(&mut f, panel.decision.expect("the owner's decision"), chosen);
+            assert_eq!(f.state(task), TaskState::InProgress, "an agreed finding sends it back either way");
+            let settled = outcome(&f, task);
+            let kept = settled.findings[1].severity == Severity::Major;
+            assert_eq!(kept, chosen == REVIEW_DISPUTE_KEEP, "{title}");
+            if !kept {
+                assert!(settled.findings[1].summary.contains("the owner sided with @easy"));
+            }
+        }
+    }
+
+    /// From the owner of the live room: a reviewer that does not write the fix
+    /// stays strict about it, and the reviewers who asked for a fix check it.
+    #[test]
+    fn reviewers_check_the_fix_and_do_not_write_it() {
+        let (mut f, strict, easy) = two_reviewers();
+        let (worker, worker2) = (f.worker, f.worker2);
+        let task = submitted(&mut f, "release notes");
+        f.apply(review(task, strict, vec![blocking("dates are wrong", "use the tag dates")], vec![]));
+        f.apply(review(task, easy, vec![], vec![respond(1, true, "two dates are off")]));
+        assert_eq!(f.state(task), TaskState::InProgress);
+
+        let err = f.reject(Command::AddArtifact {
+            task,
+            author: easy,
+            name: "fix.md".into(),
+            body: ArtifactBody::Text { text: "the fix".into() },
+            authority_bearing: false,
+        });
+        assert!(matches!(err, EngineError::NotPermitted { .. }), "{err}");
+        let offered = f.apply(Command::OfferHandoff {
+            task,
+            from: worker,
+            to: Recipient::Agent { agent: strict },
+            kind: HandoffKind::Assist,
+            brief: "fix the dates for me".into(),
+            expects: vec![],
+            context: vec![],
+            blocks_sender: Some(false),
+            timeout_ms: None,
+        });
+        let handoff = offered_handoff(&offered);
+        assert!(matches!(f.reject(Command::AcceptHandoff { handoff, by: strict }), EngineError::NotPermitted { .. }));
+
+        // Back in review, only the reviewers who asked for the fix check it.
+        f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![] });
+        assert!(f.engine.review_queue_for(f.inspector).is_empty());
+        assert_eq!(f.engine.review_queue_for(strict), vec![task]);
+        let qa = f.inspector;
+        assert!(matches!(f.reject(review(task, qa, vec![], vec![])), EngineError::NotPermitted { .. }));
+        f.apply(review(task, easy, vec![], vec![]));
+        assert_eq!(f.state(task), TaskState::Approved);
+
+        // Nor can a reviewer claim the work it reviewed once it is free.
+        let task = submitted(&mut f, "changelog");
+        f.apply(review(task, strict, vec![blocking("entries are unsorted", "sort by date")], vec![]));
+        f.apply(review(task, easy, vec![], vec![respond(1, true, "unsorted")]));
+        f.apply(Command::ReleaseTask { task, by: worker, reason: "handing on".into() });
+        assert_eq!(f.engine.evaluate_claim(task, easy, Timestamp::now()).reason, Reason::ReviewedIt);
+        assert!(f.engine.evaluate_claim(task, worker2, Timestamp::now()).eligible);
+    }
 }

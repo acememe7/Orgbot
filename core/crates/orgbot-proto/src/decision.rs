@@ -207,6 +207,17 @@ pub const RETIRE_TASK_ALLOW: &str = "Retire this task";
 /// The answer that keeps a task proposed for retirement.
 pub const RETIRE_TASK_KEEP: &str = "Keep it";
 
+/// The action of a decision between two reviewers who could not agree
+/// whether some findings block the work. Settling it changes nothing outside
+/// the room, so it grants nothing.
+pub const REVIEW_DISPUTE: &str = "review-dispute";
+
+/// The answer that sides with the reviewer who says the findings block.
+pub const REVIEW_DISPUTE_KEEP: &str = "Keep the disputed findings";
+
+/// The answer that sides with the reviewer who says they do not.
+pub const REVIEW_DISPUTE_DROP: &str = "Drop the disputed findings";
+
 /// What an approval covers.
 ///
 /// Deliberately coarse. A scope that has to enumerate every command is one

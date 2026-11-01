@@ -756,6 +756,7 @@ fn a_task_blocked_on_work_that_has_landed_does_not_stay_blocked() {
         summary: "fine".into(),
         criteria_met: vec![],
         criteria_failed: vec![],
+        responses: vec![],
     });
     r.apply(Command::SubmitTask {
         task: upstream,

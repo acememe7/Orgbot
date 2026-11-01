@@ -147,6 +147,10 @@ pub enum Command {
         summary: String,
         criteria_met: Vec<String>,
         criteria_failed: Vec<String>,
+        /// For a second opinion or a reply: whether each finding in question
+        /// really blocks the work.
+        #[serde(default)]
+        responses: Vec<orgbot_proto::review::FindingResponse>,
     },
 
     /// Replace `task` with `replacement`, which takes over its work.

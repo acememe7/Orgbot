@@ -524,6 +524,12 @@ void _answerTests() {
           findsOneWidget,
         );
         expect(find.textContaining('stay in the bot'), findsOneWidget);
+        // Two reviewers who could not agree: each answer says what follows.
+        expect(
+          answerEffect('Keep the disputed findings'),
+          contains('goes back'),
+        );
+        expect(answerEffect('Drop the disputed findings'), contains('dropped'));
       },
     );
 

@@ -1296,6 +1296,7 @@ fn touches_the_board(event: &orgbot_proto::event::Event) -> bool {
             | Event::DecisionWithdrawn { .. }
             | Event::PendingRemovals { .. }
             | Event::ReviewRecorded { .. }
+            | Event::ReviewPanelChanged { .. }
             | Event::ArtifactAdded { .. }
             | Event::UsageRecorded { .. }
     )

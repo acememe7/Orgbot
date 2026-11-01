@@ -19,7 +19,7 @@ use orgbot_proto::agent::AgentSpec;
 use orgbot_proto::artifact::{ArtifactBody, PART_CHARS};
 use orgbot_proto::graph::{Lineage, TaskKind, TaskOrigin};
 use orgbot_proto::handoff::{HandoffKind, Recipient};
-use orgbot_proto::review::{Finding, Severity};
+use orgbot_proto::review::{Finding, FindingResponse, PanelStage, Severity};
 use orgbot_proto::task::{BlockReason, Priority};
 use orgbot_proto::{
     AgentId, ArtifactId, Audience, ChatMessage, HandoffId, MessageIntent, TaskId, TaskState,
@@ -604,7 +604,16 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
              choose a verdict directly — it follows from what you report: a \"major\" \
              finding sends the work back for rework, a \"critical\" one fails the task, \
              and anything less approves it. So report what you actually found and let \
-             the verdict follow. Check the task's acceptance criteria one by one.",
+             the verdict follow. Check the task's acceptance criteria one by one. \
+             Every major or critical finding says what is wrong, where, and in \
+             `suggestion` the fix or workaround the author should try: describe it, do \
+             not write it. Work you send back gets a second opinion from another \
+             reviewer before it goes to the author. When you are that second reviewer, \
+             or the first reviewer answering one, give `responses` instead: for each \
+             finding in question, whether it really blocks the work, why, and a better \
+             workaround if you see one. When work comes back from a round you \
+             reviewed, check each fix you asked for and run the checks that show the \
+             workaround works.",
             schema::object(
                 vec![
                     ("task", schema::string("The task under review.")),
@@ -640,7 +649,27 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                     ),
                     (
                         "criteria_failed",
-                        schema::string_array("Acceptance criteria that failed."),
+                        schema::string_array(
+                            "Acceptance criteria that failed. Each needs a blocking finding saying what to change.",
+                        ),
+                    ),
+                    (
+                        "responses",
+                        schema::object_array(
+                            "Only for a second opinion, or a reply to one: your view of each finding in question.",
+                            schema::object(
+                                vec![
+                                    ("finding", schema::integer("The finding's number, counting from 1.")),
+                                    ("blocks", schema::boolean("Whether it really blocks approval.")),
+                                    ("reason", schema::string("Why.")),
+                                    (
+                                        "suggestion",
+                                        schema::string("A better fix or workaround, if you see one. Describe it; do not write it."),
+                                    ),
+                                ],
+                                &["finding", "blocks", "reason"],
+                            ),
+                        ),
                     ),
                 ],
                 &["task", "summary"],
@@ -846,6 +875,7 @@ fn explain(error: EngineError) -> ToolOutcome {
         EngineError::SelfInspection { .. } => {
             Some("Submit it for review and let a different bot inspect it.")
         }
+        EngineError::InvalidReview { .. } => Some("Correct the review as described and record it again."),
         EngineError::DependencyNotMet { .. } => {
             Some("Wait for the dependency to be submitted, or work on something else.")
         }
@@ -2176,28 +2206,75 @@ fn record_review(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutc
         .cloned()
         .unwrap_or_default()
     {
-        let severity = match raw
-            .get("severity")
-            .and_then(Value::as_str)
-            .unwrap_or("note")
-        {
+        // From the live room's code review: an unknown severity used to
+        // become a note, so a reviewer who wrote "high" approved the work.
+        let raw_severity = raw.get("severity").and_then(Value::as_str).unwrap_or("");
+        let severity = match raw_severity.trim().to_ascii_lowercase().as_str() {
+            "note" => Severity::Note,
             "minor" => Severity::Minor,
             "major" => Severity::Major,
             "critical" => Severity::Critical,
-            _ => Severity::Note,
+            _ => {
+                return ToolOutcome::error(format!(
+                    "Severity must be note, minor, major or critical, not \"{raw_severity}\". Major sends the work back; critical fails it."
+                ))
+            }
         };
         let Some(summary) = raw.get("summary").and_then(Value::as_str) else {
             return ToolOutcome::error("Every finding needs a `summary` saying what is wrong.");
         };
+        let suggestion = raw
+            .get("suggestion")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if severity.blocks_approval() {
+            if summary.trim().is_empty() {
+                return ToolOutcome::error("A major or critical finding needs a `summary` saying what is wrong.");
+            }
+            if suggestion.is_none() {
+                return ToolOutcome::error(format!(
+                    "The finding \"{}\" blocks the work, so it needs a `suggestion`: the fix or workaround the author should try. Describe it; do not write it yourself.",
+                    summary.trim()
+                ));
+            }
+        }
         findings.push(Finding {
             severity,
             summary: summary.to_string(),
             locus: raw.get("locus").and_then(Value::as_str).map(str::to_string),
+            suggestion,
+        });
+    }
+
+    let mut responses = Vec::new();
+    for raw in input.get("responses").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let (Some(finding), Some(blocks)) = (
+            raw.get("finding").and_then(Value::as_u64),
+            raw.get("blocks").and_then(Value::as_bool),
+        ) else {
+            return ToolOutcome::error("Each response needs a `finding` number and whether it `blocks`.");
+        };
+        responses.push(FindingResponse {
+            finding: u32::try_from(finding).unwrap_or(u32::MAX),
+            blocks,
+            reason: raw.get("reason").and_then(Value::as_str).unwrap_or_default().to_string(),
             suggestion: raw
                 .get("suggestion")
                 .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
                 .map(str::to_string),
         });
+    }
+
+    let criteria_failed = string_list(input, "criteria_failed");
+    let in_panel = engine.review_panel(task).is_some();
+    if !in_panel && !criteria_failed.is_empty() && !findings.iter().any(|f| f.severity.blocks_approval()) {
+        return ToolOutcome::error(
+            "You listed failed criteria but no blocking finding. Add a major finding for each failed criterion saying what to change, or move it to criteria_met.",
+        );
     }
 
     match engine.apply(Command::RecordReview {
@@ -2206,15 +2283,35 @@ fn record_review(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutc
         findings,
         summary,
         criteria_met: string_list(input, "criteria_met"),
-        criteria_failed: string_list(input, "criteria_failed"),
+        criteria_failed,
+        responses,
     }) {
         Ok(_) => {
+            let handle = |agent: AgentId| {
+                engine.agent(agent).map_or_else(|| "another reviewer".to_string(), |spec| format!("@{}", spec.handle))
+            };
+            if let Some(panel) = engine.review_panel(task) {
+                let next = match panel.stage {
+                    PanelStage::AwaitingSecond => format!(
+                        "Before it goes back, {} gives a second opinion on your blocking findings.",
+                        handle(panel.second)
+                    ),
+                    PanelStage::AwaitingReply => format!(
+                        "{} answers the findings you disputed before anything goes back.",
+                        handle(panel.first)
+                    ),
+                    PanelStage::AwaitingOwner => {
+                        "You and the other reviewer still disagree, so the owner decides.".to_string()
+                    }
+                };
+                return ToolOutcome::ok(format!("Review recorded. {next}"));
+            }
             let state = engine
                 .task(task)
                 .map(|t| t.state.as_str())
                 .unwrap_or("unknown");
             ToolOutcome::ok(format!(
-                "Review recorded. Your findings put the task in `{state}`."
+                "Review recorded. The task is now `{state}`."
             ))
         }
         Err(error) => explain(error),

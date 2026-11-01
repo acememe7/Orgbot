@@ -329,12 +329,49 @@ fn harsh_inspector() -> Arc<dyn Provider> {
                 json!({
                     "task": task,
                     "summary": "still not right",
-                    "findings": [{"severity": "major", "summary": "the version is wrong"}]
+                    "findings": [{"severity": "major", "summary": "the version is wrong", "suggestion": "use the version in Cargo.toml"}]
                 }),
             );
         }
         if last.contains("Review recorded") {
             return say("sent back");
+        }
+        nothing()
+    })
+}
+
+/// A reviewer that sends a first submission back with a fix to try, agrees
+/// when asked for a second opinion, and approves once its fix is in.
+fn second_opinion_inspector(handle: &'static str) -> Arc<dyn Provider> {
+    reactive(handle, |last, _all| {
+        if let Some(task) = id_after(last, "Awaiting your inspection:", "task") {
+            if last.contains("second opinion:") {
+                return call(
+                    "record_review",
+                    json!({
+                        "task": task,
+                        "summary": "the other reviewer is right",
+                        "responses": [{"finding": 1, "blocks": true, "reason": "the version really is wrong"}]
+                    }),
+                );
+            }
+            if last.contains("you asked for these fixes") {
+                return call(
+                    "record_review",
+                    json!({"task": task, "summary": "the fix is in", "findings": []}),
+                );
+            }
+            return call(
+                "record_review",
+                json!({
+                    "task": task,
+                    "summary": "not yet",
+                    "findings": [{"severity": "major", "summary": "the version is wrong", "locus": "notes.md", "suggestion": "use the version in Cargo.toml"}]
+                }),
+            );
+        }
+        if last.contains("Review recorded") {
+            return say("reviewed");
         }
         nothing()
     })
@@ -2699,6 +2736,7 @@ async fn a_delivering_coordinator_is_not_woken_for_a_goal_still_waiting_on_its_s
                 summary: "fine".into(),
                 criteria_met: vec![],
                 criteria_failed: vec![],
+                responses: vec![],
             },
         ] {
             let _ = room.engine_mut().apply(command);
@@ -2719,6 +2757,7 @@ async fn a_delivering_coordinator_is_not_woken_for_a_goal_still_waiting_on_its_s
         summary: "fine".into(),
         criteria_met: vec![],
         criteria_failed: vec![],
+        responses: vec![],
     });
     room.engine_mut().apply(Command::SubmitTask { task: child, by: coordinator }).unwrap();
     assert!(room.is_actionable(coordinator), "woken once the goal can go out");
@@ -2895,4 +2934,42 @@ async fn a_push_is_always_put_to_the_owner_whatever_the_access_mode() {
         .unwrap();
     assert!(room.engine().push_approved(task, lead, "origin", "main", &base, &head));
     assert!(!room.engine().push_approved(task, lead, "origin", "release", &base, &head), "only that branch");
+}
+
+/// From the owner of the live room: no reviewer sends work back alone. The
+/// second reviewer is woken with the findings to rule on, the author gets
+/// what both settled, and the reviewers who asked for the fix check it.
+#[tokio::test]
+async fn work_sent_back_gets_a_second_opinion_and_its_reviewers_check_the_fix() {
+    use orgbot_proto::review::ReviewStage;
+    let mut room = room("ship the release notes");
+    room.seat(spec("lead", &["coordinator"], Autonomy::coordinator()), coordinator())
+        .unwrap();
+    room.seat(spec("w1", &["writer"], Autonomy::default()), worker("w1"))
+        .unwrap();
+    room.seat(spec("strict", &["reviewer"], Autonomy::inspector()), second_opinion_inspector("strict"))
+        .unwrap();
+    room.seat(spec("easy", &["reviewer"], Autonomy::inspector()), second_opinion_inspector("easy"))
+        .unwrap();
+    room.start().unwrap();
+
+    let outcome = room.run(None).await;
+    assert_eq!(outcome, RunOutcome::Completed);
+    let engine = room.engine();
+    let task = engine.tasks().next().expect("a task");
+    assert_eq!(task.state, TaskState::Submitted);
+    let stages: Vec<ReviewStage> = engine.reviews().iter().map(|r| r.stage).collect();
+    assert_eq!(
+        stages,
+        vec![ReviewStage::Opening, ReviewStage::SecondOpinion, ReviewStage::Outcome, ReviewStage::Decision],
+        "sent back, second opinion, settled, then the fix checked"
+    );
+    let reviews = engine.reviews();
+    assert_ne!(reviews[0].inspector, reviews[1].inspector, "the second opinion is someone else's");
+    assert_eq!(reviews[2].with, vec![reviews[1].inspector]);
+    assert!(
+        [reviews[0].inspector, reviews[1].inspector].contains(&reviews[3].inspector),
+        "one of the reviewers who asked for the fix checks it"
+    );
+    assert_eq!(engine.review_cycles(task.id).len(), 2);
 }

@@ -90,7 +90,10 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
          2. Do the work. Record what you produce with add_artifact — the actual \
             deliverable goes there, not in a chat message.\n\
          3. Call submit_for_review when it is done. You cannot approve your own \
-            work; an inspector decides and may send it back.\n\
+            work; an inspector decides and may send it back. When it comes back, \
+            fix each blocking finding as its suggestion says, or say in your \
+            verification note why another way is better; the reviewers who \
+            raised them check the fix.\n\
          4. Once approved, the coordinator delivers it.\n\n",
     );
 
@@ -112,6 +115,15 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            project files or unavailable tools, hand it to a QA/tester teammate \
            and inspect the returned command results. Do not approve work with \
            failed required checks or present unrun checks as verified.\n\
+         - Reviewers describe fixes; they do not write them. Every blocking \
+           finding says what is wrong, where, and the fix or workaround to try. \
+           A bot that reviewed a task does not claim it, help write it or add \
+           work to it. Work sent back gets a second opinion from a reviewer on \
+           another model before it reaches the author; as that reviewer, say for \
+           each blocking finding whether it really blocks and why, and offer a \
+           better workaround if you see one. When work you sent back returns, \
+           check each fix you asked for and run the checks that show the \
+           workaround works.\n\
          - Every document costs the owner tokens to write and teammates tokens to \
            read. Do not write plan, checkpoint, status, audit, handover or summary \
            documents, as artifacts or as project files: status goes in one short \
@@ -494,6 +506,7 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
         for id in queue {
             if let Some(task) = engine.task(id) {
                 out.push_str(&format!("  {} {}\n", task.id, task.title));
+                out.push_str(&review_request(engine, agent, task));
                 if !task.acceptance_criteria.is_empty() {
                     out.push_str(&format!(
                         "    check: {}\n",
@@ -804,21 +817,27 @@ fn recent_messages(engine: &Engine, agent: AgentId, since: Seq) -> String {
                 let is_mine = engine
                     .task(review.task)
                     .is_some_and(|t| t.assignee == Some(agent));
-                if !is_mine {
+                // A second opinion or a reply is the reviewers' business; the
+                // author acts on what they settled.
+                if !is_mine || !review.decides() {
                     continue;
                 }
-                let mut out = format!("  [inspection] {}\n", review.summary);
+                let reviewers = std::iter::once(review.inspector)
+                    .chain(review.with.iter().copied())
+                    .map(|id| engine.agent(id).map_or_else(|| "a reviewer".to_string(), |spec| format!("@{}", spec.handle)))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                let verdict = match review.verdict {
+                    orgbot_proto::review::Verdict::Approve => "approved it",
+                    orgbot_proto::review::Verdict::RequestChanges => "sent it back",
+                    orgbot_proto::review::Verdict::Reject => "rejected it",
+                };
+                let mut out = format!("  [inspection] {reviewers} {verdict}: {}\n", review.summary);
                 for finding in &review.findings {
-                    out.push_str(&format!(
-                        "    {:?}: {}{}\n",
-                        finding.severity,
-                        finding.summary,
-                        finding
-                            .suggestion
-                            .as_ref()
-                            .map(|s| format!(" — {s}"))
-                            .unwrap_or_default()
-                    ));
+                    out.push_str(&format!("    {}\n", finding_line(finding)));
+                }
+                if !review.criteria_failed.is_empty() {
+                    out.push_str(&format!("    criteria not met: {}\n", review.criteria_failed.join("; ")));
                 }
                 entries.push((true, out));
             }
@@ -874,6 +893,77 @@ fn fit_catch_up(entries: Vec<(bool, String)>, budget: usize) -> String {
     for ((_, text), kept) in entries.into_iter().zip(kept) {
         if kept {
             out.push_str(&text);
+        }
+    }
+    out
+}
+
+/// One finding as a bot reads it: severity, what, where, and the fix to try.
+fn finding_line(finding: &orgbot_proto::review::Finding) -> String {
+    let mut line = format!("{}: {}", format!("{:?}", finding.severity).to_lowercase(), finding.summary.trim());
+    if let Some(locus) = finding.locus.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+        line.push_str(&format!(" (at {locus})"));
+    }
+    if let Some(fix) = finding.suggestion.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        line.push_str(&format!(" — fix: {fix}"));
+    }
+    line
+}
+
+/// What an inspector is asked to do with a task in its queue: a first
+/// review, a second opinion, a reply, or a check of the fixes it asked for.
+fn review_request(engine: &orgbot_engine::Engine, agent: orgbot_proto::AgentId, task: &orgbot_proto::Task) -> String {
+    use orgbot_proto::review::PanelStage;
+    let handle = |id: orgbot_proto::AgentId| engine.agent(id).map_or_else(|| "another reviewer".to_string(), |spec| format!("@{}", spec.handle));
+    let mut out = String::new();
+    if let Some(panel) = engine.review_panel(task.id) {
+        let Some(opening) = engine.review(panel.opening) else {
+            return out;
+        };
+        match panel.stage {
+            PanelStage::AwaitingSecond => {
+                out.push_str(&format!(
+                    "    second opinion: {} would send this back. In `responses`, say for each blocking finding whether it really blocks the work and why, with a better workaround if you see one. Report new problems as findings.\n",
+                    handle(panel.first)
+                ));
+                for (i, finding) in opening.findings.iter().enumerate() {
+                    out.push_str(&format!("    {}. {}\n", i + 1, finding_line(finding)));
+                }
+            }
+            PanelStage::AwaitingReply => {
+                out.push_str(&format!(
+                    "    reply: {} disputes these findings of yours. In `responses`, keep each one that still blocks (`blocks: true`, and why) or withdraw it (`blocks: false`).\n",
+                    handle(panel.second)
+                ));
+                if let Some(opinion) = panel.second_opinion.and_then(|id| engine.review(id)) {
+                    for response in opinion.responses.iter().filter(|r| !r.blocks) {
+                        if let Some(finding) = opening.findings.get(response.finding as usize - 1) {
+                            out.push_str(&format!(
+                                "    {}. {} — {}: {}\n",
+                                response.finding,
+                                finding.summary.trim(),
+                                handle(panel.second),
+                                response.reason.trim()
+                            ));
+                        }
+                    }
+                }
+            }
+            PanelStage::AwaitingOwner => {}
+        }
+        return out;
+    }
+    if engine.last_round_reviewers(task.id).contains(&agent) {
+        if let Some(last) = engine
+            .reviews()
+            .iter()
+            .filter(|r| r.task == task.id && r.decides() && r.revision + 1 == task.revision)
+            .last()
+        {
+            out.push_str("    you asked for these fixes last round; check each one and run the checks that show the workaround works:\n");
+            for finding in last.blockers() {
+                out.push_str(&format!("    - {}\n", finding_line(finding)));
+            }
         }
     }
     out

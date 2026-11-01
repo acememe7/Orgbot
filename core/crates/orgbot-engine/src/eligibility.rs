@@ -87,6 +87,9 @@ pub enum Reason {
     RoleMismatch,
     /// This review-only bot was offered work outside its permitted scope.
     ReviewOnly,
+    /// This bot reviewed the task, so it describes the fix and does not
+    /// write it.
+    ReviewedIt,
     /// This bot has failed too often and is not being given work.
     BotFaulted,
     /// This bot is offline or otherwise not taking work.
@@ -119,6 +122,7 @@ impl Reason {
             Self::Closed => "CLOSED",
             Self::RoleMismatch => "ROLE_MISMATCH",
             Self::ReviewOnly => "REVIEW_ONLY",
+            Self::ReviewedIt => "REVIEWED_IT",
             Self::BotFaulted => "BOT_FAULTED",
             Self::BotUnavailable => "BOT_UNAVAILABLE",
             Self::UnknownTask => "UNKNOWN_TASK",

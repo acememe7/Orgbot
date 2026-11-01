@@ -186,6 +186,13 @@ pub enum Event {
     ArtifactAdded { artifact: Box<Artifact> },
     /// An inspection was completed.
     ReviewRecorded { review: Box<Review> },
+    /// A second-opinion check on work that would be sent back opened,
+    /// moved on, or closed (`None`).
+    ReviewPanelChanged {
+        task: TaskId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        panel: Option<Box<crate::review::ReviewPanel>>,
+    },
 
     /// The engine found a cycle in the wait-for graph. Carries the cycle so
     /// the UI can show exactly who is waiting on whom.
@@ -265,6 +272,7 @@ impl Event {
             Self::HandoffTransitioned { .. } => "handoff_transitioned",
             Self::ArtifactAdded { .. } => "artifact_added",
             Self::ReviewRecorded { .. } => "review_recorded",
+            Self::ReviewPanelChanged { .. } => "review_panel_changed",
             Self::DeadlockDetected { .. } => "deadlock_detected",
             Self::AgentErrored { .. } => "agent_errored",
             Self::UsageRecorded { .. } => "usage_recorded",
