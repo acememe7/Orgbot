@@ -780,13 +780,21 @@ impl AgentCliProvider {
             ));
         }
         let mut cmd = Command::new(&self.bin);
+        // Copying the project for a bot's first turn can take minutes, and
+        // every running turn shares one task. From the live room: while two
+        // new bots' copies were made, no bot's room tools answered, and
+        // @iris's Claude Code gave up on them after 30 seconds. The copy
+        // runs off that task now, as does the merge after the turn.
         #[cfg(target_os = "linux")]
-        let prepared = self
-            .guard
-            .as_ref()
-            .map(|guard| guard.prepare())
-            .transpose()
-            .map_err(ProviderError::Unsupported)?;
+        let prepared = match self.guard.clone() {
+            Some(guard) => Some(
+                tokio::task::spawn_blocking(move || guard.prepare())
+                    .await
+                    .map_err(|error| ProviderError::Unsupported(format!("preparing the workspace stopped: {error}")))?
+                    .map_err(ProviderError::Unsupported)?,
+            ),
+            None => None,
+        };
         #[cfg(target_os = "linux")]
         let private_home = prepared
             .as_ref()
@@ -1146,7 +1154,11 @@ impl AgentCliProvider {
                         // A merge problem is reported in the turn, not made the
                         // turn's failure: the work happened, and a failed turn
                         // would only be retried into the same conflict.
-                        match guard.apply_setting_aside_conflicts() {
+                        let merging = guard.clone();
+                        let merged = tokio::task::spawn_blocking(move || merging.apply_setting_aside_conflicts())
+                            .await
+                            .unwrap_or_else(|error| Err(format!("merging stopped: {error}")));
+                        match merged {
                             Ok(integration) => {
                                 episode.workspace_changes = ["applied", "set_aside"]
                                     .iter()
