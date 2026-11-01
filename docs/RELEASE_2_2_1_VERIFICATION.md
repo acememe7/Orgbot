@@ -113,6 +113,13 @@ the engine is unchanged, the Flutter bundle and sandbox helper rebuilt). Signed
 archive revision `2c7afe7a39dba8336aa8c4437bdeeafe98152641` replaces only
 `orgbots_2.2.1_amd64.deb`;
 [Pages run 41254171933](https://github.com/acememe7/Orgbot/actions/runs/41254171933)
+published it.
+
+Later that night it was rebuilt again with the UI review's changes and the
+handoff fix (source `335ab11`; engine, Flutter bundle and sandbox helper
+rebuilt). Signed archive revision `0efa65e69650942f8690fa6525906a26e4719b08`
+replaces only `orgbots_2.2.1_amd64.deb`;
+[Pages run 41258525703](https://github.com/acememe7/Orgbot/actions/runs/41258525703)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits
