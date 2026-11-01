@@ -138,8 +138,8 @@ pub enum Command {
         /// Such an artifact may only be re-emitted by whoever produced it.
         #[serde(default)]
         authority_bearing: bool,
-        /// Whether this is the document the task or the owner asked for,
-        /// which may run longer than a note or record.
+        /// Whether this is the document the task or the owner asked for, so
+        /// its length is not remarked on.
         #[serde(default)]
         document: bool,
     },

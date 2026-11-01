@@ -101,8 +101,8 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
         "Verification before review:\n\
          - Workers run focused checks for their changes before submit_for_review. \
            Put the exact commands, exit results, tested files or revision, and \
-           any checks that could not run in one verification note per task, under \
-           8,000 characters. When the work changes, record the note again under \
+           any checks that could not run in one short verification note per task, \
+           a few thousand characters. When the work changes, record the note again under \
            the same name: the newer one replaces the older, and reviewers read \
            only the newest. Put code, logs, captures and other raw data in project \
            files and give their paths and sha256 in the note; do not paste them. \
@@ -157,6 +157,15 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            wait for the answer: you will be woken when it comes. Do not hand the wait \
            to another bot or post reminders about it. Use ask_owner only for a question \
            you need answered, never to record a status, a hold or a decision already made.\n\
+         - When a command fails for want of something only the owner can give, such as \
+           network access, a missing tool or dependency, a sign-in or a permission, and no \
+           teammate already has it, ask the owner with ask_owner at once: say exactly what \
+           is missing, the command and its error, and what it unblocks. Do not record it \
+           as a blocker and wait.\n\
+         - This room runs on the owner's own computer. Its GPU, CPU, memory and network \
+           are shared with the owner's desktop and apps and are never idle, so never make \
+           an idle or exclusive machine a condition for a run: run under normal load and \
+           report the load you measured.\n\
          - File removals waiting for the owner's review are shown to them in the app, \
            with a count per bot. Do not mention them in your messages.\n\
          - Your copy's history follows the project: with no commits of your own, \
@@ -534,7 +543,14 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
                         "    artifacts: {}\n",
                         current
                             .iter()
-                            .map(|artifact| format!("{} ({})", artifact.name, artifact.id))
+                            .map(|artifact| {
+                                format!(
+                                    "{} ({}, {} chars)",
+                                    artifact.name,
+                                    artifact.id,
+                                    artifact.body.full_text().chars().count()
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join(", ")
                     ));
@@ -1023,10 +1039,29 @@ mod tests {
             },
         );
         let prompt = system_prompt(&engine, &spec);
-        assert!(prompt.contains("one verification note per task, under 8,000 characters"));
+        assert!(prompt.contains("one short verification note per task"));
         assert!(prompt.contains("record the note again under the same name"));
         assert!(prompt.contains("Do not write plan, checkpoint, status, audit, handover or summary"));
         assert!(prompt.contains("only when the owner or the task asks for one"));
+    }
+
+    #[test]
+    fn bots_ask_for_what_is_missing_and_do_not_wait_for_an_idle_machine() {
+        // From the owner of the live room: @ollama-glm had no network or
+        // Playwright and never asked, and @mira held a capture for an
+        // "exclusive GPU window" on a desktop whose GPU is never idle.
+        let engine = Engine::new(RoomSpec {
+            name: "desktop".into(),
+            goal: "ship".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        let spec = AgentSpec::new("dev", "Dev", ProviderRef::Scripted { script: "test".into() });
+        let prompt = system_prompt(&engine, &spec);
+        assert!(prompt.contains("ask the owner with ask_owner at once"));
+        assert!(prompt.contains("never make an idle or exclusive machine a condition"));
     }
 
     #[test]

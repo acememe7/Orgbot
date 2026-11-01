@@ -2184,8 +2184,8 @@ impl Engine {
                 name,
                 body,
                 authority_bearing,
-                document,
-            } => self.add_artifact(task, author, name, body, authority_bearing, document),
+                document: _,
+            } => self.add_artifact(task, author, name, body, authority_bearing),
             Command::RecordReview {
                 task,
                 inspector,
@@ -4429,7 +4429,6 @@ impl Engine {
         name: String,
         body: ArtifactBody,
         authority_bearing: bool,
-        document: bool,
     ) -> Result<Vec<EventEnvelope>> {
         self.require_agent(author)?;
         self.require_review_only_assignment(task, author)?;
@@ -4441,9 +4440,6 @@ impl Engine {
         }
         if self.require_task(task)?.state == TaskState::Parked {
             return Err(parked_refusal(task));
-        }
-        if let Some(reason) = too_long(&name, &body, document) {
-            return Err(EngineError::ArtifactTooLong { reason });
         }
         let revision = self.require_task(task)?.revision;
         let mut artifact = Artifact::new(task, author, name, body);
@@ -5933,47 +5929,10 @@ const RETAINED_EVENTS: usize = 3_000;
 /// Chat messages kept in the saved board.
 const RETAINED_MESSAGES: usize = 1_000;
 
-/// Longest note or record kept inline: one part, so a reviewer reads it in
-/// a single call.
-const RECORD_CHARS: usize = orgbot_proto::artifact::PART_CHARS;
-/// Longest document kept inline, when the task or the owner asked for one.
-const DOCUMENT_CHARS: usize = 40_000;
 /// Current notes and records on one task past which the coordinators hear.
 const RECORDS_WARN_CHARS: usize = 60_000;
 /// How that notice begins, so a replayed room knows it was already sent.
 const RECORDS_WARNING: &str = "Too much to read:";
-
-/// Why `body` is too long to keep inline, if it is.
-///
-/// From the live room: one task held 55 records and 712,000 characters,
-/// including test code pasted whole as text and capture data as JSON. Notes
-/// and records stay short; code and raw data go in project files, which the
-/// note names. Patches are the work itself and are not limited.
-fn too_long(name: &str, body: &ArtifactBody, document: bool) -> Option<String> {
-    if !matches!(body, ArtifactBody::Text { .. } | ArtifactBody::Json { .. }) {
-        return None;
-    }
-    let chars = body.full_text().chars().count();
-    let limit = if document { DOCUMENT_CHARS } else { RECORD_CHARS };
-    if chars <= limit {
-        return None;
-    }
-    Some(if document {
-        format!(
-            "`{name}` is {chars} characters, and a document is at most {DOCUMENT_CHARS}. \
-             Write it into the project as a file and record its path and sha256 instead, \
-             or shorten it."
-        )
-    } else {
-        format!(
-            "`{name}` is {chars} characters, and a note or record is at most {RECORD_CHARS}. \
-             Keep to what changed, the commands you ran and their results. Put code, logs, \
-             captures and other raw data in project files and give their paths and sha256 \
-             here. If this is the document the task or the owner asked for, set document \
-             to true (up to {DOCUMENT_CHARS})."
-        )
-    })
-}
 
 /// Whether `new` repeats most of `old`: a rewrite that carries the earlier
 /// version forward, rather than a separate record.

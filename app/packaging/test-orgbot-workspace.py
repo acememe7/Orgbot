@@ -767,12 +767,22 @@ class WorkspaceTests(unittest.TestCase):
             workspace._status(os.fspath(self.state), "dev")
         self.assertTrue(work.is_dir())
 
-    def test_external_symlinked_project_entries_fail_closed(self):
+    def test_a_symlink_leading_outside_is_left_out_and_work_goes_on(self):
+        # From the live room: a bot made `self-link -> /tmp/orgbot-workspace`
+        # in its copy, and every command after it failed.
         outside = self.root / "outside"
         outside.write_text("outside\n", encoding="utf-8")
         (self.project / "escape").symlink_to(outside)
-        with self.assertRaisesRegex(workspace.WorkspaceError, "project symlinks are not supported|resolve inside the project"):
-            self.prepare()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            work = self.prepare()
+            self.assertFalse((work / "escape").exists() or (work / "escape").is_symlink(), "never copied")
+            (work / "self-link").symlink_to("/tmp/orgbot-workspace")
+            (work / "src/main.py").write_text("changed\n", encoding="utf-8")
+            status = workspace._status(os.fspath(self.state), "dev")
+        self.assertEqual(status["changed"], [{"path": "src/main.py", "kind": "modified"}])
+        self.assertIn("self-link points outside the project", stderr.getvalue())
+        self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
 
     def test_safe_internal_symlinks_work_inside_copy_but_not_baseline(self):
         (self.project / "src/link.py").symlink_to("main.py")
@@ -805,7 +815,7 @@ class WorkspaceTests(unittest.TestCase):
         (outside / "main.py").write_text("protected\n", encoding="utf-8")
         (work / "src").rename(work / "src-real")
         (work / "src").symlink_to(outside, target_is_directory=True)
-        with self.assertRaisesRegex(workspace.WorkspaceError, "project symlinks are not supported|resolve inside the project"):
+        with self.assertRaisesRegex(workspace.WorkspaceError, "replaces project files and leads outside the project"):
             workspace._apply(os.fspath(self.state), "dev", review_token=None)
         self.assertEqual((outside / "main.py").read_text(encoding="utf-8"), "protected\n")
 

@@ -4427,36 +4427,21 @@ fn a_note_recorded_again_replaces_the_older_one() {
     assert!(restored.artifact(v3).unwrap().is_current());
 }
 
-/// From the live room: test code was pasted whole into notes, up to 98,577
-/// characters, and capture data into JSON records.
+/// From the owner of the live room: a hard limit refused work outright and
+/// did more harm than good. Long notes and records are kept whole; the tool
+/// tells the author they are long.
 #[test]
-fn notes_and_records_past_their_limit_are_refused() {
+fn long_notes_and_records_are_kept_whole() {
     let mut f = fixture();
     let worker = f.worker;
     let task = f.start_task("gas proof", worker);
-    let refused = record(&mut f, task, worker, "verification.md", note("run", 8_001)).unwrap_err();
-    assert!(matches!(&refused, EngineError::ArtifactTooLong { reason } if reason.contains("project files")), "{refused}");
-    assert!(record(&mut f, task, worker, "verification.md", note("run", 8_000)).is_ok());
-    let data = ArtifactBody::Json { value: serde_json::json!({ "samples": vec![123_456_789u64; 1_000] }) };
-    assert!(matches!(record(&mut f, task, worker, "capture.json", data), Err(EngineError::ArtifactTooLong { .. })));
-
-    // The document the task asked for may run longer, within a limit.
-    let document = |f: &mut Fixture, chars| {
-        f.engine.apply(Command::AddArtifact {
-            task,
-            author: worker,
-            name: "design.md".into(),
-            body: note("design", chars),
-            authority_bearing: false,
-            document: true,
-        })
-    };
-    assert!(document(&mut f, 30_000).is_ok());
-    assert!(matches!(document(&mut f, 40_001), Err(EngineError::ArtifactTooLong { .. })));
-
-    // A patch is the work itself.
-    let ArtifactBody::Text { text } = note("diff", 60_000) else { unreachable!() };
-    assert!(record(&mut f, task, worker, "change.patch", ArtifactBody::Patch { diff: text }).is_ok());
+    let long = record(&mut f, task, worker, "verification.md", note("run", 40_000)).unwrap();
+    assert_eq!(
+        f.engine.artifact(long).unwrap().body.full_text().chars().count(),
+        40_000
+    );
+    let data = ArtifactBody::Json { value: serde_json::json!({ "samples": vec![123_456_789u64; 10_000] }) };
+    assert!(record(&mut f, task, worker, "capture.json", data).is_ok());
 }
 
 #[test]

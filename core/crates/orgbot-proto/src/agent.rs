@@ -187,7 +187,8 @@ impl ProviderRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Autonomy {
-    /// Model turns a bot may take on one task before it must report back.
+    /// Model calls in one turn after which, and again every as many calls,
+    /// the bot is reminded to finish if it is done. A turn is never cut off.
     pub max_turns_per_task: u32,
     /// Handoffs a bot may have in flight at once. Caps fan-out so one bot
     /// cannot flood the room.

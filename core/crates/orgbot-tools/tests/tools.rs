@@ -1827,8 +1827,10 @@ fn a_note_recorded_again_says_what_it_replaced() {
     let new = f.ok(f.inspector, "read_artifact", json!({"artifact":second}));
     assert!(!new.contains("REPLACED"));
 
+    // A long note is kept whole, and its author is told it is long.
     let long = "x".repeat(9_000);
-    let refused = f.call(f.worker, "add_artifact", json!({"task":task, "name":"capture.md", "content":long}));
-    assert!(refused.is_error && refused.content.contains("at most 8000"), "{}", refused.content);
-    f.ok(f.worker, "add_artifact", json!({"task":task, "name":"design.md", "content":long, "document":true}));
+    let told = f.ok(f.worker, "add_artifact", json!({"task":task, "name":"capture.md", "content":long}));
+    assert!(told.contains("It is 9000 characters") && told.contains("project files"), "{told}");
+    let told = f.ok(f.worker, "add_artifact", json!({"task":task, "name":"design.md", "content":long, "document":true}));
+    assert!(!told.contains("characters"), "the asked-for document is not remarked on: {told}");
 }

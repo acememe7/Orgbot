@@ -168,9 +168,9 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                     (
                         "document",
                         schema::boolean(
-                            "Set true only when this is the document the task or the \
-                             owner asked for. It may then run to 40,000 characters; \
-                             notes and other text or JSON stay under 8,000.",
+                            "Set true when this is the document the task or the owner \
+                             asked for. Notes and other records should stay short: \
+                             every reviewer reads all of them each round.",
                         ),
                     ),
                 ],
@@ -1372,6 +1372,8 @@ fn add_artifact(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
         _ => ArtifactBody::Text { text: content },
     };
 
+    let document = input.get("document").and_then(|v| v.as_bool()).unwrap_or(false);
+    let length = long_record(&body, document);
     match engine.apply(Command::AddArtifact {
         task,
         author: actor,
@@ -1381,7 +1383,7 @@ fn add_artifact(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
             .get("exact")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        document: input.get("document").and_then(|v| v.as_bool()).unwrap_or(false),
+        document,
     }) {
         Ok(events) => {
             let Some(artifact) = events.iter().find_map(|e| match &e.event {
@@ -1390,17 +1392,43 @@ fn add_artifact(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
             }) else {
                 return ToolOutcome::ok(format!("Recorded `{name}`."));
             };
-            match artifact.supersedes.and_then(|older| engine.artifact(older)) {
-                Some(older) => ToolOutcome::ok(format!(
+            let mut told = match artifact.supersedes.and_then(|older| engine.artifact(older)) {
+                Some(older) => format!(
                     "Recorded `{name}` as {}. It replaces your earlier `{}` ({}), which \
                      inspectors will no longer be shown.",
                     artifact.id, older.name, older.id
-                )),
-                None => ToolOutcome::ok(format!("Recorded `{name}` as {}.", artifact.id)),
+                ),
+                None => format!("Recorded `{name}` as {}.", artifact.id),
+            };
+            if let Some(length) = length {
+                told.push_str(&length);
             }
+            ToolOutcome::ok(told)
         }
         Err(error) => explain(error),
     }
+}
+
+/// Characters past which a note or record is remarked on.
+const LONG_RECORD_CHARS: usize = 8_000;
+
+/// What to tell the author of a long note or record. It is kept whole.
+///
+/// From the live room: notes grew to 37,000 characters, with test code and
+/// capture data pasted in, and every reviewer read all of it each round. A
+/// hard limit refused work outright, so the author is told instead.
+fn long_record(body: &ArtifactBody, document: bool) -> Option<String> {
+    if document || !matches!(body, ArtifactBody::Text { .. } | ArtifactBody::Json { .. }) {
+        return None;
+    }
+    let chars = body.full_text().chars().count();
+    (chars > LONG_RECORD_CHARS).then(|| {
+        format!(
+            " It is {chars} characters, and every reviewer reads all of it each round. \
+             Keep notes to what changed, the commands you ran and their results; put \
+             code, logs and raw data in project files and give their paths here."
+        )
+    })
 }
 
 /// Which part the caller asked for.

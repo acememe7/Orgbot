@@ -384,8 +384,15 @@ impl Bot {
         let mut posted_to_chat = false;
         let mut generated: Vec<std::path::PathBuf> = Vec::new();
 
-        let max_steps = self.spec.autonomy.max_turns_per_task.max(1);
-        for step in 1..=max_steps {
+        // No cap on a turn's model calls. From the live room: @ollama-glm's
+        // turns were cut at 24 calls three times running, mid-review, and the
+        // review expired. A turn now runs until the bot stops calling tools;
+        // every `remind_every` calls it is asked to finish if it is done.
+        let remind_every = self.spec.autonomy.max_turns_per_task.max(1);
+        let mut repeats = Repeats::default();
+        let mut step: u32 = 0;
+        loop {
+            step += 1;
             self.capabilities
                 .refresh(engine, self.spec.id, self.mcp_servers.as_deref())
                 .await;
@@ -612,18 +619,19 @@ impl Bot {
                 if outcome.is_error {
                     report.tool_errors += 1;
                 }
+                let mut content = outcome.content;
+                if let Some(note) = repeats.note(name, input) {
+                    content.push_str(&note);
+                }
                 results.push(ContentBlock::ToolResult {
                     tool_use_id: id.to_string(),
-                    content: outcome.content,
+                    content,
                     is_error: outcome.is_error,
                 });
             }
-            // From the live room: @ollama-glm accepted a review, and each of
-            // its turns hit the step limit while it was still reading code.
-            // Nothing told it so, and the review expired unanswered.
-            if let Some(warning) = steps_left_warning(max_steps, step) {
+            if let Some(reminder) = long_turn_reminder(remind_every, step) {
                 if let Some(ContentBlock::ToolResult { content, .. }) = results.last_mut() {
-                    content.push_str(&warning);
+                    content.push_str(&reminder);
                 }
             }
             self.history.push(Turn::tool_results(results));
@@ -1087,21 +1095,44 @@ const QUIET_TOOLS: &[&str] = &[
 /// such closing status.
 const QUIET_REPEAT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
-/// Model calls left in a turn at which a bot is told to record what it has.
-const WRAP_UP_STEPS: u32 = 2;
-
-/// What to tell a bot after `step` of `max_steps`, when its turn is about to
-/// end at the step limit.
-fn steps_left_warning(max_steps: u32, step: u32) -> Option<String> {
-    let left = max_steps.checked_sub(step)?;
-    (max_steps > WRAP_UP_STEPS + 1 && left == WRAP_UP_STEPS).then(|| {
+/// What to tell a bot after `step` calls of a long turn, every `every` calls.
+/// It is never cut off; it is asked to finish if it has finished.
+fn long_turn_reminder(every: u32, step: u32) -> Option<String> {
+    (step % every.max(1) == 0).then(|| {
         format!(
-            "\n\n[OrgBots] You have {left} model calls left in this turn. Use them to \
-             record your result now: complete or fail any handoff you accepted, add \
-             your artifact, or post what you found. Anything not recorded waits for \
-             your next turn, and an accepted handoff can run out meanwhile."
+            "\n\n[OrgBots] {step} model calls so far this turn. If the work is done, \
+             finish now: complete any handoff you accepted, record the result and end \
+             the turn. If you are going round in circles, say what is blocking you."
         )
     })
+}
+
+/// The same call made again and again in one turn.
+#[derive(Default)]
+struct Repeats {
+    last: Option<(String, String)>,
+    count: u32,
+}
+
+impl Repeats {
+    /// Note the call, and say so when it is the third identical one in a row.
+    fn note(&mut self, name: &str, input: &serde_json::Value) -> Option<String> {
+        let call = (name.to_string(), input.to_string());
+        if self.last.as_ref() == Some(&call) {
+            self.count += 1;
+        } else {
+            self.last = Some(call);
+            self.count = 1;
+        }
+        (self.count >= 3).then(|| {
+            format!(
+                "\n\n[OrgBots] That is the same `{name}` call {} times in a row, and \
+                 its result will not change. Try something different, or record what \
+                 you have.",
+                self.count
+            )
+        })
+    }
 }
 
 fn is_workspace_write_tool(name: &str) -> bool {
@@ -1441,13 +1472,18 @@ mod tests {
     use tokio::sync::Notify;
 
     #[test]
-    fn a_bot_is_told_two_calls_before_its_turn_hits_the_step_limit() {
-        // From the live room: @ollama-glm's turns ended at 24 calls with an
-        // accepted review unanswered.
-        assert!(steps_left_warning(24, 22).is_some_and(|w| w.contains("2 model calls left")));
-        assert_eq!(steps_left_warning(24, 21), None);
-        assert_eq!(steps_left_warning(24, 23), None, "told once");
-        assert_eq!(steps_left_warning(3, 1), None, "a short turn has nothing to wrap up");
+    fn a_long_turn_is_reminded_to_finish_and_a_repeated_call_is_named() {
+        // From the live room: @ollama-glm's turns were cut at 24 calls with an
+        // accepted review unanswered. Turns are no longer cut.
+        assert!(long_turn_reminder(24, 24).is_some_and(|r| r.contains("24 model calls so far")));
+        assert!(long_turn_reminder(24, 48).is_some());
+        assert_eq!(long_turn_reminder(24, 25), None);
+        let mut repeats = Repeats::default();
+        let read = json!({"path": "a.ts"});
+        assert_eq!(repeats.note("workspace_read", &read), None);
+        assert_eq!(repeats.note("workspace_read", &read), None);
+        assert!(repeats.note("workspace_read", &read).is_some_and(|n| n.contains("3 times in a row")));
+        assert_eq!(repeats.note("workspace_read", &json!({"path": "b.ts"})), None, "a different call resets it");
     }
 
     #[derive(Debug)]

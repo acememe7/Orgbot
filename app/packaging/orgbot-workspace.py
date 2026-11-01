@@ -223,17 +223,39 @@ def _excluded(relative: str, *, include_git: bool = False) -> bool:
     return any(part in excluded for part in parts) or bool(parts and parts[-1] in EXCLUDED_FILES)
 
 
-def _validate_internal_symlink(path: Path, root: Path) -> None:
+_IGNORED_LINKS: set[str] = set()
+
+
+def _validate_internal_symlink(path: Path, root: Path) -> bool:
+    """Whether a symlink stays inside the project.
+
+    One that does not is left alone and never copied, and the command goes
+    on. From the live room: a bot made `self-link -> /tmp/orgbot-workspace`
+    in its copy, and every command it ran after that failed, including the
+    one that would have removed it.
+    """
     target = os.readlink(path)
+    relative_link = path.relative_to(root).as_posix()
+    why = None
     if os.path.isabs(target):
-        _fail(f"Absolute project symlinks are not supported: {path.relative_to(root)}")
-    try:
-        resolved = (path.parent / target).resolve(strict=True)
-        relative = resolved.relative_to(root).as_posix()
-        if _excluded(relative):
-            _fail(f"Project symlink resolves into an excluded generated directory: {path.relative_to(root)}")
-    except (OSError, ValueError):
-        _fail(f"Project symlink must resolve inside the project: {path.relative_to(root)}")
+        why = f"points outside the project ({target})"
+    else:
+        try:
+            resolved = (path.parent / target).resolve(strict=True)
+            if _excluded(resolved.relative_to(root).as_posix()):
+                why = f"points into a generated directory ({target})"
+        except (OSError, ValueError):
+            why = f"does not resolve inside the project ({target})"
+    if why is None:
+        return True
+    if relative_link not in _IGNORED_LINKS:
+        _IGNORED_LINKS.add(relative_link)
+        print(
+            f"orgbot-workspace: the symlink {relative_link} {why}; it is ignored and never "
+            "copied into the project. Remove it if it was made by mistake.",
+            file=sys.stderr,
+        )
+    return False
 
 
 # Hashes remembered per scanned tree, by the file's identity. From the live
@@ -322,7 +344,12 @@ def _scan(root: Path) -> dict[str, dict[str, Any]]:
     return entries
 
 
+# Links the latest scan left out because they lead outside the project.
+_SKIPPED_LINKS: list[str] = []
+
+
 def _scan_tree(root: Path) -> dict[str, dict[str, Any]]:
+    _SKIPPED_LINKS.clear()
     entries: dict[str, dict[str, Any]] = {}
     total_bytes = 0
     count = 0
@@ -336,7 +363,8 @@ def _scan_tree(root: Path) -> dict[str, dict[str, Any]]:
             if _excluded(rel):
                 continue
             if stat.S_ISLNK(info.st_mode):
-                _validate_internal_symlink(path, root)
+                if not _validate_internal_symlink(path, root):
+                    _SKIPPED_LINKS.append(rel)
                 continue
             if not stat.S_ISDIR(info.st_mode):
                 _fail(f"Unsafe project directory entry: {path.relative_to(root)}")
@@ -351,7 +379,8 @@ def _scan_tree(root: Path) -> dict[str, dict[str, Any]]:
             if _excluded(rel):
                 continue
             if path.is_symlink():
-                _validate_internal_symlink(path, root)
+                if not _validate_internal_symlink(path, root):
+                    _SKIPPED_LINKS.append(rel)
                 continue
             _relative(rel)
             row = _entry(path, root)
@@ -365,6 +394,11 @@ def _scan_tree(root: Path) -> dict[str, dict[str, Any]]:
 
 def _scan_workspace(root: Path, baseline: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     entries = _scan(root)
+    # A stray link at a new path is left out, but one standing where project
+    # files were would make them look removed, and could redirect writes.
+    for link in _SKIPPED_LINKS:
+        if link in baseline or any(name.startswith(f"{link}/") for name in baseline):
+            _fail(f"The symlink {link} replaces project files and leads outside the project; restore them first")
     for name, entry in entries.items():
         before = baseline.get(name)
         if before is not None and entry["mode"] == (before["mode"] | 0o200):
@@ -419,8 +453,8 @@ def _copy_tree(source: Path, destination: Path) -> None:
                 continue
             info = src.lstat()
             if stat.S_ISLNK(info.st_mode):
-                _validate_internal_symlink(src, source)
-                (dst_dir / name).symlink_to(os.readlink(src), target_is_directory=src.resolve().is_dir())
+                if _validate_internal_symlink(src, source):
+                    (dst_dir / name).symlink_to(os.readlink(src), target_is_directory=src.resolve().is_dir())
                 continue
             if not stat.S_ISDIR(info.st_mode):
                 _fail(f"Unsafe project directory: {src}")
@@ -433,7 +467,8 @@ def _copy_tree(source: Path, destination: Path) -> None:
             if _excluded(relative, include_git=True):
                 continue
             if src.is_symlink():
-                _validate_internal_symlink(src, source)
+                if not _validate_internal_symlink(src, source):
+                    continue
                 target = dst_dir / name
                 target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 target.symlink_to(os.readlink(src), target_is_directory=src.resolve().is_dir())
