@@ -415,5 +415,22 @@
    "Sandbox helper 92 passed",
    "Package 8be8578e"
   ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r6",
+  "when": "1 Nov 13:14",
+  "day": "2026-11-01",
+  "title": "Two reviewers, one verdict",
+  "what": "Work a reviewer would send back gets a second opinion from a reviewer on a different model. They settle what the author must fix, and if they cannot agree the owner decides between both views. The reviewers who asked for a fix check it and never write it, and every blocking finding must say how to fix it. Review-only bots can answer review handoffs.",
+  "why": "The owner wanted the strict reviewer and the easier one checking each other. Meanwhile @astra could only answer a review handoff in chat, and @mira's offer sat until it expired.",
+  "commit": "1b867c4",
+  "facts": [
+   "Rust 986 passed",
+   "App 411 passed",
+   "Sandbox helper 92 passed",
+   "Package 7829e8e9"
+  ]
  }
 ]

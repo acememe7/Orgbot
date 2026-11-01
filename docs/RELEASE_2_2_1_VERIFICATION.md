@@ -81,6 +81,19 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   the owner saw nobody working. A bot's status came only from tasks it
   holds. A bot with an accepted handoff now shows as working until the
   handoff completes, fails, expires or is withdrawn.
+- **A second opinion on every send-back (sixth rebuild, 1 November).** Work a
+  reviewer would send back waits for a reviewer on a different model, who
+  says for each blocking finding whether it really blocks and why. If it
+  disputes some, the first reviewer keeps or withdraws each; reviewers who
+  still disagree put one card to the owner with both views. The author gets
+  only what was settled, with who reviewed, where each problem is and the
+  fix to try. The reviewers who sent it back check the fix, and a bot that
+  reviewed a task cannot add work to it, claim it or help write it. Every
+  blocking finding must say how to fix it, failed criteria need a blocking
+  finding, and an unknown severity is refused: a reviewer who wrote "high"
+  used to approve the work. A review-only bot can now answer the review
+  handoffs sent to it; in the live room @astra could only reply in chat and
+  @mira's offer sat until it expired.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -93,7 +106,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   adding the room's recommendation on a card, the save notice, and reading a
   CLI copy's handle back from its key; 978 at the fourth, adding a room
   naming its bots' copies as it starts; 979 at the fifth, adding a bot
-  shown as working while it runs an accepted assist.
+  shown as working while it runs an accepted assist; 986 at the sixth, adding
+  the second-opinion flow (agreed, withdrawn, decided by the owner, saved and
+  replayed), reviewers who check fixes and do not write them, an end-to-end
+  room run, strict review input, and review-only bots answering review
+  handoffs.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
@@ -104,15 +121,16 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   leftover naming and removal groups; 411 at the third (five skipped), adding
   answer effects and the recommendation line, approving chosen folders, the
   copy overview and who added a folder's files; 411 again at the fourth, with
-  the arriving commit in a folder's origin line, and at the fifth.
+  the arriving commit in a folder's origin line, and at the fifth and sixth
+  (the sixth adds what each disputed-findings answer does).
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 92 passed at the fifth 1 November rebuild and at
-  the fourth,
+- Workspace sandbox helper: 92 passed at the sixth, fifth and fourth
+  1 November rebuilds,
   three runs in a row (naming copies at room start, the commit that brought
   older files in); 90 at the third
   (approving chosen folders only, who added and last changed removed files,
@@ -129,11 +147,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`92c922da50136d1012b72f7eb8b2181a120917354bfb9779e5f357f41b75f8fb`.
+`c08381d95e80350d4996f10425a51648b9e1510f1701b356be1b3277d114b231`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `8be8578eccd98b8c062180db59c328d249f6a54882c59dba75c87b3a8c7be7cc` |
+| orgbots_2.2.1_amd64.deb | `7829e8e9c1e836b2ebc014ef3d2640a55651222ef50ec8eb815867de55873cbc` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -179,6 +197,14 @@ rebuilt unchanged). Signed archive revision
 `8abab6bd93041b5e354d8a318b5ecdd1e06d4d66` replaces only
 `orgbots_2.2.1_amd64.deb`;
 [Pages run 41293219615](https://github.com/acememe7/Orgbot/actions/runs/41293219615)
+published it.
+
+The sixth rebuild adds second opinions on review and lets review-only bots
+answer review handoffs (source `1b867c4`; engine and Flutter bundle
+changed, sandbox helper rebuilt unchanged). Signed archive revision
+`167f93a4501288e85f9653cb6ef9409f10af6bfb` replaces only
+`orgbots_2.2.1_amd64.deb`;
+[Pages run 41305958035](https://github.com/acememe7/Orgbot/actions/runs/41305958035)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits
@@ -192,6 +218,8 @@ published it, and the public archive serves the hashes in the table above.
 - Which bot added a file is known only from the third rebuild on. Older
   tracked files show the commit that brought them in; untracked ones show
   nothing.
+- Every send-back now costs at least one more review turn, and a
+  disagreement one more and a card for the owner.
 - One leftover copy in the live room (`bot_a1740742…`) cannot be named: its
   id is in no roster the room recorded, and its baseline is missing.
 - Verify copies share files; copies a bot can write do not, because ext4 has
