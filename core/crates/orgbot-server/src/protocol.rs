@@ -221,6 +221,12 @@ pub enum ServerMessage {
         /// The new phase.
         phase: RoomPhase,
     },
+    /// The room's state reached disk. If the engine stops, it restarts from
+    /// here, so a client can say how much would be replayed.
+    Saved {
+        /// When the save finished.
+        at: orgbot_proto::time::Timestamp,
+    },
     /// A reply to `Ping`.
     Pong,
     /// The client's request was refused.

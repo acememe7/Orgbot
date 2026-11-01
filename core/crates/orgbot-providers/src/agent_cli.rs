@@ -329,11 +329,13 @@ impl AgentCliProvider {
         project: PathBuf,
     ) -> Self {
         let canonical_project = canonical_workdir(&project);
+        let label = handle_from_copy_key(&agent).map(|handle| format!("@{handle}"));
         self.guard = Some(crate::workspace_guard::WorkspaceGuard {
             project,
             state,
             agent,
             read_only: self.policy == AgentPolicy::ReadOnly,
+            label,
             #[cfg(test)]
             profile_source: None,
         });
@@ -2538,8 +2540,32 @@ const ROOM_TOOL_PATTERN: &str = concat!("mcp__", room_server_name!());
 /// The same set, spelled as a wildcard for CLIs that want one.
 const ROOM_TOOL_WILDCARD: &str = concat!("mcp__", room_server_name!(), "__*");
 
+/// The handle a CLI bot's copy key spells: the room names those copies by the
+/// handle's bytes in hex, which tells a person reading a record nothing.
+#[cfg(target_os = "linux")]
+fn handle_from_copy_key(key: &str) -> Option<String> {
+    if key.is_empty() || key.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = (0..key.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(key.get(i..i + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(bytes)
+        .ok()
+        .filter(|handle| handle.chars().all(|c| c.is_alphanumeric() || "_.-".contains(c)))
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_cli_copy_key_reads_back_as_its_handle() {
+        assert_eq!(super::handle_from_copy_key("6d697261").as_deref(), Some("mira"));
+        assert_eq!(super::handle_from_copy_key("fake-agent"), None);
+        assert_eq!(super::handle_from_copy_key("0a"), None, "a control character is no handle");
+    }
+
     use super::*;
 
     #[cfg(target_os = "linux")]

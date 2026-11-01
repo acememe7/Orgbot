@@ -485,6 +485,15 @@ impl RoomSession {
         Arc::clone(&self.committed_attachment_ids)
     }
 
+    /// Each bot's handle by id.
+    pub(crate) fn agent_handles(&self) -> std::collections::HashMap<orgbot_proto::AgentId, String> {
+        self.orchestrator
+            .engine()
+            .agents()
+            .map(|spec| (spec.id, spec.handle.clone()))
+            .collect()
+    }
+
     pub(crate) fn state_path(&self) -> Option<&std::path::Path> {
         self.state_path.as_deref()
     }
@@ -520,6 +529,9 @@ impl RoomSession {
         self.saved_at = Some(stamp);
         // Everything journaled mid-turn is in the board just written.
         let _ = std::fs::remove_file(journal_path(path));
+        let _ = self.events.send(ServerMessage::Saved {
+            at: orgbot_proto::time::Timestamp::now(),
+        });
         Ok(())
     }
 
@@ -2002,6 +2014,47 @@ mod tests {
             .transcript()
             .iter()
             .all(|m| m.author != Author::Human { name: orgbot_proto::OWNER_STAND_IN.into() }));
+    }
+
+    #[test]
+    fn a_save_tells_clients_when_it_finished() {
+        // From the live room: while the engine was down the app said
+        // "restarting" but not from when, so the owner could not tell what
+        // the restart would lose.
+        let dir = std::env::temp_dir().join(format!(
+            "orgbot-saved-notice-{}",
+            orgbot_proto::RoomId::new()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = RoomConfig::parse(SCRIPTED_ROOM, "saved.toml").unwrap();
+        config.room.state_path = Some(dir.join("state.json"));
+        let (mut session, handle) = RoomSession::build(config.resolve().unwrap()).unwrap();
+        let mut events = handle.subscribe();
+        let asker = session.orchestrator.engine().agents().next().unwrap().id;
+        session
+            .orchestrator
+            .engine_mut()
+            .apply(Command::AskOwner {
+                by: asker,
+                task: None,
+                question: "Which finish line first?".into(),
+                options: vec!["A".into(), "B".into()],
+            })
+            .unwrap();
+        let before = orgbot_proto::time::Timestamp::now();
+        session.save_state().unwrap();
+        let saved = std::iter::from_fn(|| events.try_recv().ok())
+            .find_map(|m| match m {
+                ServerMessage::Saved { at } => Some(at),
+                _ => None,
+            })
+            .expect("a save is announced");
+        assert!(saved >= before);
+        // Nothing new, so nothing written and nothing announced.
+        session.save_state().unwrap();
+        assert!(std::iter::from_fn(|| events.try_recv().ok())
+            .all(|m| !matches!(m, ServerMessage::Saved { .. })));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

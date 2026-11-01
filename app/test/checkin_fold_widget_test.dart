@@ -36,21 +36,50 @@ Map<String, Object?> posted(int seq, String id, String agent, String body) => {
 };
 
 void main() {
-  testWidgets('a run of check-ins shows as one line in the chat', (tester) async {
+  testWidgets('a run of check-ins shows as one line in the chat', (
+    tester,
+  ) async {
     final store = RoomStore(_Link());
     store.restore([
-      {'type': 'snapshot', 'head': 0, 'roster': [
-        {'id': 'bot_f', 'handle': 'grok-quick', 'status': 'idle'},
-        {'id': 'bot_a', 'handle': 'astra', 'status': 'idle'},
-      ], 'tasks': []},
+      {
+        'type': 'snapshot',
+        'head': 0,
+        'roster': [
+          {'id': 'bot_f', 'handle': 'grok-quick', 'status': 'idle'},
+          {'id': 'bot_a', 'handle': 'astra', 'status': 'idle'},
+        ],
+        'tasks': [],
+      },
       posted(1, 'm1', 'bot_f', 'I hold no task, so I am not starting work.'),
       posted(2, 'm2', 'bot_a', 'Aece, no new review is ready.'),
     ]);
-    await tester.pumpWidget(MaterialApp(home: Scaffold(body: Transcript(store: store, controller: ScrollController(), desktop: true))));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Transcript(
+            store: store,
+            controller: ScrollController(),
+            desktop: true,
+          ),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.textContaining('2 bots checked in'), findsOneWidget);
     expect(find.text('Aece, no new review is ready.'), findsNothing);
     await tester.tap(find.textContaining('2 bots checked in'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 80));
+    // The run unfolds in place rather than appearing at once.
+    final fades = tester
+        .widgetList<Opacity>(
+          find.ancestor(
+            of: find.text('Aece, no new review is ready.'),
+            matching: find.byType(Opacity),
+          ),
+        )
+        .map((o) => o.opacity);
+    expect(fades.any((o) => o > 0 && o < 1), isTrue, reason: '$fades');
     await tester.pumpAndSettle();
     expect(find.text('Aece, no new review is ready.'), findsOneWidget);
     store.dispose();

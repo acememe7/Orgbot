@@ -46,6 +46,8 @@ pub struct LocalWorkspaceHost {
     attachment_parent_fd: Option<std::os::fd::OwnedFd>,
     #[cfg(target_os = "linux")]
     committed_attachment_ids: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Each bot's handle, so its copy carries a name a person can read.
+    handles: std::collections::HashMap<orgbot_proto::AgentId, String>,
 }
 
 impl LocalWorkspaceHost {
@@ -84,6 +86,7 @@ impl LocalWorkspaceHost {
         .await
         .map_err(|e| anyhow::anyhow!("local workspace setup failed: {e}"))??;
         host.guard_state = guard_state;
+        host.handles = session.agent_handles();
         host.commands = spec.commands && spec.writable;
         let verification = spec.commands && host.guard_state.is_some();
         let root = host.root.clone();
@@ -152,6 +155,7 @@ impl LocalWorkspaceHost {
             root_fd,
             attachment_parent_fd,
             committed_attachment_ids,
+            handles: Default::default(),
         })
     }
 
@@ -197,6 +201,7 @@ impl LocalWorkspaceHost {
                 .ok_or("Workspace protection is unavailable")?,
             agent: agent.to_string(),
             read_only: !self.writable,
+            label: self.handles.get(&agent).map(|handle| format!("@{handle}")),
         })
     }
 
@@ -1874,6 +1879,7 @@ mod tests {
             state: state.clone(),
             agent: format!("{agent}-verify"),
             read_only: true,
+            label: None,
         }
         .command("status")
         .unwrap()

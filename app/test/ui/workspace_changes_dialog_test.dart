@@ -387,9 +387,131 @@ void main() {
       expect(find.text('changed 3 h ago'), findsOneWidget);
     },
   );
+
+  test('a removal group says which bots added and last changed its files', () {
+    final now = DateTime(2026, 11, 1, 2, 0);
+    final at = now.subtract(const Duration(hours: 2)).millisecondsSinceEpoch;
+    expect(
+      removalOrigin({
+        'files': 40,
+        'made_by': [
+          ['@sol', 30],
+          ['@mira', 4],
+        ],
+        'last_by': '@mira',
+        'last_at': at ~/ 1000,
+      }, now),
+      'added by @sol (30), @mira (4); 6 from before OrgBots kept a record · last changed by @mira 2 h ago',
+    );
+    expect(
+      removalOrigin({
+        'files': 2,
+        'made_by': [
+          ['@sol', 2],
+        ],
+      }, now),
+      'added by @sol',
+    );
+    expect(removalOrigin({'files': 3}, now), isNull);
+  });
+
+  testWidgets('the owner approves the removals in some folders only', (
+    tester,
+  ) async {
+    // From the live room: one approval had to take all 562 removals or none.
+    final calls = <List<String>>[];
+    var merged = false;
+    final groups = [
+      {'folder': '.freeze-probe/', 'files': 2, 'bytes': 20, 'tracked': 0},
+      {'folder': 'logs/', 'files': 1, 'bytes': 10, 'tracked': 0},
+    ];
+    await tester.pumpWidget(
+      _host(
+        runner: (executable, arguments) async {
+          calls.add(arguments);
+          if (arguments[1] == 'apply') {
+            merged = true;
+            return _result({'ok': true, 'applied': []});
+          }
+          return _result({
+            'ok': true,
+            'changed': [],
+            'added': [],
+            'deleted': merged
+                ? ['.freeze-probe/a.js', '.freeze-probe/b.js']
+                : ['.freeze-probe/a.js', '.freeze-probe/b.js', 'logs/old.txt'],
+            'deleted_groups': merged ? [groups.first] : groups,
+            'review_token': 'a' * 64,
+            'conflicts': [],
+          });
+        },
+      ),
+    );
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Apply changes'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('choose-folders')));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('choose-folder-.freeze-probe/')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Move 1 file to Trash and apply'), findsOneWidget);
+    await tester.tap(find.text('Move 1 file to Trash and apply'));
+    await tester.pumpAndSettle();
+    final apply = calls.singleWhere((arguments) => arguments[1] == 'apply');
+    expect(apply, containsAllInOrder(['--review-token', 'a' * 64]));
+    expect(apply, containsAllInOrder(['--only-folder', 'logs/']));
+    expect(apply, isNot(contains('.freeze-probe/')));
+  });
+
+  testWidgets('the review shows every copy with removals waiting', (
+    tester,
+  ) async {
+    // From the live room: 2,177 removals and the owner could not tell which
+    // bots they belonged to without opening the picker.
+    final asked = <String>[];
+    await tester.pumpWidget(
+      _host(
+        agents: const [
+          WorkspaceAgentLabel(id: 'bot_mira', label: '@mira', removals: 1370),
+          WorkspaceAgentLabel(id: 'bot_sol', label: '@sol', removals: 562),
+          WorkspaceAgentLabel(id: 'bot_iris', label: '@iris'),
+        ],
+        runner: (executable, arguments) async {
+          final agent = arguments[arguments.indexOf('--agent') + 1];
+          asked.add(agent);
+          return _result({
+            'ok': true,
+            'changed': [],
+            'added': [],
+            'deleted': [
+              for (var i = 0; i < (agent == 'bot_mira' ? 1370 : 562); i++)
+                'f$i.txt',
+            ],
+            'review_token': 'a' * 64,
+            'conflicts': [],
+          });
+        },
+      ),
+    );
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    expect(find.text('1932 removals waiting in 2 copies'), findsOneWidget);
+    expect(find.byKey(const ValueKey('copy-chip-bot_iris')), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('copy-chip-bot_sol')));
+    await tester.pumpAndSettle();
+    expect(asked.last, 'bot_sol', reason: 'a chip opens that copy');
+  });
 }
 
-Widget _host({required WorkspaceProcessRunner runner}) => MaterialApp(
+Widget _host({
+  required WorkspaceProcessRunner runner,
+  List<WorkspaceAgentLabel> agents = const [
+    WorkspaceAgentLabel(id: 'agent-uuid', label: '@astra · room tools'),
+  ],
+}) => MaterialApp(
   home: Scaffold(
     body: Builder(
       builder: (context) => TextButton(
@@ -398,12 +520,7 @@ Widget _host({required WorkspaceProcessRunner runner}) => MaterialApp(
           builder: (_) => WorkspaceChangesDialog(
             stateDirectory: Directory('/tmp/room/workspaces'),
             helperPath: '/test/orgbot-workspace.py',
-            agents: const [
-              WorkspaceAgentLabel(
-                id: 'agent-uuid',
-                label: '@astra · room tools',
-              ),
-            ],
+            agents: agents,
             processRunner: runner,
           ),
         ),

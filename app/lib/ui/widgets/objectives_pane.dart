@@ -95,12 +95,20 @@ enum WorkView {
 
 /// Objectives, progress, and the decisions only you can make.
 class ObjectivesPane extends StatefulWidget {
-  const ObjectivesPane({super.key, required this.store, this.onShowAllRecords});
+  const ObjectivesPane({
+    super.key,
+    required this.store,
+    this.onShowAllRecords,
+    this.onShowUsage,
+  });
 
   final RoomStore store;
 
   /// Opens the full task board. Null hides the affordance.
   final VoidCallback? onShowAllRecords;
+
+  /// Opens usage, where the layout has no Usage tab of its own.
+  final VoidCallback? onShowUsage;
 
   @override
   State<ObjectivesPane> createState() => _ObjectivesPaneState();
@@ -174,14 +182,6 @@ class _ObjectivesPaneState extends State<ObjectivesPane> {
               ],
               const SizedBox(height: 12),
               _UtilizationStrip(utilization: digest.utilization),
-              if (digest.spend.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                _SpendStrip(
-                  spend: digest.spend,
-                  agents: digest.agentSpend,
-                  total: digest.totalSpend,
-                ),
-              ],
               if (digest.health.coordinationExpansion) ...[
                 const SizedBox(height: 16),
                 _ExpansionWarning(health: digest.health),
@@ -196,6 +196,17 @@ class _ObjectivesPaneState extends State<ObjectivesPane> {
                   label: Text(
                     'Show all ${digest.counts.rawRecords} work records',
                   ),
+                  style: TextButton.styleFrom(
+                    foregroundColor: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            if (widget.onShowUsage case final onShowUsage?)
+              Center(
+                child: TextButton.icon(
+                  onPressed: onShowUsage,
+                  icon: const Icon(Icons.receipt_long_outlined, size: 18),
+                  label: const Text('Usage and cost'),
                   style: TextButton.styleFrom(
                     foregroundColor: scheme.onSurfaceVariant,
                   ),
@@ -519,6 +530,33 @@ class DecisionParts {
   }
 }
 
+/// What an answer the room offers does, in a line, for the answers whose
+/// effect is fixed. A bot's own options say what they mean themselves.
+///
+/// From the live room: the owner could not tell from "Allow for this task"
+/// how long it lasted, or from "Land these commits" whether anything newer
+/// went too.
+String? answerEffect(String option) => switch (option) {
+  'Allow for this task' =>
+    'Lends what it asked for to this bot until the task ends.',
+  'Add it and allow for this task' =>
+    'Adds this sign-in to your list and lends it until the task ends.',
+  'Allow server access for this task' =>
+    'Lends the bot server key to this bot until the task ends.',
+  'Deny' => 'The bot is told no and does not get it.',
+  'Land these commits' =>
+    'Merges exactly these commits into your project. Anything newer needs asking again.',
+  "Don't land them" =>
+    'The commits stay in the bot\'s copy. Your project does not change.',
+  'Push these commits' =>
+    'Pushes exactly these commits to the remote. Anything newer needs asking again.',
+  "Don't push them" => 'The commits stay on this computer.',
+  'Retire this task' =>
+    'Closes the task. It moves to the Closed tab with its history.',
+  'Keep it' => 'The task stays open as it is.',
+  _ => null,
+};
+
 class _DecisionAnswerCard extends StatefulWidget {
   const _DecisionAnswerCard({
     super.key,
@@ -544,7 +582,8 @@ class _DecisionAnswerCard extends StatefulWidget {
 /// every answer the same weight; the owner picked the wrong one once. The
 /// card now leads with who asked, the risk and a short summary, keeps the
 /// full text under Details, marks the recommended answer and any that takes
-/// effect at once, and keeps a custom answer one tap away.
+/// effect at once, says what each fixed answer does, and keeps a custom
+/// answer one tap away.
 class _DecisionAnswerCardState extends State<_DecisionAnswerCard> {
   bool _details = false;
   late bool _custom = widget.response.text.isNotEmpty;
@@ -555,6 +594,12 @@ class _DecisionAnswerCardState extends State<_DecisionAnswerCard> {
     final busy = widget.busy;
     final scheme = Theme.of(context).colorScheme;
     final parts = DecisionParts.of(decision);
+    bool recommended(String option) =>
+        option.contains('(Recommended)') || option == decision.recommended;
+    final effects = [
+      for (final option in decision.options)
+        if (answerEffect(option) case final effect?) (option, effect),
+    ];
     final riskColor = switch (parts.risk) {
       'critical' => scheme.error,
       'risky' => Colors.amber.shade400,
@@ -630,13 +675,19 @@ class _DecisionAnswerCardState extends State<_DecisionAnswerCard> {
             runSpacing: 6,
             children: [
               for (final option in decision.options)
-                if (option.contains('(Recommended)'))
+                if (recommended(option))
                   FilledButton.icon(
                     onPressed: busy ? null : () => widget.onAnswer(option, ''),
                     style: FilledButton.styleFrom(
                       visualDensity: VisualDensity.compact,
                     ),
-                    icon: const Icon(Icons.star_rounded, size: 15),
+                    icon: decision.grantsWith == option
+                        ? const Icon(
+                            Icons.lock_outline,
+                            size: 14,
+                            semanticLabel: 'Asks you to confirm',
+                          )
+                        : const Icon(Icons.star_rounded, size: 15),
                     label: Text(option),
                   )
                 else
@@ -668,6 +719,49 @@ class _DecisionAnswerCardState extends State<_DecisionAnswerCard> {
                 ),
             ],
           ),
+          if (decision.recommended != null &&
+              decision.recommendedBecause != null) ...[
+            const SizedBox(height: 8),
+            Text.rich(
+              key: ValueKey('decision-recommended-${decision.id}'),
+              TextSpan(
+                children: [
+                  const TextSpan(
+                    text: 'Recommended: ',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  TextSpan(
+                    text:
+                        '${decision.recommended}. ${decision.recommendedBecause}',
+                  ),
+                ],
+              ),
+              style: TextStyle(fontSize: 12, color: scheme.onSurface),
+            ),
+          ],
+          if (effects.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            for (final (option, effect) in effects)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: Text.rich(
+                  TextSpan(
+                    children: [
+                      TextSpan(
+                        text: '$option: ',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      TextSpan(text: effect),
+                    ],
+                  ),
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    height: 1.35,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+          ],
         ],
         Align(
           alignment: Alignment.centerLeft,
@@ -1379,6 +1473,76 @@ class _CriticalPath extends StatelessWidget {
 /// visible cost of raising concurrency was that the room went faster. A
 /// roster mostly on one subscription draws on one allowance, and drawing on
 /// it four times faster is not visible anywhere until the allowance is gone.
+/// What the room has drawn, in its own tab.
+///
+/// From the UI review: tokens in the billions, "partial usage" and "cost
+/// unknown" sat folded at the bottom of the Work panel, and nothing said why
+/// the cost was unknown.
+class UsagePane extends StatelessWidget {
+  const UsagePane({super.key, required this.store});
+
+  final RoomStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        final digest = store.digest;
+        final scheme = Theme.of(context).colorScheme;
+        final note = TextStyle(
+          fontSize: 12,
+          height: 1.4,
+          color: scheme.onSurfaceVariant,
+        );
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(14, 14, 14, 28),
+          children: [
+            if (digest.spend.isEmpty)
+              Text('No turn has reported usage yet.', style: note)
+            else
+              _SpendStrip(
+                spend: digest.spend,
+                agents: digest.agentSpend,
+                total: digest.totalSpend,
+              ),
+            const SizedBox(height: 18),
+            Text(
+              'Reading these numbers',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.4,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Cost unknown: OrgBots has no price for that model. Bots signed '
+              'in through a CLI subscription report tokens, not prices, and a '
+              'price shows only when the room has rates set for the model.',
+              style: note,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'API: what turns on an API key cost at those rates. '
+              'Equivalent: what subscription turns would have cost on an '
+              'API key.',
+              style: note,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Partial usage: some turns did not report their tokens, so the '
+              'totals are a floor.',
+              style: note,
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _SpendStrip extends StatelessWidget {
   const _SpendStrip({
     required this.spend,
@@ -1434,224 +1598,194 @@ class _SpendStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    // Folded by default: token counts in the billions, "partial usage" and
-    // "cost unknown" filled the panel and answered no question the owner had
-    // mid-run. One tap opens them.
-    return Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        key: const ValueKey('usage-fold'),
-        tilePadding: EdgeInsets.zero,
-        childrenPadding: EdgeInsets.zero,
-        expandedCrossAxisAlignment: CrossAxisAlignment.start,
-        title: Text(
-          'What this has drawn',
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.4,
-            color: scheme.onSurfaceVariant,
+    final heading = Text(
+      'What this has drawn',
+      style: TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0.4,
+        color: scheme.onSurfaceVariant,
+      ),
+    );
+    final children = <Widget>[
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Room · ${_grouped(total.turns)} turns',
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+            ),
+            Text(
+              _tokens(
+                known:
+                    total.usageKnown ||
+                    total.inputTokens +
+                            total.outputTokens +
+                            total.cacheReadTokens +
+                            total.cacheWriteTokens >
+                        0,
+                input: total.inputTokens,
+                output: total.outputTokens,
+                read: total.cacheReadTokens,
+                write: total.cacheWriteTokens,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+            ),
+            Text(
+              _metering(
+                known:
+                    total.usageKnown ||
+                    total.inputTokens +
+                            total.outputTokens +
+                            total.cacheReadTokens +
+                            total.cacheWriteTokens >
+                        0,
+                complete: total.usageComplete,
+              ),
+              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+            ),
+            Text(
+              _cost(
+                total.actualApiCostMicrousd,
+                total.apiEquivalentCostMicrousd,
+              ),
+              style: const TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+      for (final account in spend)
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      account.backend,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  Text(
+                    '${_grouped(account.turns)} turns',
+                    style: TextStyle(color: scheme.onSurfaceVariant),
+                  ),
+                ],
+              ),
+              Text(
+                _tokens(
+                  known:
+                      account.usageKnown ||
+                      account.inputTokens +
+                              account.outputTokens +
+                              account.cacheReadTokens +
+                              account.cacheWriteTokens >
+                          0,
+                  input: account.inputTokens,
+                  output: account.outputTokens,
+                  read: account.cacheReadTokens,
+                  write: account.cacheWriteTokens,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+              ),
+              Text(
+                _metering(
+                  known:
+                      account.usageKnown ||
+                      account.inputTokens +
+                              account.outputTokens +
+                              account.cacheReadTokens +
+                              account.cacheWriteTokens >
+                          0,
+                  complete: account.usageComplete,
+                ),
+                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+              ),
+              Text(
+                _cost(
+                  account.actualApiCostMicrousd,
+                  account.apiEquivalentCostMicrousd,
+                ),
+                style: const TextStyle(fontSize: 12),
+              ),
+            ],
           ),
         ),
-        children: [
-          const SizedBox(height: 6),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Room · ${_grouped(total.turns)} turns',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
+      if (agents.isNotEmpty) const SizedBox(height: 6),
+      for (final agent in agents)
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      agent.handle,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12),
+                    ),
                   ),
+                  Text(
+                    '${_grouped(agent.turns)} turns',
+                    style: TextStyle(color: scheme.onSurfaceVariant),
+                  ),
+                ],
+              ),
+              Text(
+                _tokens(
+                  known:
+                      agent.usageKnown ||
+                      agent.inputTokens +
+                              agent.outputTokens +
+                              agent.cacheReadTokens +
+                              agent.cacheWriteTokens >
+                          0,
+                  input: agent.inputTokens,
+                  output: agent.outputTokens,
+                  read: agent.cacheReadTokens,
+                  write: agent.cacheWriteTokens,
                 ),
-                Text(
-                  _tokens(
-                    known:
-                        total.usageKnown ||
-                        total.inputTokens +
-                                total.outputTokens +
-                                total.cacheReadTokens +
-                                total.cacheWriteTokens >
-                            0,
-                    input: total.inputTokens,
-                    output: total.outputTokens,
-                    read: total.cacheReadTokens,
-                    write: total.cacheWriteTokens,
-                  ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: scheme.onSurfaceVariant,
-                  ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+              ),
+              Text(
+                _metering(
+                  known:
+                      agent.usageKnown ||
+                      agent.inputTokens +
+                              agent.outputTokens +
+                              agent.cacheReadTokens +
+                              agent.cacheWriteTokens >
+                          0,
+                  complete: agent.usageComplete,
                 ),
-                Text(
-                  _metering(
-                    known:
-                        total.usageKnown ||
-                        total.inputTokens +
-                                total.outputTokens +
-                                total.cacheReadTokens +
-                                total.cacheWriteTokens >
-                            0,
-                    complete: total.usageComplete,
-                  ),
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: scheme.onSurfaceVariant,
-                  ),
+                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+              ),
+              Text(
+                _cost(
+                  agent.actualApiCostMicrousd,
+                  agent.apiEquivalentCostMicrousd,
                 ),
-                Text(
-                  _cost(
-                    total.actualApiCostMicrousd,
-                    total.apiEquivalentCostMicrousd,
-                  ),
-                  style: const TextStyle(fontSize: 12),
-                ),
-              ],
-            ),
+                style: const TextStyle(fontSize: 12),
+              ),
+            ],
           ),
-          for (final account in spend)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          account.backend,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      Text(
-                        '${_grouped(account.turns)} turns',
-                        style: TextStyle(color: scheme.onSurfaceVariant),
-                      ),
-                    ],
-                  ),
-                  Text(
-                    _tokens(
-                      known:
-                          account.usageKnown ||
-                          account.inputTokens +
-                                  account.outputTokens +
-                                  account.cacheReadTokens +
-                                  account.cacheWriteTokens >
-                              0,
-                      input: account.inputTokens,
-                      output: account.outputTokens,
-                      read: account.cacheReadTokens,
-                      write: account.cacheWriteTokens,
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                  Text(
-                    _metering(
-                      known:
-                          account.usageKnown ||
-                          account.inputTokens +
-                                  account.outputTokens +
-                                  account.cacheReadTokens +
-                                  account.cacheWriteTokens >
-                              0,
-                      complete: account.usageComplete,
-                    ),
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                  Text(
-                    _cost(
-                      account.actualApiCostMicrousd,
-                      account.apiEquivalentCostMicrousd,
-                    ),
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ],
-              ),
-            ),
-          if (agents.isNotEmpty) const SizedBox(height: 6),
-          for (final agent in agents)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          agent.handle,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                      ),
-                      Text(
-                        '${_grouped(agent.turns)} turns',
-                        style: TextStyle(color: scheme.onSurfaceVariant),
-                      ),
-                    ],
-                  ),
-                  Text(
-                    _tokens(
-                      known:
-                          agent.usageKnown ||
-                          agent.inputTokens +
-                                  agent.outputTokens +
-                                  agent.cacheReadTokens +
-                                  agent.cacheWriteTokens >
-                              0,
-                      input: agent.inputTokens,
-                      output: agent.outputTokens,
-                      read: agent.cacheReadTokens,
-                      write: agent.cacheWriteTokens,
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                  Text(
-                    _metering(
-                      known:
-                          agent.usageKnown ||
-                          agent.inputTokens +
-                                  agent.outputTokens +
-                                  agent.cacheReadTokens +
-                                  agent.cacheWriteTokens >
-                              0,
-                      complete: agent.usageComplete,
-                    ),
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                  Text(
-                    _cost(
-                      agent.actualApiCostMicrousd,
-                      agent.apiEquivalentCostMicrousd,
-                    ),
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
+        ),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [heading, const SizedBox(height: 6), ...children],
     );
   }
 }

@@ -63,6 +63,7 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   /// Whether the Work tab is showing every record rather than the
   /// objectives they roll up into.
   bool _showAllRecords = false;
+  bool _showUsage = false;
 
   late final EngineRoomController _controller;
   final TextEditingController _input = TextEditingController();
@@ -954,10 +955,30 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
                                     ),
                                   ],
                                 )
+                              : _showUsage
+                              ? Column(
+                                  children: [
+                                    Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: TextButton.icon(
+                                        onPressed: () =>
+                                            setState(() => _showUsage = false),
+                                        icon: const Icon(
+                                          Icons.arrow_back,
+                                          size: 18,
+                                        ),
+                                        label: const Text('Back to objectives'),
+                                      ),
+                                    ),
+                                    Expanded(child: UsagePane(store: store)),
+                                  ],
+                                )
                               : ObjectivesPane(
                                   store: store,
                                   onShowAllRecords: () =>
                                       setState(() => _showAllRecords = true),
+                                  onShowUsage: () =>
+                                      setState(() => _showUsage = true),
                                 ),
                         ),
                       ],
@@ -989,6 +1010,7 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
     (Icons.checklist_outlined, 'Work'),
     (Icons.people_outline, 'Team'),
     (Icons.history_outlined, 'Memory'),
+    (Icons.receipt_long_outlined, 'Usage'),
   ];
 
   void _selectInspector(int index) {
@@ -1099,7 +1121,8 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
                               showBoard: true,
                               canAnswer: _controller.isRunning,
                             ),
-                            _ => _roomMemory(store),
+                            3 => _roomMemory(store),
+                            _ => UsagePane(store: store),
                           },
                   ),
               ],

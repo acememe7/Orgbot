@@ -1010,8 +1010,21 @@ def _cache_hashes(state: Path, project: Path, workspace: Path) -> None:
     _use_hash_cache(workspace, workspace.parent / ".hashes.json")
 
 
-def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) -> dict[str, Any]:
+def _copy_label(value: str | None) -> str | None:
+    """A name for a copy a person can read, such as the bot's handle.
+
+    From the live room: leftover copies were listed by bot id alone, and the
+    owner could not tell whose work a kept copy held once the bot had left.
+    """
+    if value is None:
+        return None
+    label = re.sub(r"[^\w@.\- ]", "", value).strip()[:64]
+    return label or None
+
+
+def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool, label_arg: str | None = None) -> dict[str, Any]:
     agent = _safe_agent(agent_arg)
+    label = _copy_label(label_arg)
     project = _canonical_directory(project_arg, "project")
     state = _canonical_directory(state_arg, "state", create=True)
     _check_private_dir(state)
@@ -1050,6 +1063,8 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) 
             if _scan_workspace(workspace, source_entries) != source_entries or _scan(project) != source_entries:
                 _fail("Project changed during workspace preparation; no baseline was written")
             data = {"format_version": FORMAT_VERSION, "project": os.fspath(project), "agent": agent, "read_only": read_only, "created_at": int(time.time()), "entries": source_entries}
+            if label:
+                data["label"] = label
             head = _project_head(project)
             if head is not None and _copy_head(workspace / ".git")[1] == head[1]:
                 data["git_head"] = head[1]
@@ -1101,6 +1116,8 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) 
                 data["refresh_conflicts"] = sorted(conflicts)
             else:
                 data.pop("refresh_conflicts", None)
+            if label:
+                data["label"] = label
             _atomic_json(manifest_path, data)
         shared = _share_with_siblings(state, project, agent, workspace, data["entries"]) if _is_shared_copy(agent, data) else 0
         return {"ok": True, "shared_bytes": shared, "workspace": os.fspath(workspace), "profile_root": os.fspath(agent_root / "profiles"), "private_home": os.fspath(private_home), "private_home_mount": f"/run/user/{os.getuid()}/orgbot-home", "mcp_socket_mount": f"/run/user/{os.getuid()}/orgbot-room-mcp.sock", "read_only": data["read_only"], "conflicts": data.get("refresh_conflicts", []), "project_id": _project_id(project), "history": history}
@@ -1108,15 +1125,82 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool) 
         os.close(lock_fd)
 
 
-def _removal_groups(project: Path, entries: dict[str, dict[str, Any]], deleted: list[str]) -> list[dict[str, Any]]:
+LEDGER_LIMIT = 100_000
+
+
+def _ledger_path(state: Path, project: Path) -> Path:
+    return _safe_state_child(state, "ledger", create=True) / f"{_project_id(project)}.json"
+
+
+def _ledger_read(state: Path, project: Path) -> dict[str, dict[str, Any]]:
+    """Which bot added each project file and which last changed it, as far as
+    OrgBots has applied their work. Files from before the record began are
+    simply absent.
+
+    From the live room: the owner was asked to approve 562 removals and could
+    not tell whose files they were, or whether another bot had just written
+    them.
+    """
+    try:
+        raw = _read_private_json(_ledger_path(state, project), "file origins record")
+    except (WorkspaceError, OSError):
+        return {}
+    files = raw.get("files") if isinstance(raw, dict) else None
+    if not isinstance(files, dict):
+        return {}
+    return {name: row for name, row in files.items() if isinstance(name, str) and isinstance(row, dict)}
+
+
+def _ledger_record(state: Path, project: Path, who: str, operations: list[tuple[str, str]], existed: set[str]) -> None:
+    """Note who applied each write, and who added files that are new."""
+    if not operations:
+        return
+    files = _ledger_read(state, project)
+    stamp = time.time_ns()
+    now = stamp // 1_000_000_000
+    for name, action in operations:
+        if action == "delete":
+            files.pop(name, None)
+            continue
+        row = files.get(name) or {}
+        if name not in existed:
+            row = {"made_by": who, "made_at": now}
+        row["last_by"] = who
+        row["last_at"] = now
+        # Orders two applies in the same second.
+        row["last_ns"] = stamp
+        files[name] = row
+    if len(files) > LEDGER_LIMIT:
+        newest = sorted(files.items(), key=lambda item: -_ledger_order(item[1]))[:LEDGER_LIMIT]
+        files = dict(newest)
+    _atomic_json(_ledger_path(state, project), {"format_version": 1, "files": files})
+
+
+def _ledger_order(row: dict[str, Any]) -> int:
+    """When a record row was last written, for ordering rows."""
+    if isinstance(row.get("last_ns"), int):
+        return row["last_ns"]
+    return int(row.get("last_at") or 0) * 1_000_000_000 if isinstance(row.get("last_at"), int) else 0
+
+
+def _removal_folder(name: str) -> str:
+    """The folder a removal is grouped and approved under: its top folder
+    with a trailing slash, or the file itself at the top."""
+    top, _, rest = name.partition("/")
+    return f"{top}/" if rest else top
+
+
+def _removal_groups(project: Path, entries: dict[str, dict[str, Any]], deleted: list[str], ledger: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """What a removal review would take, by top folder: how many files, their
-    size, when the newest was last changed in the project, and how many git
-    tracks.
+    size, when the newest was last changed in the project, how many git
+    tracks, and, where OrgBots applied them, which bots added the files and
+    which last changed one.
 
     From the live room: the owner had to ask what 562 removals were before
     approving them, and another session had to warn that a folder among them
     had been written to minutes before.
     """
+    ledger = ledger or {}
     tracked: set[str] = set()
     if deleted and (project / ".git").is_dir() and shutil.which("git"):
         try:
@@ -1126,10 +1210,19 @@ def _removal_groups(project: Path, entries: dict[str, dict[str, Any]], deleted: 
         except (OSError, subprocess.SubprocessError):
             tracked = set()
     groups: dict[str, dict[str, Any]] = {}
+    makers: dict[str, dict[str, int]] = {}
+    latest: dict[str, int] = {}
     for name in deleted:
-        top, _, rest = name.partition("/")
-        key = f"{top}/" if rest else top
+        key = _removal_folder(name)
         group = groups.setdefault(key, {"folder": key, "files": 0, "bytes": 0, "newest": None, "tracked": 0})
+        origin = ledger.get(name) or {}
+        if isinstance(origin.get("made_by"), str):
+            counts = makers.setdefault(key, {})
+            counts[origin["made_by"]] = counts.get(origin["made_by"], 0) + 1
+        if isinstance(origin.get("last_by"), str) and isinstance(origin.get("last_at"), int) and _ledger_order(origin) > latest.get(key, -1):
+            latest[key] = _ledger_order(origin)
+            group["last_by"] = origin["last_by"]
+            group["last_at"] = origin["last_at"]
         group["files"] += 1
         group["bytes"] += int((entries.get(name) or {}).get("size", 0))
         try:
@@ -1139,6 +1232,8 @@ def _removal_groups(project: Path, entries: dict[str, dict[str, Any]], deleted: 
             pass
         if name in tracked:
             group["tracked"] += 1
+    for key, counts in makers.items():
+        groups[key]["made_by"] = sorted(([who, n] for who, n in counts.items()), key=lambda row: (-row[1], row[0]))
     return sorted(groups.values(), key=lambda group: (-group["files"], group["folder"]))
 
 
@@ -1172,7 +1267,7 @@ def _status(state_arg: str, agent_arg: str) -> dict[str, Any]:
         current = _scan(project)
         agent_entries = data["entries"] if _is_shared_copy(agent, data) else _scan_workspace(workspace, data["entries"])
         diffs = _changes(data["entries"], current, agent_entries)
-        diffs["deleted_groups"] = _removal_groups(project, data["entries"], diffs["deleted"])
+        diffs["deleted_groups"] = _removal_groups(project, data["entries"], diffs["deleted"], _ledger_read(state, project))
         diffs["ok"] = True
         diffs["workspace"] = os.fspath(workspace)
         diffs["project_id"] = _project_id(project)
@@ -1240,8 +1335,11 @@ def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, 
                 kept.append({"agent": agent, "last_modified": _last_modified(agent_root), "reason": "not a private directory"})
                 continue
             manifest = state / "manifests" / project_dir.name / f"{agent}.json"
+            named: dict[str, Any] = {}
             try:
                 raw = _read_private_json(manifest, "workspace baseline manifest")
+                if isinstance(raw, dict) and (label := _copy_label(raw.get("label") if isinstance(raw.get("label"), str) else None)):
+                    named = {"label": label}
                 project_value = raw.get("project") if isinstance(raw, dict) else None
                 if not isinstance(project_value, str):
                     raise WorkspaceError("no project identity")
@@ -1250,7 +1348,7 @@ def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, 
                 kept.append({"agent": agent, "last_modified": _last_modified(agent_root), "reason": "its baseline or project could not be read", "bytes": _tree_bytes(agent_root)})
                 continue
             if _project_id(project) != project_dir.name:
-                kept.append({"agent": agent, "last_modified": _last_modified(agent_root), "reason": "its baseline names another project", "bytes": _tree_bytes(agent_root)})
+                kept.append({"agent": agent, **named, "last_modified": _last_modified(agent_root), "reason": "its baseline names another project", "bytes": _tree_bytes(agent_root)})
                 continue
             try:
                 data = _manifest_read(manifest, project, agent)
@@ -1265,18 +1363,18 @@ def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, 
                         current = project_scans[project_dir.name] = _scan(project)
                     diffs = _changes(data["entries"], current, _scan_workspace(workspace, data["entries"]))
             except (WorkspaceError, OSError, ValueError, json.JSONDecodeError):
-                kept.append({"agent": agent, "last_modified": _last_modified(agent_root), "reason": "its changes could not be checked", "bytes": _tree_bytes(agent_root)})
+                kept.append({"agent": agent, **named, "last_modified": _last_modified(agent_root), "reason": "its changes could not be checked", "bytes": _tree_bytes(agent_root)})
                 continue
             pending = len(diffs["changed"]) + len(diffs["added"]) + len(diffs["deleted"])
             if pending:
-                kept.append({"agent": agent, "last_modified": _last_modified(agent_root), "reason": f"{pending} change(s) never merged into the project", "bytes": _tree_bytes(agent_root)})
+                kept.append({"agent": agent, **named, "last_modified": _last_modified(agent_root), "reason": f"{pending} change(s) never merged into the project", "bytes": _tree_bytes(agent_root)})
                 continue
             size = _tree_bytes(agent_root)
             modified = _last_modified(agent_root)
             if not dry_run:
                 shutil.rmtree(agent_root)
                 manifest.unlink(missing_ok=True)
-            removed.append({"agent": agent, "bytes": size, "last_modified": modified})
+            removed.append({"agent": agent, **named, "bytes": size, "last_modified": modified})
     return {"ok": True, "dry_run": dry_run, "removed": removed, "kept": kept, "freed_bytes": sum(item["bytes"] for item in removed)}
 
 
@@ -3188,8 +3286,22 @@ def _set_aside_conflicts(project: Path, workspace: Path, conflicts: list[str], c
     return set_aside
 
 
-def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: bool = False) -> dict[str, Any]:
+def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: bool = False, only_folders: list[str] | None = None) -> dict[str, Any]:
+    """Merge a bot's copy into the project.
+
+    Removals go only with the owner's review token. With only_folders, the
+    approval covers removals in those folders (as the review groups them);
+    the rest stay waiting. From the live room: one approval had to take all
+    562 removals or none.
+    """
     agent = _safe_agent(agent_arg)
+    folders = set(only_folders or [])
+    if folders and review_token is None:
+        _fail("Choosing folders needs a review token")
+    for folder in folders:
+        _relative(folder.rstrip("/"))
+        if folder.rstrip("/").count("/"):
+            _fail("Approve removals by top folder only")
     state = _canonical_directory(state_arg, "state")
     _check_private_dir(state)
     manifests = _manifest_candidates(state, agent)
@@ -3223,9 +3335,12 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
             return {"ok": False, "workspace": os.fspath(workspace), **diffs, "pending_delete": sorted(diffs["deleted"]), "review_token": approval_token, "error": "Workspace changed after deletion review; refresh the changes and approve the current deletion list"}
         deletions_approved = review_token == approval_token
 
+        def approved(name: str) -> bool:
+            return deletions_approved and (not folders or _removal_folder(name) in folders)
+
         def plan() -> tuple[set[str], list[str], list[tuple[str, str]]]:
             conflicts = set(diffs["conflicts"])
-            pending_delete = sorted(name for name in diffs["deleted"] if not deletions_approved)
+            pending_delete = sorted(name for name in diffs["deleted"] if not approved(name))
             operations: list[tuple[str, str]] = []
             for name in sorted(set(base) | set(current) | set(agent_entries)):
                 before, now, ours = base.get(name), current.get(name), agent_entries.get(name)
@@ -3235,7 +3350,7 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
                     conflicts.add(name)
                     continue
                 if ours is None:
-                    if deletions_approved:
+                    if approved(name):
                         operations.append((name, "delete"))
                 else:
                     operations.append((name, "write"))
@@ -3312,6 +3427,11 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
                 _atomic_json(journal_path, journal)
                 _progress("apply", index + 1, len(operations))
         _prune_empty_parents(project, [name for name, action in operations if action == "delete"])
+        who = _copy_label(data.get("label") if isinstance(data.get("label"), str) else None) or agent
+        try:
+            _ledger_record(state, project, who, operations, set(current))
+        except (WorkspaceError, OSError):
+            pass  # A record of who wrote what must never undo a merge.
         removed_here: list[str] = []
         final_entries = _scan(project)
         # Advance the baseline only after clean paths have also been refreshed
@@ -3361,6 +3481,7 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--state", required=True)
     prepare.add_argument("--agent", required=True)
     prepare.add_argument("--read-only", action="store_true")
+    prepare.add_argument("--label", help="A name for the copy a person can read, such as the bot's handle")
     status = sub.add_parser("status")
     status.add_argument("--state", required=True)
     status.add_argument("--agent", required=True)
@@ -3391,6 +3512,7 @@ def _parser() -> argparse.ArgumentParser:
     apply.add_argument("--agent", required=True)
     apply.add_argument("--review-token")
     apply.add_argument("--set-aside-conflicts", action="store_true", help="Keep the bot's version of each conflicting file in its private home and take the project's")
+    apply.add_argument("--only-folder", action="append", default=[], help="With --review-token, approve only the removals in this top folder (as the review groups them)")
     agy_auth = sub.add_parser("agy-auth")
     agy_auth.add_argument("action", choices=("login", "status"))
     return parser
@@ -3400,7 +3522,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "prepare":
-            _json(_prepare(args.project, args.state, args.agent, args.read_only))
+            _json(_prepare(args.project, args.state, args.agent, args.read_only, args.label))
             return 0
         if args.command == "status":
             _json(_status(args.state, args.agent))
@@ -3418,7 +3540,7 @@ def main(argv: list[str] | None = None) -> int:
             result = _agy_auth_login() if args.action == "login" else _agy_auth_status()
             _json(result)
             return 0 if result.get("ok") else 2
-        result = _apply(args.state, args.agent, args.review_token, set_aside=args.set_aside_conflicts)
+        result = _apply(args.state, args.agent, args.review_token, set_aside=args.set_aside_conflicts, only_folders=args.only_folder)
         _json(result)
         return 0 if result.get("ok") else 1
     except (WorkspaceError, OSError, ValueError, json.JSONDecodeError) as exc:

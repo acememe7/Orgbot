@@ -552,6 +552,8 @@ class PendingDecision {
     required this.because,
     required this.options,
     this.grantsWith,
+    this.recommended,
+    this.recommendedBecause,
   });
 
   /// The question itself. An answer is addressed to this, not to a task —
@@ -575,6 +577,13 @@ class PendingDecision {
   /// confirmed before it is sent.
   final String? grantsWith;
 
+  /// The answer the room's own record points to, when it has grounds: a
+  /// review that approved the work, or the bot that proposed it.
+  final String? recommended;
+
+  /// Why, in a sentence, when there is more to say than the option itself.
+  final String? recommendedBecause;
+
   factory PendingDecision.fromJson(Map<String, Object?> json) =>
       PendingDecision(
         id: json['id'] as String? ?? '',
@@ -583,6 +592,8 @@ class PendingDecision {
         because: json['because'] as String? ?? '',
         options: (json['options'] as List? ?? const []).cast<String>(),
         grantsWith: json['grants_with'] as String?,
+        recommended: json['recommended'] as String?,
+        recommendedBecause: json['recommended_because'] as String?,
       );
 }
 

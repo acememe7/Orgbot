@@ -3482,6 +3482,60 @@ fn a_landing_card_names_the_checks_recorded_for_those_commits() {
     assert!(question.contains(&format!("Checks on these commits: \"notes.md\" ({checks})")), "{question}");
 }
 
+/// From the live room: every card gave its answers the same weight, and the
+/// owner asked for the room's recommendation.
+#[test]
+fn a_card_carries_the_rooms_recommendation_when_it_has_grounds() {
+    use orgbot_proto::decision::{LAND_COMMITS_DENY, RETIRE_TASK_ALLOW};
+    let mut f = fixture();
+    let (worker, inspector, lead) = (f.worker, f.inspector, f.coordinator);
+
+    // A landing follows the task's latest review.
+    let task = f.start_task("commit the docs", worker);
+    let artifact = f.add_artifact(task, worker);
+    f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![artifact] });
+    f.apply(Command::RecordReview {
+        task,
+        inspector,
+        findings: vec![Finding::major("checks ran after the commits")],
+        summary: "needs another pass".into(),
+        criteria_met: vec![],
+        criteria_failed: vec!["checks before each commit".into()],
+    });
+    f.apply(Command::RequestLanding {
+        by: worker,
+        task,
+        branch: "main".into(),
+        base: "a".repeat(40),
+        head: "b".repeat(40),
+        commits: vec!["bbbbbbb docs [skip ci]".into()],
+        changes: "1 file changed".into(),
+        checks: None,
+        reason: "two commits on main".into(),
+    });
+    let card = f.engine.digest().needs_you.into_iter().find(|d| d.task == Some(task)).unwrap();
+    assert_eq!(card.recommended.as_deref(), Some(LAND_COMMITS_DENY));
+    assert!(card.recommended_because.unwrap().contains("asked for changes"));
+
+    // Retiring follows the coordinator who proposed it.
+    let stale = f.open_task("try a shadow experiment", None);
+    f.apply(Command::ProposeRetire { by: lead, task: stale, reason: "replaced".into() });
+    let card = f.engine.digest().needs_you.into_iter().find(|d| d.task == Some(stale)).unwrap();
+    assert_eq!(card.recommended.as_deref(), Some(RETIRE_TASK_ALLOW));
+
+    // A question follows the asking bot's own recommendation.
+    let other = f.start_task("pick a release day", f.worker2);
+    f.apply(Command::AskOwner {
+        by: f.worker2,
+        task: Some(other),
+        question: "Which day?".into(),
+        options: vec!["Friday (Recommended)".into(), "Monday".into()],
+    });
+    let card = f.engine.digest().needs_you.into_iter().find(|d| d.task == Some(other)).unwrap();
+    assert_eq!(card.recommended.as_deref(), Some("Friday (Recommended)"));
+    assert!(card.recommended_because.is_none());
+}
+
 /// From the live room: one release reached the owner as three cards in a row.
 #[test]
 fn a_bot_asks_one_question_per_task_at_a_time() {

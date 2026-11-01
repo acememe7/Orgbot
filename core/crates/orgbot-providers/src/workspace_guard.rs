@@ -20,6 +20,9 @@ pub struct WorkspaceGuard {
     pub state: PathBuf,
     pub agent: String,
     pub read_only: bool,
+    /// A name for the copy a person can read, kept with it so a copy left
+    /// behind by a bot that has gone still says whose it was.
+    pub label: Option<String>,
     #[cfg(test)]
     pub profile_source: Option<PathBuf>,
 }
@@ -938,6 +941,9 @@ impl WorkspaceGuard {
         command.arg("--project").arg(&self.project);
         if self.read_only {
             command.arg("--read-only");
+        }
+        if let Some(label) = &self.label {
+            command.arg("--label").arg(label);
         }
         let output = command
             .output()
@@ -1949,6 +1955,7 @@ mod tests {
             state: root.join("state"),
             agent: "agent-a".into(),
             read_only: true,
+            label: None,
             #[cfg(test)]
             profile_source: None,
         };

@@ -561,6 +561,58 @@ class WorkspaceTests(unittest.TestCase):
         self.assertIsNotNone(groups[0]["newest"])
         self.assertEqual(groups[0]["tracked"], 0, "no git here, so nothing is tracked")
 
+    def test_the_owner_can_approve_removals_in_some_folders_only(self):
+        # From the live room: one approval had to take all 562 removals or
+        # none, while one folder among them had just been written to.
+        for name in (".freeze-probe/a.js", "logs/old.txt", "logs/deep/older.txt"):
+            path = self.project / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name, encoding="utf-8")
+        work = self.prepare()
+        for name in (".freeze-probe/a.js", "logs/old.txt", "logs/deep/older.txt"):
+            (work / name).unlink()
+        reviewed = workspace._status(os.fspath(self.state), "dev")
+        with self.assertRaisesRegex(workspace.WorkspaceError, "review token"):
+            workspace._apply(os.fspath(self.state), "dev", review_token=None, only_folders=["logs/"])
+        with self.assertRaisesRegex(workspace.WorkspaceError, "top folder"):
+            workspace._apply(os.fspath(self.state), "dev", review_token=reviewed["review_token"], only_folders=["logs/deep/"])
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
+            applied = workspace._apply(os.fspath(self.state), "dev", review_token=reviewed["review_token"], only_folders=["logs/"])
+        self.assertTrue(applied["ok"])
+        self.assertEqual(applied["pending_delete"], [".freeze-probe/a.js"])
+        self.assertFalse((self.project / "logs").exists())
+        self.assertTrue((self.project / ".freeze-probe/a.js").exists(), "a folder not chosen is kept")
+        after = workspace._status(os.fspath(self.state), "dev")
+        self.assertEqual(after["deleted"], [".freeze-probe/a.js"], "it still waits for review")
+
+    def test_a_removal_review_says_which_bot_added_and_last_changed_the_files(self):
+        # From the live room: the owner could not tell whose files a removal
+        # review held, or whether another bot had just written them.
+        sol = Path(workspace._prepare(os.fspath(self.project), os.fspath(self.state), "bot_sol", False, "@sol")["workspace"])
+        mira = Path(workspace._prepare(os.fspath(self.project), os.fspath(self.state), "bot_mira", False, "@mira")["workspace"])
+        (sol / "notes").mkdir()
+        (sol / "notes/a.txt").write_text("a", encoding="utf-8")
+        (sol / "notes/b.txt").write_text("b", encoding="utf-8")
+        self.assertTrue(workspace._apply(os.fspath(self.state), "bot_sol", review_token=None)["ok"])
+        workspace._prepare(os.fspath(self.project), os.fspath(self.state), "bot_mira", False, "@mira")
+        (mira / "notes/b.txt").write_text("b, revised", encoding="utf-8")
+        self.assertTrue(workspace._apply(os.fspath(self.state), "bot_mira", review_token=None)["ok"])
+        dev = self.prepare()
+        (dev / "notes/a.txt").unlink()
+        (dev / "notes/b.txt").unlink()
+        (dev / "README.md").unlink()
+        groups = {g["folder"]: g for g in workspace._status(os.fspath(self.state), "dev")["deleted_groups"]}
+        self.assertEqual(groups["notes/"]["made_by"], [["@sol", 2]])
+        self.assertEqual(groups["notes/"]["last_by"], "@mira")
+        self.assertIsInstance(groups["notes/"]["last_at"], int)
+        self.assertNotIn("made_by", groups["README.md"], "a file from before the record has no maker")
+        record = self.state / "ledger" / f"{workspace._project_id(self.project.resolve())}.json"
+        self.assertEqual(record.stat().st_mode & 0o777, 0o600)
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
+            reviewed = workspace._status(os.fspath(self.state), "dev")
+            workspace._apply(os.fspath(self.state), "dev", review_token=reviewed["review_token"])
+        self.assertNotIn("notes/a.txt", workspace._ledger_read(self.state, self.project.resolve()), "a removed file leaves the record")
+
     def test_deletion_requires_explicit_owner_approval(self):
         work = self.prepare()
         (work / "README.md").unlink()
@@ -1068,6 +1120,23 @@ Path('/tmp/private.txt').write_text('temporary')
         self.assertFalse(integrated.exists())
         self.assertGreater(result["freed_bytes"], 0)
         self.assertEqual((self.project / "README.md").read_text(encoding="utf-8"), "applied\n", "the project is never touched")
+
+    def test_a_leftover_copy_reports_the_name_its_bot_last_had(self):
+        # From the live room: kept copies were listed by bot id, and nobody
+        # could tell whose work one held after the bot left.
+        workspace._prepare(os.fspath(self.project), os.fspath(self.state), "bot_gone_with_work", False, "@sol")
+        work = self.prepare("bot_gone_with_work")  # a later run without a name keeps it
+        (work / "notes.md").write_text("only here\n", encoding="utf-8")
+        self.prepare("bot_gone")
+        workspace._prepare(os.fspath(self.project), os.fspath(self.state), "bot_renamed", False, "@old\nname<script>")
+
+        result = workspace._prune(os.fspath(self.state), [], dry_run=True)
+
+        kept = {item["agent"]: item for item in result["kept"]}
+        removed = {item["agent"]: item for item in result["removed"]}
+        self.assertEqual(kept["bot_gone_with_work"]["label"], "@sol")
+        self.assertNotIn("label", removed["bot_gone"])
+        self.assertEqual(removed["bot_renamed"]["label"], "@oldnamescript", "only plain characters are kept")
 
     def test_bots_run_the_packaged_trash_helper_not_a_stale_per_user_copy(self):
         packaged_dir = self.root / "usr-bin"

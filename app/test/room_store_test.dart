@@ -284,6 +284,16 @@ void main() {
         friendlyRoomError(store.lastError!),
         contains('not taking messages'),
       );
+      client.emit({
+        'type': 'saved',
+        'at': DateTime(2026, 11, 1, 21, 41).millisecondsSinceEpoch,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        store.runStateLabel,
+        'Not responding, restarting from the last save at 21:41',
+        reason: 'says what a restart goes back to',
+      );
       store.removePending(pending);
       expect(store.messages, isEmpty);
       client.emit({'type': 'phase', 'phase': 'running'});

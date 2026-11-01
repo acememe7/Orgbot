@@ -570,8 +570,59 @@ impl Engine {
     /// Objectives, progress and the decisions only they can make. The full
     /// graph stays available through [`Engine::tasks`] for the bots, which
     /// need all of it.
+    /// The answer the room recommends on `decision`, and why, when it has
+    /// grounds for one.
+    ///
+    /// From the live room: every card gave its answers the same weight, and
+    /// the owner asked for the room's recommendation. A landing or a push
+    /// follows the latest review of its task; retiring follows the
+    /// coordinator who proposed it; a question follows the asking bot's own
+    /// "(Recommended)" option. Access to servers and sign-ins is never
+    /// recommended: that is the owner's call alone.
+    fn recommendation(&self, decision: &Decision) -> Option<(String, Option<String>)> {
+        if let Some(option) = decision.options.iter().find(|option| option.contains("(Recommended)")) {
+            return Some((option.clone(), None));
+        }
+        let allowed = &decision.envelope.allowed;
+        let handle = |agent: &AgentId| self.specs.get(agent).map(|spec| spec.handle.clone()).unwrap_or_else(|| "a bot".into());
+        let moves_commits = allowed.iter().any(|a| a.starts_with("land-commits:") || a.starts_with("push-commits:"));
+        if moves_commits {
+            let task = decision.task?;
+            let review = self.reviews.iter().filter(|r| r.task == task).max_by_key(|r| r.revision)?;
+            let pushing = allowed.iter().any(|a| a.starts_with("push-commits:"));
+            let (allow, deny) = if pushing {
+                (PUSH_COMMITS_ALLOW, PUSH_COMMITS_DENY)
+            } else {
+                (LAND_COMMITS_ALLOW, LAND_COMMITS_DENY)
+            };
+            return Some(match review.verdict {
+                orgbot_proto::review::Verdict::Approve => (
+                    allow.to_string(),
+                    Some(format!("@{} approved this work in review.", handle(&review.inspector))),
+                ),
+                _ => (
+                    deny.to_string(),
+                    Some(format!("@{}'s latest review asked for changes.", handle(&review.inspector))),
+                ),
+            });
+        }
+        if allowed.iter().any(|a| a == RETIRE_TASK) {
+            let proposer = decision.asked_by.first()?;
+            return Some((RETIRE_TASK_ALLOW.to_string(), Some(format!("@{} proposed it.", handle(proposer)))));
+        }
+        None
+    }
+
     pub fn digest(&self) -> crate::digest::RoomDigest {
         let mut view = crate::digest::digest(self.tasks(), &self.decisions);
+        for pending in &mut view.needs_you {
+            if let Some(decision) = self.decisions.decisions.iter().find(|d| d.id == pending.id) {
+                if let Some((answer, because)) = self.recommendation(decision) {
+                    pending.recommended = Some(answer);
+                    pending.recommended_because = because;
+                }
+            }
+        }
         view.utilization = self.utilization();
         view.pending_removals = self
             .pending_removals

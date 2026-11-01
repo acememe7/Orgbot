@@ -86,6 +86,7 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
     String command, {
     String? reviewToken,
     String? agentId,
+    List<String> onlyFolders = const [],
   }) async {
     final agent = agentId ?? _agentId;
     if (agent == null ||
@@ -112,6 +113,9 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
       agent,
     ];
     if (reviewToken != null) args.addAll(['--review-token', reviewToken]);
+    for (final folder in onlyFolders) {
+      args.addAll(['--only-folder', folder]);
+    }
     if (command == 'apply' && widget.processRunner == null) {
       return _decode(await _streamApply(args));
     }
@@ -216,6 +220,15 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
     }
   }
 
+  void _select(String? agentId) {
+    if (agentId == null || agentId == _agentId) return;
+    setState(() {
+      _agentId = agentId;
+      _status = null;
+    });
+    _refresh();
+  }
+
   String _message(Object error) => error is FormatException
       ? error.message.toString()
       : error.toString().replaceFirst('Exception: ', '');
@@ -239,55 +252,15 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
     if (displayed == null || _paths(displayed['conflicts']).isNotEmpty) return;
     final removals = _paths(displayed['deleted']);
     if (removals.isNotEmpty) {
-      final approved = await showDialog<bool>(
+      final groups = displayed['deleted_groups'] is List
+          ? (displayed['deleted_groups'] as List).whereType<Map>().toList()
+          : null;
+      final folders = await showDialog<List<String>>(
         context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Approve deleted files'),
-          // A fixed size and a lazily built list: from the live room, 1,570
-          // removals built as one column froze the app on this dialog.
-          content: SizedBox(
-            width: 520,
-            height: 440,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  removals.length == 1
-                      ? 'This project file will be moved to your configured recovery folder before the changes are applied:'
-                      : 'These ${removals.length} project files will be moved to your configured recovery folder before the changes are applied:',
-                ),
-                const SizedBox(height: 8),
-                if (displayed['deleted_groups'] is List)
-                  RemovalGroups(
-                    groups: (displayed['deleted_groups'] as List)
-                        .whereType<Map>()
-                        .toList(),
-                  )
-                else
-                  PathSummary(paths: removals),
-                const SizedBox(height: 8),
-                Expanded(
-                  child: PathList(
-                    paths: removals,
-                    keyPrefix: 'approved-delete-',
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Move listed files to Trash and apply'),
-            ),
-          ],
-        ),
+        builder: (context) =>
+            ApproveRemovalsDialog(removals: removals, groups: groups),
       );
-      if (approved != true || !mounted) return;
+      if (folders == null || !mounted) return;
       // Re-read status after approval. If the deletion set changed, the
       // approval no longer covers the operation and nothing is applied.
       await _refresh();
@@ -308,7 +281,7 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
         );
         return;
       }
-      await _applyCommand(reviewToken: token);
+      await _applyCommand(reviewToken: token, onlyFolders: folders);
     } else {
       await _applyCommand();
     }
@@ -348,14 +321,21 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
       ..sort();
   }
 
-  Future<void> _applyCommand({String? reviewToken}) async {
+  Future<void> _applyCommand({
+    String? reviewToken,
+    List<String> onlyFolders = const [],
+  }) async {
     setState(() {
       _busy = true;
       _error = null;
       _progress = null;
     });
     try {
-      await _invoke('apply', reviewToken: reviewToken);
+      await _invoke(
+        'apply',
+        reviewToken: reviewToken,
+        onlyFolders: onlyFolders,
+      );
       await _refreshAfterApply();
     } catch (error) {
       if (mounted) setState(() => _error = _message(error));
@@ -392,6 +372,8 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
               const Text('No live room agents are available to inspect.')
             else
               DropdownButtonFormField<String>(
+                // Keyed by the selection: the overview below can change it.
+                key: ValueKey('copy-picker-$_agentId'),
                 isExpanded: true,
                 initialValue: _agentId,
                 decoration: const InputDecoration(labelText: 'Agent'),
@@ -406,15 +388,17 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
                       ),
                     ),
                 ],
-                onChanged: _busy
-                    ? null
-                    : (value) {
-                        setState(() {
-                          _agentId = value;
-                          _status = null;
-                        });
-                        _refresh();
-                      },
+                onChanged: _busy ? null : _select,
+              ),
+            if (_counts.values.where((n) => n > 0).length > 1)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: CopyOverview(
+                  agents: widget.agents,
+                  counts: _counts,
+                  selected: _agentId,
+                  onSelect: _busy ? null : _select,
+                ),
               ),
             const SizedBox(height: 12),
             if (_busy) const LinearProgressIndicator(),
@@ -684,12 +668,23 @@ String workspaceCopyLabel(String label, int removals) => removals <= 0
 /// from the live room, a folder among 562 removals had been written to
 /// minutes before, and only another session noticed.
 class RemovalGroups extends StatelessWidget {
-  const RemovalGroups({super.key, required this.groups, this.now});
+  const RemovalGroups({
+    super.key,
+    required this.groups,
+    this.now,
+    this.chosen,
+    this.onToggle,
+  });
 
   final List<Map> groups;
 
   /// The time to measure "changed … ago" from; the clock if not given.
   final DateTime? now;
+
+  /// The folders ticked, when the owner is choosing which to approve. Every
+  /// folder is listed then, each with a checkbox.
+  final Set<String>? chosen;
+  final ValueChanged<String>? onToggle;
 
   @override
   Widget build(BuildContext context) {
@@ -699,7 +694,7 @@ class RemovalGroups extends StatelessWidget {
       key: const ValueKey('removal-groups'),
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (final group in groups.take(8))
+        for (final group in chosen == null ? groups.take(8) : groups)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 3),
             child: Builder(
@@ -721,9 +716,18 @@ class RemovalGroups extends StatelessWidget {
                     : tracked == files
                     ? 'in git'
                     : '$tracked of $files in git';
+                final origin = removalOrigin(group, clock);
+                final folder = '${group['folder']}';
                 return Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    if (chosen != null)
+                      Checkbox(
+                        key: ValueKey('choose-folder-$folder'),
+                        value: chosen!.contains(folder),
+                        visualDensity: VisualDensity.compact,
+                        onChanged: (_) => onToggle?.call(folder),
+                      ),
                     Expanded(
                       child: Text.rich(
                         TextSpan(
@@ -739,6 +743,14 @@ class RemovalGroups extends StatelessWidget {
                                   '$files ${files == 1 ? 'file' : 'files'} · ${_size(bytes)} · $git',
                               style: TextStyle(color: scheme.onSurfaceVariant),
                             ),
+                            if (origin != null)
+                              TextSpan(
+                                text: '\n$origin',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: scheme.onSurfaceVariant,
+                                ),
+                              ),
                           ],
                         ),
                         style: const TextStyle(fontSize: 12.5),
@@ -761,7 +773,7 @@ class RemovalGroups extends StatelessWidget {
               },
             ),
           ),
-        if (groups.length > 8)
+        if (chosen == null && groups.length > 8)
           Text(
             'and ${groups.length - 8} more',
             style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
@@ -782,5 +794,206 @@ class RemovalGroups extends StatelessWidget {
     if (age.inHours < 1) return '${age.inMinutes} min ago';
     if (age.inDays < 1) return '${age.inHours} h ago';
     return '${age.inDays} d ago';
+  }
+}
+
+/// Which bots added a removal group's files and which last changed one, as
+/// far as OrgBots applied their work, or null when it has no record.
+String? removalOrigin(Map group, DateTime now) {
+  final files = group['files'] is int ? group['files'] as int : 0;
+  final parts = <String>[];
+  final makers = [
+    for (final row in group['made_by'] is List ? group['made_by'] as List : [])
+      if (row is List && row.length == 2 && row[0] is String && row[1] is int)
+        (row[0] as String, row[1] as int),
+  ];
+  if (makers.isNotEmpty) {
+    final known = makers.fold<int>(0, (sum, m) => sum + m.$2);
+    final names = makers.length == 1 && known == files
+        ? makers.single.$1
+        : makers.map((m) => '${m.$1} (${m.$2})').join(', ');
+    parts.add(
+      known < files
+          ? 'added by $names; ${files - known} from before OrgBots kept a record'
+          : 'added by $names',
+    );
+  }
+  final lastBy = group['last_by'];
+  final lastAt = group['last_at'];
+  if (lastBy is String && lastAt is int) {
+    final age = now.difference(
+      DateTime.fromMillisecondsSinceEpoch(lastAt * 1000),
+    );
+    parts.add('last changed by $lastBy ${RemovalGroups._ago(age)}');
+  }
+  return parts.isEmpty ? null : parts.join(' · ');
+}
+
+/// Approve a removal review whole, or only some of its folders.
+///
+/// Pops with the folders to approve (empty for all of them), or null when
+/// cancelled. From the live room: one approval had to take all 562 removals
+/// or none, while one folder among them had just been written to.
+class ApproveRemovalsDialog extends StatefulWidget {
+  const ApproveRemovalsDialog({
+    super.key,
+    required this.removals,
+    required this.groups,
+  });
+
+  final List<String> removals;
+
+  /// The review's folders, or null from a helper too old to group them,
+  /// which cannot approve by folder either.
+  final List<Map>? groups;
+
+  @override
+  State<ApproveRemovalsDialog> createState() => _ApproveRemovalsDialogState();
+}
+
+class _ApproveRemovalsDialogState extends State<ApproveRemovalsDialog> {
+  /// The folders ticked, while choosing; null approves everything.
+  Set<String>? _chosen;
+
+  int _filesIn(Set<String> folders) => [
+    for (final group in widget.groups ?? const <Map>[])
+      if (folders.contains('${group['folder']}') && group['files'] is int)
+        group['files'] as int,
+  ].fold(0, (sum, n) => sum + n);
+
+  @override
+  Widget build(BuildContext context) {
+    final removals = widget.removals;
+    final groups = widget.groups;
+    final chosen = _chosen;
+    final all = groups == null
+        ? const <String>[]
+        : [for (final group in groups) '${group['folder']}'];
+    final every = chosen == null || chosen.length == all.length;
+    final count = every ? removals.length : _filesIn(chosen);
+    return AlertDialog(
+      title: const Text('Approve deleted files'),
+      // A fixed size and a lazily built list: from the live room, 1,570
+      // removals built as one column froze the app on this dialog.
+      content: SizedBox(
+        width: 520,
+        height: 440,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              chosen != null
+                  ? 'Tick the folders to move to your recovery folder. The rest keep waiting for review.'
+                  : removals.length == 1
+                  ? 'This project file will be moved to your configured recovery folder before the changes are applied:'
+                  : 'These ${removals.length} project files will be moved to your configured recovery folder before the changes are applied:',
+            ),
+            const SizedBox(height: 8),
+            if (groups != null && chosen != null)
+              Expanded(
+                child: SingleChildScrollView(
+                  child: RemovalGroups(
+                    groups: groups,
+                    chosen: chosen,
+                    onToggle: (folder) => setState(() {
+                      if (!chosen.remove(folder)) chosen.add(folder);
+                    }),
+                  ),
+                ),
+              )
+            else ...[
+              if (groups != null)
+                RemovalGroups(groups: groups)
+              else
+                PathSummary(paths: removals),
+              const SizedBox(height: 8),
+              Expanded(
+                child: PathList(paths: removals, keyPrefix: 'approved-delete-'),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        if (groups != null && groups.length > 1 && chosen == null)
+          TextButton(
+            key: const ValueKey('choose-folders'),
+            onPressed: () => setState(() => _chosen = {...all}),
+            child: const Text('Choose folders'),
+          ),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: count == 0
+              ? null
+              : () => Navigator.pop(context, every ? <String>[] : [...chosen]),
+          child: Text(
+            every
+                ? 'Move listed files to Trash and apply'
+                : 'Move $count ${count == 1 ? 'file' : 'files'} to Trash and apply',
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Every copy with removals waiting, with its count, one tap from its review.
+///
+/// From the live room: 2,177 removals across copies, and the owner had to
+/// open the picker to learn there were two bots behind them.
+class CopyOverview extends StatelessWidget {
+  const CopyOverview({
+    super.key,
+    required this.agents,
+    required this.counts,
+    required this.selected,
+    required this.onSelect,
+  });
+
+  final List<WorkspaceAgentLabel> agents;
+  final Map<String, int> counts;
+  final String? selected;
+  final ValueChanged<String>? onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    final waiting = [
+      for (final agent in agents)
+        if ((counts[agent.id] ?? 0) > 0) agent,
+    ]..sort((a, b) => (counts[b.id] ?? 0).compareTo(counts[a.id] ?? 0));
+    final total = waiting.fold<int>(0, (sum, a) => sum + (counts[a.id] ?? 0));
+    return Column(
+      key: const ValueKey('copy-overview'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '$total ${total == 1 ? 'removal' : 'removals'} waiting in ${waiting.length} copies',
+          style: TextStyle(
+            fontSize: 12,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Wrap(
+          spacing: 6,
+          runSpacing: 4,
+          children: [
+            for (final agent in waiting)
+              ChoiceChip(
+                key: ValueKey('copy-chip-${agent.id}'),
+                label: Text(workspaceCopyLabel(agent.label, counts[agent.id]!)),
+                selected: agent.id == selected,
+                visualDensity: VisualDensity.compact,
+                onSelected: onSelect == null
+                    ? null
+                    : (_) => onSelect!(agent.id),
+              ),
+          ],
+        ),
+      ],
+    );
   }
 }

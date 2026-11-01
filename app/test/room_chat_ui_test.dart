@@ -446,7 +446,9 @@ void main() {
     }
 
     await show();
-    await tester.tap(find.byTooltip('Park until you resume it'));
+    await tester.tap(find.byTooltip('Task actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Park until you resume it'));
     await tester.pumpAndSettle();
     expect(find.textContaining('until you resume it'), findsOneWidget);
     await tester.enterText(find.byType(TextField), 'after the launch');
@@ -474,8 +476,15 @@ void main() {
       findsNothing,
       reason: 'nobody holds parked work',
     );
-    expect(find.byTooltip('Park until you resume it'), findsNothing);
-    await tester.tap(find.text('Resume task'));
+    await tester.tap(find.byTooltip('Task actions'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Park until you resume it'),
+      findsNothing,
+      reason: 'parked work offers Resume instead',
+    );
+    await tester.tap(find.text('Resume task').last);
+    await tester.pumpAndSettle();
     expect(client.sent.last, {'type': 'resume_task', 'task': 'task_1'});
   });
 }

@@ -38,9 +38,13 @@ class LeftoverCopy {
     required this.bytes,
     required this.reason,
     this.lastModified,
+    this.label,
   });
 
   final String agent;
+
+  /// The name its bot had when it last used the copy, if it was recorded.
+  final String? label;
   final int bytes;
 
   /// When the copy last changed, if known.
@@ -210,7 +214,9 @@ class _LeftoverCopiesDialogState extends State<LeftoverCopiesDialog> {
                     final copy = copies[index];
                     return ListTile(
                       key: ValueKey('leftover-${copy.agent}'),
-                      title: Text(leftoverCopyName(copy.agent)),
+                      title: Text(
+                        leftoverCopyName(copy.agent, label: copy.label),
+                      ),
                       subtitle: Text(
                         [
                           formatCopyBytes(copy.bytes),
@@ -262,9 +268,11 @@ List<LeftoverCopy> leftoverCopiesFrom(Map<String, dynamic> report) {
       if (agent is! String) continue;
       final bytes = row['bytes'];
       final modified = row['last_modified'];
+      final label = row['label'];
       copies.add(
         LeftoverCopy(
           agent: agent,
+          label: label is String && label.isNotEmpty ? label : null,
           bytes: bytes is int ? bytes : 0,
           lastModified: modified is int
               ? DateTime.fromMillisecondsSinceEpoch(modified * 1000)
@@ -330,14 +338,19 @@ String _day(DateTime when) {
 
 /// A leftover copy's name as a person reads it. From the live room: the one
 /// leftover showed as bot_a1740742eb994413b67d7a3bb1ed7f6e.
-String leftoverCopyName(String agent) {
+///
+/// [label] is the name the bot had when it last used the copy, which copies
+/// made since 2.2.1 keep with them.
+String leftoverCopyName(String agent, {String? label}) {
   final verify = agent.endsWith('-verify');
   final base = verify
       ? agent.substring(0, agent.length - '-verify'.length)
       : agent;
   String name;
   final bot = RegExp(r'^bot_([0-9a-f]{8})[0-9a-f]*$').firstMatch(base);
-  if (bot != null) {
+  if (label != null) {
+    name = '$label (no longer in the room)';
+  } else if (bot != null) {
     name = 'A bot no longer in the room (${bot.group(1)})';
   } else if (RegExp(r'^([0-9a-f]{2})+$').hasMatch(base)) {
     final bytes = [

@@ -309,7 +309,11 @@ void main() {
       await tester.pumpWidget(wrap(store));
 
       expect(find.text('Waiting on you'), findsOneWidget);
-      expect(find.text('Needs you: no'), findsNothing, reason: 'said only when it is so');
+      expect(
+        find.text('Needs you: no'),
+        findsNothing,
+        reason: 'said only when it is so',
+      );
     });
 
     testWidgets('the records behind an objective are one tap away', (
@@ -475,6 +479,53 @@ void _answerTests() {
       expect(find.text('Confirm this answer?'), findsNothing);
       expect(client.answered.single.chosen, 'Deny');
     });
+
+    testWidgets(
+      'a card says what each fixed answer does and what the room recommends',
+      (tester) async {
+        // From the live room: "Land these commits" did not say whether newer
+        // work went too, and the owner had to scroll for the review.
+        final store = RoomStore(_Silent());
+        final digest = digestJson(needsYou: 1);
+        (digest['needs_you'] as List)[0] = {
+          'id': 'dec_1',
+          'task': 'task_0',
+          'title': 'provision the VPS',
+          'because': '@sol asks to land 3 commits onto main.',
+          'options': ['Land these commits', "Don't land them"],
+          'recommended': 'Land these commits',
+          'recommended_because': '@mira approved this work in review.',
+        };
+        store.restore([
+          {'type': 'digest', 'digest': digest},
+        ]);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(body: ObjectivesPane(store: store)),
+          ),
+        );
+        expect(
+          find.widgetWithText(FilledButton, 'Land these commits'),
+          findsOneWidget,
+          reason: 'the recommended answer stands out',
+        );
+        expect(
+          find.widgetWithText(OutlinedButton, "Don't land them"),
+          findsOneWidget,
+        );
+        expect(
+          find.text(
+            'Recommended: Land these commits. @mira approved this work in review.',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining('Anything newer needs asking again.'),
+          findsOneWidget,
+        );
+        expect(find.textContaining('stay in the bot'), findsOneWidget);
+      },
+    );
 
     testWidgets('a custom answer is delivered with the same decision id', (
       tester,
@@ -778,15 +829,22 @@ void _viewTests() {
           {'type': 'digest', 'digest': digest},
         ]);
         await tester.pumpWidget(wrap(store));
-        await tester.scrollUntilVisible(
+        expect(
           find.text('What this has drawn'),
-          250,
-          scrollable: find.byType(Scrollable).first,
+          findsNothing,
+          reason: 'usage has its own tab now',
         );
-        // Folded by default; one tap opens it.
-        await tester.tap(find.text('What this has drawn'));
-        await tester.pumpAndSettle();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(body: UsagePane(store: store)),
+          ),
+        );
         expect(find.text('Room · ≥4,294,967,295 turns'), findsOneWidget);
+        expect(
+          find.textContaining('CLI subscription report tokens, not prices'),
+          findsOneWidget,
+          reason: 'says why a cost can be unknown',
+        );
 
         expect(
           find.textContaining('15 in · 7 out · 3 cache read · 2 cache write'),

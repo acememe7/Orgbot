@@ -644,6 +644,10 @@ class _TranscriptState extends State<Transcript>
   /// Runs of bot check-ins, by message, and the runs the owner opened.
   Map<String, CheckInRun> _runs = const {};
   final Set<String> _openRuns = {};
+
+  /// Messages of a run the owner just opened, which unfold rather than
+  /// appear at once.
+  final Set<String> _unfolding = {};
   bool _following = true;
   bool _interacting = false;
   bool _scheduled = false;
@@ -760,7 +764,10 @@ class _TranscriptState extends State<Transcript>
             final line = _CheckInLine(
               run: run,
               store: store,
-              onOpen: () => setState(() => _openRuns.add(run.start)),
+              onOpen: () => setState(() {
+                _openRuns.add(run.start);
+                _unfolding.addAll(run.members.map((m) => m.id));
+              }),
             );
             return widget.desktop
                 ? Align(
@@ -803,9 +810,15 @@ class _TranscriptState extends State<Transcript>
               ],
             );
           }
+          final unfolding = _unfolding.remove(message.id);
           final animate =
-              !_initialIds!.contains(message.id) && _arrived.add(message.id);
-          final arriving = _Arrival(animate: animate, child: bubble);
+              unfolding ||
+              (!_initialIds!.contains(message.id) && _arrived.add(message.id));
+          final arriving = _Arrival(
+            animate: animate,
+            grow: unfolding,
+            child: bubble,
+          );
           return widget.desktop
               ? Align(
                   key: ValueKey(message.id),
@@ -1196,10 +1209,18 @@ class _DotsState extends State<_Dots> with SingleTickerProviderStateMixin {
 /// Only paint is animated: the row is laid out at its final size from the
 /// first frame, so scroll anchoring and following are unaffected.
 class _Arrival extends StatefulWidget {
-  const _Arrival({required this.animate, required this.child});
+  const _Arrival({
+    required this.animate,
+    required this.child,
+    this.grow = false,
+  });
 
   final bool animate;
   final Widget child;
+
+  /// Open from no height as well, for messages unfolding in place rather
+  /// than arriving at the end.
+  final bool grow;
 
   @override
   State<_Arrival> createState() => _ArrivalState();
@@ -1253,15 +1274,25 @@ class _ArrivalState extends State<_Arrival>
     return AnimatedBuilder(
       animation: curve,
       child: widget.child,
-      builder: (context, child) => controller.isCompleted
-          ? child!
-          : Opacity(
-              opacity: curve.value,
-              child: Transform.translate(
-                offset: Offset(0, 6 * (1 - curve.value)),
-                child: child,
-              ),
-            ),
+      builder: (context, child) {
+        if (controller.isCompleted) return child!;
+        final faded = Opacity(
+          opacity: curve.value,
+          child: Transform.translate(
+            offset: Offset(0, 6 * (1 - curve.value)),
+            child: child,
+          ),
+        );
+        return widget.grow
+            ? ClipRect(
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  heightFactor: curve.value,
+                  child: faded,
+                ),
+              )
+            : faded;
+      },
     );
   }
 }
@@ -2448,14 +2479,35 @@ class _BoardStripState extends State<BoardStrip> {
                     semanticLabel: open ? 'Collapse task' : 'Expand task',
                   ),
                 ),
-                if (widget.canAnswer && task.state.isParkable)
-                  IconButton(
-                    tooltip: 'Park until you resume it',
-                    visualDensity: VisualDensity.compact,
-                    iconSize: 17,
-                    color: scheme.onSurfaceVariant,
-                    icon: const Icon(Icons.pause_circle_outline),
-                    onPressed: () => _park(context, task),
+                // A menu, not a bare pause icon: from the UI review, the
+                // icon beside the chevron read as "pause the bot" and sat
+                // one slip away from opening the card.
+                if (widget.canAnswer &&
+                    (task.state.isParkable || task.state == TaskState.parked))
+                  PopupMenuButton<String>(
+                    tooltip: 'Task actions',
+                    iconSize: 18,
+                    padding: EdgeInsets.zero,
+                    icon: Icon(Icons.more_vert, color: scheme.onSurfaceVariant),
+                    onSelected: (action) {
+                      if (action == 'park') {
+                        _park(context, task);
+                      } else {
+                        widget.store.resumeTask(task.id);
+                      }
+                    },
+                    itemBuilder: (context) => [
+                      if (task.state.isParkable)
+                        const PopupMenuItem(
+                          value: 'park',
+                          child: Text('Park until you resume it'),
+                        )
+                      else
+                        const PopupMenuItem(
+                          value: 'resume',
+                          child: Text('Resume task'),
+                        ),
+                    ],
                   )
                 else
                   const SizedBox(width: 8),

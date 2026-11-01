@@ -549,6 +549,12 @@ class RoomStore extends ChangeNotifier {
         }
       case 'phase':
         _applyPhase(message['phase'] as String?);
+      case 'saved':
+        final at = (message['at'] as num?)?.toInt();
+        if (at != null) {
+          _lastSavedAt = DateTime.fromMillisecondsSinceEpoch(at);
+          if (_notResponding) _notifyChanged();
+        }
       case 'stream':
         // Deltas do not go in the transcript — the durable event that follows
         // carries the final text — but they are the clearest signal that a bot
@@ -947,8 +953,19 @@ class RoomStore extends ChangeNotifier {
   bool get notResponding => _notResponding;
   bool _notResponding = false;
 
+  /// When the room last wrote its state to disk. A restart resumes from
+  /// there, so it is what a stopped room would lose back to.
+  DateTime? get lastSavedAt => _lastSavedAt;
+  DateTime? _lastSavedAt;
+
   String get runStateLabel {
-    if (_notResponding) return 'Not responding, restarting';
+    if (_notResponding) {
+      final saved = _lastSavedAt;
+      if (saved == null) return 'Not responding, restarting';
+      final clock =
+          '${saved.hour.toString().padLeft(2, '0')}:${saved.minute.toString().padLeft(2, '0')}';
+      return 'Not responding, restarting from the last save at $clock';
+    }
     if (isPausing) return 'Pausing after current turns';
     if (isActive) return 'Active';
     if (isCompleted && _limitReached) {

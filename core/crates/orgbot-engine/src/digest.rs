@@ -123,6 +123,14 @@ pub struct PendingDecision {
     /// the owner to confirm that answer; every other answer stays one tap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grants_with: Option<String>,
+    /// The answer the room recommends, when it has grounds for one: a
+    /// reviewer's verdict on the work, a coordinator's proposal, or a bot's
+    /// own "(Recommended)" option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended: Option<String>,
+    /// Why, in a sentence, when the room recommends an answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_because: Option<String>,
 }
 
 /// What one bot is doing, for a view of where the room's effort is going.
@@ -430,6 +438,8 @@ pub fn digest<'a>(tasks: impl Iterator<Item = &'a Task>, decisions: &DecisionLog
                 options: decision.options.clone(),
                 objective: held.and_then(|task| task.lineage.root_objective),
                 grants_with: granting_answer(decision),
+                recommended: None,
+                recommended_because: None,
             }
         })
         .collect();

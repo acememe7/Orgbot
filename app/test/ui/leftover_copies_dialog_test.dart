@@ -159,6 +159,22 @@ void main() {
       'A bot no longer in the room (de7af178), verify copy',
     );
     expect(
+      leftoverCopyName(
+        'bot_de7af1787bb740bd82ef23ac85239e90-verify',
+        label: '@sol',
+      ),
+      '@sol (no longer in the room), verify copy',
+      reason: 'the name the bot last had, when the copy kept it',
+    );
+    expect(
+      leftoverCopiesFrom({
+        'kept': [
+          {'agent': 'bot_x', 'label': '@sol', 'bytes': 9, 'reason': 'kept'},
+        ],
+      }).single.label,
+      '@sol',
+    );
+    expect(
       plainLeftoverReason('3 change(s) never merged into the project'),
       '3 changes never reached your project',
     );
