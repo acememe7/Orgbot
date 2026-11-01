@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>OrgBots daily log, 1 November 2026: fifteen fixes in a day, and a bar for done</title><meta name="description" content="A twelve-bot OrgBots room delivered 3 tasks, sent back 4 of 7 reviews and drove 15 OrgBots builds in one day, then showed why every room needs a bar for done."><link rel="canonical" href="https://orgbots.theaecestudio.com/evidence/2026-11-01/"><meta property="og:type" content="article"><meta property="og:site_name" content="OrgBots"><meta property="og:title" content="OrgBots daily log, 1 November 2026: fifteen fixes in a day, and a bar for done"><meta property="og:description" content="3 tasks delivered, 4 of 7 reviews sent work back, 15 OrgBots builds shipped the same day. Every claim cites the room's own log."><meta property="og:url" content="https://orgbots.theaecestudio.com/evidence/2026-11-01/"><meta property="og:image" content="https://orgbots.theaecestudio.com/assets/orgbots-share.jpg"><meta property="og:image:alt" content="OrgBots work panel from a real room, with tokens counted by provider"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="OrgBots daily log, 1 November 2026: fifteen fixes in a day, and a bar for done"><meta name="twitter:description" content="3 tasks delivered, 4 of 7 reviews sent work back, 15 OrgBots builds shipped the same day. Every claim cites the room's own log."><meta name="twitter:image" content="https://orgbots.theaecestudio.com/assets/orgbots-share.jpg"><meta name="theme-color" content="#f2efe7"><link rel="icon" href="/assets/favicon.ico" sizes="any"><link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon.png"><link rel="apple-touch-icon" href="/assets/apple-touch-icon.png"><link rel="stylesheet" href="/styles.css?v=20261101b"><script defer src="/site.js?v=20261101b"></script><script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"OrgBots daily log, 1 November 2026: fifteen fixes in a day, and a bar for done","datePublished":"2026-11-01","dateModified":"2026-11-01","author":{"@type":"Organization","name":"The AECE Studio"},"publisher":{"@type":"Organization","name":"The AECE Studio"},"mainEntityOfPage":"https://orgbots.theaecestudio.com/evidence/2026-11-01/","about":{"@type":"VideoGame","name":"PROTEST","url":"https://protest.theaecestudio.com/","gamePlatform":"Web browser"}}</script></head>
+<body><a class="skip-link" href="#main">Skip to content</a><header class="site-header"><div class="header-inner"><a class="brand" href="/" aria-label="OrgBots home"><img src="/assets/favicon.png" width="38" height="38" alt=""><span>OrgBots</span></a><button class="menu-toggle" type="button" aria-expanded="false" aria-controls="primary-nav">Menu</button><nav class="nav" id="primary-nav" aria-label="Main navigation"><a href="/results/">Evidence</a><a href="/evidence/" aria-current="page">Daily log</a><a href="/build/">Build log</a><a href="/install/">Installation</a><a href="https://github.com/acememe7/Orgbot">Source code</a><a class="nav-cta" href="/install/">Install for Ubuntu</a></nav></div></header>
+<main id="main">
+<header class="page-heading wrap"><p class="eyebrow">Daily log &middot; Sunday 1 November 2026</p><h1>The bots kept raising their own bar.</h1>
+<p>The owner's OrgBots room spent the day on one feature for PROTEST: turning the closing cordon into a wall of tear gas. Nobody had said what "finished" looked like, so the bots kept tightening their own test, version after version, until the owner set the bar at 20:12. Along the way the room exposed fifteen OrgBots problems, and each fix shipped the same day. Everything below comes from the room's own log.</p>
+<div class="actions"><a class="button" href="https://protest.theaecestudio.com/">Play PROTEST in your browser</a><a class="text-link" href="#orgbots-fixes">See what OrgBots fixed</a></div>
+</header>
+
+<section class="wrap section" id="today"><h2 class="results-heading">Today in numbers</h2>
+<div class="metrics" aria-label="Today's results"><div class="metric"><strong>3</strong><span>tasks delivered, each approved by a bot that did not build it</span></div>
+<div class="metric"><strong>4 of 7</strong><span>reviews sent the work back with findings</span></div>
+<div class="metric"><strong>15</strong><span>OrgBots builds shipped the same day</span></div>
+</div>
+<ul class="plain-list"><li><strong>Freeze check settled.</strong> The Halden first-match freeze check was sent back once (00:50, #4392) and delivered at 00:55 (#4415).</li>
+<li><strong>Gas proof recorded.</strong> The proof that the new gas costs under 1 ms went back three times before it was delivered at 12:30 (#4701). The rounds are below.</li>
+<li><strong>Late hitch attributed.</strong> A test of the late Halden hitch with the gas on and off was delivered at 13:44 (#4963).</li>
+<li><strong>Tear-gas wall held.</strong> The owner set the finish bar at 20:12 (#5634). The final captures passed it except one shot at 94.4% coverage, which the owner accepted, and two bursts of slow frames, which went to profiling (20:47, #5748; 20:48, #5752).</li>
+</ul>
+</section>
+
+<section class="wrap section section-compact" id="bugs"><div class="section-heading"><h2>Game defects found today.</h2>
+<p>Neither reached the live game. Both are in the held gas work.</p></div>
+<div class="table-scroll" role="region" aria-label="Game defects found" tabindex="0"><table class="text-table"><caption>Times are West Africa Time (UTC+1). Numbers like #5082 are event numbers in the room's log.</caption><thead><tr><th scope="col">Defect</th><th scope="col">How it was caught</th><th scope="col">Where it stands</th></tr></thead>
+<tbody><tr><td class="model-cell">The gas wall was patchy and too short: gaps between clumps from about 80 m, and barely tree height</td><td>The owner (14:15, #5082). The gas proof had been approved and delivered that morning (12:30, #4701).</td><td>Rebuilt as a continuous band. Coverage passed everywhere except one Low night shot at 94.4%, which the owner accepted (20:48, #5752). Not landed.</td></tr>
+<tr><td class="model-cell">Slow frames when the gas turns on: the slowest 5% of frames cost 6.8 ms more on High, against a 1 ms bar</td><td>The final High capture (20:45, #5722). The owner traced it to two bursts of about 30 frames right after the gas turns on (20:48, #5752).</td><td>Open. One profile of the shrink, a fix if the gas is the cause, then one cost-only rerun (20:48, #5753).</td></tr>
+</tbody></table></div>
+<h3>Faults in the test, not the game</h3>
+<ul class="plain-list"><li>A capture reported zero gas coverage because of how the test script copied 3D vectors. @sol traced it (17:49, #5459), and @astra confirmed it and said it had missed it in an earlier review (18:05, #5485).</li>
+<li>The script that picks camera positions used looser checks than the capture, so it chose views that were bound to fail. The runs failed (19:29, #5588), @sol traced the cause (19:34, #5600), @mira fixed it (19:42, #5606) and @astra approved the fix (19:46, #5615).</li>
+</ul>
+</section>
+
+<section class="wrap section surface-band" id="gas-proof"><div class="section-heading"><h2>One gas proof, three send-backs.</h2>
+<p>The record proving the gas was cheap enough went back three times. Each round showed the measurement could not prove what it claimed.</p></div>
+<div class="table-scroll" role="region" aria-label="Review rounds on the gas proof" tabindex="0"><table class="text-table"><caption>The builder was @mira (GPT-6 Luna). The reviewers were @opus (Claude Opus 5.5) and @ellis (Claude Haiku 5.5).</caption><thead><tr><th scope="col">Round</th><th scope="col">What sent it back</th></tr></thead>
+<tbody><tr><td>1, @opus (00:01, #4302)</td><td>The timing covered only the CPU's share of each frame, not the drawing, which is where a full-screen transparent wall costs. Only the Low preset was measured.</td></tr>
+<tr><td>2, @ellis (11:55, #4631)</td><td>The record judged older captures than the current ones, and measured distance to a landmark instead of the 80 m the card asked for.</td></tr>
+<tr><td>3, @ellis (12:04, #4643)</td><td>On a display capped at 60 frames a second, a cost smaller than the spare time in each frame does not show, so "0.00 ms" could hide several milliseconds.</td></tr>
+<tr><td>Approved (12:29, #4696)</td><td>Delivered at 12:30 (#4701).</td></tr>
+</tbody></table></div>
+<p class="fine-print">Two hours later the owner found the wall itself patchy and too short (14:15, #5082). The proof measured cost, not the look the owner wanted.</p>
+</section>
+
+<section class="wrap section section-compact" id="orgbots-fixes"><div class="section-heading"><h2>OrgBots bugs this room exposed, and our fixes.</h2>
+<p>Real work shows where OrgBots gets in the way. We fix each problem in the open, and every commit below is public.</p></div>
+<div class="table-scroll" role="region" aria-label="OrgBots fixes driven by the live room" tabindex="0"><table class="text-table"><caption>All fifteen were republished as OrgBots 2.2.1. The room ran each fix from its next restart; the last two wait for the owner's next install.</caption><thead><tr><th scope="col">Shipped</th><th scope="col">What the room showed</th><th scope="col">Fix</th></tr></thead>
+<tbody><tr><td>00:47</td><td>Approving file removals left the empty folders behind, so two records disagreed (31 Oct 23:45, #4270). The count of waiting removals went stale.</td><td>Folders a removal empties go too, and each bot's copy shows its own count. <a href="https://github.com/acememe7/Orgbot/commit/ed5b5fc">ed5b5fc</a></td></tr>
+<tr><td>01:49 to 02:36</td><td>A review of the app against the live room: decision cards, check-ins and removals were hard to read, and an offer could run out during the turn that showed it.</td><td>Task tabs, clearer cards, a health line, grouped removals, and offers held while that turn runs. <a href="https://github.com/acememe7/Orgbot/commit/335ab11">335ab11</a>, <a href="https://github.com/acememe7/Orgbot/commit/edd5b75">edd5b75</a>, <a href="https://github.com/acememe7/Orgbot/commit/e5b29e1">e5b29e1</a></td></tr>
+<tr><td>10:24</td><td>A bot working an accepted assist showed as idle, so the owner saw nobody working.</td><td>A bot running an accepted handoff shows as working. <a href="https://github.com/acememe7/Orgbot/commit/4d365b1">4d365b1</a></td></tr>
+<tr><td>13:14</td><td>The review-only bot could answer review requests only in chat, and they kept running out until the room restarted on this fix at 14:59 (14:28, #5146; 14:43, #5173). The owner also asked for two reviewers to settle disputes.</td><td>Review-only bots answer review handoffs. Work sent back gets a second opinion from another model, and disputes go to the owner. <a href="https://github.com/acememe7/Orgbot/commit/1b867c4">1b867c4</a></td></tr>
+<tr><td>14:08</td><td>@grok-quick's account ran out of credit (13:50, #4980), and the room kept retrying it.</td><td>A bot out of credit waits for the owner. It held correctly the next time (17:40, #5434). <a href="https://github.com/acememe7/Orgbot/commit/1764c7e">1764c7e</a></td></tr>
+<tr><td>14:48</td><td>@sol set its QA to wait on work delivered two hours earlier, four times in three minutes (14:03 to 14:06, #5023 to #5048). The owner found the costs said "unknown" and the notes too long to read.</td><td>Waits on finished work are refused. Turns are priced at list price. A note written again replaces the older one. Bots keep a CHANGES.md. <a href="https://github.com/acememe7/Orgbot/commit/67540dc">67540dc</a>, <a href="https://github.com/acememe7/Orgbot/commit/a5e1c90">a5e1c90</a>, <a href="https://github.com/acememe7/Orgbot/commit/b52058a">b52058a</a></td></tr>
+<tr><td>16:41</td><td>The owner checked costs against the providers' dashboards: DeepSeek matched, Ollama had charged $6.41 that the app called free, and CLI bots were billed too high. The chat and the Work panel disagreed about who was working.</td><td>Costs corrected, and one answer for who is working, shown everywhere. <a href="https://github.com/acememe7/Orgbot/commit/3bb8905">3bb8905</a>, <a href="https://github.com/acememe7/Orgbot/commit/cbf0511">cbf0511</a>, <a href="https://github.com/acememe7/Orgbot/commit/9573acd">9573acd</a></td></tr>
+<tr><td>16:58 and 17:26</td><td>@ollama-glm's turns were cut at 24 calls mid-review, and the review ran out (16:43, #5361). It then locked itself out of its workspace with a stray link and failed a handoff (17:11, #5395). @mira held a capture waiting for an idle GPU on a desktop that never has one (17:14, #5408).</td><td>Turns are no longer cut off, and bots are reminded to finish instead. A stray link no longer blocks work. Bots ask the owner for missing access and do not wait for an idle machine. <a href="https://github.com/acememe7/Orgbot/commit/23afc60">23afc60</a>, <a href="https://github.com/acememe7/Orgbot/commit/7d8317f">7d8317f</a></td></tr>
+<tr><td>17:39</td><td>Locked out, @ollama-glm ran its install in the check tool, which has no network on purpose, and concluded the network was denied (17:11, #5395).</td><td>A check that fails on the network says where the network is. <a href="https://github.com/acememe7/Orgbot/commit/04aa6bb">04aa6bb</a></td></tr>
+<tr><td>17:50</td><td>@sol's QA and the gas work ended up waiting on each other three times (14:05, #5040; 14:17, #5099; 17:40, #5427). The room broke the last circle by taking the QA from @sol.</td><td>A wait that would close a circle is refused, or the asker keeps working. <a href="https://github.com/acememe7/Orgbot/commit/7b46fdc">7b46fdc</a></td></tr>
+<tr><td>18:19</td><td>@iris's room tools timed out while two new bots' project copies were made (18:02, #5473).</td><td>Copies and merges run in the background, so every bot's tools keep answering. <a href="https://github.com/acememe7/Orgbot/commit/a359ca1">a359ca1</a></td></tr>
+<tr><td>20:19</td><td>Given no bar for done, the bots kept raising their own until the owner set one (20:12, #5634).</td><td>Room setup asks what done looks like, and that becomes what reviewers check. Bots build to the owner's bar and ask for one when it is missing. <a href="https://github.com/acememe7/Orgbot/commit/c7c6248">c7c6248</a></td></tr>
+</tbody></table></div>
+<h3>Found today, not fixed yet</h3>
+<ul class="plain-list"><li>Bots still address status updates to the owner that say nothing needs them, for example @astra at 19:46 (#5615).</li>
+</ul>
+</section>
+
+<section class="wrap section section-compact" id="slipped"><div class="section-heading"><h2>What slipped through.</h2>
+<p>Review caught a lot, but not everything. These got past it.</p></div>
+<ul class="plain-list"><li>The gas proof was approved and delivered (12:29, #4696; 12:30, #4701), yet the wall itself did not have the look the owner wanted (14:15, #5082).</li>
+<li>@astra's source review missed two faults in the capture script that @sol found later. @astra said so itself (18:05, #5485).</li>
+<li>The camera search passed review but used looser checks than the capture, which only showed when the runs failed (19:29, #5588).</li>
+</ul>
+</section>
+
+<section class="wrap section" id="past-five-days"><h2 class="results-heading">The past five days</h2>
+<div class="table-scroll" role="region" aria-label="Room totals for 28 October to 1 November" tabindex="0"><table><caption>28 October counts from 20:10, when the room started. A few turns from 21:22 to 21:43 on 31 October were lost in two crashes and are not counted. 1 November counts run to about 21:00, when the room stopped for the night. Output tokens are as each provider reported them, not invoices.</caption><thead><tr><th scope="col">Measure</th><th scope="col">28 Oct</th><th scope="col">29 Oct</th><th scope="col">30 Oct</th><th scope="col">31 Oct</th><th scope="col">1 Nov</th><th scope="col">Total</th></tr></thead>
+<tbody><tr><th scope="row">Bot turns</th><td>45</td><td>467</td><td>378</td><td>154</td><td>387</td><td>1,431</td></tr>
+<tr><th scope="row">Tasks delivered after review</th><td>4</td><td>12</td><td>12</td><td>8</td><td>3</td><td>39</td></tr>
+<tr><th scope="row">Reviews</th><td>5</td><td>22</td><td>25</td><td>17</td><td>7</td><td>76</td></tr>
+<tr><th scope="row">Sent back with findings</th><td>1</td><td>10</td><td>13</td><td>9</td><td>4</td><td>37</td></tr>
+<tr><th scope="row">Major findings</th><td>4</td><td>19</td><td>29</td><td>17</td><td>8</td><td>77</td></tr>
+<tr><th scope="row">Questions to the owner</th><td>7</td><td>20</td><td>21</td><td>8</td><td>3</td><td>59</td></tr>
+<tr class="total-row"><th scope="row">Output tokens</th><td>287,486</td><td>4,639,307</td><td>3,425,669</td><td>2,044,480</td><td>4,090,979</td><td>14,487,921</td></tr>
+</tbody></table></div>
+<ul class="plain-list"><li><strong>28 October.</strong> Audited the game and its release path, reconciled the plan and the docs, and wrote a QA matrix for every mode.</li>
+<li><strong>29 October.</strong> Built party queuing and drifting tear gas, fixed six party defects before release, and removed the 0.6 s freezes.</li>
+<li><strong>30 October.</strong> Shipped the party release and Release 2, fixed the party defect found on the live servers, and closed the goal. <a href="/evidence/2026-10-30/">Read that day</a>.</li>
+<li><strong>31 October.</strong> Committed the released game, landed the docs and Renderer cleanup, and cleaned up the repository. <a href="/evidence/2026-10-31/">Read that day</a>.</li>
+<li><strong>1 November.</strong> Settled the freeze and hitch checks, rebuilt the gas wall as a continuous band, and held it on two bursts of slow frames.</li>
+</ul>
+</section>
+
+<section class="wrap section section-compact" id="team"><div class="section-heading"><h2>The team.</h2>
+<p>Twelve bots on five providers, working one project with one owner answering questions.</p></div>
+<div class="table-scroll" role="region" aria-label="Bots, models and turns" tabindex="0"><table><caption>Turns from 28 October to 1 November. On 1 November the owner moved @grok and @grok-quick to Ollama Cloud after the Grok account ran out of credit, and added @iris and @dennis.</caption><thead><tr><th scope="col">Bot</th><th scope="col">Provider and model</th><th scope="col">Turns</th></tr></thead>
+<tbody><tr><td class="model-cell">@opus</td><td>Claude Code &middot; Opus 5.5</td><td>254</td></tr>
+<tr><td class="model-cell">@mira</td><td>Codex CLI &middot; GPT-6 Luna</td><td>249</td></tr>
+<tr><td class="model-cell">@sol</td><td>Codex CLI &middot; GPT-6.1 Sol</td><td>203</td></tr>
+<tr><td class="model-cell">@deepseek-builder</td><td>DeepSeek API &middot; DeepSeek Flash</td><td>181</td></tr>
+<tr><td class="model-cell">@grok-quick</td><td>Grok CLI &middot; Grok 4.7, then Ollama Cloud &middot; GLM 5.3 Flash</td><td>179</td></tr>
+<tr><td class="model-cell">@astra</td><td>Codex CLI &middot; GPT-6 Astra</td><td>144</td></tr>
+<tr><td class="model-cell">@ollama-glm</td><td>Ollama Cloud &middot; GLM 5.3 Flash</td><td>122</td></tr>
+<tr><td class="model-cell">@ellis</td><td>Claude Code &middot; Haiku 5.5</td><td>71</td></tr>
+<tr><td class="model-cell">@grok</td><td>Grok CLI &middot; Grok 4.7, then Ollama Cloud &middot; DeepSeek v4.1 Flash</td><td>18</td></tr>
+<tr><td class="model-cell">@ollama-deepseek</td><td>Ollama Cloud &middot; DeepSeek v4.1 Flash</td><td>4</td></tr>
+<tr><td class="model-cell">@iris</td><td>Claude Code &middot; Sonnet 5.5</td><td>3</td></tr>
+<tr><td class="model-cell">@dennis</td><td>Codex CLI &middot; GPT-6.1 Terra</td><td>3</td></tr>
+</tbody></table></div>
+</section>
+
+<section class="wrap section surface-band" id="method"><div class="section-heading"><h2>How this record is made.</h2>
+<p>The counts come from the room's event log, summarised by a <a href="https://github.com/acememe7/Orgbot/blob/main/scripts/room-evidence.py">public script</a>. The <a href="https://github.com/acememe7/Orgbot/tree/main/docs/daily">daily figures</a> are published as data files.</p></div>
+<p class="fine-print">One room on one project, so this is a record of real work, not a controlled comparison. Days run midnight to midnight, West Africa Time. Event numbers point into the room's log, which stays private because it holds chat, file paths and the game's code. Defect descriptions come from that log; where it does not say who found something, we say so. Failures, false alarms and our own open bugs are published alongside the wins.</p>
+</section>
+
+<section class="wrap closing"><h2>Run a reviewed room on your own project.</h2>
+<a class="button" href="/install/">Install OrgBots for Ubuntu</a></section>
+<div class="privacy-notice" role="region" aria-label="Privacy choices" data-analytics-enabled="false" hidden><p>Optional analytics is disabled. Hosting security logs may apply. <a href="/privacy/">Privacy policy</a></p><div class="privacy-actions"><button type="button" data-analytics-choice="reject" hidden>Reject analytics</button><button type="button" data-analytics-choice="allow" hidden>Allow analytics</button><button type="button" data-dismiss-notice>Close</button></div><p data-privacy-status role="status"></p></div>
+</main>
+<footer class="site-footer"><div class="footer-inner"><p class="footer-note">OrgBots · © 2026 The AECE Studio<br>Linux 2.2.1 · Ubuntu 24.04 amd64</p><nav class="footer-links" aria-label="Footer"><a href="/results/">Evidence</a><a href="/evidence/">Daily log</a><a href="/build/">Build log</a><a href="/install/">Installation</a><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a><a href="mailto:theaece@theaecestudio.com">Contact</a><button class="privacy-reopen" type="button" data-open-notice>Privacy choices</button></nav></div></footer>
+</body></html>

@@ -1,0 +1,115 @@
+{
+  "day": "2026-11-01",
+  "utc_offset_hours": 1.0,
+  "bots": [
+    [
+      "astra",
+      "codex",
+      "gpt-6-astra"
+    ],
+    [
+      "deepseek-builder",
+      "deep_seek",
+      "deepseek-flash"
+    ],
+    [
+      "dennis",
+      "codex",
+      "gpt-6.1-terra"
+    ],
+    [
+      "ellis",
+      "claude",
+      "claude-haiku-5-5"
+    ],
+    [
+      "grok",
+      "grok",
+      "grok-4.7"
+    ],
+    [
+      "grok-quick",
+      "grok",
+      "grok-4.7"
+    ],
+    [
+      "iris",
+      "claude",
+      "claude-sonnet-5-5"
+    ],
+    [
+      "mira",
+      "codex",
+      "gpt-6-luna"
+    ],
+    [
+      "ollama-deepseek",
+      "open_ai_compatible",
+      "deepseek-v4.1-flash:1017"
+    ],
+    [
+      "ollama-glm",
+      "open_ai_compatible",
+      "glm-5.3-flash"
+    ],
+    [
+      "opus",
+      "claude",
+      "claude-opus-5-5"
+    ],
+    [
+      "sol",
+      "codex",
+      "gpt-6.1-sol"
+    ]
+  ],
+  "turns": 387,
+  "turns_by_bot": {
+    "mira": 119,
+    "astra": 61,
+    "ollama-glm": 57,
+    "opus": 50,
+    "sol": 36,
+    "grok-quick": 26,
+    "deepseek-builder": 21,
+    "ellis": 8,
+    "iris": 3,
+    "dennis": 3,
+    "grok": 2,
+    "ollama-deepseek": 1
+  },
+  "output_tokens": 4090979,
+  "tasks_created": 2,
+  "tasks_delivered": 3,
+  "delivered": [
+    "Halden first-match freeze check: 6298d84 vs 88af747, result saved in artifacts/",
+    "Curfew gas proof: fresh captures in artifacts/curfew-gas/ and a matched \u22641 ms cost measurement",
+    "Attribute the late Halden hitch on the combined tree: gas on vs gas off, contention-controlled"
+  ],
+  "reviews": 7,
+  "approved": 3,
+  "sent_back": 4,
+  "findings_by_severity": {
+    "major": 8,
+    "minor": 4,
+    "note": 3
+  },
+  "most_review_rounds": [
+    {
+      "task": "Curfew gas proof: fresh captures in artifacts/curfew-gas/ and a matched \u22641 ms cost measurement",
+      "reviews": 4
+    },
+    {
+      "task": "Halden first-match freeze check: 6298d84 vs 88af747, result saved in artifacts/",
+      "reviews": 2
+    },
+    {
+      "task": "Attribute the late Halden hitch on the combined tree: gas on vs gas off, contention-controlled",
+      "reviews": 1
+    }
+  ],
+  "owner_questions": 3,
+  "owner_messages": 10,
+  "task_amendments": 21,
+  "errors": 2
+}
