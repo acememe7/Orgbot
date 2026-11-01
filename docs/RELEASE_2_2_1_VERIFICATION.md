@@ -167,6 +167,14 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   failed lookup as "network is denied". A check whose output shows a
   failed network lookup now says the check tool has no network and to use
   the command tool, which does.
+- **No circular waits (thirteenth rebuild, 1 November).** Three times on
+  1 November @sol's combined QA and the gas work it checks ended up waiting
+  on each other; at 17:40 the room broke the circle by taking the QA from
+  @sol, and @deepseek-builder took it over. An assist to a bot whose own
+  work waits on the sender's task now goes out without blocking the
+  sender, who is told why, and a wait on work that already waits on the
+  waiting task is refused with the reason. A circle that forms another way
+  is still found and broken.
 - **Collapsible task cards.** Each card in the task list folds to its state, a
   one-line title and its owner, and opens with a tap; Collapse all and Expand
   all switch the whole list. A task waiting on the owner's reply, or parked,
@@ -193,7 +201,8 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   turns start and end. 999 at the tenth, adding the step-limit warning. 1,000 at the eleventh, adding uncut turns
   with reminders and repeated-call notes, long notes kept whole with a
   note to the author, and the ask-the-owner and shared-desktop rules. 1,001 at the twelfth,
-  adding the network hint.
+  adding the network hint. 1,002 at the thirteenth, adding circular
+  waits refused at the source.
   New tests: a room with waiting removals saves and reopens, and an older board
   with an empty map still reads (fails on 2.2.0 with "key must be a string");
   a room with a sign-in waiting to be added saves; a handoff does not run out
@@ -208,14 +217,14 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
   (the sixth adds what each disputed-findings answer does, the eighth the
   estimated and local cost wording); 412 at the ninth, adding every view
   taking who is working from the room, and again at the tenth and eleventh
-  (the app is unchanged), and at the twelfth.
+  (the app is unchanged), and at the twelfth and thirteenth.
   Flutter analysis: no issues.
   New tests: who a message reaches (an update naming two bots reaches only
   them; `@all`, `@everyone` and `@everybody` reach every bot; no mention reaches
   one coordinator or the bot replied to; an unknown name reaches nobody), a
   message the room did not take shows as not sent and can be discarded, and
   task cards fold and open.
-- Workspace sandbox helper: 92 passed at the twelfth and eleventh (a symlink leading
+- Workspace sandbox helper: 92 passed at the thirteenth, twelfth and eleventh (a symlink leading
   outside is left out and work goes on; one replacing project files still
   stops), tenth, ninth, eighth, seventh, sixth,
   fifth and fourth 1 November rebuilds,
@@ -235,11 +244,11 @@ Release date: 31 October 2026. Target: Ubuntu 24.04 amd64. Built from source
 - The Linux acceptance suite was not rerun for this release.
 
 Final engine SHA-256:
-`f2a8c8f4898777b88ccae6ae9f53d4e04b1c6ea5853e1e7d4fee64e742b5b171`.
+`2b272ef5311b2cd46834ea92aa896c3676de0a8e7b4952709e97df01852b207d`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.1_amd64.deb | `77f423ccf6863cdfd5b0a16441902f9eee17b629b49f9fbf7a0064c8e4529544` |
+| orgbots_2.2.1_amd64.deb | `80ab4f8a39e16007f4c5604153bcb834b7d746394f963f1c41d9e2918ec1ef11` |
 | orgbot_2.2.1_all.deb | `58d27d59d5cfd8c2456a7586964ef9a668a489b262e7979854b954d18f6ea4a9` |
 
 ## Publication
@@ -350,6 +359,17 @@ unchanged). Signed archive revision
 `77770b2c5bf1c0b591f79b578a3fa41cfa85b38d` replaces only
 `orgbots_2.2.1_amd64.deb`;
 [Pages run 41327519753](https://github.com/acememe7/Orgbot/actions/runs/41327519753)
+published it (package
+`77f423ccf6863cdfd5b0a16441902f9eee17b629b49f9fbf7a0064c8e4529544`, engine
+`f2a8c8f4898777b88ccae6ae9f53d4e04b1c6ea5853e1e7d4fee64e742b5b171`); the
+owner installed the thirteenth instead.
+
+The thirteenth rebuild refuses circular waits at the source (source
+`7b46fdc`; engine changed, Flutter bundle and sandbox helper rebuilt
+unchanged). Signed archive revision
+`ad2e01481f350fc30c661b934c2127f180ad0077` replaces only
+`orgbots_2.2.1_amd64.deb`;
+[Pages run 41328436236](https://github.com/acememe7/Orgbot/actions/runs/41328436236)
 published it, and the public archive serves the hashes in the table above.
 
 ## Known limits

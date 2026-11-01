@@ -534,5 +534,22 @@
    "Sandbox helper 92 passed",
    "Package 77f423cc"
   ]
+ },
+ {
+  "kind": "rebuild",
+  "line": "2.2.1",
+  "tag": "2.2.1 r13",
+  "when": "1 Nov 17:50",
+  "day": "2026-11-01",
+  "title": "No circular waits",
+  "what": "An assist to a bot whose work already waits on yours no longer blocks you, and a wait that would close a circle is refused with the reason, so the room no longer has to break deadlocks by taking work away from a bot.",
+  "why": "Three times on 1 November @sol's combined QA and the gas work ended up waiting on each other; at 17:40 the room broke the circle by taking the QA from @sol.",
+  "commit": "7b46fdc",
+  "facts": [
+   "Rust 1,002 passed",
+   "App 412 passed",
+   "Sandbox helper 92 passed",
+   "Package 80ab4f8a"
+  ]
  }
 ]
