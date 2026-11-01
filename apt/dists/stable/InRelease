@@ -4,27 +4,27 @@ Hash: SHA512
 Architectures: amd64
 Codename: stable
 Components: main
-Date: Sun, 01 Nov 2026 13:08:11 +0000
-Valid-Until: Sat, 30 Jan 2027 13:08:11 +0000
+Date: Sun, 01 Nov 2026 13:48:21 +0000
+Valid-Until: Sat, 30 Jan 2027 13:48:21 +0000
 Label: OrgBots
 Origin: OrgBots
 Suite: stable
 MD5Sum:
- d05e452b5e0c4ef7f649c0ac86c6891a             2136 main/binary-amd64/Packages
- 7131c7a683f8079b2e65baa9f82d5c5a             1143 main/binary-amd64/Packages.gz
+ 9fd31cfd7476619ab6ad55429a0ce2aa             2136 main/binary-amd64/Packages
+ d805acf24d69982077f7ffe8895e5ba1             1142 main/binary-amd64/Packages.gz
 SHA1:
- 86bef58a4a21dbb1b1a2cfc1448ccbbe58e2f274             2136 main/binary-amd64/Packages
- 9526c9c4fc9add863852ed64b3772e3b3e8dbed8             1143 main/binary-amd64/Packages.gz
+ c708640e55ece5e8e62328a3c99f1799e01268e0             2136 main/binary-amd64/Packages
+ 6d5f2a05b6fad3ca5d467efe0e98404e40930a30             1142 main/binary-amd64/Packages.gz
 SHA256:
- 132373da68a51f26b194c9562e66b6e8e1d419d0b9edf2abbdc6f89c9c12066b             2136 main/binary-amd64/Packages
- 427f99512fef35f9904d0c72477ed88b41c9301b4beedd877ee4538d2f04b36e             1143 main/binary-amd64/Packages.gz
+ e0d6a8cbd77ba246dc6654df23234de524c95def0f15941f24b73d58d0dcd672             2136 main/binary-amd64/Packages
+ 122f350020ce7d8e967f6afae3aee4309477f73c2091bd8be9d597fa0924a610             1142 main/binary-amd64/Packages.gz
 SHA512:
- eb7923fe68baa096c4cac328ec3cf05e216d561ed96d5fa29802cdf6ac584e2d699189bbb9590806ba44d90136b0cc23f53c4caab78b91f6afd0e99ebc6455cb             2136 main/binary-amd64/Packages
- 3e08288754b12d88d71cb841e298ed53e5c7bd94153c8de5c6891471b6551cf56f545c1b67f11d02230abca64ad464556b9f5d3acdee9566d24dd118b0c2caa9             1143 main/binary-amd64/Packages.gz
+ 952f5b0b214d1459ef8e8fbe062bfd86bfa7761509df0b4ac79f888aa1a0296516484a6edaa472cecffa14541e900d4fd86b1866c85c9cc13cf66c9fc4b5cc69             2136 main/binary-amd64/Packages
+ 076380de25e919d43e4f4c7251396486281b73e48cb7aa656b49b923a002c11060269749e07689d1551828e71b34b0f72a6d7b2ded06477863805203d96dad4b             1142 main/binary-amd64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQSBRFciw7kmUxLBIDn4MbEWEebRmAUCauc5uwAKCRD4MbEWEebR
-mIipAQDbrLXiA1uB+5kG6y1LDkm0yuyBkhW2ZgAxkaJ4h0j6CgD+Lo31hqGsqG+Z
-vNUB1sdYUumMNm6+jMdD9rqWq0OWAgA=
-=7PPe
+iHUEARYKAB0WIQSBRFciw7kmUxLBIDn4MbEWEebRmAUCaudDJQAKCRD4MbEWEebR
+mGO0AQDczvgqYPp2GFml4fXqN3nNxf8UBRHA0f+kM87eQ/A47wD+Mbkjn8+5Ski/
+5vhO3gGKrT3NKbn7aYgGa0G1JSoj2ws=
+=Ynqu
 -----END PGP SIGNATURE-----
