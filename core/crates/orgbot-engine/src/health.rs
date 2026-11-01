@@ -192,7 +192,10 @@ impl Engine {
         let faulted = self
             .agents()
             .filter(|spec| self.status(spec.id) == orgbot_proto::AgentStatus::Faulted)
-            .map(|spec| spec.handle.clone())
+            .map(|spec| match self.halted_for(spec.id) {
+                Some(why) => format!("{} ({why})", spec.handle),
+                None => spec.handle.clone(),
+            })
             .collect();
 
         Health {

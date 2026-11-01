@@ -4219,3 +4219,46 @@ mod second_opinions {
         assert!(f.engine.evaluate_claim(task, worker2, Timestamp::now()).eligible);
     }
 }
+
+/// From the live room on 1 November: @grok-quick's Grok account ran out of
+/// credit. The room halted it, then retried it a minute later and every few
+/// minutes after, each time flipping the room's health. No retry fixes an
+/// empty account, so the bot waits for the owner, and the room says why.
+#[test]
+fn a_bot_whose_account_is_out_of_credit_waits_for_the_owner() {
+    use orgbot_engine::engine::out_of_credit;
+    use orgbot_proto::AgentStatus;
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("write the notes", worker);
+    let grok = "grok-cli failed: exited with exit status: 1: Error: Internal error: {\n\"message\": \"API error (status 402 Payment Required): Grok Build usage balance exhausted\",\n\"http_status\": 402\n}";
+    let events = f.apply(Command::ReportError {
+        agent: worker,
+        task: Some(task),
+        error: grok.into(),
+        permanent: false,
+    });
+    assert_eq!(f.engine.status(worker), AgentStatus::Faulted, "at once, not after three tries");
+    assert_ne!(f.state(task), TaskState::InProgress, "its work goes back to the board");
+    assert!(f.engine.health().summary().contains("w1 (out of credit)"), "{}", f.engine.health().summary());
+    let notice = events.iter().find_map(|e| match &e.event {
+        Event::MessagePosted { message } if message.body.contains("out of credit") => Some(message.body.clone()),
+        _ => None,
+    });
+    assert!(
+        notice.as_deref().is_some_and(|n| n.contains("Grok Build usage balance exhausted") && n.contains("resume")),
+        "{notice:?}"
+    );
+
+    f.apply(Command::Tick { now: Timestamp::now().plus_millis(40 * 60_000) });
+    assert_eq!(f.engine.status(worker), AgentStatus::Faulted, "no retry until the owner resumes");
+
+    f.apply(Command::PauseRoom { reason: "topping up".into() });
+    f.apply(Command::ResumeRoom);
+    assert_eq!(f.engine.status(worker), AgentStatus::Idle);
+    assert!(!f.engine.health().summary().contains("out of credit"));
+
+    assert!(out_of_credit("Error code: 429 - {'error': {'type': 'insufficient_quota'}}"));
+    assert!(out_of_credit("Your credit balance is too low to access the Anthropic API."));
+    assert!(!out_of_credit("429 Too Many Requests: rate limit, retry in 20s"));
+}

@@ -135,6 +135,10 @@ pub struct Engine {
     /// itself after the owner signs in again. Defaulted so older saves load.
     #[serde(default)]
     fault_retry: BTreeMap<AgentId, FaultRetry>,
+    /// Why a halted bot waits for the owner rather than being retried, such
+    /// as an account out of credit. Cleared by a resume or a good turn.
+    #[serde(default)]
+    halted_for: BTreeMap<AgentId, String>,
     /// When each bot's latest turn began: everything offered to it before
     /// then has been in front of it. Not saved, because a turn cut short by a
     /// restart never got to answer, so after one every offer counts as unread.
@@ -459,6 +463,7 @@ impl Engine {
             seq: Seq::ZERO,
             error_streak: BTreeMap::new(),
             fault_retry: BTreeMap::new(),
+            halted_for: BTreeMap::new(),
             turn_began: BTreeMap::new(),
             offer_shown: BTreeMap::new(),
             turn_ended: BTreeMap::new(),
@@ -2082,6 +2087,7 @@ impl Engine {
                 for agent in faulted {
                     self.error_streak.insert(agent, 0);
                     self.fault_retry.remove(&agent);
+                    self.halted_for.remove(&agent);
                     events.extend(self.set_status(agent, AgentStatus::Idle));
                 }
                 Ok(events)
@@ -5018,6 +5024,7 @@ impl Engine {
         let recorded = self.emit(Event::UsageRecorded { agent, usage });
         self.error_streak.insert(agent, 0);
         self.fault_retry.remove(&agent);
+        self.halted_for.remove(&agent);
         // A finished turn is a sign of life on everything the bot holds. An
         // agent CLI can work for a long time on files without touching the
         // board, and its claim must not lapse for that.
@@ -5043,6 +5050,13 @@ impl Engine {
         let attempt = self.error_streak.entry(agent).or_insert(0);
         *attempt += 1;
         let attempt = *attempt;
+        // From the live room on 1 November: @grok-quick's Grok account ran out
+        // of credit, and the room retried it a minute later, then every few
+        // minutes, flipping the room's health each time. No retry fixes an
+        // empty account, so it waits for the owner.
+        let unpaid = out_of_credit(&error);
+        let permanent = permanent || unpaid;
+        let detail = credit_detail(&error);
 
         let mut events = vec![self.emit(Event::AgentErrored {
             agent,
@@ -5074,16 +5088,46 @@ impl Engine {
                 }
             }
             self.statuses.insert(agent, AgentStatus::Faulted);
-            let faults = self.fault_retry.get(&agent).map_or(0, |r| r.faults) + 1;
-            self.fault_retry.insert(
-                agent,
-                FaultRetry {
-                    at: Timestamp::now(),
-                    faults,
-                },
-            );
+            if unpaid {
+                self.fault_retry.remove(&agent);
+                if self.halted_for.insert(agent, "out of credit".into()).is_none() {
+                    let handle = self.specs.get(&agent).map_or_else(|| "a bot".into(), |spec| format!("@{}", spec.handle));
+                    let message = ChatMessage {
+                        id: orgbot_proto::MessageId::new(),
+                        room: self.room.id,
+                        author: orgbot_proto::chat::Author::System,
+                        audience: orgbot_proto::chat::Audience::Everyone,
+                        intent: orgbot_proto::chat::MessageIntent::Status,
+                        body: format!(
+                            "{handle} has stopped: its account is out of credit (\"{detail}\"). Top up the account, then resume the room to bring it back."
+                        ),
+                        task: None,
+                        handoff: None,
+                        reply_to: None,
+                        attachments: vec![],
+                        files: vec![],
+                        sent_at: Timestamp::now(),
+                    };
+                    events.extend(self.post_message(message)?);
+                }
+            } else {
+                let faults = self.fault_retry.get(&agent).map_or(0, |r| r.faults) + 1;
+                self.fault_retry.insert(
+                    agent,
+                    FaultRetry {
+                        at: Timestamp::now(),
+                        faults,
+                    },
+                );
+            }
         }
         Ok(events)
+    }
+
+    /// Why a halted bot is waiting for the owner, if it is not simply being
+    /// retried.
+    pub fn halted_for(&self, agent: AgentId) -> Option<&str> {
+        self.halted_for.get(&agent).map(String::as_str)
     }
 
     /// Expire stale handoffs and look for deadlocks.
@@ -5753,6 +5797,43 @@ const RETAINED_EVENTS: usize = 3_000;
 
 /// Chat messages kept in the saved board.
 const RETAINED_MESSAGES: usize = 1_000;
+
+/// Whether a backend error says the account has run out of credit, which no
+/// retry fixes: Grok's 402 "usage balance exhausted", OpenAI's
+/// `insufficient_quota`, Anthropic's "credit balance is too low".
+pub fn out_of_credit(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "payment required",
+        "status 402",
+        "\"http_status\": 402",
+        "http 402",
+        "balance exhausted",
+        "insufficient_quota",
+        "insufficient quota",
+        "insufficient credit",
+        "credit balance is too low",
+        "out of credits",
+        "exceeded your current quota",
+    ]
+    .iter()
+    .any(|phrase| error.contains(phrase))
+}
+
+/// The backend's own words about an empty account, short enough for a notice.
+fn credit_detail(error: &str) -> String {
+    let quoted = error
+        .split("\"message\":")
+        .nth(1)
+        .and_then(|rest| rest.split('"').nth(1))
+        .map(str::trim)
+        .filter(|message| !message.is_empty());
+    let text = quoted.unwrap_or_else(|| error.lines().next().unwrap_or(error).trim());
+    match text.char_indices().nth(160) {
+        Some((cut, _)) => format!("{}…", text[..cut].trim_end()),
+        None => text.to_string(),
+    }
+}
 
 /// Check a second opinion or a reply answers exactly the findings in question,
 /// each with a reason.
