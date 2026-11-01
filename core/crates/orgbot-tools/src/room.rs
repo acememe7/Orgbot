@@ -720,6 +720,14 @@ fn review_only_tool_allowed(spec: &AgentSpec, name: &str) -> bool {
                 | "record_review"
                 | "add_artifact"
                 | "submit_for_review"
+                // From the live room on 1 November: @mira asked @astra for a
+                // review by handoff, @astra could only answer in chat, and the
+                // offer sat until it expired. The engine limits a review-only
+                // bot to review handoffs.
+                | "accept_handoff"
+                | "reject_handoff"
+                | "complete_handoff"
+                | "fail_handoff"
         )
 }
 

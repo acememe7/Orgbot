@@ -208,6 +208,8 @@ fn review_only_bots_get_read_tools_and_cannot_dispatch_mutations() {
         "record_review",
         "add_artifact",
         "submit_for_review",
+        "accept_handoff",
+        "complete_handoff",
     ] {
         assert!(
             names.iter().any(|name| name == allowed),
@@ -216,7 +218,6 @@ fn review_only_bots_get_read_tools_and_cannot_dispatch_mutations() {
     }
     for blocked in [
         "offer_handoff",
-        "accept_handoff",
         "create_task",
         "submit_task",
     ] {
@@ -1767,3 +1768,38 @@ fn a_room_with_no_skills_says_so_plainly() {
     let out = f.err(f.worker, "use_skill", json!({"skill": "anything"}));
     assert!(out.contains("no skills"), "{out}");
 }
+
+/// From the live room on 1 November: @mira asked @astra, a review-only bot,
+/// for a review by handoff. @astra could not accept it, answered in chat, and
+/// the offer sat until it expired. A review-only bot takes review handoffs,
+/// and only those.
+#[test]
+fn a_review_only_bot_answers_review_handoffs_but_takes_no_other_work() {
+    let mut f = fixture();
+    let mut reviewer = f.engine.agent(f.inspector).unwrap().clone();
+    reviewer.autonomy.review_only = true;
+    f.engine.update_agent(reviewer);
+    let (lead, worker, inspector) = (f.lead, f.worker, f.inspector);
+    let task = id_in(&f.ok(lead, "create_task", json!({"title": "notes", "brief": "write them"})), "task");
+    f.ok(worker, "claim_task", json!({"task": task}));
+    f.ok(worker, "start_task", json!({"task": task}));
+
+    let offer = |f: &mut Fixture, kind: &str| {
+        id_in(
+            &f.ok(
+                worker,
+                "offer_handoff",
+                json!({"task": task, "to_agent": "qa", "kind": kind, "brief": "please look", "blocks_sender": false}),
+            ),
+            "ho",
+        )
+    };
+    let review = offer(&mut f, "review");
+    f.ok(inspector, "accept_handoff", json!({"handoff": review}));
+    f.ok(inspector, "complete_handoff", json!({"handoff": review, "summary": "two dates are wrong; use the tag dates"}));
+
+    let assist = offer(&mut f, "assist");
+    let refused = f.call(inspector, "accept_handoff", json!({"handoff": assist}));
+    assert!(refused.is_error && refused.content.contains("review"), "{}", refused.content);
+}
+

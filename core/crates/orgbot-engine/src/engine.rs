@@ -4103,6 +4103,12 @@ impl Engine {
             .handoffs
             .get(&handoff)
             .ok_or(EngineError::UnknownHandoff { handoff })?;
+        if recipient.autonomy.review_only && offer.kind != HandoffKind::Review {
+            return Err(EngineError::NotPermitted {
+                agent: by,
+                action: "take on a handoff other than a review while review-only".into(),
+            });
+        }
         if offer.kind != HandoffKind::Review && self.reviewed_by(offer.task, by) {
             return Err(EngineError::NotPermitted {
                 agent: by,
