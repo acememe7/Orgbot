@@ -135,6 +135,23 @@ pub enum ClientMessage {
         /// The parked task.
         task: TaskId,
     },
+    /// Bench one bot: its turn under way ends, its work goes back to the
+    /// board, and it takes no turns until resumed.
+    PauseBot {
+        /// The bot.
+        agent: AgentId,
+    },
+    /// Bring a benched bot back.
+    ResumeBot {
+        /// The bot.
+        agent: AgentId,
+    },
+    /// Take one bot out of the room for good: its turn under way ends and
+    /// its work goes back to the board.
+    RemoveBot {
+        /// The bot.
+        agent: AgentId,
+    },
     /// Pause the room once the turns under way have finished. No new turn
     /// starts meanwhile, and no work is lost.
     Pause {
@@ -312,7 +329,14 @@ mod tests {
                 reason: "after launch".into(),
             },
             ClientMessage::ResumeTask { task: TaskId::new() },
+            ClientMessage::PauseBot { agent: AgentId::new() },
+            ClientMessage::ResumeBot { agent: AgentId::new() },
+            ClientMessage::RemoveBot { agent: AgentId::new() },
         ];
+        // The app sends these by hand; the wire names must match.
+        let paused: ClientMessage =
+            serde_json::from_str(&format!(r#"{{"type":"pause_bot","agent":"{}"}}"#, AgentId::new())).unwrap();
+        assert!(matches!(paused, ClientMessage::PauseBot { .. }));
         for message in messages {
             let json = serde_json::to_string(&message).unwrap();
             assert_eq!(

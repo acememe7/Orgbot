@@ -1506,3 +1506,58 @@ async fn a_held_room_starts_no_new_turns() {
     hold.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(room.step_rolling(2, &sinks).await.len(), 1, "released, the waiting bot goes");
 }
+
+/// From benchmark 2: the owner asked to stop @iris, in a turn of 54 minutes
+/// holding no task, and the room could only stop every bot's turn or none.
+#[tokio::test]
+async fn the_owner_can_stop_one_bots_turn_and_bench_it() {
+    #[derive(Debug)]
+    struct Endless;
+    #[async_trait]
+    impl Provider for Endless {
+        fn name(&self) -> &str {
+            "endless"
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+            _sink: Option<mpsc::Sender<StreamEvent>>,
+        ) -> orgbot_providers::Result<CompletionResponse> {
+            std::future::pending().await
+        }
+    }
+    let mut room = Orchestrator::new(room_spec(3));
+    let iris = room.seat(worker("iris"), Arc::new(Endless)).unwrap();
+    room.start().unwrap();
+    let task = open_task(&mut room.engine_mut(), "tidy the notes");
+    room.engine_mut().apply(Command::ClaimTask { task, by: iris }).unwrap();
+    owner_asks(&mut room, iris, "what are you doing?");
+
+    let shared = room.shared_engine();
+    let stops = room.turn_stops();
+    let sinks = |_| None;
+    let reports = {
+        let run = room.step_rolling(3, &sinks);
+        tokio::pin!(run);
+        let began = async {
+            while !shared.with(|engine| engine.in_turn(iris)) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            _ = &mut run => panic!("the run ended before the turn began"),
+            began = tokio::time::timeout(std::time::Duration::from_secs(5), began) => began.unwrap(),
+        }
+        shared.with(|engine| engine.apply(Command::PauseAgent { agent: iris })).unwrap();
+        stops.stop(iris);
+        tokio::time::timeout(std::time::Duration::from_secs(5), run)
+            .await
+            .expect("the run ends once the benched bot's turn is stopped")
+    };
+    assert!(reports.iter().any(|r| r.agent == iris && r.stop_reason == StopReason::Other("stopped".into())));
+    assert_eq!(room.engine().status(iris), orgbot_proto::AgentStatus::Offline);
+    assert_ne!(room.engine().task(task).unwrap().assignee, Some(iris), "its work went back to the board");
+    assert!(!room.is_actionable(iris), "a benched bot is not woken");
+    room.engine_mut().apply(Command::ResumeAgent { agent: iris }).unwrap();
+    assert_eq!(room.engine().status(iris), orgbot_proto::AgentStatus::Idle);
+}

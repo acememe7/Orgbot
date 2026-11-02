@@ -169,6 +169,18 @@ pub enum Effort {
 }
 
 impl Effort {
+    /// The level a room file names, such as `low`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.trim() {
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "xhigh" => Self::XHigh,
+            "max" => Self::Max,
+            _ => return None,
+        })
+    }
+
     /// The wire value.
     pub const fn as_str(self) -> &'static str {
         match self {

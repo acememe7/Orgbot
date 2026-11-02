@@ -2106,9 +2106,12 @@ class _BotEditorState extends State<_BotEditor> {
     _loadModels();
   }
 
-  /// Effort levels for the chosen provider's agent CLI, or none.
-  List<String> get _effortLevels =>
-      widget.desktopClis ? _provider.cli?.effortLevels ?? const [] : const [];
+  /// Effort levels for the chosen provider's agent CLI, or for its API.
+  List<String> get _effortLevels => _provider.needsApiKey
+      ? _provider.apiEffortLevels
+      : widget.desktopClis
+      ? _provider.cli?.effortLevels ?? const []
+      : const [];
 
   Widget _effortField() => DropdownButtonFormField<String>(
     key: const ValueKey('bot-effort'),

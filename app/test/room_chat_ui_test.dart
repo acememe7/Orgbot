@@ -307,6 +307,39 @@ void main() {
     );
   });
 
+  // From benchmark 2: the owner asked to stop one bot running long turns
+  // with no task, and the room could only stop every bot or none.
+  testWidgets('the owner can pause one bot from the activity rail', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(500, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    final client = FakeClient();
+    final store = seeded(client);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: ActivityRail(store: store)),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byTooltip('Bot actions').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Pause @iris and free its work'));
+    await tester.pumpAndSettle();
+    expect(client.sent.last, {'type': 'pause_bot', 'agent': 'bot_a'});
+
+    await tester.tap(find.byTooltip('Bot actions').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove @iris'));
+    await tester.pumpAndSettle();
+    expect(find.text('Remove @iris from this run?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Remove @iris'));
+    await tester.pumpAndSettle();
+    expect(client.sent.last, {'type': 'remove_bot', 'agent': 'bot_a'});
+  });
+
   testWidgets('the activity rail exposes a collapsible process timeline', (
     tester,
   ) async {

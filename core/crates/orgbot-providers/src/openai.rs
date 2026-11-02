@@ -123,6 +123,11 @@ impl OpenAiProvider {
             // Without this, usage is omitted entirely from streamed responses.
             body.insert("stream_options".into(), json!({"include_usage": true}));
         }
+        // Only a turned-down effort is sent: the default leaves the model to
+        // its own reasoning, and some servers refuse the field outright.
+        if let Some(level) = turned_down_effort(request.effort) {
+            body.insert("reasoning_effort".into(), json!(level));
+        }
         if !request.tools.is_empty() {
             let tools: Vec<Value> = request
                 .tools
@@ -187,17 +192,32 @@ impl Provider for OpenAiProvider {
         sink: Option<mpsc::Sender<StreamEvent>>,
     ) -> Result<CompletionResponse> {
         let request = crate::provider::prepare_images(request, self.name != "deepseek").await?;
-        let body = self.build_body(&request);
-        let response = self
-            .request_builder(&request.model)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|source| ProviderError::Transport {
-                provider: self.name.clone(),
-                source,
-            })?;
-        let response = check_status(&self.name, response).await?;
+        let mut body = self.build_body(&request);
+        let send = |body: &Value| {
+            self.request_builder(&request.model).json(body).send()
+        };
+        let response = send(&body).await.map_err(|source| ProviderError::Transport {
+            provider: self.name.clone(),
+            source,
+        })?;
+        let response = match check_status(&self.name, response).await {
+            // A server that does not take an effort level still answers
+            // without one, at its own.
+            Err(ProviderError::BadRequest { message, .. })
+                if body.get("reasoning_effort").is_some() && message.contains("reasoning") =>
+            {
+                tracing::warn!(provider = %self.name, %message, "effort level refused; asking again without it");
+                if let Some(fields) = body.as_object_mut() {
+                    fields.remove("reasoning_effort");
+                }
+                let response = send(&body).await.map_err(|source| ProviderError::Transport {
+                    provider: self.name.clone(),
+                    source,
+                })?;
+                check_status(&self.name, response).await?
+            }
+            other => other?,
+        };
 
         if request.stream {
             stream_response(&self.name, response, sink).await
@@ -208,6 +228,20 @@ impl Provider for OpenAiProvider {
             })?;
             parse_completion(&value)
         }
+    }
+}
+
+/// The wire value for an effort turned down from the default, which is all
+/// chat-completions servers take (`low`, `medium`); none for the default.
+///
+/// From benchmark 2: a bot's effort was never sent here, so GLM and DeepSeek
+/// reasoning could not be turned down.
+fn turned_down_effort(effort: Option<crate::types::Effort>) -> Option<&'static str> {
+    use crate::types::Effort;
+    match effort? {
+        Effort::Low => Some("low"),
+        Effort::Medium => Some("medium"),
+        Effort::High | Effort::XHigh | Effort::Max => None,
     }
 }
 
@@ -808,6 +842,64 @@ mod tests {
     }
 
     // ------------------------------------------------------------ request body
+
+    /// From benchmark 2: GLM and DeepSeek reasoning could not be turned
+    /// down, because a bot's effort never reached these servers.
+    #[test]
+    fn a_turned_down_effort_is_sent_and_the_default_is_left_to_the_model() {
+        use crate::types::Effort;
+        assert!(provider().build_body(&request()).get("reasoning_effort").is_none());
+        for (effort, wire) in [(Effort::Low, Some("low")), (Effort::Medium, Some("medium")), (Effort::Max, None)] {
+            let body = provider().build_body(&request().with_effort(effort));
+            assert_eq!(body.get("reasoning_effort").and_then(Value::as_str), wire);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_that_refuses_an_effort_level_is_asked_again_without_it() {
+        use crate::types::Effort;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for reply in [
+                (400, r#"{"error":{"message":"Unrecognized request argument: reasoning_effort"}}"#.to_string()),
+                (200, json!({"choices":[{"message":{"content":"done"},"finish_reason":"stop"}]}).to_string()),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 65536];
+                let mut read = 0;
+                loop {
+                    read += socket.read(&mut request[read..]).await.unwrap();
+                    let text = String::from_utf8_lossy(&request[..read]).to_string();
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let length = head
+                            .lines()
+                            .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse::<usize>().unwrap()))
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            bodies.push(body.to_string());
+                            break;
+                        }
+                    }
+                }
+                let status = if reply.0 == 400 { "400 Bad Request" } else { "200 OK" };
+                socket.write_all(format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", reply.1.len(), reply.1
+                ).as_bytes()).await.unwrap();
+            }
+            bodies
+        });
+        let provider = OpenAiProvider::custom("ollama", format!("http://{address}"), Credential::ApiKey("test".into()));
+        let mut ask = request().with_effort(Effort::Low);
+        ask.stream = false;
+        let answer = provider.complete(ask, None).await.unwrap();
+        assert!(matches!(&answer.content[0], ContentBlock::Text { text } if text == "done"));
+        let bodies = server.await.unwrap();
+        assert!(bodies[0].contains("\"reasoning_effort\":\"low\""), "{}", bodies[0]);
+        assert!(!bodies[1].contains("reasoning_effort"), "{}", bodies[1]);
+    }
 
     #[test]
     fn the_system_prompt_becomes_the_first_message() {

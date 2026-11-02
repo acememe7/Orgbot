@@ -1195,6 +1195,9 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool, 
 
 LEDGER_LIMIT = 100_000
 
+# Image files a bot most likely made as a screenshot or capture.
+CAPTURE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
 
 def _ledger_path(state: Path, project: Path) -> Path:
     return _safe_state_child(state, "ledger", create=True) / f"{_project_id(project)}.json"
@@ -3563,14 +3566,27 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
         journal["completed_at"] = int(time.time())
         _atomic_json(journal_path, journal)
         result = {"ok": True, "workspace": os.fspath(workspace), "changed": diffs["changed"], "added": diffs["added"], "deleted": diffs["deleted"], "applied": [name for name, _ in operations], "pending_delete": pending_delete, "conflicts": [], "review_token": final_review_token}
+        notes = []
         if set_aside_files:
             result["set_aside"] = set_aside_files
-            result["note"] = (
+            notes.append(
                 "These files changed in the project after your copy was made, so your versions were not merged: "
                 + ", ".join(item["path"] for item in set_aside_files)
                 + ". Your copy now has the project's version; yours are kept under ~/orgbot-conflicts/ "
                 "(read them with workspace_run). Redo your change on top of the project's version if it is still needed."
             )
+        # From benchmark 2: six preview screenshots were merged into the
+        # project root, though bots are told to keep captures in .cache/orgbots/.
+        captures = [name for name, action in operations if action != "delete" and name in diffs["added"] and "/" not in name and name.lower().endswith(CAPTURE_SUFFIXES)]
+        if captures:
+            notes.append(
+                "New image files reached the project root: " + ", ".join(captures[:10])
+                + ("" if len(captures) <= 10 else f" and {len(captures) - 10} more")
+                + ". Screenshots and captures belong under .cache/orgbots/ in your copy, which is never merged; "
+                "move them there unless the project itself uses them."
+            )
+        if notes:
+            result["note"] = "\n".join(notes)
         return result
     finally:
         os.close(lock_fd)

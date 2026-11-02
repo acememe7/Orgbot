@@ -104,6 +104,21 @@ pub enum Control {
         /// The task.
         task: TaskId,
     },
+    /// The owner benches one bot.
+    PauseBot {
+        /// The bot.
+        agent: orgbot_proto::AgentId,
+    },
+    /// The owner brings a benched bot back.
+    ResumeBot {
+        /// The bot.
+        agent: orgbot_proto::AgentId,
+    },
+    /// The owner takes one bot out of the room.
+    RemoveBot {
+        /// The bot.
+        agent: orgbot_proto::AgentId,
+    },
     /// A human answers a bot blocked awaiting one.
     Answer {
         /// The task that was waiting.
@@ -799,6 +814,7 @@ impl RoomSession {
         let control = &mut self.control;
         let deferred = &mut self.deferred;
         let hold = self.orchestrator.hold_switch();
+        let stops = self.orchestrator.turn_stops();
         let alerts = &mut self.desktop_notifications;
         let committed = self.committed_attachment_ids.clone();
         let mut answered = false;
@@ -904,6 +920,34 @@ impl RoomSession {
                             if let Err(error) = parked {
                                 let _ = events.send(ServerMessage::Error { message: format!("Not parked: {error}") });
                             }
+                            send_unsent(&engine, &events, alerts, &committed, &published, &mut sent_head);
+                        }
+                        // Now, not when the slowest turn ends: the bot's own
+                        // turn is ended and its work goes back to the board.
+                        // From benchmark 2: the owner asked to stop @iris, in
+                        // a turn of 54 minutes holding no task.
+                        bench @ (Control::PauseBot { .. } | Control::RemoveBot { .. }) => {
+                            let (agent, command) = match bench {
+                                Control::PauseBot { agent } => (agent, Command::PauseAgent { agent }),
+                                Control::RemoveBot { agent } => (
+                                    agent,
+                                    Command::LeaveAgent { agent, reason: "the owner removed it".into() },
+                                ),
+                                _ => unreachable!(),
+                            };
+                            let applied = engine.with(|engine| engine.apply(command));
+                            if let Err(error) = applied {
+                                let _ = events.send(ServerMessage::Error { message: format!("Not done: {error}") });
+                            } else {
+                                stops.stop(agent);
+                            }
+                            send_unsent(&engine, &events, alerts, &committed, &published, &mut sent_head);
+                        }
+                        Control::ResumeBot { agent } => {
+                            if let Err(error) = engine.with(|engine| engine.apply(Command::ResumeAgent { agent })) {
+                                let _ = events.send(ServerMessage::Error { message: format!("Not resumed: {error}") });
+                            }
+                            spoke = true;
                             send_unsent(&engine, &events, alerts, &committed, &published, &mut sent_head);
                         }
                         // Answered now, under the engine lock the bots' room
@@ -1125,6 +1169,18 @@ impl RoomSession {
             }
             Control::ResumeTask { task } => {
                 self.owner_task_command(Command::ResumeTask { task }, "Not resumed");
+            }
+            Control::PauseBot { agent } => {
+                self.owner_task_command(Command::PauseAgent { agent }, "Not paused");
+            }
+            Control::ResumeBot { agent } => {
+                self.owner_task_command(Command::ResumeAgent { agent }, "Not resumed");
+            }
+            Control::RemoveBot { agent } => {
+                self.owner_task_command(
+                    Command::LeaveAgent { agent, reason: "the owner removed it".into() },
+                    "Not removed",
+                );
             }
             Control::ReportPendingRemovals { agent, copy, count } => {
                 let _ = self

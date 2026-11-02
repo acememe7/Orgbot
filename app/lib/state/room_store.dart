@@ -226,6 +226,20 @@ class RoomStore extends ChangeNotifier {
   void resumeTask(String task) =>
       _client.send({'type': 'resume_task', 'task': task});
 
+  /// Bench a bot: its turn under way ends, its work goes back to the board,
+  /// and it takes no turns until you resume it.
+  void pauseBot(String agent) =>
+      _client.send({'type': 'pause_bot', 'agent': agent});
+
+  /// Bring a benched bot back.
+  void resumeBot(String agent) =>
+      _client.send({'type': 'resume_bot', 'agent': agent});
+
+  /// Take a bot out of this room's run: its turn under way ends and its work
+  /// goes back to the board.
+  void removeBot(String agent) =>
+      _client.send({'type': 'remove_bot', 'agent': agent});
+
   /// Messages typed here but not yet confirmed by the engine.
   ///
   /// A bot turn can run for a minute, and the room applies a message between

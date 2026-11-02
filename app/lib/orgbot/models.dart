@@ -76,6 +76,11 @@ enum ProviderKind {
   bool get needsApiKey =>
       this == ProviderKind.deepseek || this == ProviderKind.ollama;
 
+  /// Effort levels a bot on this API can be turned down to, or none.
+  /// Chat-completions servers take only these; empty keeps the model's own.
+  List<String> get apiEffortLevels =>
+      needsApiKey ? const ['low', 'medium'] : const [];
+
   /// API origin; the engine adds /v1/chat/completions.
   String get apiBaseUrl => switch (this) {
     ProviderKind.deepseek => 'https://api.deepseek.com',

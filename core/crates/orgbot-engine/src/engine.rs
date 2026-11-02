@@ -139,6 +139,18 @@ pub struct Engine {
     /// as an account out of credit. Cleared by a resume or a good turn.
     #[serde(default)]
     halted_for: BTreeMap<AgentId, String>,
+    /// Bots whose last fault was a refused sign-in. Retried as any fault is,
+    /// but named in the room's health until a turn goes through.
+    ///
+    /// From benchmark 2: three Claude bots signed out together, and every
+    /// two minutes the retry set them free and the health line said the room
+    /// was working normally, until each failed again.
+    #[serde(default)]
+    signed_out: BTreeSet<AgentId>,
+    /// Bots the owner has benched. They show as offline, take no turns and
+    /// hold nothing until the owner resumes them.
+    #[serde(default)]
+    paused: BTreeSet<AgentId>,
     /// Tasks whose notes and records the coordinators were told had grown
     /// past what a review round should read. Told once per task.
     #[serde(default)]
@@ -479,6 +491,8 @@ impl Engine {
             error_streak: BTreeMap::new(),
             fault_retry: BTreeMap::new(),
             halted_for: BTreeMap::new(),
+            signed_out: BTreeSet::new(),
+            paused: BTreeSet::new(),
             records_warned: BTreeSet::new(),
             turn_began: BTreeMap::new(),
             offer_shown: BTreeMap::new(),
@@ -793,6 +807,7 @@ impl Engine {
                 // means a turn is running; the chat and the team list say the
                 // same.
                 let doing = match status {
+                    AgentStatus::Offline if self.paused.contains(&spec.id) => "paused",
                     AgentStatus::Offline => "offline",
                     AgentStatus::Faulted => "faulted",
                     _ if self.in_turn(spec.id) && self.holds_a_review(spec.id) => "reviewing",
@@ -944,9 +959,12 @@ impl Engine {
             .collect();
         // From the benchmark room: second opinions waited 6 to 15 minutes on
         // a reviewer busy with its own long turns. One between turns comes
-        // first among equals.
+        // first among equals. From benchmark 2: the one reviewer of another
+        // model family held three second opinions at once while others were
+        // free, so a free reviewer comes before a different family.
         candidates.sort_by_key(|spec| {
             (
+                awaiting(spec.id) > 0,
                 Some(spec.provider.family()) == first_family,
                 awaiting(spec.id),
                 self.in_turn(spec.id),
@@ -1275,6 +1293,23 @@ impl Engine {
             );
             return result;
         }
+        // From benchmark 2: @grok-quick, a stand-in for QA, claimed the QA
+        // task 30 seconds after it opened, while @quinn, who holds the role,
+        // was free and not woken for 16 minutes. Stand-ins are for when every
+        // holder of the role is busy.
+        if fit == RoleFit::Fallback {
+            let role = record.required_role.clone().unwrap_or_default();
+            if let Some(holder) = self.free_role_holder(&role, record.kind, agent) {
+                result.eligible = false;
+                result.reason = Reason::LeaveToRoleHolder;
+                result.detail = format!(
+                    "\"{}\" needs the `{role}` role, and @{holder} holds it and is free, so it is theirs. \
+                     You stand in for `{role}` only while its holders are busy",
+                    record.title
+                );
+                return result;
+            }
+        }
         // From the benchmark room: a coordinator made five page tasks with no
         // role, and bots for QA, research and support claimed them first
         // while engineers sat idle. Work that names no role goes to a bot
@@ -1310,6 +1345,17 @@ impl Engine {
         self.specs
             .values()
             .filter(|spec| spec.id != asker && self.builds(spec))
+            .find(|spec| self.status(spec.id).accepts_work())
+            .map(|spec| spec.handle.clone())
+    }
+
+    /// A bot other than `asker` that holds `role` itself, is taking work and
+    /// holds nothing, if there is one.
+    fn free_role_holder(&self, role: &str, kind: TaskKind, asker: AgentId) -> Option<String> {
+        self.specs
+            .values()
+            .filter(|spec| spec.id != asker && spec.roles.iter().any(|held| held == role))
+            .filter(|spec| !spec.autonomy.review_only || review_only_task(kind, Some(role)))
             .find(|spec| self.status(spec.id).accepts_work())
             .map(|spec| spec.handle.clone())
     }
@@ -1369,6 +1415,7 @@ impl Engine {
             | Reason::BotFaulted
             | Reason::BotUnavailable
             | Reason::LeaveToBuilders
+            | Reason::LeaveToRoleHolder
             | Reason::UnknownBot => EngineError::NotClaimable {
                 task,
                 agent,
@@ -2130,6 +2177,8 @@ impl Engine {
         let mut outcome = match command {
             Command::JoinAgent { spec } => self.join_agent(*spec),
             Command::LeaveAgent { agent, reason } => self.leave_agent(agent, reason),
+            Command::PauseAgent { agent } => self.pause_agent(agent),
+            Command::ResumeAgent { agent } => self.resume_agent(agent),
             Command::StartRoom => self.set_phase(RoomPhase::Running, "started"),
             Command::PauseRoom { reason } => self.set_phase(RoomPhase::Paused, &reason),
             Command::ResumeRoom => {
@@ -2475,6 +2524,71 @@ impl Engine {
         self.statuses.insert(agent, AgentStatus::Offline);
         events.push(self.emit(Event::AgentLeft { agent, reason }));
         Ok(events)
+    }
+
+    /// Bench a bot for the owner.
+    ///
+    /// From benchmark 2: the owner asked to stop @iris, which ran turns of
+    /// 54 minutes and more holding no task, and the room could only stop
+    /// every bot or none.
+    fn pause_agent(&mut self, agent: AgentId) -> Result<Vec<EventEnvelope>> {
+        let handle = self.require_agent(agent)?.handle.clone();
+        if !self.paused.insert(agent) {
+            return Ok(Vec::new());
+        }
+        let mut events = Vec::new();
+        for task in self.active_tasks_of(agent) {
+            if let Ok(released) = self.transition(
+                task,
+                TaskTransition::Release { reason: format!("the owner paused @{handle}") },
+                Some(agent),
+            ) {
+                events.extend(released);
+            }
+        }
+        let pending: Vec<HandoffId> = self
+            .handoffs
+            .values()
+            .filter(|h| h.state.is_pending() && (h.from == agent || h.to == Recipient::Agent { agent }))
+            .map(|h| h.id)
+            .collect();
+        for handoff in pending {
+            let by = self.handoffs.get(&handoff).map_or(agent, |h| h.from);
+            if let Ok(withdrawn) = self.drive_handoff(
+                handoff,
+                HandoffTransition::Withdraw { by, reason: format!("the owner paused @{handle}") },
+            ) {
+                events.extend(withdrawn);
+            }
+        }
+        self.turn_began.remove(&agent);
+        self.fault_retry.remove(&agent);
+        events.extend(self.set_status(agent, AgentStatus::Offline));
+        events.extend(self.post_message(ChatMessage::system(
+            self.room.id,
+            format!("The owner paused @{handle}. It takes no turns until they resume it, and its work went back to the board."),
+        ))?);
+        Ok(events)
+    }
+
+    fn resume_agent(&mut self, agent: AgentId) -> Result<Vec<EventEnvelope>> {
+        let handle = self.require_agent(agent)?.handle.clone();
+        if !self.paused.remove(&agent) {
+            return Ok(Vec::new());
+        }
+        self.error_streak.insert(agent, 0);
+        let mut events = self.set_status(agent, AgentStatus::Idle);
+        events.extend(self.recompute_status(agent));
+        events.extend(self.post_message(ChatMessage::system(
+            self.room.id,
+            format!("The owner resumed @{handle}."),
+        ))?);
+        Ok(events)
+    }
+
+    /// Whether the owner has benched this bot.
+    pub fn is_paused(&self, agent: AgentId) -> bool {
+        self.paused.contains(&agent)
     }
 
     fn set_phase(&mut self, phase: RoomPhase, note: &str) -> Result<Vec<EngineEvent>> {
@@ -3498,7 +3612,11 @@ impl Engine {
                     return Err(EngineError::NotReady { task, reason: "a task cannot wait for itself".into() });
                 }
                 self.require_task(*dependency)?;
-                if self.depends_transitively(*dependency, task) {
+                // A wait through a block counts too: X blocked on this task,
+                // and this task waiting for X, would leave both stuck.
+                if self.depends_transitively(*dependency, task)
+                    || self.closes_a_wait_cycle(task, &[*dependency]).is_some()
+                {
                     return Err(EngineError::NotReady {
                         task,
                         reason: format!("{dependency} already waits for this task, so waiting for it would never end"),
@@ -3563,6 +3681,24 @@ impl Engine {
             depends_on: depends_on.clone(),
             reason: reason.clone(),
         })];
+        // From benchmark 2: a dependency added to the QA task while @grok-quick
+        // was working on it left it in progress while it waited, which the
+        // room's health line reported as inconsistent. Work that now waits is
+        // paused until what it waits for lands.
+        let mut paused = None;
+        if let (Some(_), Some(holder)) = (&depends_on, assignee) {
+            let record = self.require_task(task)?;
+            if record.state == TaskState::InProgress {
+                if let Some(unmet) = self.first_unmet_dependency(record).filter(|unmet| unmet.present) {
+                    events.extend(self.transition(
+                        task,
+                        TaskTransition::Block { reason: BlockReason::AwaitingTask { task: unmet.task } },
+                        Some(holder),
+                    )?);
+                    paused = Some((holder, unmet.title));
+                }
+            }
+        }
         let mut body = format!("@{handle} amended \"{title}\": {reason}");
         if let Some(criteria) = &acceptance_criteria {
             body.push_str("\nAcceptance criteria now:");
@@ -3584,10 +3720,17 @@ impl Engine {
                 format!("\nIt now waits for {}.", names.join(", "))
             });
         }
+        if let Some((holder, upstream)) = &paused {
+            body.push_str(&format!(
+                "\n{} holds it, so it is paused until \"{upstream}\" lands; they are woken then.",
+                self.handle_of(*holder)
+            ));
+        }
         let mut message = ChatMessage::system(self.room.id, body);
-        // Only a change to what the work is wakes its holder: one that only
-        // makes the task wait need not, since the holder can do nothing yet.
-        let changes_the_work = brief.is_some() || acceptance_criteria.is_some();
+        // Only a change to what the work is, or a pause of work under way,
+        // wakes its holder: a task that only now waits and was not started
+        // needs nothing from them yet.
+        let changes_the_work = brief.is_some() || acceptance_criteria.is_some() || paused.is_some();
         if let Some(assignee) = assignee.filter(|assignee| *assignee != by && changes_the_work) {
             message = message.to_agents(vec![assignee]);
         }
@@ -4834,9 +4977,13 @@ impl Engine {
         review.inspected = artifacts;
         let verdict = review.verdict;
 
-        // No single reviewer sends work back: another reviewer, on a
-        // different model where there is one, gives a second opinion first.
-        if verdict != Verdict::Approve {
+        // No single reviewer rejects work, or sends it back a second time:
+        // another reviewer, on a different model where there is one, gives a
+        // second opinion first. A first send-back goes straight to the author.
+        // From benchmark 2: every send-back waited on a second opinion, 49
+        // minutes in all, for findings the second reviewer mostly upheld.
+        let second_needed = verdict == Verdict::Reject || (verdict != Verdict::Approve && revision > 0);
+        if second_needed {
             if let Some(second) = self.second_reviewer_for(task, inspector) {
                 return Ok(self.open_panel(review, second));
             }
@@ -5351,6 +5498,7 @@ impl Engine {
         self.error_streak.insert(agent, 0);
         self.fault_retry.remove(&agent);
         self.halted_for.remove(&agent);
+        self.signed_out.remove(&agent);
         // A finished turn is a sign of life on everything the bot holds. An
         // agent CLI can work for a long time on files without touching the
         // board, and its claim must not lapse for that.
@@ -5382,6 +5530,9 @@ impl Engine {
         // empty account, so it waits for the owner.
         let unpaid = out_of_credit(&error);
         let permanent = permanent || unpaid;
+        if signed_out(&error) {
+            self.signed_out.insert(agent);
+        }
         let detail = credit_detail(&error);
 
         let mut events = vec![self.emit(Event::AgentErrored {
@@ -5390,6 +5541,11 @@ impl Engine {
             error,
             attempt,
         })];
+        // A turn the owner's pause cut short may still report how it ended;
+        // the bot stays benched rather than faulting and being retried.
+        if self.paused.contains(&agent) {
+            return Ok(events);
+        }
 
         // A misconfiguration does not get three goes. The next two attempts
         // would fail identically, and until they do the bot sits in the roster
@@ -5454,6 +5610,12 @@ impl Engine {
     /// retried.
     pub fn halted_for(&self, agent: AgentId) -> Option<&str> {
         self.halted_for.get(&agent).map(String::as_str)
+    }
+
+    /// Whether the bot's last fault was a refused sign-in and no turn has
+    /// gone through since.
+    pub fn is_signed_out(&self, agent: AgentId) -> bool {
+        self.signed_out.contains(&agent)
     }
 
     /// Expire stale handoffs and look for deadlocks.
@@ -6018,7 +6180,7 @@ impl Engine {
         if !self.specs.contains_key(&agent) {
             return Vec::new();
         }
-        if self.status(agent) == AgentStatus::Faulted {
+        if self.status(agent) == AgentStatus::Faulted || self.paused.contains(&agent) {
             return Vec::new();
         }
         let held: Vec<&Task> = self
@@ -6284,6 +6446,11 @@ fn sum_costs(costs: &[&SpendCosts]) -> (Option<u64>, Option<u64>, bool) {
         costs.iter().try_fold(0u64, |sum, c| c.equivalent.map(|e| sum.saturating_add(e)))
     };
     (actual, equivalent, costs.iter().any(|c| c.estimated))
+}
+
+/// Whether a backend error says the bot's sign-in was refused.
+pub fn signed_out(error: &str) -> bool {
+    error.contains("is signed out on this computer")
 }
 
 /// Whether a backend error says the account has run out of credit, which no

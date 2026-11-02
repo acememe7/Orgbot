@@ -24,6 +24,11 @@ pub enum Command {
     JoinAgent { spec: Box<AgentSpec> },
     /// Remove a bot, releasing anything it holds.
     LeaveAgent { agent: AgentId, reason: String },
+    /// The owner benches a bot: it takes no turns and its work goes back to
+    /// the board until the owner resumes it.
+    PauseAgent { agent: AgentId },
+    /// The owner brings a benched bot back.
+    ResumeAgent { agent: AgentId },
     /// Move the room from assembling to running.
     StartRoom,
     /// Suspend turn-taking without discarding state.
@@ -424,6 +429,8 @@ impl Command {
         match self {
             Self::JoinAgent { .. } => "join_agent",
             Self::LeaveAgent { .. } => "leave_agent",
+            Self::PauseAgent { .. } => "pause_agent",
+            Self::ResumeAgent { .. } => "resume_agent",
             Self::StartRoom => "start_room",
             Self::PauseRoom { .. } => "pause_room",
             Self::ResumeRoom => "resume_room",
@@ -505,6 +512,8 @@ impl Command {
             self,
             Self::JoinAgent { .. }
                 | Self::LeaveAgent { .. }
+                | Self::PauseAgent { .. }
+                | Self::ResumeAgent { .. }
                 | Self::StartRoom
                 | Self::PauseRoom { .. }
                 | Self::ResumeRoom

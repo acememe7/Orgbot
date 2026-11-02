@@ -99,6 +99,8 @@ pub struct Orchestrator {
     /// Set when the owner pauses mid-run: start no new turns, and let the
     /// ones under way finish, so pausing loses no work.
     holding: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Ends one bot's running turn when the owner pauses or removes it.
+    stops: TurnStops,
     /// Turns in a row each bot ended on its work without doing anything.
     fruitless: BTreeMap<AgentId, u32>,
     /// Bots no longer woken for the work they went round in circles on, with
@@ -128,6 +130,29 @@ const AUTOSAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(2 * 6
 
 /// How often a run looks for a free slot it could fill.
 const REFILL_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// One token per running turn, so the owner can end a single bot's turn.
+///
+/// From benchmark 2: the owner asked to stop @iris mid-turn, and the room
+/// could only stop every bot's turn or none.
+#[derive(Clone, Debug, Default)]
+pub struct TurnStops(Arc<std::sync::Mutex<BTreeMap<AgentId, tokio_util::sync::CancellationToken>>>);
+
+impl TurnStops {
+    /// End `agent`'s running turn, if it has one. Its bot is returned to the
+    /// room as any interrupted turn's is, and an agent CLI is stopped.
+    pub fn stop(&self, agent: AgentId) {
+        if let Some(token) = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&agent) {
+            token.cancel();
+        }
+    }
+
+    fn begin(&self, agent: AgentId) -> tokio_util::sync::CancellationToken {
+        let token = tokio_util::sync::CancellationToken::new();
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(agent, token.clone());
+        token
+    }
+}
 
 /// A bot on loan to its running turn; parks the bot if the turn is dropped.
 struct TurnLease {
@@ -263,6 +288,7 @@ impl Orchestrator {
             leased_memory: BTreeMap::new(),
             autosave: None,
             holding: Default::default(),
+            stops: Default::default(),
         };
         for (mut configured, provider) in providers {
             let saved = restored
@@ -312,6 +338,7 @@ impl Orchestrator {
             leased_memory: BTreeMap::new(),
             autosave: None,
             holding: Default::default(),
+            stops: Default::default(),
         }
     }
 
@@ -386,6 +413,11 @@ impl Orchestrator {
     /// mid-run and pauses the room once those turns have finished.
     pub fn hold_switch(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         self.holding.clone()
+    }
+
+    /// Ends a single bot's running turn, for the owner's per-bot controls.
+    pub fn turn_stops(&self) -> TurnStops {
+        self.stops.clone()
     }
 
     /// Yield API waits to human input without interrupting workspace operations.
@@ -932,15 +964,27 @@ impl Orchestrator {
             };
             let engine = engine.clone();
             let sink = sinks(agent);
+            let stop = this.stops.begin(agent);
             let turn: std::pin::Pin<Box<dyn std::future::Future<Output = TurnOutcome> + Send>> =
                 Box::pin(async move {
                     let mut lease = lease;
-                    let result = lease
-                        .bot
-                        .as_mut()
-                        .expect("a leased bot")
-                        .take_turn(&engine, sink)
-                        .await;
+                    let finished = tokio::select! {
+                        result = lease.bot.as_mut().expect("a leased bot").take_turn(&engine, sink) => Some(result),
+                        _ = stop.cancelled() => None,
+                    };
+                    let result = match finished {
+                        Some(result) => result,
+                        // The owner stopped this bot: its turn ends here, as a
+                        // stopped room's turns do, and nothing it began runs on.
+                        None => {
+                            let bot = lease.bot.as_mut().expect("a leased bot");
+                            bot.finish_turn(&engine).await;
+                            engine.with(|engine| {
+                                let _ = engine.apply(Command::EndTurn { agent });
+                            });
+                            Ok(TurnReport::stopped(agent))
+                        }
+                    };
                     let bot = lease.bot.take().expect("a leased bot");
                     (lease.id, bot, result)
                 });

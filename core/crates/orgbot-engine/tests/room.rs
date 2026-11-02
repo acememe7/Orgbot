@@ -2247,6 +2247,11 @@ fn a_stand_in_can_take_role_locked_work_when_the_holder_is_busy() {
     ]));
 
     let locked = f.open_task("write the notes", Some("writer"));
+    // Both holders of `writer` are busy.
+    let worker2 = f.worker2;
+    let (busy, busy2) = (f.open_task("write the intro", Some("writer")), f.open_task("write the outro", Some("writer")));
+    f.apply(Command::ClaimTask { task: busy, by: worker });
+    f.apply(Command::ClaimTask { task: busy2, by: worker2 });
 
     // The reviewer does not hold `writer`, but the room says it may stand in.
     assert!(f.engine.claimable_by(inspector).contains(&locked));
@@ -2259,9 +2264,11 @@ fn a_stand_in_can_take_role_locked_work_when_the_holder_is_busy() {
         "standing in is recorded, so a roster that never fits is visible"
     );
 
-    // And the actual role holder is still preferred where both could take it.
+    // Once a holder is free again, the work is theirs.
+    f.apply(Command::ReleaseTask { task: busy, by: worker, reason: "done for now".into() });
     let another = f.open_task("write more", Some("writer"));
-    assert_eq!(f.engine.claimable_by(worker).first(), Some(&another));
+    assert!(f.engine.claimable_by(worker).contains(&another));
+    assert!(!f.engine.claimable_by(inspector).contains(&another));
 }
 
 /// From the benchmark room: five page tasks had no role, and bots for QA,
@@ -2296,6 +2303,34 @@ fn work_with_no_role_goes_to_a_free_builder_first() {
     f.apply(Command::ClaimTask { task: third, by: worker2 });
     assert!(f.engine.claimable_by(qa).contains(&page));
     f.apply(Command::ClaimTask { task: page, by: qa });
+}
+
+/// From benchmark 2: @grok-quick, a stand-in for QA, claimed the QA task 30
+/// seconds after it opened, while @quinn, who holds the role, was free.
+#[test]
+fn a_stand_in_waits_while_a_holder_of_the_role_is_free() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let mut qa_role = RoleSpec::new("qa");
+    qa_role.fallbacks = vec!["writer".into()];
+    f.engine.set_roles(RoleTable::new(vec![RoleSpec::new("writer"), qa_role]));
+    let quinn = AgentSpec::new("quinn", "Quinn", provider()).with_roles(["qa"]);
+    let quinn = {
+        let id = quinn.id;
+        f.apply(Command::JoinAgent { spec: Box::new(quinn) });
+        id
+    };
+    let checks = f.open_task("run the QA pass", Some("qa"));
+    assert!(f.engine.claimable_by(quinn).contains(&checks));
+    assert!(!f.engine.claimable_by(worker).contains(&checks), "not offered to the stand-in");
+    let refused = f.reject(Command::ClaimTask { task: checks, by: worker });
+    assert!(refused.to_string().contains("@quinn holds it and is free"), "{refused}");
+
+    // With the holder busy, the stand-in may take it rather than let it wait.
+    let other = f.open_task("check the old build", Some("qa"));
+    f.apply(Command::ClaimTask { task: other, by: quinn });
+    assert!(f.engine.claimable_by(worker).contains(&checks));
+    f.apply(Command::ClaimTask { task: checks, by: worker });
 }
 
 #[test]
@@ -3800,6 +3835,46 @@ fn a_coordinator_makes_a_task_wait_for_others_with_amend_task() {
     assert!(restored.waits_on_dependency(commit));
 }
 
+/// From benchmark 2: a dependency added to the QA task while it was being
+/// worked on left it in progress and waiting at once, and the health line
+/// called the board inconsistent.
+#[test]
+fn work_under_way_that_gains_an_unmet_dependency_is_paused_until_it_lands() {
+    let mut f = fixture();
+    let (lead, worker, worker2) = (f.coordinator, f.worker, f.worker2);
+    let qa = f.start_task("run QA", worker);
+    let fix = f.open_task("fix the street framing", None);
+    f.apply(Command::AmendTask {
+        by: lead,
+        task: qa,
+        brief: None,
+        acceptance_criteria: None,
+        depends_on: Some(vec![fix]),
+        reason: "QA the build with the framing fix".into(),
+    });
+    assert_eq!(f.state(qa), TaskState::Blocked);
+    assert_eq!(f.engine.task(qa).unwrap().assignee, Some(worker), "the holder keeps it");
+    let note = f.engine.transcript().iter().rev().find(|m| m.body.contains("amended")).unwrap().clone();
+    assert!(note.body.contains("so it is paused until \"fix the street framing\" lands"), "{}", note.body);
+    assert!(note.wakes(worker, &["writer".to_string()]), "its holder is told");
+    assert!(!f.engine.health().summary().contains("waiting-not-in-progress"), "{}", f.engine.health().summary());
+
+    // A wait through the block counts as a circle too.
+    let circle = f.reject(Command::AmendTask {
+        by: lead,
+        task: fix,
+        brief: None,
+        acceptance_criteria: None,
+        depends_on: Some(vec![qa]),
+        reason: "backwards".into(),
+    });
+    assert!(circle.to_string().contains("never end"), "{circle}");
+
+    f.deliver(fix, worker2);
+    f.apply(Command::Tick { now: Timestamp::now() });
+    assert_ne!(f.state(qa), TaskState::Blocked, "back to its holder once the fix lands");
+}
+
 /// From the live room: every message a CLI bot posted ended with a reminder
 /// that file removals awaited the owner, appended by OrgBots itself.
 #[test]
@@ -4166,11 +4241,43 @@ mod second_opinions {
         (f, ids.0, ids.1)
     }
 
-    fn submitted(f: &mut Fixture, title: &str) -> TaskId {
+    /// Work `first` has already sent back once, now in review again: a
+    /// second send-back is the one that waits for a second opinion.
+    fn submitted(f: &mut Fixture, title: &str, first: AgentId) -> TaskId {
         let worker = f.worker;
         let task = f.start_task(title, worker);
         f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![] });
+        f.apply(review(task, first, vec![blocking("the first draft stops halfway", "finish it")], vec![]));
+        assert_eq!(f.state(task), TaskState::InProgress, "a first send-back goes straight back");
+        f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![] });
         task
+    }
+
+    /// From benchmark 2: every send-back waited on a second opinion, 49
+    /// minutes in all, for findings the second reviewer mostly upheld. The
+    /// first goes straight to the author; a rejection still waits.
+    #[test]
+    fn a_first_send_back_goes_straight_to_its_author_and_a_rejection_waits() {
+        let (mut f, strict, easy) = two_reviewers();
+        let worker = f.worker;
+        let task = f.start_task("first try", worker);
+        f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![] });
+        f.apply(review(task, strict, vec![blocking("the far view is under 80 m", "move the camera back to 82 m")], vec![]));
+        assert_eq!(f.state(task), TaskState::InProgress);
+        assert!(f.engine.review_panel(task).is_none(), "no second opinion for a first send-back");
+        assert_eq!(outcome(&f, task).verdict, Verdict::RequestChanges);
+
+        let task = f.start_task("unsafe change", worker);
+        f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![] });
+        let critical = Finding {
+            severity: Severity::Critical,
+            summary: "it deletes the owner's saves".into(),
+            locus: None,
+            suggestion: None,
+        };
+        f.apply(review(task, strict, vec![critical], vec![]));
+        let panel = f.engine.review_panel(task).expect("a rejection waits for a second opinion");
+        assert_eq!((panel.second, panel.stage), (easy, PanelStage::AwaitingSecond));
     }
 
     fn blocking(summary: &str, fix: &str) -> Finding {
@@ -4221,7 +4328,7 @@ mod second_opinions {
     #[test]
     fn a_send_back_waits_for_a_second_opinion_from_another_model() {
         let (mut f, strict, easy) = two_reviewers();
-        let task = submitted(&mut f, "gas proof");
+        let task = submitted(&mut f, "gas proof", strict);
         f.apply(review(
             task,
             strict,
@@ -4248,7 +4355,7 @@ mod second_opinions {
         assert_eq!((settled.stage, settled.with.clone(), settled.verdict), (ReviewStage::Outcome, vec![easy], Verdict::RequestChanges));
         assert_eq!(settled.blockers().len(), 2);
         assert!(settled.findings[1].suggestion.as_deref().unwrap().contains("adds: and say the distance"));
-        assert_eq!(f.engine.review_cycles(task).len(), 1, "a second opinion is part of one round");
+        assert_eq!(f.engine.review_cycles(task).len(), 2, "a second opinion is part of its round");
     }
 
     /// From the benchmark room: work sent back waited 49 minutes in all for
@@ -4256,7 +4363,7 @@ mod second_opinions {
     #[test]
     fn a_second_opinion_that_does_not_come_is_not_waited_for() {
         let (mut f, strict, _) = two_reviewers();
-        let task = submitted(&mut f, "gas proof");
+        let task = submitted(&mut f, "gas proof", strict);
         f.apply(review(task, strict, vec![blocking("the far view is under 80 m", "move the camera back to 82 m")], vec![]));
         f.apply(Command::Tick { now: Timestamp::now().plus_millis(5 * 60 * 1000) });
         assert_eq!(f.state(task), TaskState::InReview, "five minutes is still worth waiting");
@@ -4273,7 +4380,7 @@ mod second_opinions {
     #[test]
     fn the_first_reviewer_can_withdraw_what_the_second_disputes() {
         let (mut f, strict, easy) = two_reviewers();
-        let task = submitted(&mut f, "notes");
+        let task = submitted(&mut f, "notes", strict);
         f.apply(review(task, strict, vec![blocking("no changelog link", "link the changelog")], vec![]));
         f.apply(review(task, easy, vec![], vec![respond(1, false, "the brief never asked for a link")]));
         assert_eq!(f.engine.review_panel(task).unwrap().stage, PanelStage::AwaitingReply);
@@ -4290,7 +4397,7 @@ mod second_opinions {
     fn reviewers_who_still_disagree_leave_it_to_the_owner() {
         let (mut f, strict, easy) = two_reviewers();
         for (title, chosen) in [("drop it", REVIEW_DISPUTE_DROP), ("keep it", REVIEW_DISPUTE_KEEP)] {
-            let task = submitted(&mut f, title);
+            let task = submitted(&mut f, title, strict);
             f.apply(review(
                 task,
                 strict,
@@ -4335,7 +4442,7 @@ mod second_opinions {
     fn reviewers_check_the_fix_and_do_not_write_it() {
         let (mut f, strict, easy) = two_reviewers();
         let (worker, worker2) = (f.worker, f.worker2);
-        let task = submitted(&mut f, "release notes");
+        let task = submitted(&mut f, "release notes", strict);
         f.apply(review(task, strict, vec![blocking("dates are wrong", "use the tag dates")], vec![]));
         f.apply(review(task, easy, vec![], vec![respond(1, true, "two dates are off")]));
         assert_eq!(f.state(task), TaskState::InProgress);
@@ -4373,7 +4480,7 @@ mod second_opinions {
         assert_eq!(f.state(task), TaskState::Approved);
 
         // Nor can a reviewer claim the work it reviewed once it is free.
-        let task = submitted(&mut f, "changelog");
+        let task = submitted(&mut f, "changelog", strict);
         f.apply(review(task, strict, vec![blocking("entries are unsorted", "sort by date")], vec![]));
         f.apply(review(task, easy, vec![], vec![respond(1, true, "unsorted")]));
         f.apply(Command::ReleaseTask { task, by: worker, reason: "handing on".into() });
@@ -4386,6 +4493,27 @@ mod second_opinions {
 /// credit. The room halted it, then retried it a minute later and every few
 /// minutes after, each time flipping the room's health. No retry fixes an
 /// empty account, so the bot waits for the owner, and the room says why.
+#[test]
+fn a_signed_out_bot_stays_named_in_health_between_retries() {
+    // From benchmark 2: three Claude bots signed out together, and every
+    // retry set them free and the health line said the room was fine.
+    use orgbot_proto::AgentStatus;
+    let mut f = fixture();
+    let worker = f.worker;
+    f.apply(Command::ReportError {
+        agent: worker,
+        task: None,
+        error: "no credential for claude-cli: claude-cli is signed out on this computer. Sign in to `claude` again; the bot retries on its own. (OAuth session expired)".into(),
+        permanent: true,
+    });
+    assert_eq!(f.engine.status(worker), AgentStatus::Faulted);
+    f.apply(Command::Tick { now: Timestamp::now().plus_millis(2 * 60_000) });
+    assert_eq!(f.engine.status(worker), AgentStatus::Idle, "retried as any fault is");
+    assert!(f.engine.health().summary().contains("w1 (signed out)"), "{}", f.engine.health().summary());
+    f.apply(Command::RecordTurn { agent: worker, usage: Default::default() });
+    assert!(!f.engine.health().summary().contains("signed out"), "a turn that goes through clears it");
+}
+
 #[test]
 fn a_bot_whose_account_is_out_of_credit_waits_for_the_owner() {
     use orgbot_engine::engine::out_of_credit;

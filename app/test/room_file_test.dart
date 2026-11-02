@@ -288,6 +288,26 @@ void main() {
     expect(toml(ProviderKind.anthropic, ''), isNot(contains('effort')));
   });
 
+  // From benchmark 2: GLM and DeepSeek reasoning could not be turned down.
+  test('an Ollama or DeepSeek bot can be turned down to low or medium', () {
+    String toml(ProviderKind provider, String effort) => buildRoomFile(room(), [
+      BotDef(
+        name: 'b',
+        handle: 'b',
+        provider: provider,
+        model: 'glm-5.3-flash',
+        apiKey: 'key',
+        effort: effort,
+      ),
+    ]).toml;
+
+    expect(toml(ProviderKind.ollama, 'low'), contains('effort = "low"'));
+    expect(toml(ProviderKind.deepseek, 'medium'), contains('effort = "medium"'));
+    // A CLI's level left over from another provider is not sent.
+    expect(toml(ProviderKind.ollama, 'xhigh'), isNot(contains('effort')));
+    expect(toml(ProviderKind.ollama, ''), isNot(contains('effort')));
+  });
+
   test('a bot keeps its effort across saves', () {
     final bot = BotDef(name: 'b', provider: ProviderKind.codex, effort: 'high');
     expect(BotDef.fromJson(bot.toJson()).effort, 'high');

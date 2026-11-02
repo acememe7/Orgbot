@@ -267,6 +267,10 @@ pub enum ProviderConfig {
         /// The model id.
         #[serde(default = "default_deepseek_model")]
         model: String,
+        /// How hard the model reasons: `low` or `medium` turn it down; empty
+        /// keeps the model's own.
+        #[serde(default)]
+        effort: String,
     },
     /// An OpenAI-compatible endpoint, including a Codex/ChatGPT sign-in.
     #[serde(
@@ -281,6 +285,10 @@ pub enum ProviderConfig {
         /// Which credential profile to use: `codex`, `openai`, or a custom name.
         #[serde(default = "default_openai_profile")]
         profile: String,
+        /// How hard the model reasons: `low` or `medium` turn it down; empty
+        /// keeps the model's own.
+        #[serde(default)]
+        effort: String,
     },
     /// Drive an installed agent CLI as a real,
     /// resumable session in a project folder.
@@ -336,16 +344,25 @@ fn default_agent_policy() -> AgentPolicy {
 }
 
 impl ProviderConfig {
+    /// The effort level set for a bot on a chat-completions API, or empty.
+    /// An agent CLI's own level goes to the CLI instead.
+    pub fn api_effort(&self) -> &str {
+        match self {
+            Self::DeepSeek { effort, .. } | Self::OpenAiCompatible { effort, .. } => effort.trim(),
+            _ => "",
+        }
+    }
+
     /// Convert into the protocol's [`ProviderRef`].
     pub fn to_ref(&self) -> ProviderRef {
         match self {
             Self::Anthropic { model } => ProviderRef::Anthropic {
                 model: model.clone(),
             },
-            Self::DeepSeek { model } => ProviderRef::DeepSeek {
+            Self::DeepSeek { model, .. } => ProviderRef::DeepSeek {
                 model: model.clone(),
             },
-            Self::OpenAiCompatible { model, profile } => ProviderRef::OpenAiCompatible {
+            Self::OpenAiCompatible { model, profile, .. } => ProviderRef::OpenAiCompatible {
                 model: model.clone(),
                 profile: profile.clone(),
             },
@@ -663,6 +680,18 @@ impl RoomConfig {
                 build(&reference)
             }
             .map_err(|error| ConfigError::Invalid(format!("bot `{}`: {error}", section.handle)))?;
+            let provider = match section.provider.api_effort() {
+                "" => provider,
+                level => {
+                    let effort = orgbot_providers::Effort::from_name(level).ok_or_else(|| {
+                        ConfigError::Invalid(format!(
+                            "bot `{}`: effort `{level}` is not one of low, medium, high, xhigh, max",
+                            section.handle
+                        ))
+                    })?;
+                    Arc::new(orgbot_providers::provider::WithEffort::new(provider, effort)) as Arc<dyn Provider>
+                }
+            };
             let persona = if section.persona.trim().is_empty() {
                 ORGBOT_RUNTIME_INSTRUCTIONS.to_string()
             } else {
@@ -1143,6 +1172,34 @@ mod tests {
             let error = room("codex", "max").resolve().unwrap_err().to_string();
             assert!(error.contains("does not offer effort `max`"), "{error}");
         }
+    }
+
+    /// From benchmark 2: GLM and DeepSeek bots had no effort to turn down.
+    #[test]
+    fn an_api_bot_effort_level_is_read_and_checked() {
+        let room = |effort: &str| {
+            RoomConfig::parse(
+                &format!(
+                    r#"
+                    [room]
+                    name = "r"
+                    goal = "g"
+                    [[bots]]
+                    handle = "worker"
+                    provider = {{ kind = "openai", profile = "efforttest", model = "glm-5.3-flash", effort = "{effort}" }}
+                    "#
+                ),
+                "t.toml",
+            )
+            .unwrap()
+        };
+        assert_eq!(room("low").bots[0].provider.api_effort(), "low");
+        assert_eq!(room("").bots[0].provider.api_effort(), "");
+        std::env::set_var("ORGBOT_EFFORTTEST_BASE_URL", "http://127.0.0.1:9");
+        std::env::set_var("ORGBOT_EFFORTTEST_API_KEY", "test");
+        let error = room("lowest").resolve().unwrap_err().to_string();
+        assert!(error.contains("effort `lowest`"), "{error}");
+        assert!(room("medium").resolve().is_ok());
     }
 
     #[test]

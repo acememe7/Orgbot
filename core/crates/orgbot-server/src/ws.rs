@@ -319,6 +319,9 @@ async fn dispatch(session: &SessionHandle, message: ClientMessage) -> bool {
             session.send(Control::ParkTask { task, reason }).await
         }
         ClientMessage::ResumeTask { task } => session.send(Control::ResumeTask { task }).await,
+        ClientMessage::PauseBot { agent } => session.send(Control::PauseBot { agent }).await,
+        ClientMessage::ResumeBot { agent } => session.send(Control::ResumeBot { agent }).await,
+        ClientMessage::RemoveBot { agent } => session.send(Control::RemoveBot { agent }).await,
         ClientMessage::ReportPendingRemovals { agent, copy, count } => {
             session.send(Control::ReportPendingRemovals { agent, copy, count }).await
         }

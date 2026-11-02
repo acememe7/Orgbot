@@ -2940,7 +2940,10 @@ async fn a_push_is_always_put_to_the_owner_whatever_the_access_mode() {
 /// second reviewer is woken with the findings to rule on, the author gets
 /// what both settled, and the reviewers who asked for the fix check it.
 #[tokio::test]
-async fn work_sent_back_gets_a_second_opinion_and_its_reviewers_check_the_fix() {
+async fn work_sent_back_once_goes_straight_to_its_author_and_its_reviewer_checks_the_fix() {
+    // From benchmark 2: every send-back waited on a second opinion. A first
+    // one now goes straight back; the engine's tests cover the second opinion
+    // a rejection or a second send-back still gets.
     use orgbot_proto::review::ReviewStage;
     let mut room = room("ship the release notes");
     room.seat(spec("lead", &["coordinator"], Autonomy::coordinator()), coordinator())
@@ -2961,15 +2964,10 @@ async fn work_sent_back_gets_a_second_opinion_and_its_reviewers_check_the_fix() 
     let stages: Vec<ReviewStage> = engine.reviews().iter().map(|r| r.stage).collect();
     assert_eq!(
         stages,
-        vec![ReviewStage::Opening, ReviewStage::SecondOpinion, ReviewStage::Outcome, ReviewStage::Decision],
-        "sent back, second opinion, settled, then the fix checked"
+        vec![ReviewStage::Decision, ReviewStage::Decision],
+        "sent back with no second opinion, then the fix checked"
     );
     let reviews = engine.reviews();
-    assert_ne!(reviews[0].inspector, reviews[1].inspector, "the second opinion is someone else's");
-    assert_eq!(reviews[2].with, vec![reviews[1].inspector]);
-    assert!(
-        [reviews[0].inspector, reviews[1].inspector].contains(&reviews[3].inspector),
-        "one of the reviewers who asked for the fix checks it"
-    );
+    assert_eq!(reviews[0].inspector, reviews[1].inspector, "the reviewer who asked for the fix checks it");
     assert_eq!(engine.review_cycles(task.id).len(), 2);
 }

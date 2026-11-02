@@ -258,6 +258,9 @@ impl Room {
             },
             ClientMessage::ParkTask { task, reason } => Control::ParkTask { task, reason },
             ClientMessage::ResumeTask { task } => Control::ResumeTask { task },
+            ClientMessage::PauseBot { agent } => Control::PauseBot { agent },
+            ClientMessage::ResumeBot { agent } => Control::ResumeBot { agent },
+            ClientMessage::RemoveBot { agent } => Control::RemoveBot { agent },
             ClientMessage::ReportPendingRemovals { agent, copy, count } => {
                 Control::ReportPendingRemovals { agent, copy, count }
             }

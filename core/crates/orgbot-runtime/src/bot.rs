@@ -52,6 +52,22 @@ pub struct TurnReport {
     pub own_activity: usize,
 }
 
+impl TurnReport {
+    /// A turn the owner ended for this bot alone.
+    pub fn stopped(agent: AgentId) -> Self {
+        Self {
+            agent,
+            tool_calls: 0,
+            tool_errors: 0,
+            said: None,
+            steps: 0,
+            usage: Usage::default(),
+            stop_reason: StopReason::Other("stopped".into()),
+            own_activity: 0,
+        }
+    }
+}
+
 /// Keeps usage from completed provider responses if a later call in the same
 /// tool loop fails or its task is cancelled. The room lock is acquired only
 /// from `Drop`, never held across a provider call. Normal completion disarms
@@ -394,8 +410,7 @@ impl Bot {
         // From the benchmark room: a QA turn on a slow model ran 75 minutes
         // in 72 calls, a minute a call, so a count of calls reached it rarely.
         // Every ten minutes of a turn it hears how long it has run.
-        let turn_began = std::time::Instant::now();
-        let mut minutes_told: u64 = 0;
+        let mut steer = TurnSteer::new(seen_through);
         let mut cut_off: u32 = 0;
         loop {
             step += 1;
@@ -421,22 +436,24 @@ impl Bot {
                 let _ = tx.send(StreamEvent::Thinking).await;
             }
 
+            let mut interrupted = false;
             let response = match self.mcp_rx.as_mut() {
                 Some(rx) => {
                     let (response, mcp) = complete_with_mcp(
                         &self.provider,
                         &self.tools,
                         engine,
-                        self.spec.id,
+                        &self.spec,
                         request,
                         sink.clone(),
                         rx,
                         self.mcp_servers.as_deref(),
                         self.workspace.as_ref(),
-                        self.spec.autonomy.review_only,
                         &mut self.capabilities,
+                        &mut steer,
                     )
                     .await;
+                    interrupted = mcp.interrupted;
                     report.tool_calls += mcp.ok;
                     report.tool_errors += mcp.err;
                     // Said through the room tool already; the closing prose
@@ -512,6 +529,16 @@ impl Bot {
                     return Err(error);
                 }
             };
+            // The owner wrote to this CLI bot and it made no room call to see
+            // it: the turn ends here and the next one resumes the same session
+            // with the message in front of it.
+            if interrupted {
+                report.stop_reason = StopReason::Other("human_input".into());
+                if let Some(tx) = &sink {
+                    let _ = tx.send(StreamEvent::Done { stop_reason: report.stop_reason.clone() }).await;
+                }
+                break;
+            }
 
             report.steps += 1;
             // Pictures an agent CLI drew this turn go to the room, not into
@@ -644,13 +671,8 @@ impl Bot {
                     is_error: outcome.is_error,
                 });
             }
-            let reminder = long_turn_reminder(remind_every, step).or_else(|| {
-                let minutes = turn_began.elapsed().as_secs() / 60;
-                (minutes >= minutes_told + TURN_MINUTES_NOTE).then(|| {
-                    minutes_told = minutes - minutes % TURN_MINUTES_NOTE;
-                    turn_minutes_reminder(minutes)
-                })
-            });
+            let reminder = long_turn_reminder(remind_every, step)
+                .or_else(|| engine.with(|engine| steer.minutes(engine, self.spec.id)));
             if let Some(reminder) = reminder {
                 if let Some(ContentBlock::ToolResult { content, .. }) = results.last_mut() {
                     content.push_str(&reminder);
@@ -731,6 +753,15 @@ impl Bot {
         if mark_seen {
             self.last_seen = seen_through;
         }
+        // Where a turn's time went, for the room's log.
+        tracing::info!(
+            agent = %self.spec.handle,
+            seconds = steer.began.elapsed().as_secs(),
+            steps = report.steps,
+            tool_calls = report.tool_calls,
+            tool_errors = report.tool_errors,
+            "turn ended"
+        );
         Ok(report)
     }
 
@@ -1139,12 +1170,120 @@ const CUT_OFF_NOTE: &str = "[OrgBots] Your reply was cut off at the output limit
 /// How often, in minutes of one turn, a bot hears how long it has run.
 const TURN_MINUTES_NOTE: u64 = 10;
 
-fn turn_minutes_reminder(minutes: u64) -> String {
-    format!(
+/// Minutes into a turn on one task past which its holder is asked whether it
+/// should be split.
+const SPLIT_AFTER_MINUTES: u64 = 20;
+
+fn turn_minutes_reminder(minutes: u64, holds_work: bool) -> String {
+    if !holds_work {
+        // From benchmark 2: @iris ran one turn of 92 minutes holding no task
+        // and posting nothing.
+        return format!(
+            "\n\n[OrgBots] This turn has run {minutes} minutes and you hold no task or \
+             review. Finish now: post what you found, if anything, and end the turn. To \
+             keep working, claim a task first."
+        );
+    }
+    let mut note = format!(
         "\n\n[OrgBots] This turn has run {minutes} minutes, and teammates may be waiting \
          on it. If the task's acceptance criteria are met, finish now: record the result \
          and end the turn. Do not polish past the bar or re-run checks that already passed."
-    )
+    );
+    if minutes >= SPLIT_AFTER_MINUTES {
+        note.push_str(
+            " If the task needs much more than this, tell the coordinator now so it can be \
+             split, and hand on the parts you have not started.",
+        );
+    }
+    note
+}
+
+/// How long the owner's message to a CLI bot waits for the bot to see it
+/// through a room call before its turn is ended so the next one shows it.
+const OWNER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What a turn tells its bot as it goes: how long it has run, and messages
+/// for it that arrived since the turn began.
+///
+/// From benchmark 2: an agent CLI runs its own tool loop, so the reminders
+/// in the room's own loop never reached it; @grok-quick ran one turn of 94
+/// minutes, and the owner's "@grok-quick, what is the hold up" went unseen
+/// until it ended. The room reaches a CLI through its room tools' results.
+pub(crate) struct TurnSteer {
+    began: std::time::Instant,
+    minutes_told: u64,
+    /// Through where in the room's log messages for the bot were passed on.
+    relayed_through: Seq,
+}
+
+impl TurnSteer {
+    pub(crate) fn new(head: Seq) -> Self {
+        Self { began: std::time::Instant::now(), minutes_told: 0, relayed_through: head }
+    }
+
+    /// The time note, once every [`TURN_MINUTES_NOTE`] minutes of the turn.
+    fn minutes(&mut self, engine: &orgbot_engine::Engine, agent: AgentId) -> Option<String> {
+        let minutes = self.began.elapsed().as_secs() / 60;
+        if minutes < self.minutes_told + TURN_MINUTES_NOTE {
+            return None;
+        }
+        self.minutes_told = minutes - minutes % TURN_MINUTES_NOTE;
+        let holds_work = engine.tasks().any(|task| task.is_held_by(agent) && !task.state.is_terminal())
+            || !engine.review_queue_for(agent).is_empty();
+        Some(turn_minutes_reminder(minutes, holds_work))
+    }
+
+    /// Messages for the bot posted since they were last passed on.
+    fn messages(&mut self, engine: &orgbot_engine::Engine, spec: &AgentSpec) -> Option<String> {
+        let lines: Vec<String> = engine
+            .events_since(self.relayed_through)
+            .filter_map(|envelope| match &envelope.event {
+                orgbot_proto::Event::MessagePosted { message } if message.wakes(spec.id, &spec.roles) => {
+                    let from = match &message.author {
+                        orgbot_proto::Author::Human { name } => name.clone(),
+                        orgbot_proto::Author::Agent { agent } => engine
+                            .agent(*agent)
+                            .map_or_else(|| "a teammate".into(), |other| format!("@{}", other.handle)),
+                        orgbot_proto::Author::System => "the room".into(),
+                    };
+                    let body = message.body.trim();
+                    let body = match body.char_indices().nth(1200) {
+                        Some((cut, _)) => format!("{}…", &body[..cut]),
+                        None => body.to_string(),
+                    };
+                    Some(format!("From {from}: {body}"))
+                }
+                _ => None,
+            })
+            .collect();
+        self.relayed_through = engine.head();
+        (!lines.is_empty()).then(|| {
+            format!(
+                "\n\n[OrgBots] New for you since this turn began. Answer anything that asks you \
+                 something with post_message now, then carry on:\n{}",
+                lines.join("\n")
+            )
+        })
+    }
+
+    /// Whether the owner has written to the bot at least [`OWNER_WAIT`] ago
+    /// and it has not been passed on yet.
+    fn owner_kept_waiting(&self, engine: &orgbot_engine::Engine, spec: &AgentSpec) -> bool {
+        let before = orgbot_proto::Timestamp::now().plus_millis(-(OWNER_WAIT.as_millis() as i64));
+        engine.events_since(self.relayed_through).any(|envelope| {
+            matches!(&envelope.event, orgbot_proto::Event::MessagePosted { message }
+                if matches!(message.author, orgbot_proto::Author::Human { .. })
+                    && message.wakes(spec.id, &spec.roles)
+                    && message.sent_at <= before)
+        })
+    }
+
+    /// Everything the bot should hear now, appended to a room tool's result.
+    fn note(&mut self, engine: &orgbot_engine::Engine, spec: &AgentSpec) -> String {
+        let mut note = self.messages(engine, spec).unwrap_or_default();
+        note.push_str(&self.minutes(engine, spec.id).unwrap_or_default());
+        note
+    }
 }
 
 /// The same call made again and again in one turn.
@@ -1347,6 +1486,8 @@ struct McpTally {
     err: usize,
     /// A post_message call succeeded during the episode.
     posted: bool,
+    /// The episode was ended for the owner's message; see [`OWNER_WAIT`].
+    interrupted: bool,
 }
 
 /// Run one provider turn while also serving inbound room-MCP calls.
@@ -1361,50 +1502,100 @@ async fn complete_with_mcp(
     provider: &Arc<dyn Provider>,
     tools: &[ToolDef],
     engine: &SharedEngine,
-    actor: AgentId,
+    spec: &AgentSpec,
     request: CompletionRequest,
     sink: Option<mpsc::Sender<StreamEvent>>,
     rx: &mut mpsc::Receiver<crate::mcp::McpCall>,
     servers: Option<&crate::mcp_client::McpClient>,
     workspace: Option<&crate::workspace::Workspace>,
-    review_only: bool,
     capabilities: &mut crate::capabilities::Capabilities,
+    steer: &mut TurnSteer,
 ) -> (Result<CompletionResponse, ProviderError>, McpTally) {
     let mut session = crate::mcp::McpSession::new(tools.to_vec());
+    let model = request.model.clone();
     let mut turn = std::pin::pin!(provider.complete(request, sink));
     let mut tally = McpTally::default();
+    let mut check = tokio::time::interval_at(
+        tokio::time::Instant::now() + OWNER_WAIT / 4,
+        OWNER_WAIT / 4,
+    );
     loop {
         tokio::select! {
             response = &mut turn => {
                 while let Ok(call) = rx.try_recv() {
-                    let reply = dispatch_room_mcp(&mut session, &call.request, engine, actor,
-                        servers, workspace, review_only, &mut tally, capabilities).await;
+                    let reply = dispatch_room_mcp(&mut session, &call.request, engine, spec,
+                        servers, workspace, &mut tally, capabilities, steer).await;
                     let _ = call.reply.send(reply);
                 }
                 return (response, tally);
             }
             inbound = rx.recv() => {
                 let Some(call) = inbound else { return (turn.await, tally) };
-                let reply = dispatch_room_mcp(&mut session, &call.request, engine, actor,
-                    servers, workspace, review_only, &mut tally, capabilities).await;
+                let reply = dispatch_room_mcp(&mut session, &call.request, engine, spec,
+                    servers, workspace, &mut tally, capabilities, steer).await;
                 let _ = call.reply.send(reply);
+            }
+            // Dropping the episode stops the CLI; its session was saved as it
+            // began, so the next turn resumes it.
+            _ = check.tick() => {
+                if engine.with(|engine| steer.owner_kept_waiting(engine, spec)) {
+                    tally.interrupted = true;
+                    let stopped = CompletionResponse {
+                        model,
+                        content: Vec::new(),
+                        stop_reason: StopReason::Other("human_input".into()),
+                        usage: Usage::default(),
+                    };
+                    return (Ok(stopped), tally);
+                }
             }
         }
     }
 }
 
 /// Validate the MCP session synchronously, then await only the selected external operation.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_room_mcp(
     session: &mut crate::mcp::McpSession,
     request: &str,
     engine: &SharedEngine,
-    actor: AgentId,
+    spec: &AgentSpec,
     servers: Option<&crate::mcp_client::McpClient>,
     workspace: Option<&crate::workspace::Workspace>,
-    review_only: bool,
+    tally: &mut McpTally,
+    capabilities: &mut crate::capabilities::Capabilities,
+    steer: &mut TurnSteer,
+) -> Option<String> {
+    let reply = room_mcp_reply(session, request, engine, spec, servers, workspace, tally, capabilities).await;
+    let note = engine.with(|engine| steer.note(engine, spec));
+    with_note(reply, &note)
+}
+
+/// A room tool's MCP reply with `note` after its result text.
+fn with_note(reply: Option<String>, note: &str) -> Option<String> {
+    if note.is_empty() {
+        return reply;
+    }
+    let mut response: serde_json::Value = serde_json::from_str(reply.as_deref()?).ok()?;
+    match response.pointer_mut("/result/content/0/text") {
+        Some(serde_json::Value::String(text)) => text.push_str(note),
+        _ => return reply,
+    }
+    Some(response.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn room_mcp_reply(
+    session: &mut crate::mcp::McpSession,
+    request: &str,
+    engine: &SharedEngine,
+    spec: &AgentSpec,
+    servers: Option<&crate::mcp_client::McpClient>,
+    workspace: Option<&crate::workspace::Workspace>,
     tally: &mut McpTally,
     capabilities: &mut crate::capabilities::Capabilities,
 ) -> Option<String> {
+    let (actor, review_only) = (spec.id, spec.autonomy.review_only);
     capabilities.refresh(engine, actor, servers).await;
     let mut pending = None;
     let reply = session.handle(request, |name, args| {
@@ -1524,7 +1715,11 @@ mod tests {
         assert!(long_turn_reminder(24, 48).is_some());
         assert_eq!(long_turn_reminder(24, 25), None);
         // From the benchmark room: a 75-minute turn of a minute a call.
-        assert!(turn_minutes_reminder(20).contains("This turn has run 20 minutes"));
+        assert!(turn_minutes_reminder(20, true).contains("This turn has run 20 minutes"));
+        assert!(turn_minutes_reminder(20, true).contains("so it can be split"));
+        assert!(!turn_minutes_reminder(10, true).contains("split"));
+        // From benchmark 2: @iris ran 92 minutes holding nothing.
+        assert!(turn_minutes_reminder(30, false).contains("you hold no task or review"));
         let mut repeats = Repeats::default();
         let read = json!({"path": "a.ts"});
         assert_eq!(repeats.note("workspace_read", &read), None);
@@ -1575,14 +1770,14 @@ mod tests {
             &provider,
             &[],
             &engine,
-            spec.id,
+            &spec,
             CompletionRequest::new("fixture", "", vec![]),
             None,
             &mut rx,
             None,
             None,
-            false,
             &mut crate::capabilities::Capabilities::default(),
+            &mut TurnSteer::new(engine.with(|engine| engine.head())),
         )
         .await;
         assert!(result.is_ok());
@@ -2303,6 +2498,87 @@ mod tests {
         SharedEngine::new(room)
     }
 
+    /// From benchmark 2: the owner asked "@grok-quick, what is the hold up"
+    /// during a 94-minute Grok CLI turn, and it went unseen until the turn
+    /// ended. It now rides on the bot's next room tool result, once.
+    #[tokio::test]
+    async fn a_cli_bot_hears_a_message_for_it_on_its_next_room_tool_result() {
+        let spec = spec();
+        let engine = mcp_test_engine(&spec).await;
+        let mut session = crate::mcp::McpSession::new(crate::mcp::room_tools_for(&spec));
+        session.handle(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, |_, _| unreachable!());
+        let mut steer = TurnSteer::new(engine.with(|engine| engine.head()));
+        let (mut tally, mut capabilities) = (McpTally::default(), crate::capabilities::Capabilities::default());
+        let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"list_tasks","arguments":{}}})
+        .to_string();
+        engine.with(|room| {
+            let message = orgbot_proto::ChatMessage::human(room.room_id(), "Aece", "what is the hold up?")
+                .to_agents(vec![spec.id]);
+            room.apply(Command::PostMessage { message: Box::new(message) }).unwrap();
+        });
+        let reply = dispatch_room_mcp(&mut session, &list, &engine, &spec, None, None, &mut tally, &mut capabilities, &mut steer)
+            .await
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("From Aece: what is the hold up?"), "{text}");
+        let again = dispatch_room_mcp(&mut session, &list, &engine, &spec, None, None, &mut tally, &mut capabilities, &mut steer)
+            .await
+            .unwrap();
+        let again: serde_json::Value = serde_json::from_str(&again).unwrap();
+        assert!(!again["result"]["content"][0]["text"].as_str().unwrap().contains("hold up"), "said once");
+    }
+
+    /// A CLI bot that makes no room call for a minute after the owner wrote
+    /// to it has its turn ended, so the next one, resuming the same session,
+    /// shows the message.
+    #[tokio::test(start_paused = true)]
+    async fn a_cli_turn_that_keeps_the_owner_waiting_is_ended_for_them() {
+        #[derive(Debug)]
+        struct Endless;
+        #[async_trait::async_trait]
+        impl Provider for Endless {
+            fn name(&self) -> &str {
+                "endless"
+            }
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+                _sink: Option<mpsc::Sender<StreamEvent>>,
+            ) -> orgbot_providers::Result<CompletionResponse> {
+                std::future::pending().await
+            }
+        }
+        let spec = spec();
+        let engine = mcp_test_engine(&spec).await;
+        let mut steer = TurnSteer::new(engine.with(|engine| engine.head()));
+        engine.with(|room| {
+            let mut message = orgbot_proto::ChatMessage::human(room.room_id(), "Aece", "what is the hold up?")
+                .to_agents(vec![spec.id]);
+            message.sent_at = orgbot_proto::Timestamp::now().plus_millis(-2 * 60_000);
+            room.apply(Command::PostMessage { message: Box::new(message) }).unwrap();
+        });
+        let provider: Arc<dyn Provider> = Arc::new(Endless);
+        let (_tx, mut rx) = mpsc::channel(1);
+        let (result, tally) = complete_with_mcp(
+            &provider,
+            &[],
+            &engine,
+            &spec,
+            CompletionRequest::new("fixture", "", vec![]),
+            None,
+            &mut rx,
+            None,
+            None,
+            &mut crate::capabilities::Capabilities::default(),
+            &mut steer,
+        )
+        .await;
+        assert!(tally.interrupted);
+        assert_eq!(result.unwrap().stop_reason, StopReason::Other("human_input".into()));
+    }
+
     #[tokio::test]
     async fn review_only_bots_cannot_advertise_or_call_external_mcp_tools() {
         let (server_spec, calls, server) = local_mcp_server().await;
@@ -2691,6 +2967,7 @@ mod tests {
         .to_string();
         let mut tally = McpTally::default();
         let mut capabilities = crate::capabilities::Capabilities::default();
+        let mut steer = TurnSteer::new(engine.with(|engine| engine.head()));
         let host = async {
             let call = calls.recv().await.unwrap();
             let access = call.grants.server_access;
@@ -2699,8 +2976,8 @@ mod tests {
         };
         let (_, before) = tokio::join!(
             dispatch_room_mcp(
-                &mut session, &request, &engine, spec.id, None, Some(&workspace), false,
-                &mut tally, &mut capabilities,
+                &mut session, &request, &engine, &spec, None, Some(&workspace),
+                &mut tally, &mut capabilities, &mut steer,
             ),
             host
         );
@@ -2742,8 +3019,8 @@ mod tests {
         };
         let (_, after) = tokio::join!(
             dispatch_room_mcp(
-                &mut session, &request, &engine, spec.id, None, Some(&workspace), false,
-                &mut tally, &mut capabilities,
+                &mut session, &request, &engine, &spec, None, Some(&workspace),
+                &mut tally, &mut capabilities, &mut steer,
             ),
             host
         );
@@ -2765,16 +3042,17 @@ mod tests {
         let request = json!({"jsonrpc":"2.0","id":7,"method":"tools/call",
             "params":{"name":"call_mcp_tool","arguments":{"tool":"external__mutate","arguments":{}}}})
         .to_string();
+        let mut steer = TurnSteer::new(engine.with(|engine| engine.head()));
         let reply = dispatch_room_mcp(
             &mut session,
             &request,
             &engine,
-            spec.id,
+            &spec,
             Some(&client),
             None,
-            false,
             &mut tally,
             &mut capabilities,
+            &mut steer,
         )
         .await
         .unwrap();
@@ -2784,16 +3062,18 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
             |_, _| panic!("initialization must not dispatch"),
         );
+        let mut reviewer = spec.clone();
+        reviewer.autonomy.review_only = true;
         let reply = dispatch_room_mcp(
             &mut session,
             &request,
             &engine,
-            spec.id,
+            &reviewer,
             Some(&client),
             None,
-            true,
             &mut tally,
             &mut capabilities,
+            &mut steer,
         )
         .await
         .unwrap();
@@ -2814,12 +3094,12 @@ mod tests {
             &mut session,
             &request,
             &engine,
-            spec.id,
+            &spec,
             Some(&client),
             None,
-            false,
             &mut tally,
             &mut capabilities,
+            &mut steer,
         )
         .await
         .unwrap();
@@ -2841,12 +3121,12 @@ mod tests {
             &mut session,
             &request,
             &engine,
-            spec.id,
+            &spec,
             Some(&client),
             None,
-            false,
             &mut tally,
             &mut capabilities,
+            &mut steer,
         )
         .await
         .unwrap();
@@ -2858,12 +3138,12 @@ mod tests {
             &mut session,
             &request,
             &engine,
-            spec.id,
+            &spec,
             Some(&client),
             None,
-            false,
             &mut tally,
             &mut capabilities,
+            &mut steer,
         )
         .await
         .unwrap();

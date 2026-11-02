@@ -118,6 +118,8 @@ const LISTINGS: &[Listing] = &[
     // cost input.
     Listing { model: "deepseek-v4.1-flash", rates: usd(300_000, 1_200_000, 6_000, 300_000), long: None, off_peak: true },
     Listing { model: "glm-5.3-flash", rates: usd(150_000, 500_000, 30_000, 150_000), long: None, off_peak: false },
+    // ollama.com/pricing on 2026-11-02, the same as MiniMax's own list price.
+    Listing { model: "minimax-m3.1-flash", rates: usd(150_000, 600_000, 15_000, 150_000), long: None, off_peak: false },
     Listing { model: "glm-5.3", rates: usd(1_400_000, 4_400_000, 260_000, 1_400_000), long: None, off_peak: false },
     Listing { model: "glm-5.2", rates: usd(1_400_000, 4_400_000, 260_000, 1_400_000), long: None, off_peak: false },
 ];
@@ -300,6 +302,9 @@ mod tests {
         let glm = ProviderRef::OpenAiCompatible { model: "glm-5.3-flash".into(), profile: "ollama".into() };
         assert!(!is_local(&glm));
         assert_eq!(list_cost(&glm, "glm-5.3-flash", &usage(1_000_000, 1_000_000, 1_000_000, 0), SATURDAY), Some(680_000));
+        // From benchmark 2: @iris's spend showed as unknown.
+        let minimax = ProviderRef::OpenAiCompatible { model: "minimax-m3.1-flash:cloud".into(), profile: "ollama".into() };
+        assert_eq!(list_cost(&minimax, "minimax-m3.1-flash:cloud", &usage(1_000_000, 1_000_000, 1_000_000, 0), MONDAY_AFTERNOON), Some(765_000));
         let flash = ProviderRef::OpenAiCompatible { model: "deepseek-v4.1-flash:1017".into(), profile: "ollama".into() };
         let out = usage(0, 1_000_000, 0, 0);
         assert_eq!(list_cost(&flash, "deepseek-v4.1-flash:1017", &out, MONDAY_PEAK), Some(600_000), "07:00 UTC is off-peak on Ollama");

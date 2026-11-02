@@ -191,9 +191,12 @@ impl Engine {
 
         let faulted = self
             .agents()
-            .filter(|spec| self.status(spec.id) == orgbot_proto::AgentStatus::Faulted)
+            .filter(|spec| {
+                self.status(spec.id) == orgbot_proto::AgentStatus::Faulted || self.is_signed_out(spec.id)
+            })
             .map(|spec| match self.halted_for(spec.id) {
                 Some(why) => format!("{} ({why})", spec.handle),
+                None if self.is_signed_out(spec.id) => format!("{} (signed out)", spec.handle),
                 None => spec.handle.clone(),
             })
             .collect();

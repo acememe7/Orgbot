@@ -42,15 +42,17 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
             continue;
         }
         out.push_str(&format!(
-            "  @{} — {}\n",
+            "  @{} — {} ({})\n",
             other.handle,
             if other.roles.is_empty() {
                 other.display_name.clone()
             } else {
                 other.roles.join("/")
             },
+            what_it_can_do(other),
         ));
     }
+    out.push_str(&format!("  You: {}\n", what_it_can_do(spec)));
 
     out.push_str(
         "\nRule loading for this OrgBots task:\n\
@@ -89,7 +91,10 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
          1. Take an open task with claim_task, then start_task.\n\
          2. Do the work. Record what you produce with add_artifact — the actual \
             deliverable goes there, not in a chat message.\n\
-         3. Call submit_for_review when it is done. You cannot approve your own \
+         3. Before submit_for_review, go through the task's brief and acceptance \
+            criteria one by one and check each is met, saying how in your \
+            verification note; a part you missed costs a whole review round. \
+            Then submit. You cannot approve your own \
             work; an inspector decides and may send it back. When it comes back, \
             fix each blocking finding as its suggestion says, or say in your \
             verification note why another way is better; the reviewers who \
@@ -132,8 +137,10 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
          - Reviewers describe fixes; they do not write them. Every blocking \
            finding says what is wrong, where, and the fix or workaround to try. \
            A bot that reviewed a task does not claim it, help write it or add \
-           work to it. Work sent back gets a second opinion from a reviewer on \
-           another model before it reaches the author; as that reviewer, say for \
+           work to it. Work rejected, or sent back a second time, gets a second \
+           opinion from a reviewer on another model before it reaches the \
+           author; a first send-back goes straight to the author. As that \
+           second reviewer, say for \
            each blocking finding whether it really blocks and why, and offer a \
            better workaround if you see one. When work you sent back returns, \
            check each fix you asked for and run the checks that show the \
@@ -217,6 +224,11 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            it, use fail_handoff with the reason instead of leaving it to run out.\n\
          - Post at most one room message per turn, a few sentences long. Put long \
            detail in an artifact or the verification note and refer to it.\n\
+         - Use what you are good at. If your tools can run sub-agents or parallel \
+           workers (Claude Code's Agent tool, Codex sub-agents), use them for \
+           independent pieces of your own work, such as several reviews waiting on \
+           you or separate files to check, and record one result. They work inside \
+           your own turn and copy.\n\
          - Do the work in the turn you describe it. A turn that only says what you will \
            do next changes nothing; after three such turns in a row on your work you are \
            no longer woken for it, and the coordinators are told.\n\n",
@@ -286,8 +298,8 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
          line and know where things stand. Write to the operator only when they \
          asked you something, need to act, or the work they asked for is \
          delivered; an update that needs nothing from them goes to the room, not \
-         to them. Never tell them nothing is needed while a question of yours \
-         waits for them.\n",
+         to them, and does not open with their name. Never tell them nothing is \
+         needed while a question of yours waits for them.\n",
     );
 
     #[cfg(target_os = "linux")]
@@ -328,6 +340,26 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
              goes to whichever builder is free. Consult the \
              other coordinator for a bounded decision when their expertise is needed; \
              do not require both leads to act on every message.\n",
+        );
+        // From benchmark 2, where a solo agent finished in a quarter of the
+        // room's time: one task ran 90 minutes, pieces clashed only when put
+        // together at the end, several bots re-ran the same suite, and a rule
+        // the coordinator added cost four bots an hour and a half.
+        out.push_str(
+            "\nThe room beats a single agent only by working in parallel, so plan for it:\n\
+             - Split work into tasks of about 10 to 20 minutes each, each with its own \
+               acceptance criteria, and run independent ones at the same time. When a \
+               holder says a task is running long, split what is left.\n\
+             - Name one integration owner, usually QA, in the plan. They put the pieces \
+               together and run the combined build as each piece lands, not only at the \
+               end, so clashes between pieces surface early.\n\
+             - One QA run per revision: the integration owner runs the full checks and \
+               records the result; others reuse it unless the revision changed or a \
+               check failed. Do not ask several bots to re-run the same suite.\n\
+             - Do not add acceptance criteria or checks the owner's goal did not ask \
+               for. If you think one is needed, ask the owner with ask_owner first; \
+               until they agree it is a note, never a gate. A criterion you add must \
+               already pass on the current build, or it waits for the owner.\n",
         );
         out.push_str(
             "\nWhen you decide a task's requirement no longer applies or must change, \
@@ -374,6 +406,41 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
         out.push_str("You do not perform the final submit. That is the coordinator's job.\n");
     }
     out
+}
+
+/// What a bot runs on and can do, so work goes to whoever can do it.
+///
+/// From benchmark 2: @ellis sent an eye check to @grok-quick as "the one who
+/// can view images", though Ellis and @quinn, both on Claude Code, could open
+/// images themselves.
+fn what_it_can_do(spec: &AgentSpec) -> String {
+    use orgbot_proto::agent::{CliKind, ProviderRef};
+    let mut parts = vec![match &spec.provider {
+        ProviderRef::CliAgent { cli, model, .. } => {
+            let runtime = match cli {
+                CliKind::Claude => "Claude Code",
+                CliKind::Codex => "Codex",
+                CliKind::Grok => "Grok CLI",
+                CliKind::OpenCode => "OpenCode",
+                CliKind::Antigravity => "Antigravity",
+            };
+            if model.trim().is_empty() { runtime.to_string() } else { format!("{runtime}, {model}") }
+        }
+        ProviderRef::Scripted { .. } => "scripted".to_string(),
+        other => format!("{} by API", other.model()),
+    }];
+    // Claude Code and Codex read image files with their own tools; the
+    // room's workspace tools read text only.
+    if matches!(
+        spec.provider,
+        ProviderRef::CliAgent { cli: CliKind::Claude | CliKind::Codex, .. }
+    ) {
+        parts.push("opens image files".to_string());
+    }
+    if spec.autonomy.review_only {
+        parts.push("review-only".to_string());
+    }
+    parts.join("; ")
 }
 
 /// Opens every board snapshot, so a later turn can recognise an earlier one.
@@ -1196,12 +1263,60 @@ mod tests {
         assert!(prompt.contains("Delivered work is finished: leave its files alone"));
         assert!(prompt.contains("start nothing new unless the owner asks"));
         assert!(prompt.contains("an update that needs nothing from them goes to the room"));
+        // From benchmark 2: progress opened "Aece, ..." and read as a message to the owner.
+        assert!(prompt.contains("does not open with their name"));
         assert!(!prompt.contains("`nothing needs you`, say that"));
         assert!(prompt.contains("set its required_role"));
         assert!(prompt.contains("such as `npm install`"));
         // Bots could not open their own screenshots: /tmp was gone after the
         // command and other paths were refused.
         assert!(prompt.contains("under .cache/orgbots/ in your copy"));
+        // From benchmark 2.
+        assert!(prompt.contains("tasks of about 10 to 20 minutes"));
+        assert!(prompt.contains("Name one integration owner"));
+        assert!(prompt.contains("One QA run per revision"));
+        assert!(prompt.contains("ask the owner with ask_owner first"));
+        assert!(prompt.contains("check each is met"));
+        assert!(prompt.contains("sub-agents"));
+    }
+
+    /// From benchmark 2: an eye check went to the "one who can view images"
+    /// while the bot asking could open images itself.
+    #[test]
+    fn the_roster_says_what_each_bot_runs_on_and_can_do() {
+        use orgbot_proto::agent::{AgentPolicy, CliKind};
+        let mut engine = Engine::new(RoomSpec {
+            name: "roster".into(),
+            goal: "ship".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        let cli = |cli| ProviderRef::CliAgent {
+            cli,
+            model: "claude-haiku-5-5".into(),
+            workdir: String::new(),
+            policy: AgentPolicy::ReadOnly,
+            mcp: true,
+            effort: String::new(),
+        };
+        let ellis = AgentSpec::new("ellis", "Ellis", cli(CliKind::Claude)).with_roles(["reviewer"]);
+        let mut astra = AgentSpec::new("astra", "Astra", cli(CliKind::Grok)).with_roles(["reviewer"]);
+        astra.autonomy.review_only = true;
+        let glm = AgentSpec::new(
+            "glm",
+            "GLM",
+            ProviderRef::OpenAiCompatible { model: "glm-5.3-flash".into(), profile: "ollama".into() },
+        )
+        .with_roles(["qa"]);
+        for spec in [&ellis, &astra, &glm] {
+            engine.apply(orgbot_engine::Command::JoinAgent { spec: Box::new(spec.clone()) }).unwrap();
+        }
+        let prompt = system_prompt(&engine, &ellis);
+        assert!(prompt.contains("@astra — reviewer (Grok CLI, claude-haiku-5-5; review-only)"), "{prompt}");
+        assert!(prompt.contains("@glm — qa (glm-5.3-flash by API)"), "{prompt}");
+        assert!(prompt.contains("You: Claude Code, claude-haiku-5-5; opens image files"), "{prompt}");
     }
 
     #[test]

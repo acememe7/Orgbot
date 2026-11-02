@@ -46,7 +46,8 @@ pub struct Workspace {
     /// work is genuinely serial.
     ///
     /// Every clone of a `Workspace` shares this, which is what makes it a
-    /// room-wide queue rather than a per-bot one.
+    /// room-wide queue rather than a per-bot one. A host that serves bots
+    /// side by side ([`WorkspaceCapabilities::concurrent`]) skips it.
     pub gate: Arc<tokio::sync::Mutex<()>>,
     capabilities: WorkspaceCapabilities,
 }
@@ -61,6 +62,12 @@ pub struct WorkspaceCapabilities {
     /// Commands run in a protected copy whose home is private, so the
     /// computer's own home, and the CLI settings in it, are out of sight.
     pub private_home: bool,
+    /// The host serves different bots' calls side by side and keeps each
+    /// bot's own calls in order, so the room-wide queue is not needed.
+    ///
+    /// From benchmark 2: through the one queue, a bot's file reads averaged
+    /// 35 seconds and its writes 64, behind other bots' builds.
+    pub concurrent: bool,
 }
 
 impl Workspace {
@@ -75,6 +82,7 @@ impl Workspace {
                 git_read: false,
                 verification: false,
                 private_home: false,
+                concurrent: false,
             },
         }
     }
@@ -227,7 +235,11 @@ impl Workspace {
         // Wait for the device to be free before starting the clock, so a bot
         // queued behind a long build still gets its own full allowance rather
         // than spending it in the queue.
-        let _turn = self.gate.lock().await;
+        let _turn = if self.capabilities.concurrent {
+            None
+        } else {
+            Some(self.gate.lock().await)
+        };
 
         let (reply, result) = oneshot::channel();
         let call = WorkspaceCall {
@@ -364,6 +376,7 @@ mod tests {
                 git_read: true,
                 verification: false,
                 private_home: false,
+                concurrent: false,
             },
         );
         let names: Vec<_> = workspace
@@ -412,6 +425,7 @@ mod tests {
                 git_read: false,
                 verification: true,
                 private_home: false,
+                concurrent: false,
             },
         );
         let names: Vec<_> = workspace

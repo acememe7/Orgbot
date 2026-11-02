@@ -246,6 +246,20 @@ class WorkspaceTests(unittest.TestCase):
         again = workspace._apply(os.fspath(self.state), "dev", review_token=None)
         self.assertTrue(again["ok"], "no conflict is left behind")
 
+    def test_a_capture_merged_into_the_project_root_is_named(self):
+        # From benchmark 2: six preview screenshots reached the project root.
+        work = self.prepare()
+        (work / "preview-rain.png").write_bytes(b"png")
+        (work / "src/icon.png").write_bytes(b"png")
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
+            result = workspace._apply(os.fspath(self.state), "dev", review_token=None)
+        self.assertTrue(result["ok"], result)
+        self.assertIn("preview-rain.png", result["note"])
+        self.assertIn(".cache/orgbots/", result["note"])
+        self.assertNotIn("src/icon.png", result["note"], "an image inside the project's folders is its own")
+        again = workspace._apply(os.fspath(self.state), "dev", review_token=None)
+        self.assertNotIn("note", again, "named once, when it lands")
+
     def test_setting_conflicts_aside_cannot_be_redirected_by_a_link_in_the_bots_home(self):
         work = self.prepare()
         (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")

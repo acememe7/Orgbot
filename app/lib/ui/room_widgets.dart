@@ -68,6 +68,7 @@ class ActivityRail extends StatelessWidget {
                 return _BotRow(
                   entry: entry,
                   doing: store.doingOf(entry.agent.id),
+                  store: canAnswer ? store : null,
                 );
               },
             ),
@@ -165,12 +166,69 @@ class ActivityRail extends StatelessWidget {
 }
 
 class _BotRow extends StatelessWidget {
-  const _BotRow({required this.entry, required this.doing});
+  const _BotRow({required this.entry, required this.doing, this.store});
 
   final BotActivity entry;
 
   /// What the room says the bot is doing; see [RoomStore.doingOf].
   final String doing;
+
+  /// The room, when the person viewing it runs it and may pause a bot.
+  final RoomStore? store;
+
+  /// Pause, resume or remove this one bot.
+  ///
+  /// From benchmark 2: the owner asked to stop one bot running long turns
+  /// with no task, and the room could only stop every bot or none.
+  Widget _actions(BuildContext context, RoomStore store) {
+    final handle = '@${entry.agent.handle}';
+    final paused = doing == 'paused';
+    return PopupMenuButton<String>(
+      tooltip: 'Bot actions',
+      icon: const Icon(Icons.more_vert, size: 18),
+      onSelected: (action) async {
+        switch (action) {
+          case 'pause':
+            store.pauseBot(entry.agent.id);
+          case 'resume':
+            store.resumeBot(entry.agent.id);
+          case 'remove':
+            final sure = await showDialog<bool>(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: Text('Remove $handle from this run?'),
+                content: Text(
+                  'Its turn ends now and its work goes back to the board. '
+                  'To have it back, reopen the room. To keep it for later, '
+                  'pause it instead.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('Keep it'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: Text('Remove $handle'),
+                  ),
+                ],
+              ),
+            );
+            if (sure == true) store.removeBot(entry.agent.id);
+        }
+      },
+      itemBuilder: (context) => [
+        if (paused)
+          PopupMenuItem(value: 'resume', child: Text('Resume $handle'))
+        else
+          PopupMenuItem(
+            value: 'pause',
+            child: Text('Pause $handle and free its work'),
+          ),
+        PopupMenuItem(value: 'remove', child: Text('Remove $handle')),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -253,6 +311,8 @@ class _BotRow extends StatelessWidget {
                   ),
                 ),
               ),
+              if (store case final store? when doing != 'offline')
+                _actions(context, store),
             ],
           ),
           if (entry.taskTitle != null) ...[
@@ -460,6 +520,7 @@ class _BotRow extends StatelessWidget {
       'between turns' => (Colors.blueGrey, 'between turns'),
       'faulted' => (Colors.red, 'faulted'),
       'offline' => (Colors.grey, 'offline'),
+      'paused' => (Colors.grey, 'paused by you'),
       _ => (Colors.green, 'idle'),
     };
   }

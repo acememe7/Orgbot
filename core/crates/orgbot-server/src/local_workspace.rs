@@ -51,6 +51,14 @@ pub struct LocalWorkspaceHost {
     /// The removals each bot has already been told await the owner.
     reported_removals:
         std::sync::Mutex<std::collections::HashMap<orgbot_proto::AgentId, std::collections::BTreeSet<String>>>,
+    /// Each bot's calls, one at a time in the order it made them. Different
+    /// bots' calls run side by side: each works in its own copy, and the
+    /// helper locks the project itself while it merges a copy in.
+    call_lines: std::sync::Mutex<
+        std::collections::HashMap<orgbot_proto::AgentId, Arc<tokio::sync::Mutex<()>>>,
+    >,
+    /// Landing and pushing move the owner's branches: one at a time.
+    branch_moves: tokio::sync::Mutex<()>,
 }
 
 impl LocalWorkspaceHost {
@@ -98,6 +106,7 @@ impl LocalWorkspaceHost {
             git_read: true,
             verification,
             private_home: true,
+            concurrent: true,
         };
         let mut runtime_spec = spec;
         runtime_spec.root = root.display().to_string();
@@ -161,6 +170,8 @@ impl LocalWorkspaceHost {
             committed_attachment_ids,
             handles: Default::default(),
             reported_removals: Default::default(),
+            call_lines: Default::default(),
+            branch_moves: Default::default(),
         })
     }
 
@@ -190,6 +201,12 @@ impl LocalWorkspaceHost {
         status
     }
 
+    /// Serve every bot at once, each bot's own calls in order.
+    ///
+    /// From benchmark 2: served one call at a time for the whole room, a
+    /// bot's file reads averaged 35 seconds and its writes 64, queued behind
+    /// other bots' builds and test runs; one 111-minute turn spent 86 of them
+    /// waiting on the workspace.
     #[cfg(target_os = "linux")]
     async fn serve(self: Arc<Self>, mut rx: mpsc::Receiver<WorkspaceCall>) {
         while let Some(call) = rx.recv().await {
@@ -197,26 +214,61 @@ impl LocalWorkspaceHost {
             if call.reply.is_closed() {
                 continue;
             }
-            let host = Arc::clone(&self);
-            if matches!(call.name.as_str(), "workspace_run" | "workspace_verify") {
-                let outcome = self
-                    .run(call.agent, &call.name, &call.arguments, call.grants)
-                    .await;
-                let _ = call.reply.send(outcome);
-                continue;
-            }
-            let agent = call.agent;
-            let name = call.name;
-            let arguments = call.arguments;
-            let outcome =
-                tokio::task::spawn_blocking(move || host.handle_agent(agent, &name, &arguments))
-                    .await
-                    .unwrap_or_else(|e| ToolOutcome {
-                        content: format!("Local workspace worker failed: {e}"),
-                        is_error: true,
-                    });
-            let _ = call.reply.send(outcome);
+            tokio::spawn(Arc::clone(&self).serve_call(call));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn call_line(&self, agent: orgbot_proto::AgentId) -> Arc<tokio::sync::Mutex<()>> {
+        let mut lines = self.call_lines.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Arc::clone(lines.entry(agent).or_default())
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn serve_call(self: Arc<Self>, call: WorkspaceCall) {
+        let WorkspaceCall { agent, name, arguments, grants, reply } = call;
+        let queued = Instant::now();
+        let line = self.call_line(agent);
+        let _own_turn = line.lock().await;
+        let _branches = if matches!(name.as_str(), "workspace_land_commits" | "workspace_push_commits") {
+            Some(self.branch_moves.lock().await)
+        } else {
+            None
+        };
+        if reply.is_closed() {
+            return;
+        }
+        let waited = queued.elapsed();
+        let started = Instant::now();
+        let mut outcome = if matches!(name.as_str(), "workspace_run" | "workspace_verify") {
+            self.run(agent, &name, &arguments, grants).await
+        } else {
+            let host = Arc::clone(&self);
+            let tool = name.clone();
+            tokio::task::spawn_blocking(move || host.handle_agent(agent, &tool, &arguments))
+                .await
+                .unwrap_or_else(|e| ToolOutcome {
+                    content: format!("Local workspace worker failed: {e}"),
+                    is_error: true,
+                })
+        };
+        // Where a slow call's time went: waiting for the bot's own earlier
+        // call, or the work itself (copy refresh, merge, the command).
+        tracing::info!(
+            %agent,
+            tool = %name,
+            waited_ms = waited.as_millis() as u64,
+            took_ms = started.elapsed().as_millis() as u64,
+            error = outcome.is_error,
+            "workspace call"
+        );
+        if waited >= Duration::from_secs(5) {
+            outcome.content.push_str(&format!(
+                "\n[OrgBots] This call waited {}s for your earlier workspace call to finish.",
+                waited.as_secs()
+            ));
+        }
+        let _ = reply.send(outcome);
     }
 
     /// Keep each bot's handle with the copies it already has, now rather
@@ -453,6 +505,7 @@ impl LocalWorkspaceHost {
                     command.env_remove(name);
                 }
             }
+            let began = Instant::now();
             let mut child = command.spawn().map_err(|e| e.to_string())?;
             let stdout = child.stdout.take().expect("piped stdout");
             let stderr = child.stderr.take().expect("piped stderr");
@@ -466,6 +519,7 @@ impl LocalWorkspaceHost {
             }
             let output = out.await.map_err(|e| e.to_string())??;
             let error = err.await.map_err(|e| e.to_string())??;
+            let seconds_ran = began.elapsed().as_secs_f64();
             let success = matches!(status, Ok(Ok(code)) if code.success());
             // A failure with no output said nothing; the exit code at least
             // says how it ended.
@@ -496,8 +550,12 @@ impl LocalWorkspaceHost {
             };
             let integration = integration.map(|status| self.only_new_removals(agent, status));
             Ok(ToolOutcome {
+                // How long the command itself ran, apart from refreshing and
+                // merging the copy. From benchmark 2: no bot could say where
+                // a 90-minute turn had gone.
                 content: serde_json::json!({"stdout":output,"stderr":error,"timed_out":timed_out,
-                "success":success,"exit_code":exit_code,"integration":integration})
+                "success":success,"exit_code":exit_code,"seconds":(seconds_ran * 10.0).round() / 10.0,
+                "integration":integration})
                 .to_string(),
                 is_error: !success,
             })
@@ -1891,6 +1949,59 @@ mod tests {
         let _ = fs::remove_dir_all(&state);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_bots_long_command_does_not_hold_up_another_bots_files() {
+        // From benchmark 2: served one call at a time for the room, file reads
+        // averaged 35 seconds behind other bots' builds.
+        let root = temp_dir();
+        let state = temp_dir();
+        fs::write(root.join("notes.txt"), "shared").unwrap();
+        let host = Arc::new(protected_host(&root, &state, true));
+        let (tx, rx) = mpsc::channel(8);
+        let server = tokio::spawn(Arc::clone(&host).serve(rx));
+        let ask = |agent: AgentId, name: &str, arguments: Value| {
+            let (reply, result) = tokio::sync::oneshot::channel();
+            let call = WorkspaceCall {
+                agent,
+                name: name.into(),
+                arguments,
+                grants: false.into(),
+                reply,
+            };
+            (call, result)
+        };
+        let (builder, reader) = (AgentId::new(), AgentId::new());
+        // Each copy exists before the clock starts.
+        for agent in [builder, reader] {
+            let (call, result) = ask(agent, "workspace_list", json!({"path": "."}));
+            tx.send(call).await.unwrap();
+            assert!(!result.await.unwrap().is_error);
+        }
+        let started = Instant::now();
+        let (call, long) = ask(builder, "workspace_run", json!({"command": "sleep 4; printf built"}));
+        tx.send(call).await.unwrap();
+        let (call, own_read) = ask(builder, "workspace_read", json!({"path": "notes.txt"}));
+        tx.send(call).await.unwrap();
+        let (call, read) = ask(reader, "workspace_read", json!({"path": "notes.txt"}));
+        tx.send(call).await.unwrap();
+        let read = read.await.unwrap();
+        assert!(!read.is_error, "{}", read.content);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "another bot's read waited {:?} for the build",
+            started.elapsed()
+        );
+        // A bot's own calls stay in the order it made them.
+        let own_read = own_read.await.unwrap();
+        assert!(!own_read.is_error, "{}", own_read.content);
+        assert!(started.elapsed() >= Duration::from_secs(4), "the bot's own read overtook its build");
+        assert!(long.await.unwrap().content.contains("built"));
+        drop(tx);
+        server.await.unwrap();
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&state);
+    }
+
     #[tokio::test]
     async fn protected_api_commands_preserve_originals_and_bound_runtime_and_output() {
         let root = temp_dir();
@@ -1914,6 +2025,7 @@ mod tests {
         let result: Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(result["integration"]["pending_delete"], json!(["keep.txt"]));
         assert_eq!(result["exit_code"], 0);
+        assert!(result["seconds"].as_f64().is_some(), "how long the command ran: {result}");
         // From the benchmark room: bots write bash, and /bin/sh refused it.
         let bash = host
             .run(
@@ -2293,6 +2405,7 @@ mod tests {
                 attachment_import: false,
                 verification: false,
                 private_home: false,
+                concurrent: false,
             },
         )
         .await;
@@ -2375,6 +2488,7 @@ mod tests {
                 git_read: true,
                 verification: false,
                 private_home: false,
+                concurrent: false,
             },
         );
         let host_task = tokio::spawn(serve_files(host, rx));

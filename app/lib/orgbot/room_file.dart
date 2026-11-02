@@ -159,7 +159,7 @@ RoomFile buildRoomFile(
       ..writeln(
         'persona = ' +
             _s(
-              '${_persona(bot, role)}\n\nThe human operating this room is ${userName.trim().isEmpty ? 'You' : userName.trim()}. Address them by that name.\n${userProfile.trim().isEmpty ? '' : 'Their self-described profile and preferences:\n${userProfile.trim()}'}\n${room.memory.trim().isEmpty ? '' : 'Pinned room memory from the owner:\n${room.memory.trim()}'}',
+              '${_persona(bot, role)}\n\nThe human operating this room is ${userName.trim().isEmpty ? 'You' : userName.trim()}. Use that name when you write to them, which is only when they asked you something, need to act, or their work is delivered. Progress goes to the room and is not addressed to them.\n${userProfile.trim().isEmpty ? '' : 'Their self-described profile and preferences:\n${userProfile.trim()}'}\n${room.memory.trim().isEmpty ? '' : 'Pinned room memory from the owner:\n${room.memory.trim()}'}',
             ),
       );
 
@@ -285,6 +285,9 @@ RoomFile buildRoomFile(
       buffer.writeln(
         'model = ' + _s(bot.model.isEmpty ? 'deepseek-chat' : bot.model),
       );
+      if (bot.provider.apiEffortLevels.contains(bot.effort)) {
+        buffer.writeln('effort = ' + _s(bot.effort));
+      }
     } else {
       buffer
         ..writeln('[bots.provider]')

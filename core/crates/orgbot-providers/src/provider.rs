@@ -104,6 +104,47 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
     fn start_fresh_session(&self) {}
 }
 
+/// A provider whose every turn runs at the bot's own effort level.
+#[derive(Debug)]
+pub struct WithEffort {
+    inner: std::sync::Arc<dyn Provider>,
+    effort: crate::types::Effort,
+}
+
+impl WithEffort {
+    pub fn new(inner: std::sync::Arc<dyn Provider>, effort: crate::types::Effort) -> Self {
+        Self { inner, effort }
+    }
+}
+
+#[async_trait]
+impl Provider for WithEffort {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn complete(
+        &self,
+        mut request: CompletionRequest,
+        sink: Option<mpsc::Sender<StreamEvent>>,
+    ) -> Result<CompletionResponse> {
+        request.effort = Some(self.effort);
+        self.inner.complete(request, sink).await
+    }
+
+    fn last_turn_activity(&self) -> Option<usize> {
+        self.inner.last_turn_activity()
+    }
+
+    fn last_pending_removals(&self) -> Option<usize> {
+        self.inner.last_pending_removals()
+    }
+
+    fn start_fresh_session(&self) {
+        self.inner.start_fresh_session()
+    }
+}
+
 /// Emit a stream event, ignoring a closed receiver.
 ///
 /// A dropped UI subscriber must not abort a turn that is otherwise fine, so

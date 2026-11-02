@@ -558,6 +558,9 @@ struct Episode {
     antigravity_result_seen: bool,
     /// Images the CLI generated this turn, in its private home.
     generated: Vec<PathBuf>,
+    /// The turn ended signed out, and the owner's own sign-in, which differs
+    /// from the bot's, has been copied in to take the turn again with.
+    took_owner_sign_in: bool,
     /// Tools the CLI used on its own this turn: commands, edits, searches,
     /// room and other connected tools.
     tool_uses: usize,
@@ -664,6 +667,24 @@ impl Provider for AgentCliProvider {
                 .run_episode(
                     &fresh_prompt,
                     None,
+                    &sink,
+                    &mut episode,
+                    claude_config.as_deref(),
+                    codex_home.as_deref(),
+                )
+                .await;
+        }
+        // From benchmark 2: three Claude bots failed "OAuth session expired"
+        // two seconds after another bot's refresh replaced the sign-in they
+        // shared. With the owner's newer sign-in in hand, the turn is taken
+        // again once rather than faulting.
+        if episode.took_owner_sign_in && matches!(result, Err(ProviderError::MissingCredential { .. })) {
+            tracing::warn!(cli = self.cli.binary(), "signed out with a newer sign-in waiting; taking the turn again");
+            episode = Episode::default();
+            result = self
+                .run_episode(
+                    &prompt,
+                    resumed.as_deref(),
                     &sink,
                     &mut episode,
                     claude_config.as_deref(),
@@ -1055,8 +1076,20 @@ impl AgentCliProvider {
         })
         .await;
 
+        // A turn that ended signed out holds a sign-in that no longer works,
+        // however new its file. From benchmark 2: handed back over the
+        // owner's, such a copy stranded the owner and every other Claude bot.
+        let signed_out = match &outcome {
+            Ok((_, stderr_bytes, status)) => {
+                let refused = |error: Option<ProviderError>| matches!(error, Some(ProviderError::MissingCredential { .. }));
+                refused(episode.structured_error.as_deref().map(|message| classify_cli_error(self.cli, message)))
+                    || (status.as_ref().is_ok_and(|status| !status.success())
+                        && refused(classify_cli_failure(self.cli, &String::from_utf8_lossy(stderr_bytes))))
+            }
+            Err(_) => false,
+        };
         #[cfg(target_os = "linux")]
-        let cleanup_private_profile = || -> Result<()> {
+        let cleanup_private_profile = |episode: &mut Episode| -> Result<()> {
             if self.guard.is_some() {
                 if let Some(home) = private_home.as_deref() {
                     match self.cli {
@@ -1073,9 +1106,15 @@ impl AgentCliProvider {
                         _ => {}
                     }
                     // A sign-in the CLI refreshed this turn goes back to the
-                    // owner's file. Never fatal: the turn's work stands.
+                    // owner's file. Never fatal: the turn's work stands. One
+                    // that was refused is replaced by the owner's instead.
                     if let Some(owner) = self.credential_owner_home() {
-                        if let Err(error) =
+                        if signed_out {
+                            match crate::workspace_guard::take_owner_sign_in(home, &owner, sign_in_dir(self.cli)) {
+                                Ok(took) => episode.took_owner_sign_in = took,
+                                Err(error) => tracing::warn!(%error, "could not take the owner's sign-in"),
+                            }
+                        } else if let Err(error) =
                             crate::workspace_guard::write_back_credentials_to(home, &owner)
                         {
                             tracing::warn!(%error, "could not hand a refreshed sign-in back");
@@ -1093,7 +1132,7 @@ impl AgentCliProvider {
         }
         #[cfg(target_os = "linux")]
         if outcome.is_ok() {
-            cleanup_private_profile()?;
+            cleanup_private_profile(episode)?;
         }
 
         match outcome {
@@ -1191,7 +1230,7 @@ impl AgentCliProvider {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 #[cfg(target_os = "linux")]
-                cleanup_private_profile()?;
+                cleanup_private_profile(episode)?;
                 Err(ProviderError::Process {
                     provider: self.cli.label().to_string(),
                     detail: format!("timed out after {}s", self.timeout.as_secs()),
@@ -1975,6 +2014,17 @@ fn classify_cli_failure(cli: CliKind, message: &str) -> Option<ProviderError> {
             cli.binary()
         ),
     })
+}
+
+/// The folder in a home where `cli` keeps its sign-in, or empty for a CLI
+/// whose sign-in OrgBots does not keep in step.
+fn sign_in_dir(cli: CliKind) -> &'static str {
+    match cli {
+        CliKind::Claude => ".claude",
+        CliKind::Codex => ".codex",
+        CliKind::Grok => ".grok",
+        CliKind::OpenCode | CliKind::Antigravity => "",
+    }
 }
 
 /// Token accounting from either vocabulary. Every field is optional so an
@@ -4269,6 +4319,82 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
         outcome.unwrap();
         assert_eq!(episode.text.trim(), "lend-ok");
         assert_eq!(renewed.as_deref(), Some("renewed"), "a renewed sign-in reaches the owner's copy");
+    }
+
+    /// From benchmark 2: one Claude bot's refresh replaced the sign-in the
+    /// others shared, they failed "OAuth session expired", and a refused copy
+    /// handed back over the owner's stranded everyone. A signed-out turn now
+    /// leaves the owner's sign-in alone and is taken again with it, once.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_signed_out_turn_never_hands_back_its_sign_in_and_retries_with_the_owners() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "orgbot-signed-out-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let source = root.join("original-home");
+        let project = root.join("project");
+        let state = root.join("state/workspaces");
+        std::fs::create_dir_all(source.join(".codex")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let owner_auth = source.join(".codex/auth.json");
+        std::fs::write(&owner_auth, r#"{"tokens":"stale"}"#).unwrap();
+
+        // Signs in only with the owner's renewed token; otherwise its refresh
+        // fails, and it rewrites its own copy as a failed refresh does.
+        let binary = project.join("fake-codex");
+        write_executable_fixture(
+            &binary,
+            "#!/bin/sh
+             if grep -q renewed \"$CODEX_HOME/auth.json\"; then
+               printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"signed-in\"}}'
+               exit 0
+             fi
+             printf '{\"tokens\":\"refused\"}' > \"$CODEX_HOME/auth.json\"
+             echo 'Error: token expired, please log in' >&2
+             exit 1
+",
+        )
+        .unwrap();
+        let mut provider = AgentCliProvider::new(
+            CliKind::Codex,
+            "fixture-model",
+            project.to_string_lossy(),
+            AgentPolicy::WorkspaceWrite,
+            false,
+        )
+        .unwrap();
+        provider.bin = binary.to_string_lossy().into_owned();
+        provider.timeout = Duration::from_secs(10);
+        provider = provider.with_workspace_guard_project(state.clone(), "fake-agent".into(), project.clone());
+        provider.guard.as_mut().unwrap().profile_source = Some(source.clone());
+        let ask = || CompletionRequest::new("fixture-model", "", vec![Turn::user("work")]);
+
+        let first = provider.complete(ask(), None).await;
+        assert!(matches!(first, Err(ProviderError::MissingCredential { .. })), "{first:?}");
+        assert_eq!(
+            std::fs::read_to_string(&owner_auth).unwrap(),
+            r#"{"tokens":"stale"}"#,
+            "a refused sign-in never replaces the owner's"
+        );
+
+        // The owner's sign-in is renewed, but its file is older than the
+        // bot's refused copy, so only a signed-out turn takes it.
+        std::fs::write(&owner_auth, r#"{"tokens":"renewed"}"#).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&owner_auth)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
+        let second = provider.complete(ask(), None).await;
+        let _ = std::fs::remove_dir_all(&root);
+        let second = second.expect("taken again with the owner's sign-in");
+        assert_eq!(second.text().trim(), "signed-in");
     }
 
     #[cfg(target_os = "linux")]

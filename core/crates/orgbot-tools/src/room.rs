@@ -624,8 +624,9 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
              check yourself is minor, and anything stricter than the bar is a note. \
              Every major or critical finding says what is wrong, where, and in \
              `suggestion` the fix or workaround the author should try: describe it, do \
-             not write it. Work you send back gets a second opinion from another \
-             reviewer before it goes to the author. When you are that second reviewer, \
+             not write it. Work you reject, or send back a second time, gets a second \
+             opinion from another reviewer before it goes to the author; a first \
+             send-back goes straight to the author. When you are that second reviewer, \
              or the first reviewer answering one, give `responses` instead: for each \
              finding in question, whether it really blocks the work, why, and a better \
              workaround if you see one. When work comes back from a round you \
@@ -1998,6 +1999,7 @@ fn amend_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome
         }
         None => None,
     };
+    let criteria_changed = acceptance_criteria.is_some();
     match engine.apply(Command::AmendTask {
         by: actor,
         task,
@@ -2006,6 +2008,14 @@ fn amend_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome
         depends_on,
         reason,
     }) {
+        // From benchmark 2: a timing rule the coordinator added, which the
+        // owner never asked for, was rewritten five times and held four bots
+        // for an hour and a half.
+        Ok(_) if criteria_changed => ToolOutcome::ok(
+            "Amended. Reviewers now judge the task against what it asks for now, and its holder has been told. \
+             A criterion the owner's goal did not ask for must already pass on the current build, or wait for \
+             the owner: ask them with ask_owner before it holds any work.",
+        ),
         Ok(_) => ToolOutcome::ok(
             "Amended. Reviewers now judge the task against what it asks for now, and its holder has been told.",
         ),

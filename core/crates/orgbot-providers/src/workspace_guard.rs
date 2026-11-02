@@ -1431,6 +1431,27 @@ pub fn write_back_credentials_to(private_home: &Path, owner_home: &Path) -> Resu
     Ok(())
 }
 
+/// After a turn the CLI ended signed out, replace the bot's copy of its
+/// sign-in with the owner's, whatever the files' times say: the bot's copy
+/// was refused, and a failed refresh may have rewritten it newer. Returns
+/// whether the owner held a different, real sign-in to take.
+pub fn take_owner_sign_in(private_home: &Path, owner_home: &Path, cli_dir: &str) -> Result<bool, String> {
+    let mut took = false;
+    for file in credential_files(cli_dir) {
+        let source = owner_home.join(cli_dir).join(file);
+        let copy = private_home.join(cli_dir).join(file);
+        if regular_file_mtime(&source).is_none() || holds_sign_in(&source).is_none() {
+            continue;
+        }
+        if std::fs::read(&source).ok() == std::fs::read(&copy).ok() {
+            continue;
+        }
+        replace_private_file(&source, &copy)?;
+        took = true;
+    }
+    Ok(took)
+}
+
 fn copy_file_if_missing(from: &Path, to: &Path, budget: &mut CopyBudget) -> Result<(), String> {
     use std::io::{Read, Write};
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
