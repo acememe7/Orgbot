@@ -3182,7 +3182,7 @@ impl Engine {
         let answer = Answer {
             chosen: allow.into(),
             note: format!(
-                "Approved automatically: this room is in {} mode and the request is rated {}.",
+                "Approved automatically: this room is in {} mode, which lets bots go ahead with requests rated {}.",
                 mode.label(),
                 risk.as_str()
             ),
@@ -3260,6 +3260,23 @@ impl Engine {
             });
         }
         self.require_assignee(task, by)?;
+        // From the live room: a coordinator asked to land the project it had
+        // just delivered. Full write mode granted it, but a delivered task was
+        // not one it could land for, so every retry said the owner had been
+        // asked and no card ever reached them. A landing is asked for only
+        // when its answer can be used.
+        let reviewed = self.landing_after_review(task, by);
+        if !reviewed && !self.tasks_open_to_access(by).any(|open| open.id == task) {
+            let record = self.require_task(task)?;
+            return Err(EngineError::NotReady {
+                task,
+                reason: format!(
+                    "\"{}\" is {}. Commits can be landed for a task you are working on, with nothing it depends on unfinished, or for one that passed review",
+                    record.title,
+                    record.state.as_str()
+                ),
+            });
+        }
         let action = land_action(&branch, &base, &head);
         if self.access_granted(task, by, &action) {
             return Ok(Vec::new());
@@ -3289,6 +3306,12 @@ impl Engine {
         proposed.envelope.allowed = vec![action];
         proposed.envelope.environment = server_access_scope(task);
         proposed.task = Some(task);
+        if reviewed && !self.room.spec.access.mode.approves(orgbot_proto::room::Risk::Risky) {
+            // Reviewed work has nothing left to wait: the owner is asked and
+            // the bot hears the answer, with the task left as it is.
+            self.refuse_second_question(by, task, &proposed.because)?;
+            return self.put_to_owner(by, None, proposed);
+        }
         self.ask_or_grant(by, task, &title, proposed, LAND_COMMITS_ALLOW, orgbot_proto::room::Risk::Risky)
     }
 
@@ -3366,8 +3389,17 @@ impl Engine {
     /// Whether the owner has let `agent` land exactly these commits onto
     /// `branch` for `task`, which it must still be working.
     pub fn landing_approved(&self, task: TaskId, agent: AgentId, branch: &str, base: &str, head: &str) -> bool {
-        self.tasks_open_to_access(agent).any(|open| open.id == task)
+        (self.landing_after_review(task, agent) || self.tasks_open_to_access(agent).any(|open| open.id == task))
             && self.access_granted(task, agent, &land_action(branch, base, head))
+    }
+
+    /// Whether `task` passed review and `agent` still holds it, so the commits
+    /// that carry it may be landed though nothing more is worked on it.
+    fn landing_after_review(&self, task: TaskId, agent: AgentId) -> bool {
+        self.specs.get(&agent).is_some_and(|spec| !spec.autonomy.review_only)
+            && self.tasks.get(&task).is_some_and(|record| {
+                record.assignee == Some(agent) && matches!(record.state, TaskState::Approved | TaskState::Submitted)
+            })
     }
 
     /// Change what `task` asks for, on a coordinator's decision.

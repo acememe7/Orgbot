@@ -37,13 +37,17 @@ fn provider() -> ProviderRef {
 }
 
 fn fixture() -> Fixture {
+    fixture_with(Default::default())
+}
+
+fn fixture_with(access: orgbot_proto::room::RoomAccess) -> Fixture {
     let mut engine = Engine::new(RoomSpec {
         name: "release".into(),
         goal: "ship the release notes".into(),
         roster: vec![],
         completion: CompletionRule::AllTasksTerminal,
         limits: RoomLimits::default(),
-        access: Default::default(),
+        access,
     });
 
     let coordinator = AgentSpec::new("lead", "Lead", provider())
@@ -3526,6 +3530,51 @@ fn landing_commits_needs_the_owners_yes_for_exactly_those_commits() {
     assert!(matches!(not_holding, EngineError::NotAssignee { .. }), "only the task's holder may ask: {not_holding:?}");
     f.reject(request(worker, "../main", &head));
     f.reject(request(worker, "main", &base));
+}
+
+/// From the live room: a coordinator asked to land the project it had just
+/// delivered. Full write mode granted it, nothing landed, and every retry was
+/// told the owner had been asked, with no card waiting for them.
+#[test]
+fn reviewed_work_can_be_landed_and_a_landing_that_cannot_be_used_is_refused() {
+    use orgbot_proto::decision::LAND_COMMITS_ALLOW;
+    use orgbot_proto::room::{AccessMode, RoomAccess};
+    let (base, head) = ("a".repeat(40), "b".repeat(40));
+    let request = |by: AgentId, task: TaskId| Command::RequestLanding {
+        by,
+        task,
+        branch: "main".into(),
+        base: "a".repeat(40),
+        head: "b".repeat(40),
+        commits: vec!["bbbbbbb pages: the five concepts".into()],
+        changes: "12 files changed".into(),
+        checks: None,
+        reason: "the delivered project".into(),
+    };
+    for mode in [AccessMode::FullWrite, AccessMode::Approval] {
+        let mut f = fixture_with(RoomAccess { mode, ..Default::default() });
+        let worker = f.worker;
+        let task = f.open_task("build the five pages", None);
+        f.deliver(task, worker);
+        let asked = f.apply(request(worker, task));
+        if mode == AccessMode::Approval {
+            assert_eq!(f.state(task), TaskState::Submitted, "delivered work is not put back to wait");
+            assert!(!f.engine.landing_approved(task, worker, "main", &base, &head), "not before the owner answers");
+            answer(&mut f, asked_decision(&asked), LAND_COMMITS_ALLOW);
+        }
+        assert!(f.engine.landing_approved(task, worker, "main", &base, &head), "{mode:?}: the answer can be used");
+        assert!(f.apply(request(worker, task)).is_empty(), "{mode:?}: nothing is asked twice");
+    }
+
+    // Work in review is refused in every mode, so no grant waits unused.
+    let mut f = fixture_with(RoomAccess { mode: AccessMode::FullWrite, ..Default::default() });
+    let worker = f.worker;
+    let task = f.start_task("release notes", worker);
+    let artifact = f.add_artifact(task, worker);
+    f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![artifact] });
+    let refused = f.reject(request(worker, task));
+    assert!(refused.to_string().contains("is in_review") && refused.to_string().contains("passed review"), "{refused}");
+    assert!(f.engine.decisions().decisions.is_empty(), "nothing granted or asked");
 }
 
 /// From the live room: a reviewer sent a landing back because its checks ran
