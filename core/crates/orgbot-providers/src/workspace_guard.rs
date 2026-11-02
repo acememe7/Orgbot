@@ -157,6 +157,11 @@ pub fn update_private_agent_config(
     ));
     if cli == orgbot_proto::agent::CliKind::Codex {
         contents.push_str("default_tools_approval_mode = \"approve\"\n");
+        // Room tools may run a workspace command for up to 30 minutes plus
+        // its setup. From the live room: @mira's profile died with "timed
+        // out awaiting tools/call after 300s". The 1 November fix reached
+        // only an older config writer; this is the one bots run with.
+        contents.push_str("tool_timeout_sec = 2100\n");
     }
     if cli == orgbot_proto::agent::CliKind::Grok {
         contents.push_str("enabled = true\n");
@@ -216,6 +221,11 @@ pub fn strip_private_agent_mcp_config(
     cli: orgbot_proto::agent::CliKind,
 ) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
+    // From the benchmark room: the Grok bots tried eighteen times to start an
+    // MCP server ("unreal") from the owner's ~/.claude.json, which the private
+    // home carries for Claude. No bot needs the owner's own servers, and
+    // Claude bots already ignore them (--strict-mcp-config).
+    strip_claude_json_mcp(&home.join(".claude.json"))?;
     let profile = match cli {
         orgbot_proto::agent::CliKind::Codex => ".codex",
         orgbot_proto::agent::CliKind::Grok => ".grok",
@@ -242,6 +252,43 @@ pub fn strip_private_agent_mcp_config(
         .map_err(|error| format!("sanitize private {profile} config: {error}"))?;
     write_private_file(&config, sanitized.as_bytes())
         .map_err(|error| format!("sanitize {} config: {error}", config.display()))
+}
+
+/// Remove MCP servers from a private copy of Claude's `~/.claude.json`, at the
+/// top level and under each project. Anything unreadable is left as it is:
+/// the CLI owns that file and rewrites it.
+fn strip_claude_json_mcp(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() || meta.nlink() != 1 => {
+            return Err("unsafe private .claude.json".into());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("inspect private .claude.json: {error}")),
+    }
+    let Ok(contents) = read_private_file(path) else {
+        return Ok(());
+    };
+    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return Ok(());
+    };
+    let mut removed = false;
+    if let Some(top) = parsed.as_object_mut() {
+        removed |= top.remove("mcpServers").is_some();
+        if let Some(projects) = top.get_mut("projects").and_then(serde_json::Value::as_object_mut) {
+            for project in projects.values_mut() {
+                if let Some(project) = project.as_object_mut() {
+                    removed |= project.remove("mcpServers").is_some();
+                }
+            }
+        }
+    }
+    if !removed {
+        return Ok(());
+    }
+    let sanitized = serde_json::to_string_pretty(&parsed).map_err(|error| format!("sanitize private .claude.json: {error}"))?;
+    write_private_file(path, sanitized.as_bytes()).map_err(|error| format!("sanitize {}: {error}", path.display()))
 }
 
 pub fn remove_private_file(path: &Path) -> Result<(), String> {
@@ -1676,6 +1723,9 @@ mod tests {
         assert!(first.contains("/run/user/1000/orgbot-room-mcp.sock"));
         assert!(first.contains("model = \"gpt-6.1-sol\""));
         assert!(!first.contains("outside-server"));
+        // The config bots actually run with gives room tools the workspace
+        // time limit, not Codex's 300-second default.
+        assert!(first.contains("tool_timeout_sec = 2100"), "{first}");
         update_private_agent_config(
             &home,
             orgbot_proto::agent::CliKind::Codex,
@@ -1690,6 +1740,32 @@ mod tests {
         let clean = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
         assert!(!clean.contains("orgbot_room"));
         assert!(clean.contains("model = \"gpt-6.1-sol\""));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// From the benchmark room: Grok bots tried eighteen times to start an MCP
+    /// server from the owner's ~/.claude.json, copied into the private home.
+    #[cfg(unix)]
+    #[test]
+    fn the_owners_own_mcp_servers_never_reach_a_bot() {
+        use orgbot_proto::agent::CliKind;
+        let root = temp();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let claude = serde_json::json!({
+            "numStartups": 3,
+            "mcpServers": {"unreal": {"type": "http", "url": "http://127.0.0.1:8765"}},
+            "projects": {"/work": {"allowedTools": [], "mcpServers": {"local": {"command": "x"}}}}
+        });
+        for cli in [CliKind::Grok, CliKind::Claude, CliKind::Codex, CliKind::OpenCode] {
+            write_private_file(&home.join(".claude.json"), claude.to_string().as_bytes()).unwrap();
+            strip_private_agent_mcp_config(&home, cli).unwrap();
+            let after: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
+            assert!(after.get("mcpServers").is_none(), "{cli:?}: {after}");
+            assert!(after["projects"]["/work"].get("mcpServers").is_none(), "{cli:?}");
+            assert_eq!(after["numStartups"], 3, "everything else is kept");
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

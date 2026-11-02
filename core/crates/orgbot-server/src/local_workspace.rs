@@ -48,6 +48,9 @@ pub struct LocalWorkspaceHost {
     committed_attachment_ids: Arc<RwLock<std::collections::HashSet<String>>>,
     /// Each bot's handle, so its copy carries a name a person can read.
     handles: std::collections::HashMap<orgbot_proto::AgentId, String>,
+    /// The removals each bot has already been told await the owner.
+    reported_removals:
+        std::sync::Mutex<std::collections::HashMap<orgbot_proto::AgentId, std::collections::BTreeSet<String>>>,
 }
 
 impl LocalWorkspaceHost {
@@ -157,7 +160,34 @@ impl LocalWorkspaceHost {
             attachment_parent_fd,
             committed_attachment_ids,
             handles: Default::default(),
+            reported_removals: Default::default(),
         })
+    }
+
+    /// Name only the removals `agent` has not been told about yet, with a
+    /// count of every one still waiting for the owner.
+    ///
+    /// From the benchmark room: every command a bot ran listed the same 24
+    /// removals again, until the owner reviewed them.
+    fn only_new_removals(&self, agent: orgbot_proto::AgentId, mut status: Value) -> Value {
+        let Some(pending) = status.get("pending_delete").and_then(Value::as_array) else {
+            return status;
+        };
+        let now: std::collections::BTreeSet<String> =
+            pending.iter().filter_map(|path| path.as_str().map(str::to_string)).collect();
+        let mut told = self.reported_removals.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = told.entry(agent).or_default();
+        let new: Vec<String> = now.difference(before).cloned().collect();
+        let waiting = now.len();
+        *before = now;
+        if new.is_empty() && waiting > 0 {
+            status["pending_delete_note"] = json!(format!(
+                "{waiting} removal(s) you were already told about still await the owner's review."
+            ));
+        }
+        status["pending_delete"] = json!(new);
+        status["pending_delete_waiting"] = json!(waiting);
+        status
     }
 
     #[cfg(target_os = "linux")]
@@ -464,6 +494,7 @@ impl LocalWorkspaceHost {
             } else {
                 None
             };
+            let integration = integration.map(|status| self.only_new_removals(agent, status));
             Ok(ToolOutcome {
                 content: serde_json::json!({"stdout":output,"stderr":error,"timed_out":timed_out,
                 "success":success,"exit_code":exit_code,"integration":integration})
@@ -1894,6 +1925,10 @@ mod tests {
             .await;
         assert!(!bash.is_error, "{}", bash.content);
         assert!(bash.content.contains("2\\n"), "{}", bash.content);
+        // The removal it was told about is not listed again, only counted.
+        let bash: Value = serde_json::from_str(&bash.content).unwrap();
+        assert_eq!(bash["integration"]["pending_delete"], json!([]));
+        assert_eq!(bash["integration"]["pending_delete_waiting"], 1);
         // A failure says how it ended, output or not.
         let failed = host
             .run(agent, "workspace_run", &json!({"command":"exit 3"}), false)

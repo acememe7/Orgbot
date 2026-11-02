@@ -942,10 +942,14 @@ impl Engine {
             .filter(|spec| !self.authored_review_artifact(record, spec.id))
             .filter(|spec| self.status(spec.id).is_available())
             .collect();
+        // From the benchmark room: second opinions waited 6 to 15 minutes on
+        // a reviewer busy with its own long turns. One between turns comes
+        // first among equals.
         candidates.sort_by_key(|spec| {
             (
                 Some(spec.provider.family()) == first_family,
                 awaiting(spec.id),
+                self.in_turn(spec.id),
                 spec.handle.clone(),
             )
         });
@@ -5179,7 +5183,15 @@ impl Engine {
             standing.extend(opinion.findings.iter().cloned());
         }
         let decided = if by_owner { ", with the owner's call" } else { "" };
-        let summary = if dropped == 0 {
+        // Settled without a second opinion: it did not come in time.
+        let unanswered = opinion.is_none();
+        let summary = if unanswered {
+            format!(
+                "{second} gave no second opinion within {} minutes, so {first}'s findings stand. {}",
+                SECOND_OPINION_WAIT_MS / 60_000,
+                opening.summary.trim()
+            )
+        } else if dropped == 0 {
             format!("{first} and {second} agree{decided}. {}", opening.summary.trim())
         } else {
             format!(
@@ -5190,7 +5202,7 @@ impl Engine {
         };
         let mut outcome = Review::from_findings(task, panel.first, panel.revision, standing, summary);
         outcome.stage = ReviewStage::Outcome;
-        outcome.with = vec![panel.second];
+        outcome.with = if unanswered { Vec::new() } else { vec![panel.second] };
         outcome.criteria_met = opening.criteria_met.clone();
         if outcome.verdict != Verdict::Approve {
             outcome.criteria_failed = opening.criteria_failed.clone();
@@ -5219,6 +5231,11 @@ impl Engine {
             .map_or_else(|| "its author".into(), |agent| self.handle_of(agent));
         let note = match verdict {
             Verdict::Approve => format!("\"{title}\" passes review: {second} showed the blocking findings do not hold{decided}."),
+            Verdict::RequestChanges if unanswered => format!(
+                "\"{title}\" goes back to {author} with {first}'s {blockers} {}: {second} gave no second opinion within {} minutes.",
+                if blockers == 1 { "finding" } else { "findings" },
+                SECOND_OPINION_WAIT_MS / 60_000
+            ),
             Verdict::RequestChanges => format!(
                 "\"{title}\" goes back to {author} with {blockers} {} both reviewers stand behind{decided}.",
                 if blockers == 1 { "finding" } else { "findings" }
@@ -5469,6 +5486,27 @@ impl Engine {
                 handoff.hold_open(now);
             }
         }
+        // From the benchmark room: work sent back waited 49 minutes in all
+        // for second opinions, up to 15 at a time, while its author could do
+        // nothing. A second opinion that has not come in ten minutes of a
+        // running room is not waited for: the first reviewer's findings go
+        // back as they stand.
+        let mut events = Vec::new();
+        if self.room.phase == RoomPhase::Running {
+            let overdue: Vec<ReviewPanel> = self
+                .review_panels
+                .values()
+                .filter(|panel| panel.stage == PanelStage::AwaitingSecond && panel.second_opinion.is_none())
+                .filter(|panel| {
+                    self.review(panel.opening)
+                        .is_some_and(|opening| now >= opening.at.plus_millis(SECOND_OPINION_WAIT_MS))
+                })
+                .cloned()
+                .collect();
+            for panel in overdue {
+                events.extend(self.settle_panel(panel, true, false)?);
+            }
+        }
         // Rooms saved before delegations were settled on acceptance can hold
         // one still open; it is settled rather than left to expire.
         let unsettled: Vec<(HandoffId, AgentId)> = self
@@ -5477,7 +5515,6 @@ impl Engine {
             .filter(|h| h.state == HandoffState::Accepted && h.kind.transfers_ownership())
             .filter_map(|h| h.accepted_by.map(|by| (h.id, by)))
             .collect();
-        let mut events = Vec::new();
         for (handoff, by) in unsettled {
             events.extend(self.complete_handoff(handoff, by, Vec::new(), "took over the task".into())?);
         }
@@ -6094,6 +6131,9 @@ fn review_only_task(kind: TaskKind, required_role: Option<&str>) -> bool {
 /// Alias kept so the `set_phase` signature reads clearly.
 type EngineEvent = EventEnvelope;
 
+/// How long work sent back waits for a second opinion before the first
+/// reviewer's findings go back as they stand.
+const SECOND_OPINION_WAIT_MS: i64 = 10 * 60 * 1000;
 /// How an answer the room's access mode gave on the owner's behalf begins.
 const AUTO_APPROVED: &str = "Approved automatically";
 /// Upper bound on deadlock-breaking passes in a single sweep.

@@ -4251,6 +4251,25 @@ mod second_opinions {
         assert_eq!(f.engine.review_cycles(task).len(), 1, "a second opinion is part of one round");
     }
 
+    /// From the benchmark room: work sent back waited 49 minutes in all for
+    /// second opinions, up to 15 at a time, while its author could do nothing.
+    #[test]
+    fn a_second_opinion_that_does_not_come_is_not_waited_for() {
+        let (mut f, strict, _) = two_reviewers();
+        let task = submitted(&mut f, "gas proof");
+        f.apply(review(task, strict, vec![blocking("the far view is under 80 m", "move the camera back to 82 m")], vec![]));
+        f.apply(Command::Tick { now: Timestamp::now().plus_millis(5 * 60 * 1000) });
+        assert_eq!(f.state(task), TaskState::InReview, "five minutes is still worth waiting");
+
+        f.apply(Command::Tick { now: Timestamp::now().plus_millis(11 * 60 * 1000) });
+        assert_eq!(f.state(task), TaskState::InProgress, "the first reviewer's findings go back");
+        assert!(f.engine.review_panel(task).is_none());
+        let settled = outcome(&f, task);
+        assert!(settled.with.is_empty(), "nobody else stands behind them");
+        assert!(settled.summary.contains("gave no second opinion within 10 minutes"), "{}", settled.summary);
+        assert!(f.engine.transcript().iter().any(|m| m.body.contains("gave no second opinion within 10 minutes")));
+    }
+
     #[test]
     fn the_first_reviewer_can_withdraw_what_the_second_disputes() {
         let (mut f, strict, easy) = two_reviewers();

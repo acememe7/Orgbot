@@ -391,6 +391,12 @@ impl Bot {
         let remind_every = self.spec.autonomy.max_turns_per_task.max(1);
         let mut repeats = Repeats::default();
         let mut step: u32 = 0;
+        // From the benchmark room: a QA turn on a slow model ran 75 minutes
+        // in 72 calls, a minute a call, so a count of calls reached it rarely.
+        // Every ten minutes of a turn it hears how long it has run.
+        let turn_began = std::time::Instant::now();
+        let mut minutes_told: u64 = 0;
+        let mut cut_off: u32 = 0;
         loop {
             step += 1;
             self.capabilities
@@ -528,6 +534,15 @@ impl Bot {
             self.history.push(response.as_turn());
 
             let calls = response.tool_calls();
+            // From the benchmark room: a reasoning model's reply hit the
+            // 16,000-token output limit before it called a tool, three turns
+            // in a row, and each turn ended with nothing done. A reply cut
+            // off there is not the end of the turn.
+            if calls.is_empty() && response.stop_reason == StopReason::MaxTokens && cut_off < MAX_CUT_OFF_RETRIES {
+                cut_off += 1;
+                self.history.push(Turn::user(CUT_OFF_NOTE));
+                continue;
+            }
             if calls.is_empty() {
                 let text = response.text();
                 if !text.trim().is_empty() {
@@ -629,7 +644,14 @@ impl Bot {
                     is_error: outcome.is_error,
                 });
             }
-            if let Some(reminder) = long_turn_reminder(remind_every, step) {
+            let reminder = long_turn_reminder(remind_every, step).or_else(|| {
+                let minutes = turn_began.elapsed().as_secs() / 60;
+                (minutes >= minutes_told + TURN_MINUTES_NOTE).then(|| {
+                    minutes_told = minutes - minutes % TURN_MINUTES_NOTE;
+                    turn_minutes_reminder(minutes)
+                })
+            });
+            if let Some(reminder) = reminder {
                 if let Some(ContentBlock::ToolResult { content, .. }) = results.last_mut() {
                     content.push_str(&reminder);
                 }
@@ -1107,6 +1129,24 @@ fn long_turn_reminder(every: u32, step: u32) -> Option<String> {
     })
 }
 
+/// How many replies cut off at the output limit a turn carries on past.
+const MAX_CUT_OFF_RETRIES: u32 = 2;
+
+const CUT_OFF_NOTE: &str = "[OrgBots] Your reply was cut off at the output limit before you \
+     called a tool or finished. Keep your reasoning short and act now: make the next tool call, \
+     or give your final answer in a few sentences.";
+
+/// How often, in minutes of one turn, a bot hears how long it has run.
+const TURN_MINUTES_NOTE: u64 = 10;
+
+fn turn_minutes_reminder(minutes: u64) -> String {
+    format!(
+        "\n\n[OrgBots] This turn has run {minutes} minutes, and teammates may be waiting \
+         on it. If the task's acceptance criteria are met, finish now: record the result \
+         and end the turn. Do not polish past the bar or re-run checks that already passed."
+    )
+}
+
 /// The same call made again and again in one turn.
 #[derive(Default)]
 struct Repeats {
@@ -1483,6 +1523,8 @@ mod tests {
         assert!(long_turn_reminder(24, 24).is_some_and(|r| r.contains("24 model calls so far")));
         assert!(long_turn_reminder(24, 48).is_some());
         assert_eq!(long_turn_reminder(24, 25), None);
+        // From the benchmark room: a 75-minute turn of a minute a call.
+        assert!(turn_minutes_reminder(20).contains("This turn has run 20 minutes"));
         let mut repeats = Repeats::default();
         let read = json!({"path": "a.ts"});
         assert_eq!(repeats.note("workspace_read", &read), None);
@@ -2006,6 +2048,47 @@ mod tests {
         assert_eq!(posted(&engine), 2, "asked directly, it answers");
         bot.take_turn(&engine, None).await.unwrap();
         assert_eq!(posted(&engine), 2);
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_off_at_the_output_limit_does_not_end_the_turn() {
+        // From the benchmark room: three turns of @ollama-glm each ended on
+        // one reply cut at the 16,000-token limit, with nothing done.
+        use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+        let agent = spec();
+        let mut room = Engine::new(RoomSpec {
+            name: "cut".into(),
+            goal: "finish the review".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        room.apply(Command::JoinAgent { spec: Box::new(agent.clone()) }).unwrap();
+        room.apply(Command::StartRoom).unwrap();
+        let engine = SharedEngine::new(room);
+        let reply = |text: &str, stop_reason| CompletionResponse {
+            model: "test".into(),
+            content: vec![ContentBlock::Text { text: text.into() }],
+            stop_reason,
+            usage: Usage::default(),
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            reply("thinking…", StopReason::MaxTokens),
+            reply("Done: the review is recorded.", StopReason::EndTurn),
+        ]));
+        let mut bot = Bot::new(agent.clone(), provider.clone());
+        let report = bot.take_turn(&engine, None).await.unwrap();
+        assert_eq!(provider.requests().len(), 2, "the turn carried on past the cut");
+        assert_eq!(report.said.as_deref(), Some("Done: the review is recorded."));
+        let asked = provider.requests()[1].messages.iter().any(|turn| format!("{turn:?}").contains("cut off at the output limit"));
+        assert!(asked, "the model is told why it is asked again");
+
+        // It does not carry on for ever.
+        let provider = Arc::new(ScriptedProvider::new(vec![reply("thinking…", StopReason::MaxTokens); 4]));
+        let mut bot = Bot::new(agent, provider.clone());
+        bot.take_turn(&engine, None).await.unwrap();
+        assert_eq!(provider.requests().len(), 1 + MAX_CUT_OFF_RETRIES as usize);
     }
 
     #[tokio::test]

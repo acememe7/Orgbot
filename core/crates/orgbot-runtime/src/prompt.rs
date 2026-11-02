@@ -108,8 +108,11 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            any checks that could not run in one short verification note per task, \
            a few thousand characters. When the work changes, record the note again under \
            the same name: the newer one replaces the older, and reviewers read \
-           only the newest. Put code, logs, captures and other raw data in project \
-           files and give their paths and sha256 in the note; do not paste them. \
+           only the newest. Put code, logs and other raw data a reviewer needs in \
+           project files and give their paths and sha256 in the note; do not paste them. \
+           Save screenshots and scratch output you only look at yourself under \
+           .cache/orgbots/ in your copy: your own tools can open them there and they \
+           never reach the owner's project, while /tmp is emptied after every command. \
            Never infer a passing test from a planned command or missing output.\n\
          - Keep a CHANGES.md at the project root. For every change you make to \
            the project, add an entry of 2-3 lines at its end: what changed, why, \
@@ -1196,6 +1199,9 @@ mod tests {
         assert!(!prompt.contains("`nothing needs you`, say that"));
         assert!(prompt.contains("set its required_role"));
         assert!(prompt.contains("such as `npm install`"));
+        // Bots could not open their own screenshots: /tmp was gone after the
+        // command and other paths were refused.
+        assert!(prompt.contains("under .cache/orgbots/ in your copy"));
     }
 
     #[test]
