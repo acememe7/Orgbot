@@ -227,6 +227,8 @@ pub struct RoomSession {
     events: broadcast::Sender<ServerMessage>,
     /// The last log position broadcast, so each step ships only new events.
     broadcast_head: Seq,
+    /// The phase last sent to clients, and when.
+    phase_sent: Option<(RoomPhase, std::time::Instant)>,
     /// Whether the room has finished its work. A settled room takes no more
     /// turns but stays connected, so its transcript can still be read and a
     /// person can still speak into it.
@@ -458,6 +460,7 @@ impl RoomSession {
             deferred: std::collections::VecDeque::new(),
             events: events_tx.clone(),
             broadcast_head: Seq::ZERO,
+            phase_sent: None,
             settled: false,
             published: published.clone(),
             interrupt: interrupt.clone(),
@@ -938,8 +941,6 @@ impl RoomSession {
         // What went out live is not sent again.
         self.broadcast_head = self.broadcast_head.max(sent_head);
         self.broadcast_new_events();
-        let phase = self.orchestrator.engine().room().phase;
-        let _ = self.events.send(ServerMessage::Phase { phase });
     }
 
     /// Broadcast every log event not yet sent.
@@ -971,9 +972,6 @@ impl RoomSession {
                 .backlog
                 .extend(new.iter().filter(|e| e.seq > head).cloned());
         }
-        let _ = self.events.send(ServerMessage::Phase {
-            phase: self.orchestrator.engine().room().phase,
-        });
         // Whether anything a person's view depends on has moved. Checked
         // before the events are consumed below.
         let board_moved = new.iter().any(|e| touches_the_board(&e.event));
@@ -982,6 +980,9 @@ impl RoomSession {
             self.broadcast_head = self.broadcast_head.max(envelope.seq);
             announce(&self.events, &mut self.desktop_notifications, envelope);
         }
+        // After the events, so a client reads the closing messages before it
+        // sees the room close.
+        self.send_phase();
 
         // The digest is a fold over every task, so it cannot be patched from
         // one event. Recomputing and resending it whole is both correct and
@@ -1220,9 +1221,25 @@ impl RoomSession {
             let _ = self.orchestrator.engine_mut().apply(command);
             self.broadcast_new_events();
         }
-        let _ = self.events.send(ServerMessage::Phase {
-            phase: self.orchestrator.engine().room().phase,
-        });
+        self.send_phase();
+    }
+
+    /// Tell clients the room's phase: always when it changes, and otherwise
+    /// at most once per half idle tick. Clients take the idle tick's frame as
+    /// a sign of life.
+    ///
+    /// From the benchmark room: as the room closed, a client got about thirty
+    /// identical "running" frames in one second, two from every step.
+    fn send_phase(&mut self) {
+        let phase = self.orchestrator.engine().room().phase;
+        let now = std::time::Instant::now();
+        if let Some((sent, at)) = self.phase_sent {
+            if sent == phase && now.duration_since(at) < IDLE_TICK / 2 {
+                return;
+            }
+        }
+        self.phase_sent = Some((phase, now));
+        let _ = self.events.send(ServerMessage::Phase { phase });
     }
 
     /// Close the room and tell every subscriber why.

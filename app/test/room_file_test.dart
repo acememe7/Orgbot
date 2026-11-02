@@ -442,6 +442,17 @@ void main() {
     },
   );
 
+  test('a handle typed with its @ is kept bare', () {
+    // From the benchmark setup: "@savage" showed as "@@savage" in the Team list.
+    expect(BotDef(name: 'Savage', handle: '@savage').handle, 'savage');
+    expect(BotDef(name: 'Savage', handle: ' @@savage ').handle, 'savage');
+    final saved = BotDef(name: 'Savage', handle: 'savage').toJson()
+      ..['handle'] = '@savage';
+    expect(BotDef.fromJson(saved).handle, 'savage', reason: 'older libraries read back bare');
+    final file = buildRoomFile(room(), [BotDef(name: 'Savage', handle: '@savage')]);
+    expect(file.toml, contains('handle = "savage"'));
+  });
+
   test('a name with spaces becomes a usable handle', () {
     final file = buildRoomFile(room(), [
       BotDef(name: 'Big Bot Name', handle: ''),

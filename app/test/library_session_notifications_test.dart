@@ -102,7 +102,13 @@ void main() {
       await library.stopRoom(room.id);
       expect(shellNotifications, beforeStop + 1);
     },
-    skip: engine.available
+    // These start a real room service on this machine, as the owner's own
+    // rooms run, so they run only when asked for, like room_continuity_test.
+    // From the benchmark day: every plain test run left a "debug" or
+    // "Notification check" room behind, 119 of them by then.
+    skip: !Platform.environment.containsKey('ORGBOT_ENGINE')
+        ? 'starts a real room service; set ORGBOT_ENGINE to run it'
+        : engine.available
         ? false
         : 'engine binary unavailable: ${engine.problem}',
     timeout: const Timeout(Duration(seconds: 90)),

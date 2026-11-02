@@ -294,8 +294,14 @@ impl Handoff {
     }
 
     /// Whether this offer has outlived its deadline as of `now`.
+    ///
+    /// From the live room: a delegation accepted at 10:12 was marked expired
+    /// at 10:28, though the task had been the recipient's since it was taken.
+    /// An accepted delegation has already done its work; the task's own lease
+    /// covers a holder that goes quiet.
     pub fn is_expired_at(&self, now: Timestamp) -> bool {
-        self.state.is_pending() && self.deadline.is_some_and(|d| now >= d)
+        let settled = self.state == HandoffState::Accepted && self.kind.transfers_ownership();
+        self.state.is_pending() && !settled && self.deadline.is_some_and(|d| now >= d)
     }
 
     /// Keep a pending handoff open for at least its whole timeout from `now`.

@@ -94,7 +94,11 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
             fix each blocking finding as its suggestion says, or say in your \
             verification note why another way is better; the reviewers who \
             raised them check the fix.\n\
-         4. Once approved, the coordinator delivers it.\n\n",
+         4. Once approved, the coordinator delivers it. Delivered work is \
+            finished: leave its files alone, and if it needs more, ask a \
+            coordinator for a follow-up task. Once the room's goal is delivered, \
+            finish only what is still open and start nothing new unless the \
+            owner asks.\n\n",
     );
 
     out.push_str(
@@ -131,7 +135,17 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            better workaround if you see one. When work you sent back returns, \
            check each fix you asked for and run the checks that show the \
            workaround works. Check that each change has its CHANGES.md entry and \
-           that the entry matches the change; a missing one is a major finding.\n\
+           that the entry matches the change; a missing one is a minor finding the \
+           author adds before delivery.\n\
+         - Review against the task's acceptance criteria and the owner's bar, in one \
+           pass. Only these block (major): a criterion or the owner's bar not met, a \
+           required check failing, or a defect a user would notice. For pages and \
+           screens, look at them as a user would, at phone and desktop widths when you \
+           can: clipped or overlapping text, unreadable contrast, broken or placeholder \
+           images and wording meant for developers are such defects. A gap in the \
+           evidence (a hash, a width, how a check was run) is minor when you can run the \
+           check yourself: run it instead of sending the work back. Anything stricter \
+           than the bar is a note.\n\
          - Every document costs the owner tokens to write and teammates tokens to \
            read. Do not write plan, checkpoint, status, audit, handover or summary \
            documents, as artifacts or as project files: status goes in one short \
@@ -266,8 +280,11 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
          anything is needed from them. No ids, no artifact hashes, no status \
          codes in that first line — put those underneath if they matter. \
          Someone who has been away for a day should be able to read your first \
-         line and know where things stand. If the only honest first line is \
-         `nothing needs you`, say that.\n",
+         line and know where things stand. Write to the operator only when they \
+         asked you something, need to act, or the work they asked for is \
+         delivered; an update that needs nothing from them goes to the room, not \
+         to them. Never tell them nothing is needed while a question of yours \
+         waits for them.\n",
     );
 
     #[cfg(target_os = "linux")]
@@ -298,7 +315,14 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
              Coordinate by writing one concrete plan and creating role-specific tasks \
              with acceptance criteria. Check the board before creating tasks; extend \
              the existing plan instead of duplicating another coordinator's work. \
-             Route each task to the teammate whose specialty fits it. Consult the \
+             When you deliver work that added or changed dependencies (package.json, \
+             a lock file, requirements), tell the owner the one command to run before \
+             building, such as `npm install`: what bots install stays in their own \
+             copies. \
+             Route each task to the teammate whose specialty fits it, and set its \
+             required_role to the role that should do it (frontend or engineer for a \
+             page, qa for a test pass, researcher for research). A task with no role \
+             goes to whichever builder is free. Consult the \
              other coordinator for a bounded decision when their expertise is needed; \
              do not require both leads to act on every message.\n",
         );
@@ -325,7 +349,9 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
                 "You coordinate and review with read-only workspace access. Delegate \
                  implementation by creating tasks with required_role; do not claim \
                  implementation tasks or edit project files. Final delivery still \
-                 requires independent approval.\n",
+                 requires independent approval. When you open a task to repair what a \
+                 review found, put every fix in its brief and acceptance criteria as you \
+                 create it: you cannot attach notes to it afterwards.\n",
             );
         }
     }
@@ -366,6 +392,30 @@ pub const SUPERSEDED_SITUATION: &str =
 ///
 /// This answers the only question a bot has at the start of a turn: what
 /// changed, and what should I do about it?
+/// The task behind a handoff, so whoever takes it works to the task's own
+/// brief and acceptance criteria rather than the offer's summary.
+///
+/// From the benchmark room: two bots took over pages through handoffs, built
+/// from the one-line handoff brief, and redid parts once the page's own brief
+/// reached them a turn later.
+fn handoff_task_lines(engine: &Engine, task: TaskId) -> String {
+    let Some(task) = engine.task(task) else {
+        return String::new();
+    };
+    let mut out = format!("    task \"{}\"", task.title);
+    let brief = task.brief.trim();
+    if !brief.is_empty() {
+        let shown: String = brief.chars().take(1_200).collect();
+        let more = if brief.chars().count() > 1_200 { " …(list_tasks shows the rest)" } else { "" };
+        out.push_str(&format!(": {}{more}", shown.split_whitespace().collect::<Vec<_>>().join(" ")));
+    }
+    out.push('\n');
+    if !task.acceptance_criteria.is_empty() {
+        out.push_str(&format!("    done when: {}\n", task.acceptance_criteria.join("; ")));
+    }
+    out
+}
+
 pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
     let mut out = String::from(SITUATION_MARKER);
     out.push('\n');
@@ -386,6 +436,7 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
                 "  {} from {} ({:?}): {}\n",
                 handoff.id, from, handoff.kind, handoff.brief
             ));
+            out.push_str(&handoff_task_lines(engine, handoff.task));
             if !handoff.expects.is_empty() {
                 out.push_str(&format!("    wants back: {}\n", handoff.expects.join("; ")));
             }
@@ -427,6 +478,12 @@ pub fn situation(engine: &Engine, agent: AgentId, since: Seq) -> String {
                 "  {} for {} ({:?}): {}\n",
                 handoff.id, from, handoff.kind, handoff.brief
             ));
+            if !handoff.kind.transfers_ownership() {
+                out.push_str(&handoff_task_lines(engine, handoff.task));
+            }
+            if !handoff.expects.is_empty() {
+                out.push_str(&format!("    wants back: {}\n", handoff.expects.join("; ")));
+            }
         }
         out.push('\n');
     }
@@ -1109,6 +1166,36 @@ mod tests {
         assert!(prompt.contains("what changed, why, and what errors or failed checks it ran into"));
         assert!(prompt.contains("CHANGES.md merge=union"));
         assert!(prompt.contains("Check that each change has its CHANGES.md entry"));
+    }
+
+    #[test]
+    fn the_benchmark_rules_reach_reviewers_coordinators_and_everyone() {
+        // From the benchmark room: the pages were done at 11:31 and the goal
+        // delivered at 13:14, after reviews sent back for evidence paperwork;
+        // bots kept working and wrote to the owner after delivery; pages went to
+        // whoever claimed first; dependencies the bots installed never reached
+        // the owner's folder.
+        let engine = Engine::new(RoomSpec {
+            name: "bench".into(),
+            goal: "ship".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        let lead = AgentSpec::new("lead", "Lead", ProviderRef::Scripted { script: "test".into() })
+            .with_roles(["coordinator"]);
+        let prompt = system_prompt(&engine, &lead);
+        assert!(prompt.contains("Only these block (major)"));
+        assert!(prompt.contains("run it instead of sending the work back"));
+        assert!(prompt.contains("clipped or overlapping text"));
+        assert!(prompt.contains("a missing one is a minor finding"));
+        assert!(prompt.contains("Delivered work is finished: leave its files alone"));
+        assert!(prompt.contains("start nothing new unless the owner asks"));
+        assert!(prompt.contains("an update that needs nothing from them goes to the room"));
+        assert!(!prompt.contains("`nothing needs you`, say that"));
+        assert!(prompt.contains("set its required_role"));
+        assert!(prompt.contains("such as `npm install`"));
     }
 
     #[test]

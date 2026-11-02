@@ -49,9 +49,9 @@ void main() {
     final listed = await RoomArchive.list(room);
     expect(listed.length, archive.segments.length);
 
-    for (final segment in archive.segments) {
-      await segment.delete();
-    }
+    // The folder is this run's own (its id is unique); leaving it behind left
+    // an empty room in the owner's history after every test run.
+    await (await RoomArchive.directory(room)).delete(recursive: true);
   });
 
   test('a short run stays in one file', () async {
@@ -61,8 +61,8 @@ void main() {
     await archive.close();
 
     expect(archive.segments.length, 1, reason: 'nothing to roll yet');
-    for (final segment in archive.segments) {
-      await segment.delete();
-    }
+    // The folder is this run's own (its id is unique); leaving it behind left
+    // an empty room in the owner's history after every test run.
+    await (await RoomArchive.directory(room)).delete(recursive: true);
   });
 }

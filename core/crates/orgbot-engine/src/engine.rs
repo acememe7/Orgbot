@@ -1271,7 +1271,43 @@ impl Engine {
             );
             return result;
         }
+        // From the benchmark room: a coordinator made five page tasks with no
+        // role, and bots for QA, research and support claimed them first
+        // while engineers sat idle. Work that names no role goes to a bot
+        // that builds while one is free; when every builder is busy, anyone
+        // may take it. Coordinators keep the work they plan.
+        if record.required_role.as_deref().is_none_or(str::is_empty)
+            && !self.builds(spec)
+            && !spec.roles.iter().any(|role| role == "coordinator")
+        {
+            if let Some(builder) = self.free_builder(agent) {
+                result.eligible = false;
+                result.reason = Reason::LeaveToBuilders;
+                result.detail = format!(
+                    "\"{}\" names no role, and @{builder} builds and is free, so it is theirs. \
+                     Take work for your own role, or ask a coordinator to set this task's role if it is yours",
+                    record.title
+                );
+                return result;
+            }
+        }
         result
+    }
+
+    /// Whether a bot with `spec` builds: one of its roles has the room's
+    /// `build` capability.
+    fn builds(&self, spec: &AgentSpec) -> bool {
+        !spec.autonomy.review_only && self.roles.eligibility(&spec.roles, Some("build")).is_eligible()
+    }
+
+    /// A bot other than `asker` that builds, is taking work and holds
+    /// nothing, if there is one.
+    fn free_builder(&self, asker: AgentId) -> Option<String> {
+        self.specs
+            .values()
+            .filter(|spec| spec.id != asker && self.builds(spec))
+            .find(|spec| self.status(spec.id).accepts_work())
+            .map(|spec| spec.handle.clone())
     }
 
     /// Turn a refusal into the error the caller already knows.
@@ -1328,6 +1364,7 @@ impl Engine {
             | Reason::LeaseExpired
             | Reason::BotFaulted
             | Reason::BotUnavailable
+            | Reason::LeaveToBuilders
             | Reason::UnknownBot => EngineError::NotClaimable {
                 task,
                 agent,

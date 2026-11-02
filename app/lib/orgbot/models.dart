@@ -127,7 +127,13 @@ class BotDef {
     this.additionalRoles = const [],
     this.powers,
   }) : id = id ?? genId('bot'),
-       handle = handle == null || handle.isEmpty ? '' : handle;
+       handle = bareHandle(handle);
+
+  /// A handle as the room uses it: trimmed, without the `@` the app shows in
+  /// front of it. From the benchmark setup: "@savage" typed into the field
+  /// was shown as "@@savage". Saved libraries holding the `@` read back bare.
+  static String bareHandle(String? raw) =>
+      (raw ?? '').trim().replaceFirst(RegExp(r'^@+'), '').trim();
 
   /// Whether this bot still needs a key from the user.
   bool get needsKey => provider.needsApiKey && apiKey.trim().isEmpty;

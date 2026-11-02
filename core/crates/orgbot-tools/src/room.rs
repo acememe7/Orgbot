@@ -550,7 +550,12 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                     ),
                     (
                         "required_role",
-                        schema::string("Restrict to bots holding this role."),
+                        schema::string(
+                            "The role that should do this task (for example frontend, engineer, \
+                             qa, researcher); only bots holding it, or a role that stands in for \
+                             it, may claim it. Leave it out only for work any bot may do: with \
+                             no role, a free builder takes it first.",
+                        ),
                     ),
                     (
                         "priority",
@@ -614,6 +619,9 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
              finding sends the work back for rework, a \"critical\" one fails the task, \
              and anything less approves it. So report what you actually found and let \
              the verdict follow. Check the task's acceptance criteria one by one. \
+             Major is for a criterion or the owner's bar not met, a required check \
+             failing, or a defect a user would notice; a gap in the evidence you can \
+             check yourself is minor, and anything stricter than the bar is a note. \
              Every major or critical finding says what is wrong, where, and in \
              `suggestion` the fix or workaround the author should try: describe it, do \
              not write it. Work you send back gets a second opinion from another \
@@ -1800,14 +1808,39 @@ fn accept_handoff(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOut
     };
     match engine.apply(Command::AcceptHandoff { handoff, by: actor }) {
         Ok(_) => {
-            let brief = engine
-                .handoff(handoff)
-                .map(|h| h.brief.clone())
-                .unwrap_or_default();
-            ToolOutcome::ok(format!(
-                "Accepted {handoff}. Someone is waiting on this, so do it now: {brief}\n\
-                 Call complete_handoff with that id when you have the answer."
-            ))
+            let Some(record) = engine.handoff(handoff) else {
+                return ToolOutcome::ok(format!("Accepted {handoff}."));
+            };
+            // From the benchmark room: a bot that took over a page worked from
+            // the handoff's one line and redid parts once the page's own brief
+            // reached it a turn later. The task comes with the acceptance.
+            let task = engine.task(record.task);
+            let mut about = String::new();
+            if let Some(task) = task {
+                about.push_str(&format!("\nThe task, \"{}\":\n{}\n", task.title, task.brief.trim()));
+                if !task.acceptance_criteria.is_empty() {
+                    about.push_str("Done when:\n");
+                    for criterion in &task.acceptance_criteria {
+                        about.push_str(&format!("- {criterion}\n"));
+                    }
+                }
+            }
+            if !record.expects.is_empty() {
+                about.push_str(&format!("They want back: {}\n", record.expects.join("; ")));
+            }
+            if record.kind.transfers_ownership() {
+                ToolOutcome::ok(format!(
+                    "Accepted {handoff}. The task is yours now: {}{about}\
+                     Work it to the task's own brief and acceptance criteria, and submit it for review when done.",
+                    record.brief
+                ))
+            } else {
+                ToolOutcome::ok(format!(
+                    "Accepted {handoff}. Someone is waiting on this, so do it now: {}{about}\
+                     Call complete_handoff with that id when you have the answer.",
+                    record.brief
+                ))
+            }
         }
         Err(error) => explain(error),
     }

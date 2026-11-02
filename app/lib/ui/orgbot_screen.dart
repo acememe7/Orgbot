@@ -2196,6 +2196,11 @@ class _BotEditorState extends State<_BotEditor> {
                   const SizedBox(height: 12),
                   TextField(
                     controller: _handle,
+                    // The field shows the `@`; one typed or pasted in front
+                    // would be doubled.
+                    inputFormatters: [
+                      FilteringTextInputFormatter.deny(RegExp(r'^\s*@+')),
+                    ],
                     decoration: const InputDecoration(
                       labelText: 'Handle',
                       prefixText: '@',

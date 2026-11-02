@@ -850,6 +850,19 @@ fn a_delegation_moves_the_task_to_whoever_accepts() {
         by: worker2,
     });
     assert_eq!(f.engine.task(task).unwrap().assignee, Some(worker2));
+
+    // From the benchmark room: a delegation accepted at 10:12 was marked
+    // expired at 10:28, though the task had been the recipient's all along.
+    f.apply(Command::Tick {
+        // Past the five-minute handoff timeout, inside the task's lease.
+        now: Timestamp::now().plus_millis(10 * 60 * 1000),
+    });
+    assert_eq!(
+        f.engine.handoff(handoff).unwrap().state,
+        HandoffState::Accepted,
+        "an accepted delegation has done its work and does not run out"
+    );
+    assert_eq!(f.engine.task(task).unwrap().assignee, Some(worker2));
 }
 
 /// The reason given when the room withdrew `handoff`, if it did.
@@ -2221,6 +2234,40 @@ fn a_stand_in_can_take_role_locked_work_when_the_holder_is_busy() {
     // And the actual role holder is still preferred where both could take it.
     let another = f.open_task("write more", Some("writer"));
     assert_eq!(f.engine.claimable_by(worker).first(), Some(&another));
+}
+
+/// From the benchmark room: five page tasks had no role, and bots for QA,
+/// research and support claimed them first while engineers sat idle.
+#[test]
+fn work_with_no_role_goes_to_a_free_builder_first() {
+    let mut f = fixture();
+    let (lead, worker, worker2) = (f.coordinator, f.worker, f.worker2);
+    let mut builder = RoleSpec::new("writer");
+    builder.capabilities = vec!["build".into()];
+    let mut tester = RoleSpec::new("qa");
+    tester.capabilities = vec!["test".into(), "review".into()];
+    f.engine.set_roles(RoleTable::new(vec![builder, tester]));
+    let qa = AgentSpec::new("qa-bot", "QA", provider()).with_roles(["qa"]);
+    let qa = {
+        let id = qa.id;
+        f.apply(Command::JoinAgent { spec: Box::new(qa) });
+        id
+    };
+
+    let page = f.open_task("build the /1 page", None);
+    assert!(!f.engine.claimable_by(qa).contains(&page), "not offered while builders are free");
+    let refused = f.reject(Command::ClaimTask { task: page, by: qa });
+    assert!(refused.to_string().contains("builds and is free"), "{refused}");
+    assert!(f.engine.claimable_by(lead).contains(&page), "a coordinator keeps the work it plans");
+    let checks = f.open_task("test the pages", Some("qa"));
+    assert!(f.engine.claimable_by(qa).contains(&checks), "work for its own role is unaffected");
+
+    // Once every builder is busy, anyone may take it rather than let it wait.
+    let (other, third) = (f.open_task("build /2", None), f.open_task("build /3", None));
+    f.apply(Command::ClaimTask { task: other, by: worker });
+    f.apply(Command::ClaimTask { task: third, by: worker2 });
+    assert!(f.engine.claimable_by(qa).contains(&page));
+    f.apply(Command::ClaimTask { task: page, by: qa });
 }
 
 #[test]
