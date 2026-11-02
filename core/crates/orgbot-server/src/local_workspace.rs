@@ -405,8 +405,11 @@ impl LocalWorkspaceHost {
             } else {
                 command.args(grants.launcher_args());
             }
+            // From the benchmark room: bots write bash ("set -o pipefail",
+            // arrays, process substitution) and /bin/sh refused it outright.
+            let shell = if std::path::Path::new("/bin/bash").exists() { "/bin/bash" } else { "/bin/sh" };
             command
-                .args(["--", "/bin/sh", "-c", script])
+                .args(["--", shell, "-c", script])
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -434,6 +437,12 @@ impl LocalWorkspaceHost {
             let output = out.await.map_err(|e| e.to_string())??;
             let error = err.await.map_err(|e| e.to_string())??;
             let success = matches!(status, Ok(Ok(code)) if code.success());
+            // A failure with no output said nothing; the exit code at least
+            // says how it ended.
+            let exit_code = match &status {
+                Ok(Ok(code)) => code.code(),
+                _ => None,
+            };
             // The command has run whatever the merge says: its output and its
             // effects are the bot's to know about. From the live room: a bot
             // whose copy conflicted was told every command had failed, with
@@ -457,7 +466,7 @@ impl LocalWorkspaceHost {
             };
             Ok(ToolOutcome {
                 content: serde_json::json!({"stdout":output,"stderr":error,"timed_out":timed_out,
-                "success":success,"integration":integration})
+                "success":success,"exit_code":exit_code,"integration":integration})
                 .to_string(),
                 is_error: !success,
             })
@@ -1873,6 +1882,24 @@ mod tests {
         assert_eq!(fs::read_to_string(root.join("added.txt")).unwrap(), "added");
         let result: Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(result["integration"]["pending_delete"], json!(["keep.txt"]));
+        assert_eq!(result["exit_code"], 0);
+        // From the benchmark room: bots write bash, and /bin/sh refused it.
+        let bash = host
+            .run(
+                agent,
+                "workspace_run",
+                &json!({"command":"set -o pipefail; words=(a b); echo \"${#words[@]}\""}),
+                false,
+            )
+            .await;
+        assert!(!bash.is_error, "{}", bash.content);
+        assert!(bash.content.contains("2\\n"), "{}", bash.content);
+        // A failure says how it ended, output or not.
+        let failed = host
+            .run(agent, "workspace_run", &json!({"command":"exit 3"}), false)
+            .await;
+        assert!(failed.is_error);
+        assert_eq!(serde_json::from_str::<Value>(&failed.content).unwrap()["exit_code"], 3);
         let timeout = host
             .run(
                 agent,

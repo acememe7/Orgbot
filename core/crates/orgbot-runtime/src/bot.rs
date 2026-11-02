@@ -1232,10 +1232,15 @@ async fn land_commits(
     if !landed.is_error {
         engine.with(|e| {
             let handle = e.agent(actor).map(|spec| spec.handle.clone()).unwrap_or_default();
+            let approval = if e.landing_granted_by_mode(task, actor, &branch, &base, &head) {
+                format!("as the room's {} mode allows", e.room().spec.access.mode.label())
+            } else {
+                "as the owner approved".to_string()
+            };
             let note = orgbot_proto::chat::ChatMessage::system(
                 e.room().id,
                 format!(
-                    "@{handle} landed {count} commit(s) on {branch}, moving it from {} to {} as the owner approved. Nothing was pushed.",
+                    "@{handle} landed {count} commit(s) on {branch}, moving it from {} to {} {approval}. Nothing was pushed.",
                     base.get(..7).unwrap_or(&base),
                     head.get(..7).unwrap_or(&head)
                 ),

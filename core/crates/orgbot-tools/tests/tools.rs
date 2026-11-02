@@ -423,6 +423,12 @@ fn a_task_ships_end_to_end_through_tool_calls_alone() {
     assert!(board.contains(&task), "the worker must be able to find it");
     f.ok(worker, "claim_task", json!({"task": task}));
     f.ok(worker, "start_task", json!({"task": task}));
+    // From the benchmark room: bots that claimed or started work they already
+    // had under way were told the call had failed.
+    let again = f.ok(worker, "start_task", json!({"task": task}));
+    assert!(again.contains("already yours and in progress"), "{again}");
+    f.ok(worker, "claim_task", json!({"task": task}));
+    f.err(f.worker2, "claim_task", json!({"task": task}));
 
     // The work itself lands as an artifact, not as chat.
     let recorded = f.ok(

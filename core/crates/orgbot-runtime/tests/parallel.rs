@@ -1301,7 +1301,11 @@ async fn an_offer_made_mid_turn_is_still_open_when_the_recipients_next_turn_begi
     tokio::time::timeout(std::time::Duration::from_secs(5), room.step_rolling(2, &sinks))
         .await
         .expect("the next run should end");
-    assert_eq!(state(handoff), HandoffState::Accepted, "its next turn takes the offer");
+    assert_eq!(
+        state(handoff),
+        HandoffState::Completed,
+        "its next turn takes the offer, and a delegation settles as it is taken"
+    );
     assert_eq!(
         engine.with(|engine| engine.task(task).unwrap().assignee),
         Some(quick_id)
@@ -1321,6 +1325,11 @@ async fn an_offer_its_recipient_has_read_runs_out_however_busy_it_stays() {
     room.start().unwrap();
     let (sender, task) = sender_holding_a_task(&mut room, "opus");
     let handoff = delegate(&mut room.engine_mut(), task, sender, quick_id);
+    // An offer made in the same millisecond as the turn begins counts as
+    // possibly part of that turn and is held one more round. In a room the
+    // turn starts later; here it could start in the same millisecond, and
+    // about one run in five did.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
     let reports = room.step(None).await;
     assert!(reports.is_some(), "the offer wakes its recipient");

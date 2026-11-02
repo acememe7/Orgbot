@@ -3219,7 +3219,7 @@ impl Engine {
         let answer = Answer {
             chosen: allow.into(),
             note: format!(
-                "Approved automatically: this room is in {} mode, which lets bots go ahead with requests rated {}.",
+                "{AUTO_APPROVED}: this room is in {} mode, which lets bots go ahead with requests rated {}.",
                 mode.label(),
                 risk.as_str()
             ),
@@ -3269,11 +3269,16 @@ impl Engine {
         // recorded for these commits.
         let checks_line = match checks {
             Some(id) => {
-                let artifact = self
-                    .artifacts
-                    .get(&id)
-                    .filter(|artifact| artifact.task == task)
-                    .ok_or(EngineError::UnknownArtifact { artifact: id })?;
+                let artifact = self.artifacts.get(&id).ok_or(EngineError::UnknownArtifact { artifact: id })?;
+                // From the benchmark room: checks recorded on the delivered
+                // task, passed for a landing task, were reported as "no artifact".
+                if artifact.task != task {
+                    return Err(EngineError::InvalidOwnerQuestion {
+                        reason: format!(
+                            "the checks {id} are recorded on another task; record them on this task, or leave checks out"
+                        ),
+                    });
+                }
                 format!("\nChecks on these commits: \"{}\" ({id}).", artifact.name)
             }
             None => "\nNo checks were recorded for these commits.".to_string(),
@@ -3428,6 +3433,24 @@ impl Engine {
     pub fn landing_approved(&self, task: TaskId, agent: AgentId, branch: &str, base: &str, head: &str) -> bool {
         (self.landing_after_review(task, agent) || self.tasks_open_to_access(agent).any(|open| open.id == task))
             && self.access_granted(task, agent, &land_action(branch, base, head))
+    }
+
+    /// Whether the grant that lets `agent` land these commits came from the
+    /// room's access mode rather than from the owner.
+    ///
+    /// From the benchmark room: a landing Full write mode had allowed was
+    /// announced as "as the owner approved", and the owner had not answered.
+    pub fn landing_granted_by_mode(&self, task: TaskId, agent: AgentId, branch: &str, base: &str, head: &str) -> bool {
+        let request = Request::new(&land_action(branch, base, head), server_access_scope(task));
+        let now = Timestamp::now();
+        self.decisions.decisions.iter().any(|decision| {
+            decision.task == Some(task)
+                && decision.asked_by.contains(&agent)
+                && decision.envelope.covers(&request, now).is_ok()
+                && decision.answer.as_ref().is_some_and(|answer| {
+                    answer.chosen == LAND_COMMITS_ALLOW && answer.note.starts_with(AUTO_APPROVED)
+                })
+        })
     }
 
     /// Whether `task` passed review and `agent` still holds it, so the commits
@@ -4214,7 +4237,20 @@ impl Engine {
             if *agent == from {
                 return Err(EngineError::SelfHandoff);
             }
-            self.require_agent(*agent)?;
+            let recipient = self.require_agent(*agent)?;
+            // From the benchmark room: an engineer-only repair was delegated
+            // to a generalist, whose accept the room then refused. A
+            // delegation the recipient could not take is refused as offered.
+            let required = self.require_task(task)?.required_role.clone();
+            if kind.transfers_ownership()
+                && !self.roles.eligibility(&recipient.roles, required.as_deref()).is_eligible()
+            {
+                return Err(EngineError::RoleMismatch {
+                    task,
+                    agent: *agent,
+                    required: required.unwrap_or_default(),
+                });
+            }
         }
 
         let open = self.open_handoffs_from(from);
@@ -4317,7 +4353,8 @@ impl Engine {
                     action: "accept a delegation outside review-only scope".into(),
                 });
             }
-            if !recipient.can_take(task.required_role.as_deref()) {
+            // The same rule as claiming: a role that stands in counts.
+            if !self.roles.eligibility(&recipient.roles, task.required_role.as_deref()).is_eligible() {
                 return Err(EngineError::RoleMismatch {
                     task: task.id,
                     agent: by,
@@ -4352,6 +4389,12 @@ impl Engine {
                 record.assignee = Some(by);
                 record.updated_at = Timestamp::now();
             }
+            // From the benchmark room: a delegation accepted at 10:12 was
+            // marked expired at 10:28, though the task had been the
+            // recipient's since it was taken. Moving the task is all a
+            // delegation does, so it is settled as it is taken; left open it
+            // would also keep its recipient counted busy.
+            events.extend(self.complete_handoff(handoff, by, Vec::new(), "took over the task".into())?);
         }
         events.extend(self.recompute_status(by));
         Ok(events)
@@ -5426,6 +5469,18 @@ impl Engine {
                 handoff.hold_open(now);
             }
         }
+        // Rooms saved before delegations were settled on acceptance can hold
+        // one still open; it is settled rather than left to expire.
+        let unsettled: Vec<(HandoffId, AgentId)> = self
+            .handoffs
+            .values()
+            .filter(|h| h.state == HandoffState::Accepted && h.kind.transfers_ownership())
+            .filter_map(|h| h.accepted_by.map(|by| (h.id, by)))
+            .collect();
+        let mut events = Vec::new();
+        for (handoff, by) in unsettled {
+            events.extend(self.complete_handoff(handoff, by, Vec::new(), "took over the task".into())?);
+        }
         let expired: Vec<HandoffId> = self
             .handoffs
             .values()
@@ -5433,7 +5488,6 @@ impl Engine {
             .map(|h| h.id)
             .collect();
 
-        let mut events = Vec::new();
         for handoff in expired {
             // Expiring is not enough on its own: the sender is still waiting,
             // and a handoff nobody accepted leaves the work inert. Returning
@@ -6040,6 +6094,8 @@ fn review_only_task(kind: TaskKind, required_role: Option<&str>) -> bool {
 /// Alias kept so the `set_phase` signature reads clearly.
 type EngineEvent = EventEnvelope;
 
+/// How an answer the room's access mode gave on the owner's behalf begins.
+const AUTO_APPROVED: &str = "Approved automatically";
 /// Upper bound on deadlock-breaking passes in a single sweep.
 const MAX_DEADLOCK_PASSES: usize = 32;
 

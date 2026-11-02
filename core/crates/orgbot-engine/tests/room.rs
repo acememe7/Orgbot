@@ -853,16 +853,44 @@ fn a_delegation_moves_the_task_to_whoever_accepts() {
 
     // From the benchmark room: a delegation accepted at 10:12 was marked
     // expired at 10:28, though the task had been the recipient's all along.
+    assert_eq!(
+        f.engine.handoff(handoff).unwrap().state,
+        HandoffState::Completed,
+        "moving the task is all a delegation does, so taking it settles it"
+    );
+    assert!(f.engine.handoffs_accepted_by(worker2).is_empty(), "nothing left to finish");
     f.apply(Command::Tick {
         // Past the five-minute handoff timeout, inside the task's lease.
         now: Timestamp::now().plus_millis(10 * 60 * 1000),
     });
-    assert_eq!(
-        f.engine.handoff(handoff).unwrap().state,
-        HandoffState::Accepted,
-        "an accepted delegation has done its work and does not run out"
-    );
+    assert_eq!(f.engine.handoff(handoff).unwrap().state, HandoffState::Completed);
     assert_eq!(f.engine.task(task).unwrap().assignee, Some(worker2));
+}
+
+/// From the benchmark room: an engineer-only repair was delegated to a
+/// generalist, and the room refused the generalist's accept.
+#[test]
+fn a_delegation_the_recipient_cannot_take_is_refused_as_offered() {
+    let mut f = fixture();
+    let (worker, worker2, lead) = (f.worker, f.worker2, f.coordinator);
+    let task = f.open_task("repair /5", Some("writer"));
+    f.apply(Command::ClaimTask { task, by: worker });
+    f.apply(Command::StartTask { task, by: worker });
+    let offer = |to| Command::OfferHandoff {
+        task,
+        from: worker,
+        to: Recipient::Agent { agent: to },
+        kind: HandoffKind::Delegate,
+        brief: "take the repair".into(),
+        expects: vec![],
+        context: vec![],
+        blocks_sender: None,
+        timeout_ms: None,
+    };
+    let refused = f.reject(offer(lead));
+    assert!(matches!(refused, EngineError::RoleMismatch { .. }), "{refused:?}");
+    assert!(f.engine.handoffs_accepted_by(lead).is_empty());
+    f.apply(offer(worker2));
 }
 
 /// The reason given when the room withdrew `handoff`, if it did.
@@ -3610,6 +3638,13 @@ fn reviewed_work_can_be_landed_and_a_landing_that_cannot_be_used_is_refused() {
             answer(&mut f, asked_decision(&asked), LAND_COMMITS_ALLOW);
         }
         assert!(f.engine.landing_approved(task, worker, "main", &base, &head), "{mode:?}: the answer can be used");
+        // From the benchmark room: a landing the mode allowed was announced
+        // as "as the owner approved".
+        assert_eq!(
+            f.engine.landing_granted_by_mode(task, worker, "main", &base, &head),
+            mode == AccessMode::FullWrite,
+            "{mode:?}: who allowed it is known"
+        );
         assert!(f.apply(request(worker, task)).is_empty(), "{mode:?}: nothing is asked twice");
     }
 

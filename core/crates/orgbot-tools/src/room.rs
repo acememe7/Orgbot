@@ -774,6 +774,11 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
         "post_message" => post_message(engine, actor, input),
         "room_status" => room_status(engine, actor),
         "list_tasks" => list_tasks(engine, actor, input),
+        "claim_task" | "start_task" if already_under_way(engine, actor, input, name) => {
+            let task = task_arg(input, "task").expect("checked above");
+            let title = engine.task(task).map(|t| t.title.clone()).unwrap_or_default();
+            ToolOutcome::ok(format!("{task} ({title}) is already yours and in progress; carry on with it."))
+        }
         "claim_task" => simple(engine, input, "task", |task| Command::ClaimTask {
             task,
             by: actor,
@@ -922,6 +927,20 @@ fn explain(error: EngineError) -> ToolOutcome {
 }
 
 /// Run a command taking a single task id.
+/// Whether `actor` asks to claim or start a task it already holds in
+/// progress. From the benchmark room: bots did this four times and were told
+/// the call had failed, about work that was going fine.
+fn already_under_way(engine: &Engine, actor: AgentId, input: &Value, name: &str) -> bool {
+    let wanted = match name {
+        "claim_task" => [TaskState::Claimed, TaskState::InProgress].as_slice(),
+        _ => [TaskState::InProgress].as_slice(),
+    };
+    task_arg(input, "task")
+        .ok()
+        .and_then(|task| engine.task(task))
+        .is_some_and(|task| task.assignee == Some(actor) && wanted.contains(&task.state))
+}
+
 fn simple(
     engine: &mut Engine,
     input: &Value,
