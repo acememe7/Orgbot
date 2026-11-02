@@ -636,6 +636,67 @@ class BoardCounts {
   );
 }
 
+/// Where one bot's time has gone in the room.
+///
+/// From benchmark 2: nothing in the app could say where a 90-minute turn had
+/// gone.
+class BotTime {
+  const BotTime({
+    this.turns = 0,
+    this.turnMs = 0,
+    this.longestTurnMs = 0,
+    this.currentTurnMs = 0,
+    this.workspaceMs = 0,
+    this.workspaceCalls = 0,
+  });
+
+  final int turns;
+  final int turnMs;
+  final int longestTurnMs;
+
+  /// The turn under way, or 0.
+  final int currentTurnMs;
+
+  /// Its workspace calls, waiting and running.
+  final int workspaceMs;
+  final int workspaceCalls;
+
+  bool get isEmpty => turns == 0 && currentTurnMs == 0 && workspaceCalls == 0;
+
+  factory BotTime.fromJson(Map<String, Object?> json) {
+    int read(String key) => (json[key] as num?)?.toInt() ?? 0;
+    return BotTime(
+      turns: read('turns'),
+      turnMs: read('turn_ms'),
+      longestTurnMs: read('longest_turn_ms'),
+      currentTurnMs: read('current_turn_ms'),
+      workspaceMs: read('workspace_ms'),
+      workspaceCalls: read('workspace_calls'),
+    );
+  }
+
+  /// "45 s", "12 min", "1 h 12 min".
+  static String span(int ms) {
+    final seconds = ms ~/ 1000;
+    if (seconds < 60) return '$seconds s';
+    final minutes = seconds ~/ 60;
+    if (minutes < 60) return '$minutes min';
+    final rest = minutes % 60;
+    return rest == 0 ? '${minutes ~/ 60} h' : '${minutes ~/ 60} h $rest min';
+  }
+
+  /// One line for the Team panel.
+  String get summary => [
+    if (currentTurnMs > 0) 'This turn ${span(currentTurnMs)}',
+    if (turns > 0)
+      '${span(turnMs)} in $turns ${turns == 1 ? 'turn' : 'turns'}'
+          '${turns > 1 ? ', longest ${span(longestTurnMs)}' : ''}',
+    if (workspaceCalls > 0)
+      '${span(workspaceMs)} in $workspaceCalls workspace '
+          '${workspaceCalls == 1 ? 'call' : 'calls'}',
+  ].join(' · ');
+}
+
 /// What one bot is doing.
 class BotState {
   const BotState({
@@ -644,12 +705,14 @@ class BotState {
     required this.doing,
     required this.holding,
     required this.free,
+    this.time = const BotTime(),
   });
 
   final String agent;
   final String handle;
 
-  /// One word: working, reviewing, waiting, idle, faulted, offline.
+  /// One word: working, reviewing, waiting, idle, faulted, offline, paused
+  /// (by the owner) or benched (by the room).
   final String doing;
 
   /// How much live work it holds.
@@ -658,12 +721,18 @@ class BotState {
   /// Whether it could take something now.
   final bool free;
 
+  /// Where its time has gone.
+  final BotTime time;
+
   factory BotState.fromJson(Map<String, Object?> json) => BotState(
     agent: json['agent'] as String? ?? '',
     handle: json['handle'] as String? ?? '',
     doing: json['doing'] as String? ?? 'idle',
     holding: (json['holding'] as num?)?.toInt() ?? 0,
     free: json['free'] as bool? ?? false,
+    time: json['time'] is Map
+        ? BotTime.fromJson((json['time'] as Map).cast<String, Object?>())
+        : const BotTime(),
   );
 }
 

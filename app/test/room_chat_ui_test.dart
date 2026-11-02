@@ -340,6 +340,59 @@ void main() {
     expect(client.sent.last, {'type': 'remove_bot', 'agent': 'bot_a'});
   });
 
+  // From benchmark 2: nothing in the app could say where a 90-minute turn
+  // had gone, and a bot the room benched must say why.
+  testWidgets('each bot row says where its time went and why it is benched', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(500, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    final client = FakeClient();
+    final store = seeded(client);
+    client.emit({
+      'type': 'digest',
+      'digest': {
+        'utilization': {
+          'bots': [
+            {
+              'agent': 'bot_a',
+              'handle': 'iris',
+              'doing': 'benched',
+              'holding': 0,
+              'free': false,
+              'time': {
+                'turns': 3,
+                'turn_ms': 111 * 60000,
+                'longest_turn_ms': 94 * 60000,
+                'current_turn_ms': 0,
+                'workspace_ms': 86 * 60000,
+                'workspace_calls': 128,
+              },
+            },
+          ],
+        },
+      },
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: ActivityRail(store: store)),
+      ),
+    );
+    await tester.pump();
+    expect(
+      find.text(
+        '1 h 51 min in 3 turns, longest 1 h 34 min · 1 h 26 min in 128 workspace calls',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('benched: long turn, no task'), findsOneWidget);
+    await tester.tap(find.byTooltip('Bot actions').first);
+    await tester.pumpAndSettle();
+    expect(find.text('Resume @iris'), findsOneWidget);
+  });
+
   testWidgets('the activity rail exposes a collapsible process timeline', (
     tester,
   ) async {

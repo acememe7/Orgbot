@@ -60,6 +60,22 @@ fn spend_usage_known(spend: Spend) -> bool {
 /// stopping the chains that turned twelve objectives into ninety-six records.
 pub const MAX_OPEN_REMEDIATIONS: usize = 3;
 
+/// Who benched a bot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PausedBy {
+    Owner,
+    /// The room, for a turn that ran long holding nothing.
+    Room,
+}
+
+/// How long a turn may run while its bot holds no task or review before the
+/// room benches the bot.
+///
+/// From benchmark 2: @iris ran turns of 54 and 92 minutes holding no task,
+/// until the owner asked for it to be stopped.
+pub const IDLE_TURN_LIMIT_MS: i64 = 30 * 60 * 1000;
+
 /// Why the work graph refuses this task, in words aimed at a bot.
 ///
 /// Deliberately not [`orgbot_proto::graph::Readiness::summary`], which is
@@ -147,10 +163,14 @@ pub struct Engine {
     /// was working normally, until each failed again.
     #[serde(default)]
     signed_out: BTreeSet<AgentId>,
-    /// Bots the owner has benched. They show as offline, take no turns and
-    /// hold nothing until the owner resumes them.
+    /// Bots benched by the owner or by the room, with who benched them. They
+    /// show as offline, take no turns and hold nothing until the owner
+    /// resumes them.
     #[serde(default)]
-    paused: BTreeSet<AgentId>,
+    paused: BTreeMap<AgentId, PausedBy>,
+    /// Where each bot's time has gone.
+    #[serde(default)]
+    time_spent: BTreeMap<AgentId, crate::digest::TimeSpent>,
     /// Tasks whose notes and records the coordinators were told had grown
     /// past what a review round should read. Told once per task.
     #[serde(default)]
@@ -492,7 +512,8 @@ impl Engine {
             fault_retry: BTreeMap::new(),
             halted_for: BTreeMap::new(),
             signed_out: BTreeSet::new(),
-            paused: BTreeSet::new(),
+            paused: BTreeMap::new(),
+            time_spent: BTreeMap::new(),
             records_warned: BTreeSet::new(),
             turn_began: BTreeMap::new(),
             offer_shown: BTreeMap::new(),
@@ -807,7 +828,8 @@ impl Engine {
                 // means a turn is running; the chat and the team list say the
                 // same.
                 let doing = match status {
-                    AgentStatus::Offline if self.paused.contains(&spec.id) => "paused",
+                    AgentStatus::Offline if self.paused.get(&spec.id) == Some(&PausedBy::Owner) => "paused",
+                    AgentStatus::Offline if self.paused.contains_key(&spec.id) => "benched",
                     AgentStatus::Offline => "offline",
                     AgentStatus::Faulted => "faulted",
                     _ if self.in_turn(spec.id) && self.holds_a_review(spec.id) => "reviewing",
@@ -822,6 +844,7 @@ impl Engine {
                     doing: doing.to_string(),
                     holding,
                     free: status.accepts_work() && holding == 0,
+                    time: self.time_spent(spec.id),
                 }
             })
             .collect();
@@ -2427,11 +2450,11 @@ impl Engine {
                 if !self.in_turn(agent) {
                     return Ok(Vec::new());
                 }
-                self.turn_ended.insert(agent, Timestamp::now());
+                self.close_turn(agent, Timestamp::now());
                 Ok(vec![self.emit(Event::TurnEnded { agent })])
             }
             Command::RecordTurn { agent, usage } => {
-                self.turn_ended.insert(agent, Timestamp::now());
+                self.close_turn(agent, Timestamp::now());
                 self.record_turn(agent, usage)
             }
             Command::ReportError {
@@ -2533,16 +2556,45 @@ impl Engine {
     /// every bot or none.
     fn pause_agent(&mut self, agent: AgentId) -> Result<Vec<EventEnvelope>> {
         let handle = self.require_agent(agent)?.handle.clone();
-        if !self.paused.insert(agent) {
+        let note = format!(
+            "The owner paused @{handle}. It takes no turns until they resume it, and its work went back to the board."
+        );
+        self.bench(agent, PausedBy::Owner, &format!("the owner paused @{handle}"), ChatMessage::system(self.room.id, note))
+    }
+
+    /// Bench a bot whose turn has run [`IDLE_TURN_LIMIT_MS`] holding nothing,
+    /// and tell the coordinators.
+    fn bench_idle(&mut self, agent: AgentId, minutes: i64) -> Result<Vec<EventEnvelope>> {
+        let handle = self.require_agent(agent)?.handle.clone();
+        let coordinators: Vec<AgentId> = self
+            .specs
+            .values()
+            .filter(|spec| spec.id != agent && spec.roles.iter().any(|role| role == "coordinator"))
+            .map(|spec| spec.id)
+            .collect();
+        let mut note = ChatMessage::system(
+            self.room.id,
+            format!(
+                "The room benched @{handle}: its turn ran {minutes} minutes holding no task or review. \
+                 Give the work it was doing to a task if it matters. The owner can resume it from the Team panel."
+            ),
+        );
+        if !coordinators.is_empty() {
+            note = note.to_agents(coordinators);
+        }
+        self.bench(agent, PausedBy::Room, &format!("the room benched @{handle}"), note)
+    }
+
+    fn bench(&mut self, agent: AgentId, by: PausedBy, why: &str, note: ChatMessage) -> Result<Vec<EventEnvelope>> {
+        if self.paused.contains_key(&agent) {
             return Ok(Vec::new());
         }
+        self.paused.insert(agent, by);
         let mut events = Vec::new();
         for task in self.active_tasks_of(agent) {
-            if let Ok(released) = self.transition(
-                task,
-                TaskTransition::Release { reason: format!("the owner paused @{handle}") },
-                Some(agent),
-            ) {
+            if let Ok(released) =
+                self.transition(task, TaskTransition::Release { reason: why.to_string() }, Some(agent))
+            {
                 events.extend(released);
             }
         }
@@ -2553,27 +2605,23 @@ impl Engine {
             .map(|h| h.id)
             .collect();
         for handoff in pending {
-            let by = self.handoffs.get(&handoff).map_or(agent, |h| h.from);
-            if let Ok(withdrawn) = self.drive_handoff(
-                handoff,
-                HandoffTransition::Withdraw { by, reason: format!("the owner paused @{handle}") },
-            ) {
+            let from = self.handoffs.get(&handoff).map_or(agent, |h| h.from);
+            if let Ok(withdrawn) =
+                self.drive_handoff(handoff, HandoffTransition::Withdraw { by: from, reason: why.to_string() })
+            {
                 events.extend(withdrawn);
             }
         }
-        self.turn_began.remove(&agent);
+        self.close_turn(agent, Timestamp::now());
         self.fault_retry.remove(&agent);
         events.extend(self.set_status(agent, AgentStatus::Offline));
-        events.extend(self.post_message(ChatMessage::system(
-            self.room.id,
-            format!("The owner paused @{handle}. It takes no turns until they resume it, and its work went back to the board."),
-        ))?);
+        events.extend(self.post_message(note)?);
         Ok(events)
     }
 
     fn resume_agent(&mut self, agent: AgentId) -> Result<Vec<EventEnvelope>> {
         let handle = self.require_agent(agent)?.handle.clone();
-        if !self.paused.remove(&agent) {
+        if self.paused.remove(&agent).is_none() {
             return Ok(Vec::new());
         }
         self.error_streak.insert(agent, 0);
@@ -2586,9 +2634,62 @@ impl Engine {
         Ok(events)
     }
 
-    /// Whether the owner has benched this bot.
+    /// End `agent`'s turn at `now`, counting its time.
+    fn close_turn(&mut self, agent: AgentId, now: Timestamp) {
+        if self.in_turn(agent) {
+            if let Some(began) = self.turn_began.get(&agent) {
+                let took = began.elapsed_to(now).max(0);
+                let spent = self.time_spent.entry(agent).or_default();
+                spent.turns += 1;
+                spent.turn_ms += took;
+                spent.longest_turn_ms = spent.longest_turn_ms.max(took);
+            }
+        }
+        self.turn_ended.insert(agent, now);
+    }
+
+    /// Count a workspace call's time, waiting and running, to its bot.
+    pub fn note_workspace_time(&mut self, agent: AgentId, millis: i64) {
+        let spent = self.time_spent.entry(agent).or_default();
+        spent.workspace_calls += 1;
+        spent.workspace_ms += millis.max(0);
+    }
+
+    /// Where `agent`'s time has gone, with the turn under way.
+    pub fn time_spent(&self, agent: AgentId) -> crate::digest::TimeSpent {
+        let mut spent = self.time_spent.get(&agent).copied().unwrap_or_default();
+        if self.in_turn(agent) {
+            spent.current_turn_ms = self
+                .turn_began
+                .get(&agent)
+                .map_or(0, |began| began.elapsed_to(Timestamp::now()).max(0));
+        }
+        spent
+    }
+
+    /// Bots whose turn has run [`IDLE_TURN_LIMIT_MS`] by `now` holding no
+    /// task or review. Coordinators plan without holding work, so are left.
+    fn idle_too_long(&self, now: Timestamp) -> Vec<(AgentId, i64)> {
+        self.turn_began
+            .iter()
+            .filter(|(agent, _)| self.in_turn(**agent) && !self.paused.contains_key(agent))
+            .map(|(agent, began)| (*agent, began.elapsed_to(now)))
+            .filter(|(_, ran)| *ran >= IDLE_TURN_LIMIT_MS)
+            .filter(|(agent, _)| {
+                self.specs
+                    .get(agent)
+                    .is_some_and(|spec| !spec.roles.iter().any(|role| role == "coordinator"))
+            })
+            .filter(|(agent, _)| {
+                !self.tasks.values().any(|task| task.is_held_by(*agent) && !task.state.is_terminal())
+                    && self.review_queue_for(*agent).is_empty()
+            })
+            .collect()
+    }
+
+    /// Whether the owner or the room has benched this bot.
     pub fn is_paused(&self, agent: AgentId) -> bool {
-        self.paused.contains(&agent)
+        self.paused.contains_key(&agent)
     }
 
     fn set_phase(&mut self, phase: RoomPhase, note: &str) -> Result<Vec<EngineEvent>> {
@@ -5543,7 +5644,7 @@ impl Engine {
         })];
         // A turn the owner's pause cut short may still report how it ended;
         // the bot stays benched rather than faulting and being retried.
-        if self.paused.contains(&agent) {
+        if self.paused.contains_key(&agent) {
             return Ok(events);
         }
 
@@ -5654,6 +5755,11 @@ impl Engine {
         // running room is not waited for: the first reviewer's findings go
         // back as they stand.
         let mut events = Vec::new();
+        // Before any lapsed claim is returned: a bot is benched for what it
+        // held while its turn ran, not for what the sweep below takes away.
+        for (agent, ran) in self.idle_too_long(now) {
+            events.extend(self.bench_idle(agent, ran / 60_000)?);
+        }
         if self.room.phase == RoomPhase::Running {
             let overdue: Vec<ReviewPanel> = self
                 .review_panels
@@ -5718,7 +5824,7 @@ impl Engine {
     pub fn retry_due(&self, now: Timestamp) -> bool {
         self.fault_retry.iter().any(|(agent, retry)| {
             self.status(*agent) == AgentStatus::Faulted && retry.retry_at() <= now
-        })
+        }) || !self.idle_too_long(now).is_empty()
     }
 
     fn retry_faulted(&mut self, now: Timestamp) -> Vec<EventEnvelope> {
@@ -6180,7 +6286,7 @@ impl Engine {
         if !self.specs.contains_key(&agent) {
             return Vec::new();
         }
-        if self.status(agent) == AgentStatus::Faulted || self.paused.contains(&agent) {
+        if self.status(agent) == AgentStatus::Faulted || self.paused.contains_key(&agent) {
             return Vec::new();
         }
         let held: Vec<&Task> = self

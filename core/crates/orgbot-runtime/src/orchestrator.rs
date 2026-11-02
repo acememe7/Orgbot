@@ -1029,9 +1029,16 @@ impl Orchestrator {
                         for agent in running_backend.keys().chain(&waiting) {
                             let _ = engine.apply(Command::KeepAlive { agent: *agent });
                         }
-                        engine
+                        let freed = engine
                             .apply(Command::Tick { now: Timestamp::now() })
-                            .is_ok_and(|events| tick_frees_work(&events))
+                            .is_ok_and(|events| tick_frees_work(&events));
+                        // A bot the room benched mid-turn stops now.
+                        for agent in running_backend.keys() {
+                            if engine.is_paused(*agent) {
+                                self.stops.stop(*agent);
+                            }
+                        }
+                        freed
                     });
                     if freed {
                         self.wake();
@@ -1044,13 +1051,22 @@ impl Orchestrator {
                         for agent in running_backend.keys().chain(&waiting) {
                             let _ = engine.apply(Command::KeepAlive { agent: *agent });
                         }
-                        // A faulted bot's retry is due on its own schedule, not
-                        // whenever another turn happens to finish.
+                        // A faulted bot's retry, or a bench for a turn holding
+                        // nothing, is due on its own schedule, not whenever
+                        // another turn happens to finish.
                         let now = Timestamp::now();
-                        engine.retry_due(now)
+                        let freed = engine.retry_due(now)
                             && engine
                                 .apply(Command::Tick { now })
-                                .is_ok_and(|events| tick_frees_work(&events))
+                                .is_ok_and(|events| tick_frees_work(&events));
+                        // A bot benched mid-turn, by the room or the owner,
+                        // stops now.
+                        for agent in running_backend.keys() {
+                            if engine.is_paused(*agent) {
+                                self.stops.stop(*agent);
+                            }
+                        }
+                        freed
                     });
                     if freed {
                         self.wake();

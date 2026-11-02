@@ -4839,3 +4839,58 @@ fn a_wait_that_would_close_a_circle_is_never_made() {
     assert!(matches!(&refused, EngineError::NotReady { reason, .. } if reason.contains("already waits on this task")), "{refused}");
     assert_eq!(f.state(gas), TaskState::InProgress);
 }
+
+/// From benchmark 2: @iris ran turns of 54 and 92 minutes holding no task,
+/// until the owner asked for it to be stopped.
+#[test]
+fn a_turn_that_runs_long_holding_nothing_is_benched_and_the_coordinators_told() {
+    use orgbot_proto::AgentStatus;
+    let mut early = fixture();
+    let idle = early.worker;
+    early.apply(Command::BeginTurn { agent: idle });
+    early.apply(Command::Tick { now: Timestamp::now().plus_millis(20 * 60_000) });
+    assert!(!early.engine.is_paused(idle), "twenty minutes is reminded, not benched");
+
+    // A running bot's claims are kept alive as it works, so the tick sees
+    // what each bot holds.
+    let mut f = fixture();
+    let (lead, worker, worker2) = (f.coordinator, f.worker, f.worker2);
+    f.start_task("write the notes", worker2);
+    for agent in [lead, worker, worker2] {
+        f.apply(Command::BeginTurn { agent });
+    }
+    f.apply(Command::Tick { now: Timestamp::now().plus_millis(31 * 60_000) });
+    assert!(f.engine.is_paused(worker));
+    assert_eq!(f.engine.status(worker), AgentStatus::Offline);
+    assert!(!f.engine.is_paused(lead), "coordinators plan without holding work");
+    assert!(!f.engine.is_paused(worker2), "a bot holding a task is reminded, not benched");
+    let note = f.engine.transcript().iter().rev().find(|m| m.body.contains("The room benched @w1")).unwrap().clone();
+    assert!(note.body.contains("ran 31 minutes holding no task or review"), "{}", note.body);
+    assert!(note.wakes(lead, &["coordinator".to_string()]), "the coordinators are told");
+    let row = f.engine.digest().utilization.bots.into_iter().find(|bot| bot.agent == worker).unwrap();
+    assert_eq!(row.doing, "benched");
+
+    f.apply(Command::ResumeAgent { agent: worker });
+    assert_eq!(f.engine.status(worker), AgentStatus::Idle);
+}
+
+/// From benchmark 2: nothing in the room could say where a 90-minute turn
+/// had gone. Each bot's turns and workspace calls are counted.
+#[test]
+fn each_bots_time_in_turns_and_workspace_calls_is_kept() {
+    let mut f = fixture();
+    let worker = f.worker;
+    f.apply(Command::BeginTurn { agent: worker });
+    f.engine.note_workspace_time(worker, 1_500);
+    f.engine.note_workspace_time(worker, 500);
+    assert!(f.engine.time_spent(worker).current_turn_ms >= 0);
+    f.apply(Command::EndTurn { agent: worker });
+    f.apply(Command::EndTurn { agent: worker });
+    let spent = f.engine.time_spent(worker);
+    assert_eq!((spent.turns, spent.workspace_calls, spent.workspace_ms, spent.current_turn_ms), (1, 2, 2_000, 0));
+    assert!(spent.longest_turn_ms <= spent.turn_ms);
+    let row = f.engine.digest().utilization.bots.into_iter().find(|bot| bot.agent == worker).unwrap();
+    assert_eq!(row.time, spent);
+    let saved: Engine = serde_json::from_str(&serde_json::to_string(&f.engine).unwrap()).unwrap();
+    assert_eq!(saved.time_spent(worker), spent, "kept across a save");
+}

@@ -1534,7 +1534,6 @@ async fn the_owner_can_stop_one_bots_turn_and_bench_it() {
     owner_asks(&mut room, iris, "what are you doing?");
 
     let shared = room.shared_engine();
-    let stops = room.turn_stops();
     let sinks = |_| None;
     let reports = {
         let run = room.step_rolling(3, &sinks);
@@ -1548,8 +1547,9 @@ async fn the_owner_can_stop_one_bots_turn_and_bench_it() {
             _ = &mut run => panic!("the run ended before the turn began"),
             began = tokio::time::timeout(std::time::Duration::from_secs(5), began) => began.unwrap(),
         }
+        // No call to stop it: the run notices the bench by itself, as it
+        // does when the room benches a bot whose turn holds nothing.
         shared.with(|engine| engine.apply(Command::PauseAgent { agent: iris })).unwrap();
-        stops.stop(iris);
         tokio::time::timeout(std::time::Duration::from_secs(5), run)
             .await
             .expect("the run ends once the benched bot's turn is stopped")

@@ -631,9 +631,13 @@ impl Bot {
                             Some(workspace) => {
                                 let grants = engine
                                     .with(|engine| sandbox_grants(engine, self.spec.id));
+                                let began = std::time::Instant::now();
                                 let outcome = workspace
                                     .call_as(self.spec.id, name, input, grants)
                                     .await;
+                                engine.with(|engine| {
+                                    engine.note_workspace_time(self.spec.id, began.elapsed().as_millis() as i64)
+                                });
                                 note_room_removals(engine, self.spec.id, name, &outcome);
                                 outcome
                             }
@@ -1181,7 +1185,9 @@ fn turn_minutes_reminder(minutes: u64, holds_work: bool) -> String {
         return format!(
             "\n\n[OrgBots] This turn has run {minutes} minutes and you hold no task or \
              review. Finish now: post what you found, if anything, and end the turn. To \
-             keep working, claim a task first."
+             keep working, claim a task first. At {} minutes holding nothing, the room \
+             benches you until the owner resumes you.",
+            orgbot_engine::engine::IDLE_TURN_LIMIT_MS / 60_000
         );
     }
     let mut note = format!(
@@ -1639,7 +1645,9 @@ async fn room_mcp_reply(
         } else if name == "workspace_push_commits" {
             push_commits(engine, workspace, actor, &args, grants).await
         } else {
+            let began = std::time::Instant::now();
             let outcome = workspace.call_as(actor, &name, &args, grants).await;
+            engine.with(|engine| engine.note_workspace_time(actor, began.elapsed().as_millis() as i64));
             note_room_removals(engine, actor, &name, &outcome);
             outcome
         }
@@ -1719,7 +1727,8 @@ mod tests {
         assert!(turn_minutes_reminder(20, true).contains("so it can be split"));
         assert!(!turn_minutes_reminder(10, true).contains("split"));
         // From benchmark 2: @iris ran 92 minutes holding nothing.
-        assert!(turn_minutes_reminder(30, false).contains("you hold no task or review"));
+        assert!(turn_minutes_reminder(20, false).contains("you hold no task or review"));
+        assert!(turn_minutes_reminder(20, false).contains("At 30 minutes holding nothing, the room benches you"));
         let mut repeats = Repeats::default();
         let read = json!({"path": "a.ts"});
         assert_eq!(repeats.note("workspace_read", &read), None);

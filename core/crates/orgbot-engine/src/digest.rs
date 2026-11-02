@@ -150,6 +150,30 @@ pub struct BotState {
     pub holding: u32,
     /// Whether it could take something now.
     pub free: bool,
+    /// Where its time has gone in this room.
+    #[serde(default)]
+    pub time: TimeSpent,
+}
+
+/// Where one bot's time has gone, so a slow room can be explained.
+///
+/// From benchmark 2: no bot, and nothing in the app, could say where a
+/// 90-minute turn had gone; the answer came from a CLI's private log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TimeSpent {
+    /// Turns finished.
+    pub turns: u32,
+    /// Milliseconds in those turns.
+    pub turn_ms: i64,
+    /// The longest of them.
+    pub longest_turn_ms: i64,
+    /// The turn under way, if one is.
+    #[serde(default)]
+    pub current_turn_ms: i64,
+    /// Milliseconds its workspace calls took, waiting and running.
+    pub workspace_ms: i64,
+    /// How many workspace calls it made.
+    pub workspace_calls: u32,
 }
 
 /// Where the room's effort is going.

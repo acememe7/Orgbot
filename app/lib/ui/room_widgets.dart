@@ -68,6 +68,7 @@ class ActivityRail extends StatelessWidget {
                 return _BotRow(
                   entry: entry,
                   doing: store.doingOf(entry.agent.id),
+                  time: store.timeOf(entry.agent.id),
                   store: canAnswer ? store : null,
                 );
               },
@@ -166,12 +167,20 @@ class ActivityRail extends StatelessWidget {
 }
 
 class _BotRow extends StatelessWidget {
-  const _BotRow({required this.entry, required this.doing, this.store});
+  const _BotRow({
+    required this.entry,
+    required this.doing,
+    this.time = const BotTime(),
+    this.store,
+  });
 
   final BotActivity entry;
 
   /// What the room says the bot is doing; see [RoomStore.doingOf].
   final String doing;
+
+  /// Where its time has gone; see [RoomStore.timeOf].
+  final BotTime time;
 
   /// The room, when the person viewing it runs it and may pause a bot.
   final RoomStore? store;
@@ -182,7 +191,7 @@ class _BotRow extends StatelessWidget {
   /// with no task, and the room could only stop every bot or none.
   Widget _actions(BuildContext context, RoomStore store) {
     final handle = '@${entry.agent.handle}';
-    final paused = doing == 'paused';
+    final paused = doing == 'paused' || doing == 'benched';
     return PopupMenuButton<String>(
       tooltip: 'Bot actions',
       icon: const Icon(Icons.more_vert, size: 18),
@@ -315,6 +324,15 @@ class _BotRow extends StatelessWidget {
                 _actions(context, store),
             ],
           ),
+          if (!time.isEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              time.summary,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+            ),
+          ],
           if (entry.taskTitle != null) ...[
             const SizedBox(height: 10),
             Row(
@@ -521,6 +539,7 @@ class _BotRow extends StatelessWidget {
       'faulted' => (Colors.red, 'faulted'),
       'offline' => (Colors.grey, 'offline'),
       'paused' => (Colors.grey, 'paused by you'),
+      'benched' => (Colors.grey, 'benched: long turn, no task'),
       _ => (Colors.green, 'idle'),
     };
   }

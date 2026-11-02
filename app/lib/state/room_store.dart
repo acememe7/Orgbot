@@ -435,6 +435,14 @@ class RoomStore extends ChangeNotifier {
     return 'idle';
   }
 
+  /// Where the bot's time has gone, as the room last reported it.
+  BotTime timeOf(String agentId) {
+    for (final bot in _digest.utilization.bots) {
+      if (bot.agent == agentId) return bot.time;
+    }
+    return const BotTime();
+  }
+
   /// Whether a turn of the bot's is running.
   bool inTurn(String agentId) {
     final doing = doingOf(agentId);
