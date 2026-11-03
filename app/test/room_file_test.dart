@@ -308,6 +308,13 @@ void main() {
     expect(toml(ProviderKind.ollama, ''), isNot(contains('effort')));
   });
 
+  // From speed test 1: fourteen bots with eight at once left holders waiting.
+  test('a mixed team can run up to sixteen at once and is told when it waits', () {
+    expect(parallelTurnChoices.last, 16);
+    expect(parallelTurnsHelp(8, 14), contains('Your team has 14 bots: with 8 at once'));
+    expect(parallelTurnsHelp(16, 14), isNot(contains('Your team has')));
+  });
+
   test('a bot keeps its effort across saves', () {
     final bot = BotDef(name: 'b', provider: ProviderKind.codex, effort: 'high');
     expect(BotDef.fromJson(bot.toJson()).effort, 'high');

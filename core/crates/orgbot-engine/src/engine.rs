@@ -76,6 +76,25 @@ enum PausedBy {
 /// until the owner asked for it to be stopped.
 pub const IDLE_TURN_LIMIT_MS: i64 = 30 * 60 * 1000;
 
+/// How long a task may be with one holder, while other work waits on it,
+/// before the coordinators and the holder are told to split it or hand it on.
+///
+/// From speed test 1: @grok-quick held the 3D model for two hours, never
+/// submitting it, while the render pipeline, the hero and the final QA
+/// waited on it, until the owner noticed.
+pub const HELD_TOO_LONG_MS: i64 = 45 * 60 * 1000;
+
+/// How long work back in review waits for the reviewers who asked for its
+/// fixes before any free reviewer may check it.
+///
+/// From speed test 1: the tech specs waited 29 minutes for @ellis, busy
+/// writing, to recheck them.
+pub const RECHECK_FALLBACK_MS: i64 = 10 * 60 * 1000;
+
+/// How long reviews wait, while bots that cannot review sit idle, before the
+/// owner is told the room has too few reviewers.
+pub const REVIEW_BACKLOG_MS: i64 = 10 * 60 * 1000;
+
 /// Why the work graph refuses this task, in words aimed at a bot.
 ///
 /// Deliberately not [`orgbot_proto::graph::Readiness::summary`], which is
@@ -168,6 +187,16 @@ pub struct Engine {
     /// resumes them.
     #[serde(default)]
     paused: BTreeMap<AgentId, PausedBy>,
+    /// Since when each task in hand has been with its holder.
+    #[serde(default)]
+    held_since: BTreeMap<TaskId, (AgentId, Timestamp)>,
+    /// When the room last said a task was held too long, so it says so once
+    /// an interval.
+    #[serde(default)]
+    held_nudged: BTreeMap<TaskId, Timestamp>,
+    /// When the owner was last told reviews were piling up.
+    #[serde(default)]
+    review_backlog_told: Option<Timestamp>,
     /// Where each bot's time has gone.
     #[serde(default)]
     time_spent: BTreeMap<AgentId, crate::digest::TimeSpent>,
@@ -513,6 +542,9 @@ impl Engine {
             halted_for: BTreeMap::new(),
             signed_out: BTreeSet::new(),
             paused: BTreeMap::new(),
+            held_since: BTreeMap::new(),
+            held_nudged: BTreeMap::new(),
+            review_backlog_told: None,
             time_spent: BTreeMap::new(),
             records_warned: BTreeSet::new(),
             turn_began: BTreeMap::new(),
@@ -939,6 +971,15 @@ impl Engine {
     ///
     /// Empty for a first submission, or when none of them is available, in
     /// which case any reviewer may take it.
+    /// Who must check `task`'s fixes now: the reviewers who asked for them,
+    /// until it has waited [`RECHECK_FALLBACK_MS`] in review; then anyone.
+    pub fn recheck_reviewers(&self, task: &Task, now: Timestamp) -> Vec<AgentId> {
+        if task.state == TaskState::InReview && task.updated_at.elapsed_to(now) >= RECHECK_FALLBACK_MS {
+            return Vec::new();
+        }
+        self.last_round_reviewers(task.id)
+    }
+
     pub fn last_round_reviewers(&self, task: TaskId) -> Vec<AgentId> {
         let Some(record) = self.tasks.get(&task) else {
             return Vec::new();
@@ -1321,6 +1362,22 @@ impl Engine {
             );
             return result;
         }
+        // From speed test 1: six tasks waited up to 29 minutes for review while
+        // the bots that could review took build work. Reviews come first.
+        if spec.autonomy.may_inspect
+            && !review_only_task(record.kind, record.required_role.as_deref())
+        {
+            let waiting = self.review_queue_for(agent).len();
+            if waiting > 0 {
+                result.eligible = false;
+                result.reason = Reason::ReviewsFirst;
+                result.detail = format!(
+                    "{waiting} task(s) wait for {}'s review: review them before taking new work",
+                    spec.handle
+                );
+                return result;
+            }
+        }
         // From benchmark 2: @grok-quick, a stand-in for QA, claimed the QA
         // task 30 seconds after it opened, while @quinn, who holds the role,
         // was free and not woken for 16 minutes. Stand-ins are for when every
@@ -1444,6 +1501,7 @@ impl Engine {
             | Reason::BotUnavailable
             | Reason::LeaveToBuilders
             | Reason::LeaveToRoleHolder
+            | Reason::ReviewsFirst
             | Reason::UnknownBot => EngineError::NotClaimable {
                 task,
                 agent,
@@ -1914,7 +1972,7 @@ impl Engine {
             if task.assignee == Some(inspector) || self.authored_review_artifact(task, inspector) {
                 continue;
             }
-            let checkers = self.last_round_reviewers(task.id);
+            let checkers = self.recheck_reviewers(task, Timestamp::now());
             if !checkers.is_empty() && !checkers.contains(&inspector) {
                 continue;
             }
@@ -2690,6 +2748,146 @@ impl Engine {
                     && self.review_queue_for(*agent).is_empty()
             })
             .collect()
+    }
+
+    /// Tell the owner, at most hourly, when reviews have waited long while
+    /// bots that cannot review sit idle: the room has too few reviewers.
+    ///
+    /// From speed test 1: one bot did nearly every review for fourteen, and
+    /// work waited up to 29 minutes for it while three builders sat idle.
+    fn tell_review_backlog(&mut self, now: Timestamp) -> Result<Vec<EventEnvelope>> {
+        if self.review_backlog_told.is_some_and(|at| at.elapsed_to(now) < 60 * 60 * 1000) {
+            return Ok(Vec::new());
+        }
+        let waiting: Vec<&Task> = self
+            .tasks
+            .values()
+            .filter(|task| task.state == TaskState::InReview && task.updated_at.elapsed_to(now) >= REVIEW_BACKLOG_MS)
+            .collect();
+        let idle: Vec<String> = self
+            .specs
+            .values()
+            .filter(|spec| !spec.autonomy.may_inspect && self.status(spec.id).accepts_work())
+            .filter(|spec| !self.tasks.values().any(|task| task.is_held_by(spec.id) && !task.state.is_terminal()))
+            .map(|spec| format!("@{}", spec.handle))
+            .collect();
+        if waiting.len() < 2 || idle.len() < 2 {
+            return Ok(Vec::new());
+        }
+        self.review_backlog_told = Some(now);
+        let oldest = waiting.iter().map(|task| task.updated_at.elapsed_to(now)).max().unwrap_or(0) / 60_000;
+        let reviewers = self.specs.values().filter(|spec| spec.autonomy.may_inspect).count();
+        let mut message = ChatMessage::system(
+            self.room.id,
+            format!(
+                "{} tasks are waiting for review, the oldest for {oldest} minutes, while {} sit idle and cannot \
+                 review. Only {reviewers} bot(s) here can review: in Team, let one or two strong builders review too.",
+                waiting.len(),
+                idle.join(", ")
+            ),
+        );
+        message.audience = orgbot_proto::chat::Audience::Human;
+        Ok(self.post_message(message)?)
+    }
+
+    /// Tell the coordinators and the holder about each task that has been
+    /// with one holder for [`HELD_TOO_LONG_MS`] while other work waits on it.
+    fn nudge_long_held(&mut self, now: Timestamp) -> Result<Vec<EventEnvelope>> {
+        let held: Vec<(TaskId, AgentId)> = self
+            .tasks
+            .values()
+            .filter(|task| matches!(task.state, TaskState::Claimed | TaskState::InProgress))
+            .filter_map(|task| task.assignee.map(|holder| (task.id, holder)))
+            .collect();
+        self.held_since
+            .retain(|task, (holder, _)| held.contains(&(*task, *holder)));
+        self.held_nudged.retain(|task, _| held.iter().any(|(id, _)| id == task));
+        for (task, holder) in &held {
+            self.held_since.entry(*task).or_insert((*holder, now));
+        }
+        let due: Vec<(TaskId, AgentId, i64, usize)> = self
+            .held_since
+            .iter()
+            .filter(|(_, (_, since))| since.elapsed_to(now) >= HELD_TOO_LONG_MS)
+            .filter(|(task, _)| {
+                self.held_nudged
+                    .get(task)
+                    .is_none_or(|at| at.elapsed_to(now) >= HELD_TOO_LONG_MS)
+            })
+            .map(|(task, (holder, since))| {
+                let waiting = self
+                    .tasks
+                    .values()
+                    .filter(|other| other.id != *task && !other.state.is_terminal())
+                    .filter(|other| {
+                        other.depends_on.contains(task)
+                            || other.blocked_on.iter().any(
+                                |reason| matches!(reason, BlockReason::AwaitingTask { task: awaited } if awaited == task),
+                            )
+                    })
+                    .count();
+                (*task, *holder, since.elapsed_to(now), waiting)
+            })
+            .filter(|(_, _, _, waiting)| *waiting > 0)
+            .collect();
+        let mut events = Vec::new();
+        for (task, holder, held_for, waiting) in due {
+            self.held_nudged.insert(task, now);
+            let title = self.title_of(task);
+            let who = self.handle_of(holder);
+            let mut told: Vec<AgentId> = self
+                .specs
+                .values()
+                .filter(|spec| spec.roles.iter().any(|role| role == "coordinator"))
+                .map(|spec| spec.id)
+                .collect();
+            if !told.contains(&holder) {
+                told.push(holder);
+            }
+            let message = ChatMessage::system(
+                self.room.id,
+                format!(
+                    "\"{title}\" has been with {who} for {} minutes and {waiting} other task(s) wait on it. \
+                     {who}: submit what works now for review and say what is left. Coordinators: split what is \
+                     left or hand it on.",
+                    held_for / 60_000
+                ),
+            )
+            .to_agents(told);
+            events.extend(self.post_message(message)?);
+        }
+        Ok(events)
+    }
+
+    /// Whether teammates' work waits on this bot now: a task it holds that
+    /// another open task depends on or is blocked on, or help it was asked
+    /// for and has not finished.
+    ///
+    /// Long thinking costs the room only then. From speed test 1: a
+    /// coordinator thinking a plan through for thirteen minutes held nobody
+    /// up; a bot reasoning for twenty minutes on the render pipeline held up
+    /// three teammates.
+    pub fn others_wait_on(&self, agent: AgentId) -> bool {
+        let held: BTreeSet<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| task.is_held_by(agent) && !task.state.is_terminal())
+            .map(|task| task.id)
+            .collect();
+        let waits_on_held = self.tasks.values().any(|task| {
+            !task.state.is_terminal()
+                && !task.is_held_by(agent)
+                && (task.depends_on.iter().any(|upstream| held.contains(upstream))
+                    || task.blocked_on.iter().any(|reason| {
+                        matches!(reason, BlockReason::AwaitingTask { task } if held.contains(task))
+                    }))
+        });
+        let asked_for_help = self.handoffs.values().any(|handoff| {
+            handoff.state.is_pending()
+                && handoff.from != agent
+                && (handoff.accepted_by == Some(agent) || handoff.to == Recipient::Agent { agent })
+        });
+        waits_on_held || asked_for_help
     }
 
     /// Whether the owner or the room has benched this bot.
@@ -5065,8 +5263,9 @@ impl Engine {
             .state
             .apply(&TaskTransition::Approve { by: inspector })?;
         let (revision, artifacts) = (record.revision, record.artifacts.clone());
-        // The reviewers who asked for the fix check it.
-        let checkers = self.last_round_reviewers(task);
+        // The reviewers who asked for the fix check it, unless it has waited
+        // too long for them.
+        let checkers = self.recheck_reviewers(record, Timestamp::now());
         if !checkers.is_empty() && !checkers.contains(&inspector) {
             return Err(EngineError::NotPermitted {
                 agent: inspector,
@@ -5765,6 +5964,8 @@ impl Engine {
         for (agent, ran) in self.idle_too_long(now) {
             events.extend(self.bench_idle(agent, ran / 60_000)?);
         }
+        events.extend(self.nudge_long_held(now)?);
+        events.extend(self.tell_review_backlog(now)?);
         if self.room.phase == RoomPhase::Running {
             let overdue: Vec<ReviewPanel> = self
                 .review_panels

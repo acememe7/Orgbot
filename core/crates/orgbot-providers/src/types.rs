@@ -227,6 +227,12 @@ pub struct CompletionRequest {
     /// Every path the owner lends, hidden from the sandbox unless lent.
     #[serde(default)]
     pub hide: Vec<String>,
+    /// How long one reply may only reason, with no answer or tool call,
+    /// before it is cut off. Short when teammates wait on this bot, long when
+    /// none do, so a coordinator can think a plan through. Decided by the
+    /// room; `None` keeps the provider's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_limit: Option<std::time::Duration>,
 }
 
 /// What a bot's sandbox may carry of the owner's for one turn or command:
@@ -286,6 +292,7 @@ impl CompletionRequest {
             server_access: false,
             lend: Vec::new(),
             hide: Vec::new(),
+            thinking_limit: None,
         }
     }
 

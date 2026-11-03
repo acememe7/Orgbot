@@ -1848,6 +1848,35 @@ fn record_human_message(
     } else {
         MessageIntent::Ask
     };
+    // From speed test 1: the owner wrote "@grok-quick has held the 3D phone
+    // model since 11:08 ... I'm asking the room to have it submitted or
+    // handed on", and only @grok-quick heard it. Coordinators keep the plan,
+    // so they hear what the owner tells any one bot, as a note to them.
+    let tagged: Vec<orgbot_proto::AgentId> = match &audience {
+        Audience::Agents { agents } if !agents.is_empty() && parent_author.is_none() => agents.clone(),
+        _ => Vec::new(),
+    };
+    let coordinators: Vec<orgbot_proto::AgentId> = engine
+        .agents()
+        .filter(|spec| spec.roles.iter().any(|role| role == "coordinator") && !tagged.contains(&spec.id))
+        .map(|spec| spec.id)
+        .collect();
+    let note = (!tagged.is_empty() && !coordinators.is_empty()).then(|| {
+        let names: Vec<String> = tagged
+            .iter()
+            .filter_map(|agent| engine.agent(*agent).map(|spec| format!("@{}", spec.handle)))
+            .collect();
+        let quoted: String = body.chars().take(600).collect();
+        ChatMessage::system(
+            room,
+            format!(
+                "For the coordinators: {author} wrote to {}: \"{quoted}\" If it changes the plan, act on it; \
+                 otherwise leave the answer to them.",
+                names.join(", ")
+            ),
+        )
+        .to_agents(coordinators)
+    });
     let message = ChatMessage {
         id,
         room,
@@ -1862,11 +1891,15 @@ fn record_human_message(
         files,
         sent_at: Timestamp::now(),
     };
-    engine
+    let mut events = engine
         .apply(Command::PostMessage {
             message: Box::new(message),
         })
-        .map_err(|error| format!("Message was not sent: {error}"))
+        .map_err(|error| format!("Message was not sent: {error}"))?;
+    if let Some(note) = note {
+        events.extend(engine.apply(Command::PostMessage { message: Box::new(note) }).unwrap_or_default());
+    }
+    Ok(events)
 }
 
 /// Record the owner's answer to a decision, and put it in the transcript.
@@ -3672,6 +3705,47 @@ mod tests {
         );
         drop(engine);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// From speed test 1: the owner told @grok-quick to submit or hand on the
+    /// 3D model "so the room" could act, and only @grok-quick heard it.
+    #[test]
+    fn the_coordinators_hear_what_the_owner_tells_one_bot() {
+        use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+        let mut engine = orgbot_engine::Engine::new(RoomSpec {
+            name: "notes".into(),
+            goal: "ship".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        let scripted = || orgbot_proto::agent::ProviderRef::Scripted { script: "t".into() };
+        let lead = orgbot_proto::AgentSpec::new("opus", "Opus", scripted()).with_roles(["coordinator"]);
+        let builder = orgbot_proto::AgentSpec::new("grok-quick", "Grok", scripted()).with_roles(["engineer"]);
+        let (lead_id, builder_id) = (lead.id, builder.id);
+        for spec in [lead, builder] {
+            engine.apply(Command::JoinAgent { spec: Box::new(spec) }).unwrap();
+        }
+        engine.apply(Command::StartRoom).unwrap();
+        let input = |body: &str| HumanInput {
+            id: MessageId::new(),
+            author: "Aece".into(),
+            body: body.into(),
+            task: None,
+            files: vec![],
+            reply_to: None,
+        };
+        record_human_message(&mut engine, None, None, input("@grok-quick submit the model now")).unwrap();
+        let note = engine.transcript().iter().find(|m| m.body.starts_with("For the coordinators")).cloned();
+        let note = note.expect("the coordinators hear it");
+        assert!(note.body.contains("Aece wrote to @grok-quick: \"@grok-quick submit the model now\""), "{}", note.body);
+        assert!(note.wakes(lead_id, &["coordinator".to_string()]) && !note.wakes(builder_id, &["engineer".to_string()]));
+
+        // Written to the coordinator itself, nobody else is copied.
+        let before = engine.transcript().len();
+        record_human_message(&mut engine, None, None, input("@opus split the model task")).unwrap();
+        assert_eq!(engine.transcript().len(), before + 1);
     }
 
     #[test]

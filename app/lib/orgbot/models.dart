@@ -228,10 +228,20 @@ const int desktopDefaultParallelTurns = 4;
 
 /// Concurrency settings offered in the UI.
 ///
-/// Stops at eight deliberately. Past that the limit stops being the room and
-/// starts being the providers, and a room that spends its turns collecting
-/// rate-limit errors is slower than one that waited its turn.
-const List<int> parallelTurnChoices = [1, 2, 4, 6, 8];
+/// Up to sixteen. A team on one provider meets that provider's limits first,
+/// but a mixed team does not, and from speed test 1: fourteen bots across five
+/// providers with eight at once left holders of work waiting for a slot.
+const List<int> parallelTurnChoices = [1, 2, 4, 6, 8, 10, 12, 16];
+
+/// What the "Bots working at once" setting means for a team of [teamSize].
+String parallelTurnsHelp(int parallel, int teamSize) {
+  const base =
+      'Most of a turn is waiting on a model, so this decides how much of the '
+      'room is busy, and it multiplies how fast you draw on your plans.';
+  if (teamSize <= parallel) return base;
+  return '$base Your team has $teamSize bots: with $parallel at once, the '
+      'others wait for a free slot, even with work in hand.';
+}
 
 /// How much of what bots ask to use the owner approves by hand. The values
 /// are the room file's `access` names.

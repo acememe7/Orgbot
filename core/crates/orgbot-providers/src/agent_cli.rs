@@ -149,6 +149,9 @@ pub struct AgentCliProvider {
     /// Tool uses and file changes in the last turn, for the room to tell a
     /// bot working on its own from one going round in circles.
     last_activity: std::sync::atomic::AtomicUsize,
+    /// Tool uses so far, rising while a turn runs; see
+    /// [`Provider::live_activity`].
+    live_activity: std::sync::atomic::AtomicUsize,
     /// Removals waiting in this bot's copy after its last turn; `usize::MAX`
     /// until a turn has reported.
     last_pending: std::sync::atomic::AtomicUsize,
@@ -259,6 +262,7 @@ impl AgentCliProvider {
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
+            live_activity: std::sync::atomic::AtomicUsize::new(0),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             timeout,
             session_store: Mutex::new(None),
@@ -576,6 +580,10 @@ impl Provider for AgentCliProvider {
 
     fn last_turn_activity(&self) -> Option<usize> {
         Some(self.last_activity.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    fn live_activity(&self) -> Option<usize> {
+        Some(self.live_activity.load(std::sync::atomic::Ordering::SeqCst))
     }
 
     fn last_pending_removals(&self) -> Option<usize> {
@@ -1042,7 +1050,11 @@ impl AgentCliProvider {
                     })?;
                 let Some(line) = line else { break };
                 let previous_session = episode.session_id.clone();
+                let tools_before = episode.tool_uses;
                 ingest_line(provider.cli, &line, sink, episode);
+                if episode.tool_uses != tools_before {
+                    provider.live_activity.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 if previous_session != episode.session_id {
                     if let Some(session_id) = episode.session_id.as_deref() {
                         let mut active = provider.session.lock().unwrap();
@@ -2900,6 +2912,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
+            live_activity: std::sync::atomic::AtomicUsize::new(0),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -3208,6 +3221,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
+            live_activity: std::sync::atomic::AtomicUsize::new(0),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -3523,6 +3537,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
+            live_activity: std::sync::atomic::AtomicUsize::new(0),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: true,
             timeout: Duration::from_secs(5),
@@ -3626,6 +3641,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
+            live_activity: std::sync::atomic::AtomicUsize::new(0),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -3708,6 +3724,7 @@ fi
                 last_socket: Mutex::new(None),
                 grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
+            live_activity: std::sync::atomic::AtomicUsize::new(0),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
                 mcp: false,
                 timeout: Duration::from_secs(5),
@@ -3811,6 +3828,7 @@ fi
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
+            live_activity: std::sync::atomic::AtomicUsize::new(0),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -3879,6 +3897,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
                 last_socket: Mutex::new(None),
                 grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
+            live_activity: std::sync::atomic::AtomicUsize::new(0),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
                 mcp: false,
                 timeout: Duration::from_secs(5),
@@ -4094,6 +4113,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
+            live_activity: std::sync::atomic::AtomicUsize::new(0),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: store.mcp,
             timeout: Duration::from_secs(5),
@@ -4241,6 +4261,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
+            live_activity: std::sync::atomic::AtomicUsize::new(0),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: store.mcp,
             timeout: Duration::from_millis(50),
@@ -5094,6 +5115,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             last_socket: Mutex::new(None),
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
+            live_activity: std::sync::atomic::AtomicUsize::new(0),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             effort: String::new(),

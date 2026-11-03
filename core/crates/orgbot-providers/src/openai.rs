@@ -220,7 +220,7 @@ impl Provider for OpenAiProvider {
         };
 
         if request.stream {
-            stream_response(&self.name, response, sink).await
+            stream_response(&self.name, response, sink, request.thinking_limit).await
         } else {
             let value: Value = response.json().await.map_err(|e| ProviderError::Decode {
                 provider: self.name.clone(),
@@ -489,21 +489,66 @@ fn parse_usage(usage: Option<&Value>) -> Usage {
     }
 }
 
+/// How long a stream may go without a single event of the model's answer,
+/// keep-alive comments aside, before the service counts as too busy.
+///
+/// From speed test 1: under load DeepSeek queues a request and keeps the
+/// connection open with keep-alive comments for up to 30 minutes, so the
+/// read timeout never fired and @deepseek-builder sat 14 minutes in its
+/// queue holding the render pipeline two teammates were waiting on.
+const QUIET_STREAM_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How long a reply may reason before it has said a word or called a tool,
+/// when the room sets no limit of its own. Past it the reply is cut off as if
+/// it had reached its output limit, and the bot is told to act.
+///
+/// From speed test 1: @deepseek-builder reasoned for over 20 minutes in one
+/// reply, at some 200 tokens a second, without a single tool call, holding
+/// the render pipeline. DeepSeek's output limit does not cover its reasoning.
+/// The room sets a shorter limit while teammates wait on the bot.
+const THINKING_LIMIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 async fn stream_response(
     provider: &str,
     response: reqwest::Response,
     sink: Option<mpsc::Sender<StreamEvent>>,
+    thinking_limit: Option<std::time::Duration>,
+) -> Result<CompletionResponse> {
+    stream_response_within(provider, response, sink, QUIET_STREAM_LIMIT, thinking_limit.unwrap_or(THINKING_LIMIT))
+        .await
+}
+
+async fn stream_response_within(
+    provider: &str,
+    response: reqwest::Response,
+    sink: Option<mpsc::Sender<StreamEvent>>,
+    quiet_limit: std::time::Duration,
+    thinking_limit: std::time::Duration,
 ) -> Result<CompletionResponse> {
     let mut decoder = SseDecoder::new();
     let mut accumulator = Accumulator::default();
     let mut bytes = response.bytes_stream();
+    let mut last_answer = tokio::time::Instant::now();
+    let mut thinking_since: Option<tokio::time::Instant> = None;
+    let too_busy = || ProviderError::RateLimited {
+        provider: provider.into(),
+        message: format!(
+            "the service held the request {} minutes without answering, so it is too busy",
+            quiet_limit.as_secs().div_ceil(60)
+        ),
+        retry_after_secs: Some(60),
+    };
 
-    'stream: while let Some(chunk) = bytes.next().await {
+    'stream: loop {
+        let next = tokio::time::timeout_at(last_answer + quiet_limit, bytes.next()).await;
+        let Ok(next) = next else { return Err(too_busy()) };
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|source| ProviderError::Transport {
             provider: provider.into(),
             source,
         })?;
         for event in decoder.push(&chunk) {
+            last_answer = tokio::time::Instant::now();
             if event.data.trim() == "[DONE]" {
                 break 'stream;
             }
@@ -511,6 +556,15 @@ async fn stream_response(
                 continue;
             };
             accumulator.absorb(&value, &sink).await;
+            if accumulator.text.is_empty() && accumulator.calls.is_empty() && !accumulator.thinking.is_empty() {
+                let since = *thinking_since.get_or_insert_with(tokio::time::Instant::now);
+                if since.elapsed() >= thinking_limit {
+                    accumulator.stop_reason = Some(StopReason::MaxTokens);
+                    break 'stream;
+                }
+            } else {
+                thinking_since = None;
+            }
         }
     }
     if let Some(event) = decoder.finish() {
@@ -713,7 +767,7 @@ mod tests {
                 crate::sse::test_response(&format!("{tool}{terminal}"), keep_open).await;
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
-                stream_response("grok", http, None),
+                stream_response("grok", http, None, None),
             )
             .await
             .expect("a completed turn must not wait for the server to close HTTP");
@@ -842,6 +896,84 @@ mod tests {
     }
 
     // ------------------------------------------------------------ request body
+
+    /// From speed test 1: one reply reasoned for over 20 minutes without a
+    /// word or a tool call. It is cut off, and the bot is told to act.
+    #[tokio::test]
+    async fn a_reply_that_only_reasons_past_the_limit_is_cut_off() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            for _ in 0..60 {
+                let delta = json!({"choices":[{"delta":{"reasoning_content":"still weighing the options. "}}]});
+                if socket.write_all(format!("data: {delta}\n\n").as_bytes()).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+        let response = reqwest::get(format!("http://{address}")).await.unwrap();
+        let started = std::time::Instant::now();
+        let cut = stream_response_within(
+            "deepseek",
+            response,
+            None,
+            QUIET_STREAM_LIMIT,
+            std::time::Duration::from_millis(600),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cut.stop_reason, StopReason::MaxTokens, "cut off like a reply at its output limit");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(cut.tool_calls().is_empty());
+        server.abort();
+    }
+
+    /// From speed test 1: DeepSeek kept a queued request open with keep-alive
+    /// comments, and the bot waited in its queue holding work others needed.
+    #[tokio::test]
+    async fn a_stream_of_keep_alives_alone_counts_as_a_busy_service() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            for _ in 0..40 {
+                if socket.write_all(b": keep-alive\n\n").await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+        let response = reqwest::get(format!("http://{address}")).await.unwrap();
+        let started = std::time::Instant::now();
+        let error = stream_response_within(
+            "deepseek",
+            response,
+            None,
+            std::time::Duration::from_millis(800),
+            THINKING_LIMIT,
+        )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::RateLimited { .. }), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "keep-alives do not hold it");
+        server.abort();
+    }
 
     /// From benchmark 2: GLM and DeepSeek reasoning could not be turned
     /// down, because a bot's effort never reached these servers.

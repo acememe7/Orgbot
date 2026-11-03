@@ -622,9 +622,11 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
              Major is for a criterion or the owner's bar not met, a required check \
              failing, or a defect a user would notice; a gap in the evidence you can \
              check yourself is minor, and anything stricter than the bar is a note. \
-             Every major or critical finding says what is wrong, where, and in \
+             Every major or critical finding says what you saw go wrong, where, and in \
              `suggestion` the fix or workaround the author should try: describe it, do \
-             not write it. Work you reject, or send back a second time, gets a second \
+             not write it. What may be wrong is not a major: check it, or make it a \
+             minor. A failure caused by another task's code belongs to that task: open \
+             a fix task for it instead of blocking this one. Work you reject, or send back a second time, gets a second \
              opinion from another reviewer before it goes to the author; a first \
              send-back goes straight to the author. When you are that second reviewer, \
              or the first reviewer answering one, give `responses` instead: for each \

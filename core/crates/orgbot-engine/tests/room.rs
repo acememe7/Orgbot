@@ -4894,3 +4894,128 @@ fn each_bots_time_in_turns_and_workspace_calls_is_kept() {
     let saved: Engine = serde_json::from_str(&serde_json::to_string(&f.engine).unwrap()).unwrap();
     assert_eq!(saved.time_spent(worker), spent, "kept across a save");
 }
+
+/// From speed test 1: @grok-quick held the 3D model for two hours, never
+/// submitting it, while three tasks waited on it, until the owner noticed.
+#[test]
+fn a_task_held_long_while_others_wait_on_it_is_raised_with_its_holder_and_coordinators() {
+    let mut f = fixture();
+    let (lead, worker) = (f.coordinator, f.worker);
+    let model = f.start_task("3D phone model", worker);
+    let alone = f.start_task("notes nobody needs", f.worker2);
+    let renders = f.open_task("render pipeline", None);
+    f.apply(Command::AmendTask {
+        by: lead,
+        task: renders,
+        brief: None,
+        acceptance_criteria: None,
+        depends_on: Some(vec![model]),
+        reason: "renders need the model".into(),
+    });
+    let raised = |f: &Fixture| f.engine.transcript().iter().filter(|m| m.body.contains("has been with")).cloned().collect::<Vec<_>>();
+    // A running room keeps claims alive as bots work; here time only jumps,
+    // so each check is one jump from when the holding was first seen.
+    let start = Timestamp::now();
+    let mut early = fixture();
+    let held = early.start_task("3D phone model", early.worker);
+    let waiting = early.open_task("render pipeline", None);
+    early.apply(Command::AmendTask {
+        by: early.coordinator,
+        task: waiting,
+        brief: None,
+        acceptance_criteria: None,
+        depends_on: Some(vec![held]),
+        reason: "renders need the model".into(),
+    });
+    early.apply(Command::Tick { now: start });
+    early.apply(Command::Tick { now: start.plus_millis(30 * 60_000) });
+    assert!(raised(&early).is_empty(), "thirty minutes is not too long");
+
+    f.apply(Command::Tick { now: start });
+    f.apply(Command::Tick { now: start.plus_millis(46 * 60_000) });
+    let said = raised(&f);
+    assert_eq!(said.len(), 1, "only the task others wait on: {said:?}");
+    assert!(said[0].body.contains("\"3D phone model\" has been with @w1 for 46 minutes and 1 other task(s) wait on it"), "{}", said[0].body);
+    assert!(said[0].wakes(lead, &["coordinator".to_string()]) && said[0].wakes(worker, &["writer".to_string()]));
+    let _ = alone;
+}
+
+/// From speed test 1: the tech specs waited 29 minutes for the reviewer who
+/// asked for their fixes, busy writing. After ten minutes anyone may check.
+#[test]
+fn a_recheck_falls_back_to_any_reviewer_after_ten_minutes() {
+    let mut f = fixture();
+    let (worker, inspector) = (f.worker, f.inspector);
+    let task = f.start_task("tech specs", worker);
+    f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![] });
+    f.apply(Command::RecordReview {
+        task,
+        inspector,
+        findings: vec![Finding { severity: Severity::Major, summary: "links break".into(), locus: None, suggestion: Some("fix them".into()) }],
+        summary: "not yet".into(),
+        criteria_met: vec![],
+        criteria_failed: vec![],
+        responses: vec![],
+    });
+    f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![] });
+    let record = f.engine.task(task).unwrap().clone();
+    assert_eq!(f.engine.recheck_reviewers(&record, Timestamp::now()), vec![inspector], "first, the reviewer who asked");
+    assert!(
+        f.engine.recheck_reviewers(&record, Timestamp::now().plus_millis(11 * 60_000)).is_empty(),
+        "after ten minutes, anyone"
+    );
+}
+
+/// From speed test 1: bots that could review took build work while six tasks
+/// waited for review.
+#[test]
+fn a_reviewer_reviews_waiting_work_before_taking_new_work() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let both = AgentSpec::new("both", "Both", provider()).with_roles(["writer", "reviewer"]).with_autonomy(Autonomy::inspector());
+    let both = {
+        let id = both.id;
+        f.apply(Command::JoinAgent { spec: Box::new(both) });
+        id
+    };
+    let done = f.start_task("navigation", worker);
+    f.apply(Command::SubmitForReview { task: done, by: worker, artifacts: vec![] });
+    let next = f.open_task("footer", Some("writer"));
+    let refused = f.reject(Command::ClaimTask { task: next, by: both });
+    assert!(refused.to_string().contains("wait for both's review"), "{refused}");
+    f.apply(Command::RecordReview {
+        task: done,
+        inspector: both,
+        findings: vec![],
+        summary: "fine".into(),
+        criteria_met: vec![],
+        criteria_failed: vec![],
+        responses: vec![],
+    });
+    f.apply(Command::ClaimTask { task: next, by: both });
+}
+
+/// From speed test 1: one bot did nearly every review for fourteen while
+/// builders sat idle; the owner had to notice.
+#[test]
+fn the_owner_hears_when_reviews_pile_up_while_bots_that_cannot_review_sit_idle() {
+    let mut f = fixture();
+    let worker = f.worker;
+    for handle in ["idle-a", "idle-b"] {
+        f.apply(Command::JoinAgent { spec: Box::new(AgentSpec::new(handle, handle, provider()).with_roles(["writer"])) });
+    }
+    for title in ["gallery", "storytelling"] {
+        let task = f.start_task(title, worker);
+        f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![] });
+    }
+    let told = |f: &Fixture| f.engine.transcript().iter().filter(|m| m.body.contains("waiting for review")).cloned().collect::<Vec<_>>();
+    f.apply(Command::Tick { now: Timestamp::now().plus_millis(5 * 60_000) });
+    assert!(told(&f).is_empty(), "five minutes is not a backlog");
+    f.apply(Command::Tick { now: Timestamp::now().plus_millis(11 * 60_000) });
+    let said = told(&f);
+    assert_eq!(said.len(), 1);
+    assert!(said[0].body.contains("@idle-a") && said[0].body.contains("let one or two strong builders review"), "{}", said[0].body);
+    assert_eq!(said[0].audience, orgbot_proto::chat::Audience::Human);
+    f.apply(Command::Tick { now: Timestamp::now().plus_millis(12 * 60_000) });
+    assert_eq!(told(&f).len(), 1, "once an hour at most");
+}

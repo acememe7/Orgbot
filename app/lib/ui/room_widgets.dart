@@ -2707,6 +2707,32 @@ Color taskColor(TaskState state) {
 }
 
 /// The message input.
+/// Who a message will reach, shown above the box as it is typed, or null
+/// when it names nobody.
+///
+/// From speed test 1: the owner wrote "@grok-quick ... I'm asking the room",
+/// and only @grok-quick heard it. A tagged message goes to the bots it tags;
+/// the coordinators see a copy.
+String? composerReach(String text, List<String> handles) {
+  final tags = RegExp(r'@([A-Za-z0-9_-]+)')
+      .allMatches(text)
+      .map((match) => match.group(1)!.toLowerCase())
+      .toList();
+  if (tags.isEmpty) return null;
+  if (tags.any((tag) => const ['all', 'everyone', 'everybody'].contains(tag))) {
+    return 'Goes to everyone in the room.';
+  }
+  final known = {for (final handle in handles) handle.toLowerCase(): handle};
+  final reached = <String>[];
+  for (final tag in tags) {
+    final handle = known[tag];
+    if (handle != null && !reached.contains(handle)) reached.add(handle);
+  }
+  if (reached.isEmpty) return null;
+  final names = reached.map((handle) => '@$handle').join(', ');
+  return 'Goes to $names. The coordinators see a copy; @all reaches everyone.';
+}
+
 class Composer extends StatefulWidget {
   const Composer({
     super.key,
@@ -2957,6 +2983,25 @@ class _ComposerState extends State<Composer> {
                     ),
                 ],
               ),
+            ),
+          if (widget.replyTo == null && widget.mentions.isNotEmpty)
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: controller,
+              builder: (context, value, _) {
+                final reach = composerReach(value.text, widget.mentions);
+                if (reach == null) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+                  child: Text(
+                    reach,
+                    key: const ValueKey('composer-reach'),
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                );
+              },
             ),
           if (busy)
             Padding(

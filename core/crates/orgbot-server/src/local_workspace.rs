@@ -18,7 +18,40 @@ const MAX_LIST_ENTRIES: usize = 500;
 const MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 
-async fn bounded_output(mut stream: impl tokio::io::AsyncRead + Unpin) -> Result<String, String> {
+/// How long a command may go with no output and almost no processor time
+/// before it is stopped as most likely stuck.
+///
+/// From speed test 1: one QA test sat waiting with its browser idle, and the
+/// whole suite would have run to its time limit with the final QA held.
+const QUIET_COMMAND: Duration = Duration::from_secs(5 * 60);
+
+/// Processor time used by a process and everything under it, in clock ticks.
+fn tree_cpu_ticks(pid: u32) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![pid];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            if let Some((_, rest)) = stat.rsplit_once(')') {
+                let fields: Vec<&str> = rest.split_whitespace().collect();
+                total += fields.get(11).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0)
+                    + fields.get(12).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            }
+        }
+        if let Ok(children) = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")) {
+            stack.extend(children.split_whitespace().filter_map(|child| child.parse::<u32>().ok()));
+        }
+    }
+    total
+}
+
+async fn bounded_output(
+    mut stream: impl tokio::io::AsyncRead + Unpin,
+    seen: Arc<std::sync::atomic::AtomicUsize>,
+) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
     let mut saved = Vec::new();
     let mut buffer = [0u8; 8192];
@@ -27,6 +60,7 @@ async fn bounded_output(mut stream: impl tokio::io::AsyncRead + Unpin) -> Result
         if count == 0 {
             break;
         }
+        seen.fetch_add(count, Ordering::Relaxed);
         let keep = count.min(32768_usize.saturating_sub(saved.len()));
         saved.extend_from_slice(&buffer[..keep]);
     }
@@ -59,6 +93,8 @@ pub struct LocalWorkspaceHost {
     >,
     /// Landing and pushing move the owner's branches: one at a time.
     branch_moves: tokio::sync::Mutex<()>,
+    /// See [`QUIET_COMMAND`]; shorter under test.
+    quiet_limit: Duration,
 }
 
 impl LocalWorkspaceHost {
@@ -172,6 +208,7 @@ impl LocalWorkspaceHost {
             reported_removals: Default::default(),
             call_lines: Default::default(),
             branch_moves: Default::default(),
+            quiet_limit: QUIET_COMMAND,
         })
     }
 
@@ -522,11 +559,34 @@ impl LocalWorkspaceHost {
             let mut child = command.spawn().map_err(|e| e.to_string())?;
             let stdout = child.stdout.take().expect("piped stdout");
             let stderr = child.stderr.take().expect("piped stderr");
-            let out = tokio::spawn(bounded_output(stdout));
-            let err = tokio::spawn(bounded_output(stderr));
-            let status = tokio::time::timeout(Duration::from_secs(seconds), child.wait()).await;
-            let timed_out = status.is_err();
-            if timed_out {
+            let output_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let out = tokio::spawn(bounded_output(stdout, Arc::clone(&output_seen)));
+            let err = tokio::spawn(bounded_output(stderr, Arc::clone(&output_seen)));
+            let pid = child.id();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+            let mut check = tokio::time::interval((self.quiet_limit / 10).max(Duration::from_millis(200)));
+            check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last = (0usize, pid.map_or(0, tree_cpu_ticks), tokio::time::Instant::now());
+            let mut went_quiet = false;
+            let status = loop {
+                tokio::select! {
+                    status = child.wait() => break Ok(status),
+                    _ = tokio::time::sleep_until(deadline) => break Err(()),
+                    _ = check.tick() => {
+                        let output = output_seen.load(Ordering::Relaxed);
+                        let cpu = pid.map_or(0, tree_cpu_ticks);
+                        // A tick of a hundred is a second of processor time.
+                        if output != last.0 || cpu > last.1 + 100 {
+                            last = (output, cpu, tokio::time::Instant::now());
+                        } else if last.2.elapsed() >= self.quiet_limit {
+                            went_quiet = true;
+                            break Err(());
+                        }
+                    }
+                }
+            };
+            let timed_out = status.is_err() && !went_quiet;
+            if status.is_err() {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
             }
@@ -566,9 +626,20 @@ impl LocalWorkspaceHost {
                 // How long the command itself ran, apart from refreshing and
                 // merging the copy. From benchmark 2: no bot could say where
                 // a 90-minute turn had gone.
-                content: serde_json::json!({"stdout":output,"stderr":error,"timed_out":timed_out,
-                "success":success,"exit_code":exit_code,"seconds":(seconds_ran * 10.0).round() / 10.0,
-                "integration":integration})
+                content: {
+                    let mut result = serde_json::json!({"stdout":output,"stderr":error,"timed_out":timed_out,
+                    "success":success,"exit_code":exit_code,"seconds":(seconds_ran * 10.0).round() / 10.0,
+                    "integration":integration});
+                    if went_quiet {
+                        result["stopped_quiet"] = json!(true);
+                        result["note"] = json!(format!(
+                            "Stopped after {} minutes with no output and almost no processor use: it is most likely \
+                             stuck waiting on something. Run the step that hung on its own with a short timeout.",
+                            self.quiet_limit.as_secs().div_ceil(60)
+                        ));
+                    }
+                    result
+                }
                 .to_string(),
                 is_error: !success,
             })
@@ -2011,6 +2082,40 @@ mod tests {
         assert!(long.await.unwrap().content.contains("built"));
         drop(tx);
         server.await.unwrap();
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    /// From speed test 1: one QA test sat waiting with its browser idle, and
+    /// the suite would have run to its time limit.
+    #[tokio::test]
+    async fn a_command_that_goes_quiet_is_stopped_and_one_that_talks_is_not() {
+        let root = temp_dir();
+        let state = temp_dir();
+        let mut host = protected_host(&root, &state, true);
+        host.quiet_limit = Duration::from_secs(2);
+        let agent = AgentId::new();
+        let started = Instant::now();
+        let hung = host
+            .run(agent, "workspace_run", &json!({"command": "echo starting; sleep 30", "timeout_seconds": 60}), false)
+            .await;
+        assert!(started.elapsed() < Duration::from_secs(10), "stopped early, not at the time limit");
+        let hung: Value = serde_json::from_str(&hung.content).unwrap();
+        assert_eq!(hung["stopped_quiet"], true, "{hung}");
+        assert_eq!(hung["timed_out"], false);
+        assert!(hung["stdout"].as_str().unwrap().contains("starting"));
+        assert!(hung["note"].as_str().unwrap().contains("most likely stuck"));
+
+        let talking = host
+            .run(
+                agent,
+                "workspace_run",
+                &json!({"command": "for i in 1 2 3 4; do echo $i; sleep 1; done", "timeout_seconds": 60}),
+                false,
+            )
+            .await;
+        assert!(!talking.is_error, "{}", talking.content);
+        assert!(serde_json::from_str::<Value>(&talking.content).unwrap().get("stopped_quiet").is_none());
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&state);
     }

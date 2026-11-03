@@ -168,6 +168,8 @@ pub struct Bot {
     retry_at: Option<std::time::Instant>,
     /// Since when its model service has refused every turn, if it is.
     unavailable_since: Option<std::time::Instant>,
+    /// Told to the bot at the start of its next turn, once.
+    next_turn_note: Option<String>,
     /// When this bot last posted the closing words of a turn that changed
     /// nothing, so it does not post another such status straight away.
     last_idle_post: Option<std::time::Instant>,
@@ -210,6 +212,7 @@ impl Bot {
             input_interrupt: CancellationToken::new(),
             retry_at: None,
             unavailable_since: None,
+            next_turn_note: None,
             last_idle_post: None,
         }
     }
@@ -372,6 +375,10 @@ impl Bot {
             let _ = engine.apply(Command::BeginTurn { agent: self.spec.id });
             let mut situation = prompt::situation(engine, self.spec.id, self.last_seen);
             situation.push_str(&memory_notes);
+            if let Some(note) = self.next_turn_note.take() {
+                situation.push_str("\n\n");
+                situation.push_str(&note);
+            }
             let mut turn = Turn::user(situation);
             turn.content.extend(crate::attachments::context(
                 engine,
@@ -434,6 +441,10 @@ impl Bot {
             // Decided afresh each step: a release, block or hold since the
             // last one takes the server key and lent sign-ins away from this one.
             request = request.with_grants(engine.with(|engine| sandbox_grants(engine, self.spec.id)));
+            // Reasoning without acting is cut short only while teammates wait.
+            if engine.with(|engine| engine.others_wait_on(self.spec.id)) {
+                request.thinking_limit = Some(API_THINKING_LIMIT);
+            }
 
             if let Some(tx) = &sink {
                 let _ = tx.send(StreamEvent::Thinking).await;
@@ -456,7 +467,10 @@ impl Bot {
                         &mut steer,
                     )
                     .await;
-                    interrupted = mcp.interrupted;
+                    interrupted = mcp.interrupted || mcp.thinking_stopped;
+                    if mcp.thinking_stopped {
+                        self.next_turn_note = Some(THINKING_STOPPED_NOTE.to_string());
+                    }
                     report.tool_calls += mcp.ok;
                     report.tool_errors += mcp.err;
                     // Said through the room tool already; the closing prose
@@ -552,7 +566,9 @@ impl Bot {
             // it: the turn ends here and the next one resumes the same session
             // with the message in front of it.
             if interrupted {
-                report.stop_reason = StopReason::Other("human_input".into());
+                report.stop_reason = StopReason::Other(
+                    if self.next_turn_note.is_some() { "thinking_limit" } else { "human_input" }.into(),
+                );
                 if let Some(tx) = &sink {
                     let _ = tx.send(StreamEvent::Done { stop_reason: report.stop_reason.clone() }).await;
                 }
@@ -1199,13 +1215,14 @@ fn long_turn_reminder(every: u32, step: u32) -> Option<String> {
 /// How many replies cut off at the output limit a turn carries on past.
 const MAX_CUT_OFF_RETRIES: u32 = 2;
 
-const CUT_OFF_NOTE: &str = "[OrgBots] Your reply was cut off at the output limit before you \
-     called a tool or finished. Keep your reasoning short and act now: make the next tool call, \
-     or give your final answer in a few sentences.";
+const CUT_OFF_NOTE: &str = "[OrgBots] Your reply was cut off before you called a tool or \
+     finished: it reached the output limit, or reasoned too long without acting. Keep \
+     your reasoning short and act now: make the next tool call, or give your final answer in a \
+     few sentences.";
 
 /// How long a bot's model service may refuse every turn before the work it
 /// holds goes back to the board.
-const SERVICE_DOWN_RELEASE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const SERVICE_DOWN_RELEASE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Put a bot's work back on the board while its model service refuses it,
 /// and tell the coordinators.
@@ -1284,6 +1301,30 @@ fn turn_minutes_reminder(minutes: u64, holds_work: bool) -> String {
     }
     note
 }
+
+/// How long an agent CLI may go in one turn without using a tool or calling
+/// the room, while teammates wait on it, before its turn is ended to be
+/// resumed with a note to act.
+///
+/// From speed test 1: @grok-quick's Grok CLI reasoned for long stretches
+/// without a tool call and held the 3D model for two hours while three tasks
+/// waited on it. Only API replies had a limit on reasoning.
+const CLI_THINKING_LIMIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// The same, when nobody waits on the bot: long enough for a coordinator to
+/// think a plan through, which took @opus thirteen minutes in speed test 1.
+const CLI_THINKING_CAP: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// How long one API reply may only reason, while teammates wait on the bot.
+/// When nobody does, the provider's long default applies.
+const API_THINKING_LIMIT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// What a CLI bot is told at the start of the turn after one stopped for
+/// reasoning without acting.
+const THINKING_STOPPED_NOTE: &str = "[OrgBots] Your last turn was stopped after a long time \
+     without a tool call. Do not reason further before acting: make the next tool call now. If \
+     the task is bigger than you can finish soon, submit what works, say what is left, and ask the \
+     coordinator to split it.";
 
 /// How long the owner's message to a CLI bot waits for the bot to see it
 /// through a room call before its turn is ended so the next one shows it.
@@ -1575,6 +1616,9 @@ struct McpTally {
     posted: bool,
     /// The episode was ended for the owner's message; see [`OWNER_WAIT`].
     interrupted: bool,
+    /// The episode was ended because the CLI reasoned without acting; see
+    /// [`CLI_THINKING_LIMIT`].
+    thinking_stopped: bool,
 }
 
 /// Run one provider turn while also serving inbound room-MCP calls.
@@ -1606,6 +1650,7 @@ async fn complete_with_mcp(
         tokio::time::Instant::now() + OWNER_WAIT / 4,
         OWNER_WAIT / 4,
     );
+    let mut progress = (provider.live_activity(), tokio::time::Instant::now());
     loop {
         tokio::select! {
             response = &mut turn => {
@@ -1618,6 +1663,7 @@ async fn complete_with_mcp(
             }
             inbound = rx.recv() => {
                 let Some(call) = inbound else { return (turn.await, tally) };
+                progress.1 = tokio::time::Instant::now();
                 let reply = dispatch_room_mcp(&mut session, &call.request, engine, spec,
                     servers, workspace, &mut tally, capabilities, steer).await;
                 let _ = call.reply.send(reply);
@@ -1625,8 +1671,26 @@ async fn complete_with_mcp(
             // Dropping the episode stops the CLI; its session was saved as it
             // began, so the next turn resumes it.
             _ = check.tick() => {
-                if engine.with(|engine| steer.owner_kept_waiting(engine, spec)) {
-                    tally.interrupted = true;
+                let activity = provider.live_activity();
+                if activity != progress.0 {
+                    progress = (activity, tokio::time::Instant::now());
+                }
+                let limit = if engine.with(|engine| engine.others_wait_on(spec.id)) {
+                    CLI_THINKING_LIMIT
+                } else {
+                    CLI_THINKING_CAP
+                };
+                let thinking_only = activity.is_some() && progress.1.elapsed() >= limit;
+                if thinking_only {
+                    tracing::warn!(
+                        agent = %spec.handle,
+                        minutes = limit.as_secs() / 60,
+                        "an agent CLI went without acting; stopping its turn"
+                    );
+                    tally.thinking_stopped = true;
+                }
+                if thinking_only || engine.with(|engine| steer.owner_kept_waiting(engine, spec)) {
+                    tally.interrupted = !thinking_only;
                     let stopped = CompletionResponse {
                         model,
                         content: Vec::new(),
@@ -2366,7 +2430,7 @@ mod tests {
         let report = bot.take_turn(&engine, None).await.unwrap();
         assert_eq!(provider.requests().len(), 2, "the turn carried on past the cut");
         assert_eq!(report.said.as_deref(), Some("Done: the review is recorded."));
-        let asked = provider.requests()[1].messages.iter().any(|turn| format!("{turn:?}").contains("cut off at the output limit"));
+        let asked = provider.requests()[1].messages.iter().any(|turn| format!("{turn:?}").contains("reached the output limit, or reasoned too long"));
         assert!(asked, "the model is told why it is asked again");
 
         // It does not carry on for ever.
@@ -2586,6 +2650,142 @@ mod tests {
         .unwrap();
         room.apply(Command::StartRoom).unwrap();
         SharedEngine::new(room)
+    }
+
+    /// From speed test 1: @grok-quick's CLI reasoned for long stretches
+    /// without a tool call and held the 3D model for two hours while three
+    /// tasks waited on it; @opus thought its plan through for thirteen
+    /// minutes with nobody waiting, and must not be cut short.
+    #[tokio::test(start_paused = true)]
+    async fn a_cli_that_only_reasons_is_stopped_only_while_teammates_wait_on_it() {
+        #[derive(Debug)]
+        struct Cli(Arc<AtomicUsize>, bool);
+        #[async_trait::async_trait]
+        impl Provider for Cli {
+            fn name(&self) -> &str {
+                "grok-cli"
+            }
+            fn live_activity(&self) -> Option<usize> {
+                // An acting CLI uses a tool every time it is asked.
+                Some(if self.1 { self.0.fetch_add(1, Ordering::SeqCst) + 1 } else { self.0.load(Ordering::SeqCst) })
+            }
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+                _sink: Option<mpsc::Sender<StreamEvent>>,
+            ) -> orgbot_providers::Result<CompletionResponse> {
+                tokio::time::sleep(std::time::Duration::from_secs(15 * 60)).await;
+                Ok(CompletionResponse {
+                    model: "grok".into(),
+                    content: vec![ContentBlock::text("done")],
+                    stop_reason: StopReason::EndTurn,
+                    usage: Default::default(),
+                })
+            }
+        }
+        let run = |engine: SharedEngine, spec: AgentSpec, acting: bool| async move {
+            let provider: Arc<dyn Provider> = Arc::new(Cli(Arc::new(AtomicUsize::new(0)), acting));
+            let (_tx, mut rx) = mpsc::channel(1);
+            let mut steer = TurnSteer::new(engine.with(|engine| engine.head()));
+            let (result, tally) = complete_with_mcp(
+                &provider,
+                &[],
+                &engine,
+                &spec,
+                CompletionRequest::new("grok", "", vec![]),
+                None,
+                &mut rx,
+                None,
+                None,
+                &mut crate::capabilities::Capabilities::default(),
+                &mut steer,
+            )
+            .await;
+            (tally.thinking_stopped, result.unwrap().text())
+        };
+        let spec = spec();
+
+        // Nobody waits on it: fifteen minutes of thought finish.
+        let engine = mcp_test_engine(&spec).await;
+        assert_eq!(run(engine.clone(), spec.clone(), false).await, (false, "done".to_string()));
+
+        // A teammate's task depends on what it holds: ten minutes, then stopped.
+        let created = |title: &str, depends_on: Vec<orgbot_proto::TaskId>| Command::CreateTask {
+            title: title.into(),
+            brief: String::new(),
+            by: None,
+            required_role: None,
+            priority: orgbot_proto::task::Priority::Normal,
+            acceptance_criteria: vec![],
+            depends_on,
+            origin: orgbot_proto::graph::TaskOrigin::plain(),
+        };
+        let id = |events: Vec<orgbot_proto::EventEnvelope>| {
+            events
+                .iter()
+                .find_map(|e| match &e.event {
+                    orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        engine.with(|room| {
+            let model = id(room.apply(created("3D model", vec![])).unwrap());
+            for command in [Command::OpenTask { task: model }, Command::ClaimTask { task: model, by: spec.id }] {
+                room.apply(command).unwrap();
+            }
+            room.apply(created("render pipeline", vec![model])).unwrap();
+            assert!(room.others_wait_on(spec.id));
+        });
+        assert_eq!(run(engine.clone(), spec.clone(), false).await, (true, String::new()));
+        // Using tools all along, it is never stopped.
+        assert_eq!(run(engine.clone(), spec.clone(), true).await, (false, "done".to_string()));
+    }
+
+    /// API replies are cut short only while teammates wait on the bot.
+    #[tokio::test]
+    async fn an_api_bot_gets_a_short_thinking_limit_only_while_teammates_wait() {
+        let spec = spec();
+        let engine = mcp_test_engine(&spec).await;
+        let provider = Arc::new(ScriptedProvider::always_says("done"));
+        let mut bot = Bot::new(spec.clone(), provider.clone());
+        bot.take_turn(&engine, None).await.unwrap();
+        assert_eq!(provider.requests()[0].thinking_limit, None, "nobody waits: the long default");
+        engine.with(|room| {
+            let task = room
+                .apply(Command::CreateTask {
+                    title: "render pipeline".into(),
+                    brief: String::new(),
+                    by: None,
+                    required_role: None,
+                    priority: orgbot_proto::task::Priority::Normal,
+                    acceptance_criteria: vec![],
+                    depends_on: vec![],
+                    origin: orgbot_proto::graph::TaskOrigin::plain(),
+                })
+                .unwrap()
+                .iter()
+                .find_map(|e| match &e.event {
+                    orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+                    _ => None,
+                })
+                .unwrap();
+            room.apply(Command::OpenTask { task }).unwrap();
+            room.apply(Command::ClaimTask { task, by: spec.id }).unwrap();
+            room.apply(Command::CreateTask {
+                title: "hero".into(),
+                brief: String::new(),
+                by: None,
+                required_role: None,
+                priority: orgbot_proto::task::Priority::Normal,
+                acceptance_criteria: vec![],
+                depends_on: vec![task],
+                origin: orgbot_proto::graph::TaskOrigin::plain(),
+            })
+            .unwrap();
+        });
+        bot.take_turn(&engine, None).await.unwrap();
+        assert_eq!(provider.requests().last().unwrap().thinking_limit, Some(API_THINKING_LIMIT));
     }
 
     /// From speed test 1: DeepSeek refused every turn of @deepseek-builder,

@@ -576,6 +576,9 @@ impl Provider for GuardedProvider {
     fn start_fresh_session(&self) {
         self.inner.start_fresh_session()
     }
+    fn live_activity(&self) -> Option<usize> {
+        self.inner.live_activity()
+    }
     async fn complete(
         &self,
         mut request: CompletionRequest,

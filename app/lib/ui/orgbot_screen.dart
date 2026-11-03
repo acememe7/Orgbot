@@ -1470,14 +1470,13 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                       // finish sooner.
                       DropdownButtonFormField<int>(
                         initialValue: parallelTurns,
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           labelText: 'Bots working at once',
-                          helperText:
-                              'Most of a turn is waiting on a model, so this '
-                              'is what decides how much of the room is busy — '
-                              'and it multiplies how fast you draw on your '
-                              'plan. Four at once spends roughly four times '
-                              'as much per hour as one.',
+                          helperText: parallelTurnsHelp(
+                            parallelTurns,
+                            selected.length,
+                          ),
+                          helperMaxLines: 4,
                         ),
                         items: [
                           for (final choice in availableParallelChoices)

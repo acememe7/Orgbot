@@ -155,7 +155,12 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            images and wording meant for developers are such defects. A gap in the \
            evidence (a hash, a width, how a check was run) is minor when you can run the \
            check yourself: run it instead of sending the work back. Anything stricter \
-           than the bar is a note.\n\
+           than the bar is a note. A major says what you saw go wrong and where; a \
+           doubt you can settle by running a check, settle it, and one you cannot is \
+           a minor or a question, never a major. A failing check caused by another \
+           task's code is not this task's blocker: open a fix task for that code, or \
+           tell a coordinator, and judge this work on its own. Before you approve, run \
+           the project-wide checks the task names, such as lint and the build.\n\
          - Every document costs the owner tokens to write and teammates tokens to \
            read. Do not write plan, checkpoint, status, audit, handover or summary \
            documents, as artifacts or as project files: status goes in one short \
@@ -1284,6 +1289,10 @@ mod tests {
         assert!(prompt.contains("One QA run per revision"));
         assert!(prompt.contains("ask the owner with ask_owner first"));
         assert!(prompt.contains("check each is met"));
+        // From speed test 1: a blocker on what renders "may" show, unchecked,
+        // and another task's lint error sent back the 3D model.
+        assert!(prompt.contains("A major says what you saw go wrong and where"));
+        assert!(prompt.contains("caused by another task's code is not this task's blocker"));
         assert!(prompt.contains("sub-agents"));
     }
 

@@ -102,6 +102,13 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
     /// Start the next turn in a fresh session instead of resuming the last
     /// one. For a bot that has gone round in circles in a long session.
     fn start_fresh_session(&self) {}
+
+    /// For an agent CLI, a count that rises with every tool it uses while its
+    /// turn runs, so the room can tell a CLI that acts from one that only
+    /// reasons. `None` for providers whose tools are the room's own.
+    fn live_activity(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// A provider whose every turn runs at the bot's own effort level.
@@ -142,6 +149,10 @@ impl Provider for WithEffort {
 
     fn start_fresh_session(&self) {
         self.inner.start_fresh_session()
+    }
+
+    fn live_activity(&self) -> Option<usize> {
+        self.inner.live_activity()
     }
 }
 

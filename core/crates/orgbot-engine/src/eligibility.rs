@@ -91,6 +91,8 @@ pub enum Reason {
     /// This bot would stand in for the role the work asks for, and a bot
     /// holding that role is free to take it.
     LeaveToRoleHolder,
+    /// This bot can review, and work waits for its review.
+    ReviewsFirst,
     /// This review-only bot was offered work outside its permitted scope.
     ReviewOnly,
     /// This bot reviewed the task, so it describes the fix and does not
@@ -129,6 +131,7 @@ impl Reason {
             Self::RoleMismatch => "ROLE_MISMATCH",
             Self::LeaveToBuilders => "LEAVE_TO_BUILDERS",
             Self::LeaveToRoleHolder => "LEAVE_TO_ROLE_HOLDER",
+            Self::ReviewsFirst => "REVIEWS_FIRST",
             Self::ReviewOnly => "REVIEW_ONLY",
             Self::ReviewedIt => "REVIEWED_IT",
             Self::BotFaulted => "BOT_FAULTED",
