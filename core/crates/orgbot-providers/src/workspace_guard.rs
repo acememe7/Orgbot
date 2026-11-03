@@ -1452,6 +1452,66 @@ pub fn take_owner_sign_in(private_home: &Path, owner_home: &Path, cli_dir: &str)
     Ok(took)
 }
 
+/// How far ahead a sign-in is good for, as written in it: its latest
+/// `expiresAt`, `expires_at` or `expiry` (seconds or milliseconds since the
+/// epoch), in milliseconds. `None` when it records no expiry.
+fn sign_in_expiry(value: &serde_json::Value) -> Option<i64> {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .filter_map(|(key, value)| match (key.as_str(), value) {
+                ("expiresAt" | "expires_at" | "expiry", serde_json::Value::Number(number)) => {
+                    number.as_i64().map(|n| if n < 100_000_000_000 { n * 1000 } else { n })
+                }
+                (_, nested) => sign_in_expiry(nested),
+            })
+            .max(),
+        _ => None,
+    }
+}
+
+/// While a bot's CLI is still running, hand a sign-in it has just refreshed
+/// back to the owner's file, returning whether it did.
+///
+/// From speed test 1: Claude's refresh code works once, so @opus refreshing
+/// at the start of its turn left the owner's file, and every other Claude
+/// bot's copy of it, refused until @opus's turn ended. @quinn faulted 74
+/// seconds in. Only a sign-in good for longer than the owner's, and for
+/// longer than now, goes back: a refresh that failed is never written over a
+/// working one.
+pub fn hand_back_fresh_sign_in(private_home: &Path, owner_home: &Path) -> Result<bool, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as i64);
+    let mut handed = false;
+    for cli_dir in [".claude", ".codex", ".grok"] {
+        for file in credential_files(cli_dir) {
+            let copy = private_home.join(cli_dir).join(file);
+            let source = owner_home.join(cli_dir).join(file);
+            let (Some(refreshed), Some(current)) = (holds_sign_in(&copy), holds_sign_in(&source)) else {
+                continue;
+            };
+            if !current.keys().all(|key| refreshed.contains_key(key)) {
+                continue;
+            }
+            let fresh = sign_in_expiry(&serde_json::Value::Object(refreshed));
+            let owners = sign_in_expiry(&serde_json::Value::Object(current));
+            let good_for_longer = match (fresh, owners) {
+                (Some(fresh), Some(owners)) => fresh > owners && fresh > now,
+                _ => false,
+            };
+            if !good_for_longer || std::fs::read(&copy).ok() == std::fs::read(&source).ok() {
+                continue;
+            }
+            let previous = source.with_file_name(format!("{file}.orgbot-previous"));
+            replace_private_file(&source, &previous)?;
+            replace_private_file(&copy, &source)?;
+            handed = true;
+        }
+    }
+    Ok(handed)
+}
+
 fn copy_file_if_missing(from: &Path, to: &Path, budget: &mut CopyBudget) -> Result<(), String> {
     use std::io::{Read, Write};
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -1530,6 +1590,47 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    /// From speed test 1: one Claude bot's refresh left the owner's sign-in,
+    /// and every other bot's copy of it, refused until that bot's turn ended.
+    #[test]
+    fn a_refreshed_sign_in_goes_back_mid_turn_only_when_it_is_good_for_longer() {
+        let root = std::env::temp_dir().join(format!(
+            "orgbot-signin-handback-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let (owner, home) = (root.join("owner"), root.join("home"));
+        for dir in [&owner, &home] {
+            std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        let sign_in = |token: &str, expires: i64| {
+            format!(r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"r-{token}","expiresAt":{expires}}}}}"#)
+        };
+        let (owner_file, bot_file) = (owner.join(".claude/.credentials.json"), home.join(".claude/.credentials.json"));
+        let read = |path: &Path| std::fs::read_to_string(path).unwrap();
+        std::fs::write(&owner_file, sign_in("old", now - 60_000)).unwrap();
+
+        // A refresh that failed leaves nothing good for longer: kept back.
+        std::fs::write(&bot_file, sign_in("refused", now - 30_000)).unwrap();
+        assert!(!hand_back_fresh_sign_in(&home, &owner).unwrap());
+        assert_eq!(read(&owner_file), sign_in("old", now - 60_000));
+
+        // A refresh that worked goes back at once, the owner's kept beside it.
+        std::fs::write(&bot_file, sign_in("fresh", now + 8 * 3_600_000)).unwrap();
+        assert!(hand_back_fresh_sign_in(&home, &owner).unwrap());
+        assert_eq!(read(&owner_file), sign_in("fresh", now + 8 * 3_600_000));
+        assert_eq!(read(&owner.join(".claude/.credentials.json.orgbot-previous")), sign_in("old", now - 60_000));
+        assert!(!hand_back_fresh_sign_in(&home, &owner).unwrap(), "handed back once");
+
+        // The owner signs in again, good for longer: the bot's never replaces it.
+        std::fs::write(&owner_file, sign_in("login", now + 9 * 3_600_000)).unwrap();
+        assert!(!hand_back_fresh_sign_in(&home, &owner).unwrap());
+        assert_eq!(read(&owner_file), sign_in("login", now + 9 * 3_600_000));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn bot_sign_ins_stay_in_step_with_the_owners() {
         use std::time::{Duration, SystemTime};

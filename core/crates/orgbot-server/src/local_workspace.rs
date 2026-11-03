@@ -253,15 +253,28 @@ impl LocalWorkspaceHost {
                 })
         };
         // Where a slow call's time went: waiting for the bot's own earlier
-        // call, or the work itself (copy refresh, merge, the command).
-        tracing::info!(
-            %agent,
-            tool = %name,
-            waited_ms = waited.as_millis() as u64,
-            took_ms = started.elapsed().as_millis() as u64,
-            error = outcome.is_error,
-            "workspace call"
-        );
+        // call, or the work itself (copy refresh, merge, the command). Rooms
+        // log warnings only, so a slow one is a warning and the rest are not.
+        let took = started.elapsed();
+        if waited >= Duration::from_secs(5) || took >= Duration::from_secs(120) {
+            tracing::warn!(
+                %agent,
+                tool = %name,
+                waited_ms = waited.as_millis() as u64,
+                took_ms = took.as_millis() as u64,
+                error = outcome.is_error,
+                "slow workspace call"
+            );
+        } else {
+            tracing::info!(
+                %agent,
+                tool = %name,
+                waited_ms = waited.as_millis() as u64,
+                took_ms = took.as_millis() as u64,
+                error = outcome.is_error,
+                "workspace call"
+            );
+        }
         if waited >= Duration::from_secs(5) {
             outcome.content.push_str(&format!(
                 "\n[OrgBots] This call waited {}s for your earlier workspace call to finish.",

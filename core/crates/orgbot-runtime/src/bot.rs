@@ -166,6 +166,8 @@ pub struct Bot {
     pub(crate) attachments_root: Option<std::path::PathBuf>,
     pub(crate) input_interrupt: CancellationToken,
     retry_at: Option<std::time::Instant>,
+    /// Since when its model service has refused every turn, if it is.
+    unavailable_since: Option<std::time::Instant>,
     /// When this bot last posted the closing words of a turn that changed
     /// nothing, so it does not post another such status straight away.
     last_idle_post: Option<std::time::Instant>,
@@ -207,6 +209,7 @@ impl Bot {
             attachments_root: None,
             input_interrupt: CancellationToken::new(),
             retry_at: None,
+            unavailable_since: None,
             last_idle_post: None,
         }
     }
@@ -489,8 +492,24 @@ impl Bot {
                 engine.with(|e| note_pending_removals(e, self.spec.id, "its own CLI", count));
             }
             let response = match response {
-                Ok(response) => response,
+                Ok(response) => {
+                    self.unavailable_since = None;
+                    response
+                }
                 Err(error) => {
+                    if matches!(error, ProviderError::RateLimited { .. }) {
+                        let since = *self.unavailable_since.get_or_insert_with(std::time::Instant::now);
+                        tracing::warn!(
+                            agent = %self.spec.handle,
+                            refused_for_secs = since.elapsed().as_secs(),
+                            %error,
+                            "the model service refused a turn; waiting"
+                        );
+                        if since.elapsed() >= SERVICE_DOWN_RELEASE {
+                            let minutes = since.elapsed().as_secs() / 60;
+                            engine.with(|engine| hand_on_held_work(engine, &self.spec, minutes, &error));
+                        }
+                    }
                     if matches!(
                         error,
                         ProviderError::Allowance { .. } | ProviderError::RateLimited { .. }
@@ -757,15 +776,28 @@ impl Bot {
         if mark_seen {
             self.last_seen = seen_through;
         }
-        // Where a turn's time went, for the room's log.
-        tracing::info!(
-            agent = %self.spec.handle,
-            seconds = steer.began.elapsed().as_secs(),
-            steps = report.steps,
-            tool_calls = report.tool_calls,
-            tool_errors = report.tool_errors,
-            "turn ended"
-        );
+        // Where a turn's time went, for the room's log, which keeps warnings
+        // only: a long turn is one.
+        let seconds = steer.began.elapsed().as_secs();
+        if seconds >= TURN_MINUTES_NOTE * 60 {
+            tracing::warn!(
+                agent = %self.spec.handle,
+                seconds,
+                steps = report.steps,
+                tool_calls = report.tool_calls,
+                tool_errors = report.tool_errors,
+                "long turn ended"
+            );
+        } else {
+            tracing::info!(
+                agent = %self.spec.handle,
+                seconds,
+                steps = report.steps,
+                tool_calls = report.tool_calls,
+                tool_errors = report.tool_errors,
+                "turn ended"
+            );
+        }
         Ok(report)
     }
 
@@ -1170,6 +1202,55 @@ const MAX_CUT_OFF_RETRIES: u32 = 2;
 const CUT_OFF_NOTE: &str = "[OrgBots] Your reply was cut off at the output limit before you \
      called a tool or finished. Keep your reasoning short and act now: make the next tool call, \
      or give your final answer in a few sentences.";
+
+/// How long a bot's model service may refuse every turn before the work it
+/// holds goes back to the board.
+const SERVICE_DOWN_RELEASE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Put a bot's work back on the board while its model service refuses it,
+/// and tell the coordinators.
+///
+/// From speed test 1: DeepSeek answered "Service is too busy" for every turn
+/// of @deepseek-builder, which held the render pipeline for 24 minutes with
+/// nothing to show while two teammates waited on its renders.
+fn hand_on_held_work(engine: &mut orgbot_engine::Engine, spec: &AgentSpec, minutes: u64, error: &ProviderError) {
+    let held = engine.active_tasks_of(spec.id);
+    if held.is_empty() {
+        return;
+    }
+    let reason = format!("its model service has refused it for {minutes} minutes");
+    let mut titles = Vec::new();
+    for task in held {
+        let title = engine.task(task).map(|task| task.title.clone()).unwrap_or_default();
+        if engine
+            .apply(Command::ReleaseTask { task, by: spec.id, reason: reason.clone() })
+            .is_ok()
+        {
+            titles.push(format!("\"{title}\""));
+        }
+    }
+    if titles.is_empty() {
+        return;
+    }
+    let detail: String = error.to_string().chars().take(160).collect();
+    let coordinators: Vec<AgentId> = engine
+        .agents()
+        .filter(|other| other.id != spec.id && other.roles.iter().any(|role| role == "coordinator"))
+        .map(|other| other.id)
+        .collect();
+    let mut message = orgbot_proto::ChatMessage::system(
+        engine.room_id(),
+        format!(
+            "@{}'s model service has refused it for {minutes} minutes ({detail}), so its work went back to the board: {}.",
+            spec.handle,
+            titles.join(", ")
+        ),
+    );
+    if !coordinators.is_empty() {
+        message = message.to_agents(coordinators);
+    }
+    let _ = engine.apply(Command::PostMessage { message: Box::new(message) });
+}
 
 /// How often, in minutes of one turn, a bot hears how long it has run.
 const TURN_MINUTES_NOTE: u64 = 10;
@@ -2505,6 +2586,86 @@ mod tests {
         .unwrap();
         room.apply(Command::StartRoom).unwrap();
         SharedEngine::new(room)
+    }
+
+    /// From speed test 1: DeepSeek refused every turn of @deepseek-builder,
+    /// which held the render pipeline for 24 minutes with nothing to show.
+    #[tokio::test]
+    async fn work_goes_back_to_the_board_when_a_bots_service_keeps_refusing_it() {
+        #[derive(Debug)]
+        struct Busy;
+        #[async_trait::async_trait]
+        impl Provider for Busy {
+            fn name(&self) -> &str {
+                "deepseek"
+            }
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+                _sink: Option<mpsc::Sender<StreamEvent>>,
+            ) -> orgbot_providers::Result<CompletionResponse> {
+                Err(ProviderError::RateLimited {
+                    provider: "deepseek".into(),
+                    message: "Service is too busy".into(),
+                    retry_after_secs: Some(1),
+                })
+            }
+        }
+        use orgbot_proto::room::{CompletionRule, RoomLimits, RoomSpec};
+        let worker = spec();
+        let lead = AgentSpec::new("lead", "Lead", orgbot_proto::agent::ProviderRef::Scripted { script: "t".into() })
+            .with_roles(["coordinator"]);
+        let mut room = Engine::new(RoomSpec {
+            name: "busy".into(),
+            goal: "ship".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        for agent in [&worker, &lead] {
+            room.apply(Command::JoinAgent { spec: Box::new(agent.clone()) }).unwrap();
+        }
+        room.apply(Command::StartRoom).unwrap();
+        let created = room
+            .apply(Command::CreateTask {
+                title: "render pipeline".into(),
+                brief: String::new(),
+                by: None,
+                required_role: None,
+                priority: orgbot_proto::task::Priority::Normal,
+                acceptance_criteria: vec![],
+                depends_on: vec![],
+                origin: orgbot_proto::graph::TaskOrigin::plain(),
+            })
+            .unwrap();
+        let task = created
+            .iter()
+            .find_map(|e| match &e.event {
+                orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+                _ => None,
+            })
+            .unwrap();
+        for command in [Command::OpenTask { task }, Command::ClaimTask { task, by: worker.id }, Command::StartTask { task, by: worker.id }] {
+            room.apply(command).unwrap();
+        }
+        let engine = SharedEngine::new(room);
+        let mut bot = Bot::new(worker.clone(), Arc::new(Busy));
+
+        bot.take_turn(&engine, None).await.unwrap();
+        assert_eq!(engine.with(|e| e.task(task).unwrap().assignee), Some(worker.id), "a first refusal is waited out");
+
+        bot.unavailable_since = Some(std::time::Instant::now() - SERVICE_DOWN_RELEASE);
+        bot.take_turn(&engine, None).await.unwrap();
+        assert_ne!(engine.with(|e| e.task(task).unwrap().assignee), Some(worker.id), "its work went back to the board");
+        let told = engine.with(|e| {
+            e.transcript()
+                .iter()
+                .find(|m| m.body.contains("model service has refused it"))
+                .cloned()
+        });
+        let told = told.expect("the coordinators are told");
+        assert!(told.body.contains("\"render pipeline\"") && told.wakes(lead.id, &lead.roles), "{}", told.body);
     }
 
     /// From benchmark 2: the owner asked "@grok-quick, what is the hold up"

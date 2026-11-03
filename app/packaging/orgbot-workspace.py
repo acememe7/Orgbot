@@ -3585,6 +3585,22 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
                 + ". Screenshots and captures belong under .cache/orgbots/ in your copy, which is never merged; "
                 "move them there unless the project itself uses them."
             )
+        # From speed test 1: a bot left an empty `_t` and a `project/src/...`
+        # folder in the project root, as if the project were a folder in it.
+        strays = [
+            name for name, action in operations
+            if action != "delete" and name in diffs["added"] and (
+                name.startswith("project/")
+                or ("/" not in name and not name.startswith(".") and (agent_entries.get(name) or {}).get("size") == 0)
+            )
+        ]
+        if strays:
+            notes.append(
+                "Stray files reached the project: " + ", ".join(strays[:10])
+                + ("" if len(strays) <= 10 else f" and {len(strays) - 10} more")
+                + ". Your current folder is the project's root, so there is no project/ folder in it; "
+                "test and scratch files belong under .cache/orgbots/. Remove these unless the project needs them."
+            )
         if notes:
             result["note"] = "\n".join(notes)
         return result

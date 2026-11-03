@@ -1068,8 +1068,30 @@ impl AgentCliProvider {
             Ok::<(), ProviderError>(())
         };
 
+        // A sign-in the CLI refreshes goes back to the owner as soon as it is
+        // written, not when the turn ends: other bots' copies, and the
+        // owner's, stop working the moment it is refreshed.
+        #[cfg(target_os = "linux")]
+        let hand_back = async {
+            let (Some(home), Some(owner)) = (private_home.as_deref(), self.credential_owner_home()) else {
+                return std::future::pending::<()>().await;
+            };
+            loop {
+                tokio::time::sleep(SIGN_IN_POLL).await;
+                match crate::workspace_guard::hand_back_fresh_sign_in(home, &owner) {
+                    Ok(true) => tracing::info!(cli = self.cli.binary(), "handed a refreshed sign-in back mid-turn"),
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(%error, "could not hand a refreshed sign-in back mid-turn"),
+                }
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let hand_back = std::future::pending::<()>();
         let outcome = timeout(self.timeout, async {
-            let parsed = run.await;
+            let parsed = tokio::select! {
+                parsed = run => parsed,
+                () = hand_back => unreachable!("the sign-in watch never ends"),
+            };
             let stderr_bytes = stderr_task.await.unwrap_or_default();
             let status = child.wait().await;
             (parsed, stderr_bytes, status)
@@ -2016,6 +2038,9 @@ fn classify_cli_failure(cli: CliKind, message: &str) -> Option<ProviderError> {
     })
 }
 
+/// How often a running CLI's sign-in is checked for a refresh to hand back.
+const SIGN_IN_POLL: Duration = Duration::from_secs(5);
+
 /// The folder in a home where `cli` keeps its sign-in, or empty for a CLI
 /// whose sign-in OrgBots does not keep in step.
 fn sign_in_dir(cli: CliKind) -> &'static str {
@@ -2449,13 +2474,17 @@ fn build_args(
             codex_network(cmd, policy);
         }
         (CliKind::Codex, Some(_session)) => {
-            // `codex exec resume` does not take a sandbox flag (the resumed
-            // session keeps the one it started with), and its trailing prompt
-            // is appended after all options below.
+            // `codex exec resume` takes no sandbox flag, and its trailing
+            // prompt is appended after all options below. The sandbox goes in
+            // as configuration instead. From speed test 1: Codex 0.166 ran
+            // every resumed turn read-only, so @mira, a builder, refused two
+            // tasks handed to her as "a read-only filesystem".
             cmd.arg("exec")
                 .arg("resume")
                 .arg("--json")
                 .arg("--skip-git-repo-check")
+                .arg("-c")
+                .arg(format!("sandbox_mode=\"{policy_value}\""))
                 .arg("-c")
                 .arg("approval_policy=\"never\"");
             codex_network(cmd, policy);
@@ -3950,6 +3979,17 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             assert!(args
                 .windows(2)
                 .any(|pair| pair == ["-c", "approval_policy=\"never\""]));
+            // From speed test 1: without it, Codex 0.166 ran resumed turns
+            // read-only, and a builder refused work it could not write.
+            let sandbox = match policy {
+                AgentPolicy::ReadOnly => "read-only",
+                AgentPolicy::WorkspaceWrite => "workspace-write",
+                AgentPolicy::FullAccess => "danger-full-access",
+            };
+            assert!(
+                args.windows(2).any(|pair| pair == ["-c", &format!("sandbox_mode=\"{sandbox}\"")]),
+                "{args:?}"
+            );
             assert!(!args.iter().any(|arg| arg == "-s"));
             assert!(!args.iter().any(|arg| arg == "--approve-for-me"));
             assert!(!args.iter().any(|arg| arg == "--full-auto"));

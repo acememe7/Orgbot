@@ -884,10 +884,37 @@ fn task_arg(input: &Value, field: &str) -> Result<TaskId, String> {
     parse_id(required_str(input, field)?, field, "task")
 }
 
-fn artifact_ids(input: &Value, field: &str) -> Result<Vec<ArtifactId>, String> {
+/// An artifact named by its full id, or by the short form the room shows
+/// (`art_7280e4bf`) when only one artifact's id starts with it.
+///
+/// From speed test 1: the coordinator's briefs named artifacts by their short
+/// ids, reading them was refused, and two bots spent handoffs asking it for
+/// the full ones.
+fn artifact_arg(engine: &Engine, raw: &str, field: &str) -> Result<ArtifactId, String> {
+    if let Ok(id) = raw.trim().parse() {
+        return Ok(id);
+    }
+    let wanted = raw.trim().to_ascii_lowercase();
+    let start = wanted.strip_prefix("art_").unwrap_or(&wanted).replace('-', "");
+    if start.len() >= 6 && start.chars().all(|c| c.is_ascii_hexdigit()) {
+        let matches: Vec<ArtifactId> = engine
+            .artifacts()
+            .map(|artifact| artifact.id)
+            .filter(|id| id.as_uuid().simple().to_string().starts_with(&start))
+            .collect();
+        return match matches.as_slice() {
+            [one] => Ok(*one),
+            [] => Err(format!("There is no artifact whose id starts `{raw}`.")),
+            several => Err(format!("`{raw}` starts {} artifact ids; give more of the id.", several.len())),
+        };
+    }
+    parse_id(raw, field, "art")
+}
+
+fn artifact_ids(engine: &Engine, input: &Value, field: &str) -> Result<Vec<ArtifactId>, String> {
     string_list(input, field)
         .iter()
-        .map(|raw| parse_id(raw, field, "art"))
+        .map(|raw| artifact_arg(engine, raw, field))
         .collect()
 }
 
@@ -1623,7 +1650,7 @@ fn use_skill(engine: &Engine, input: &Value) -> ToolOutcome {
 }
 
 fn read_artifact(engine: &Engine, input: &Value) -> ToolOutcome {
-    let id = match required_str(input, "artifact").and_then(|raw| parse_id(raw, "artifact", "art"))
+    let id = match required_str(input, "artifact").and_then(|raw| artifact_arg(engine, raw, "artifact"))
     {
         Ok(id) => id,
         Err(message) => return ToolOutcome::error(message),
@@ -1680,7 +1707,7 @@ fn submit_for_review(engine: &mut Engine, actor: AgentId, input: &Value) -> Tool
         Ok(task) => task,
         Err(message) => return ToolOutcome::error(message),
     };
-    let artifacts = match artifact_ids(input, "artifacts") {
+    let artifacts = match artifact_ids(engine, input, "artifacts") {
         Ok(ids) => ids,
         Err(message) => return ToolOutcome::error(message),
     };
@@ -1731,7 +1758,7 @@ fn offer_handoff(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutc
         );
     };
 
-    let context = match artifact_ids(input, "context") {
+    let context = match artifact_ids(engine, input, "context") {
         Ok(ids) => ids,
         Err(message) => return ToolOutcome::error(message),
     };
@@ -1901,7 +1928,7 @@ fn complete_handoff(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolO
         (Ok(handoff), Ok(summary)) => (handoff, summary.to_string()),
         (Err(message), _) | (_, Err(message)) => return ToolOutcome::error(message),
     };
-    let artifacts = match artifact_ids(input, "artifacts") {
+    let artifacts = match artifact_ids(engine, input, "artifacts") {
         Ok(ids) => ids,
         Err(message) => return ToolOutcome::error(message),
     };

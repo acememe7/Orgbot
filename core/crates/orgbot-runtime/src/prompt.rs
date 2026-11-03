@@ -247,6 +247,13 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
              `orgbot_room__add_artifact`, and so on. Use those exact names; the \
              unprefixed ones do not exist.\n\n",
         );
+        // From speed test 1: a bot wrote `project/src/...` and an empty `_t`
+        // into the owner's project.
+        out.push_str(
+            "Your current folder is the project's root. Write paths relative to it; \
+             there is no project/ folder inside it. Test and scratch files go under \
+             .cache/orgbots/.\n\n",
+        );
     }
     if matches!(spec.provider, orgbot_proto::agent::ProviderRef::CliAgent { .. }) {
         out.push_str(
@@ -1317,6 +1324,7 @@ mod tests {
         assert!(prompt.contains("@astra — reviewer (Grok CLI, claude-haiku-5-5; review-only)"), "{prompt}");
         assert!(prompt.contains("@glm — qa (glm-5.3-flash by API)"), "{prompt}");
         assert!(prompt.contains("You: Claude Code, claude-haiku-5-5; opens image files"), "{prompt}");
+        assert!(prompt.contains("Your current folder is the project's root"), "{prompt}");
     }
 
     #[test]

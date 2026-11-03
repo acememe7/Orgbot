@@ -898,6 +898,11 @@ impl Engine {
     }
 
     /// A recorded deliverable.
+    /// Every artifact in the room.
+    pub fn artifacts(&self) -> impl Iterator<Item = &Artifact> {
+        self.artifacts.values()
+    }
+
     pub fn artifact(&self, id: ArtifactId) -> Option<&Artifact> {
         self.artifacts.get(&id)
     }

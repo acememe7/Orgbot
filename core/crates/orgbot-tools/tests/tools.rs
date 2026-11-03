@@ -1842,3 +1842,25 @@ fn a_note_recorded_again_says_what_it_replaced() {
     let told = f.ok(f.worker, "add_artifact", json!({"task":task, "name":"design.md", "content":long, "document":true}));
     assert!(!told.contains("characters"), "the asked-for document is not remarked on: {told}");
 }
+
+/// From speed test 1: a coordinator's briefs named artifacts by the short ids
+/// the room shows, reading them was refused, and two bots spent handoffs
+/// asking for the full ones.
+#[test]
+fn an_artifact_can_be_read_by_its_short_id() {
+    let mut f = fixture();
+    let task = f.make(json!({ "title": "write the brief", "brief": "short" }));
+    f.ok(f.worker, "claim_task", json!({ "task": task }));
+    f.ok(f.worker, "start_task", json!({ "task": task }));
+    let told = f.ok(
+        f.worker,
+        "add_artifact",
+        json!({ "task": task, "name": "brief.md", "content": "the shared rules" }),
+    );
+    let artifact = id_in(&told, "art");
+    let short = &artifact[..12];
+    let read = f.ok(f.worker, "read_artifact", json!({ "artifact": short }));
+    assert!(read.contains("the shared rules"), "{read}");
+    let missing = f.call(f.worker, "read_artifact", json!({ "artifact": "art_00000000" }));
+    assert!(missing.is_error && missing.content.contains("starts `art_00000000`"), "{}", missing.content);
+}

@@ -260,6 +260,20 @@ class WorkspaceTests(unittest.TestCase):
         again = workspace._apply(os.fspath(self.state), "dev", review_token=None)
         self.assertNotIn("note", again, "named once, when it lands")
 
+    def test_stray_files_in_the_project_root_are_named(self):
+        # From speed test 1: an empty `_t` and a `project/src/...` folder.
+        work = self.prepare()
+        (work / "_t").write_bytes(b"")
+        (work / "project/src/components").mkdir(parents=True)
+        (work / "project/src/components/Hero.jsx").write_text("x\n", encoding="utf-8")
+        (work / ".nojekyll").write_bytes(b"")
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
+            result = workspace._apply(os.fspath(self.state), "dev", review_token=None)
+        self.assertTrue(result["ok"], result)
+        self.assertIn("_t", result["note"])
+        self.assertIn("project/src/components/Hero.jsx", result["note"])
+        self.assertNotIn(".nojekyll", result["note"], "a dotfile is the project's own")
+
     def test_setting_conflicts_aside_cannot_be_redirected_by_a_link_in_the_bots_home(self):
         work = self.prepare()
         (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")
