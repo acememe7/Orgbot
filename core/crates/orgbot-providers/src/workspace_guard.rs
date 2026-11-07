@@ -992,8 +992,7 @@ impl WorkspaceGuard {
         if let Some(label) = &self.label {
             command.arg("--label").arg(label);
         }
-        let output = command
-            .output()
+        let output = output_within(&mut command, HELPER_TIME_LIMIT)
             .map_err(|e| format!("workspace setup failed: {e}"))?;
         if !output.status.success() {
             let text = if output.stderr.is_empty() {
@@ -1024,8 +1023,7 @@ impl WorkspaceGuard {
         if set_aside {
             command.arg("--set-aside-conflicts");
         }
-        let output = command
-            .output()
+        let output = output_within(&mut command, HELPER_TIME_LIMIT)
             .map_err(|e| format!("workspace integration failed: {e}"))?;
         if !output.status.success() {
             let text = if output.stderr.is_empty() {
@@ -1038,6 +1036,65 @@ impl WorkspaceGuard {
         serde_json::from_slice(&output.stdout)
             .map_err(|e| format!("invalid workspace integration result: {e}"))
     }
+}
+
+/// How long one prepare or merge may take, waiting for the project lock
+/// included. From the audit after speed test 1: the helper ran with no limit
+/// while holding the lock every bot's merge needs, so one that hung would
+/// have stopped the whole room's work from landing.
+const HELPER_TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// Run a helper and collect its output, stopping it once `limit` passes.
+fn output_within(
+    command: &mut Command,
+    limit: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let out = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(stream) = stdout.as_mut() {
+            let _ = stream.read_to_end(&mut buffer);
+        }
+        buffer
+    });
+    let err = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(stream) = stderr.as_mut() {
+            let _ = stream.read_to_end(&mut buffer);
+        }
+        buffer
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "the workspace helper ran over {} minutes and was stopped, so other bots' work can land",
+                    limit.as_secs() / 60
+                ),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
 }
 
 /// Seed selected credentials, config, plugins, skills and resume data into a
@@ -1099,6 +1156,7 @@ fn private_home_from(
         entries: 0,
         bytes: 0,
     };
+    let mut seeded = SeedStamp::load(profile_root);
     for name in [".codex", ".claude", ".grok"] {
         let from = source_home.join(name);
         let to = home.join(name);
@@ -1138,15 +1196,24 @@ fn private_home_from(
                     "skills", "plugins", "rules", "prompts", "commands", "agents", "hooks",
                 ] {
                     let src = from.join(directory);
-                    if std::fs::symlink_metadata(&src)
-                        .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
-                    {
+                    let Ok(meta) = std::fs::symlink_metadata(&src) else {
+                        continue;
+                    };
+                    if meta.is_dir() && !meta.file_type().is_symlink() {
                         let dst = to.join(directory);
+                        let key = format!("{name}/{directory}");
+                        if seeded.tree_current(&key, &meta, &dst) {
+                            continue;
+                        }
                         ensure_private_directory(&dst)?;
                         copy_tree_bounded(&src, &dst, &mut budget)?;
+                        seeded.walked(key, &meta);
                     }
                 }
-                if let Some(id) = resume_id.filter(|id| !id.is_empty() && id.len() <= 256) {
+                if let Some(id) = resume_id
+                    .filter(|id| !id.is_empty() && id.len() <= 256)
+                    .filter(|id| !seeded.session_checked(name, id))
+                {
                     let session_dirs: &[&str] = match name {
                         ".claude" => &["projects", "sessions"],
                         _ => &["sessions", "history", "projects"],
@@ -1159,6 +1226,7 @@ fn private_home_from(
                             copy_matching_session(&src, &to.join(directory), id, &mut budget, 0)?;
                         }
                     }
+                    seeded.checked_session(name, id);
                 }
             }
         }
@@ -1168,7 +1236,107 @@ fn private_home_from(
         &home.join(".claude.json"),
         &mut budget,
     )?;
+    seeded.save();
     Ok(home)
+}
+
+/// How often a bot's copy of the owner's skills, plugins and the like is
+/// checked for new files when the folder itself looks unchanged: files added
+/// deep inside a folder don't change the folder's own time.
+const PROFILE_TREE_RECHECK_SECS: u64 = 10 * 60;
+
+/// What a bot's private home was last seeded from, so a turn walks the
+/// owner's folders only when they may have changed. From the audit after
+/// speed test 1: every CLI turn walked about 12,000 entries of the owner's
+/// .claude, .codex and .grok folders, and every session folder, to copy
+/// nothing new.
+struct SeedStamp {
+    path: PathBuf,
+    data: serde_json::Value,
+    changed: bool,
+}
+
+impl SeedStamp {
+    fn load(profile_root: &Path) -> Self {
+        let path = profile_root.join("home-seeded.json");
+        let data = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        Self { path, data, changed: false }
+    }
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn stamp_of(meta: &std::fs::Metadata) -> String {
+        use std::os::unix::fs::MetadataExt;
+        format!("{}:{}:{}:{}", meta.dev(), meta.ino(), meta.mtime(), meta.mtime_nsec())
+    }
+
+    /// The bot's copy of this folder exists and was filled from the folder
+    /// as it is now, recently enough.
+    fn tree_current(&self, key: &str, source: &std::fs::Metadata, copy: &Path) -> bool {
+        let Some(entry) = self.data.get("trees").and_then(|trees| trees.get(key)) else {
+            return false;
+        };
+        let same = entry.get("stamp").and_then(serde_json::Value::as_str) == Some(Self::stamp_of(source).as_str());
+        let recent = entry
+            .get("walked_at")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|at| Self::now().saturating_sub(at) < PROFILE_TREE_RECHECK_SECS);
+        same && recent
+            && std::fs::symlink_metadata(copy).is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+    }
+
+    fn walked(&mut self, key: String, source: &std::fs::Metadata) {
+        let entry = serde_json::json!({ "stamp": Self::stamp_of(source), "walked_at": Self::now() });
+        if !self.data.get("trees").is_some_and(serde_json::Value::is_object) {
+            self.data["trees"] = serde_json::json!({});
+        }
+        self.data["trees"][key] = entry;
+        self.changed = true;
+    }
+
+    /// The owner's folders were already searched for this session: a bot's
+    /// session lives in its own home from its first turn on.
+    fn session_checked(&self, cli_dir: &str, id: &str) -> bool {
+        let key = format!("{cli_dir}/{id}");
+        self.data
+            .get("sessions")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|ids| ids.iter().any(|known| known.as_str() == Some(key.as_str())))
+    }
+
+    fn checked_session(&mut self, cli_dir: &str, id: &str) {
+        let key = serde_json::Value::String(format!("{cli_dir}/{id}"));
+        let mut ids = self
+            .data
+            .get("sessions")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if ids.contains(&key) {
+            return;
+        }
+        ids.push(key);
+        let excess = ids.len().saturating_sub(64);
+        ids.drain(..excess);
+        self.data["sessions"] = serde_json::Value::Array(ids);
+        self.changed = true;
+    }
+
+    fn save(&self) {
+        if self.changed {
+            // Only a hint: losing it means one more walk.
+            let _ = write_private_file(&self.path, self.data.to_string().as_bytes());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1587,6 +1755,64 @@ mod tests {
                 .unwrap()
                 .as_nanos(),
         ))
+    }
+
+    /// From the audit after speed test 1: every CLI turn walked the owner's
+    /// skills, plugins and session folders to copy nothing new.
+    #[test]
+    fn a_bots_home_is_reseeded_only_when_the_owners_folders_change() {
+        let root = temp();
+        let owner = root.join("owner");
+        let profiles = root.join("profiles");
+        std::fs::create_dir_all(owner.join(".claude/skills/deep")).unwrap();
+        std::fs::create_dir_all(&profiles).unwrap();
+        std::fs::write(owner.join(".claude/skills/deep/one.md"), "one").unwrap();
+        let home = private_home_from(&profiles, &owner, None).unwrap();
+        assert!(home.join(".claude/skills/deep/one.md").exists());
+
+        // A file added deep inside leaves the folder's own time alone: the
+        // next turn doesn't walk it again.
+        std::fs::write(owner.join(".claude/skills/deep/two.md"), "two").unwrap();
+        private_home_from(&profiles, &owner, None).unwrap();
+        assert!(!home.join(".claude/skills/deep/two.md").exists());
+
+        // A new entry at the top changes the folder: it is walked again.
+        std::fs::write(owner.join(".claude/skills/three.md"), "three").unwrap();
+        private_home_from(&profiles, &owner, None).unwrap();
+        assert!(home.join(".claude/skills/deep/two.md").exists());
+        assert!(home.join(".claude/skills/three.md").exists());
+
+        // And after the recheck interval, deep additions arrive too.
+        std::fs::write(owner.join(".claude/skills/deep/four.md"), "four").unwrap();
+        let stamp_path = profiles.join("home-seeded.json");
+        let mut stamp: serde_json::Value = serde_json::from_slice(&std::fs::read(&stamp_path).unwrap()).unwrap();
+        stamp["trees"][".claude/skills"]["walked_at"] = serde_json::json!(0);
+        std::fs::write(&stamp_path, stamp.to_string()).unwrap();
+        private_home_from(&profiles, &owner, None).unwrap();
+        assert!(home.join(".claude/skills/deep/four.md").exists());
+
+        // A session is looked for in the owner's folders once.
+        std::fs::create_dir_all(owner.join(".codex/sessions")).unwrap();
+        private_home_from(&profiles, &owner, Some("session-789")).unwrap();
+        std::fs::write(owner.join(".codex/sessions/rollout-session-789.jsonl"), "late").unwrap();
+        private_home_from(&profiles, &owner, Some("session-789")).unwrap();
+        assert!(!home.join(".codex/sessions/rollout-session-789.jsonl").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_helper_that_runs_too_long_is_stopped() {
+        let started = std::time::Instant::now();
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let error = output_within(&mut command, std::time::Duration::from_millis(300)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let mut command = Command::new("/bin/echo");
+        command.arg("done");
+        let output = output_within(&mut command, std::time::Duration::from_secs(10)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"done\n");
     }
 
     #[cfg(unix)]

@@ -101,6 +101,9 @@ pub struct Orchestrator {
     holding: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Ends one bot's running turn when the owner pauses or removes it.
     stops: TurnStops,
+    /// Who could act when the room stalled, so a tick can tell when someone
+    /// new can.
+    stalled_with: Option<BTreeSet<AgentId>>,
     /// Turns in a row each bot ended on its work without doing anything.
     fruitless: BTreeMap<AgentId, u32>,
     /// Bots no longer woken for the work they went round in circles on, with
@@ -130,6 +133,10 @@ const AUTOSAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(2 * 6
 
 /// How often a run looks for a free slot it could fill.
 const REFILL_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How often a run moves the room's clock: timed waits settle and lapsed
+/// claims return, however long the turns under way are.
+const CLOCK_TICK: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// One token per running turn, so the owner can end a single bot's turn.
 ///
@@ -213,7 +220,13 @@ impl Orchestrator {
     /// From the live room: one field could not be written as JSON, and the
     /// save that tried crashed the whole room. A save now fails on its own.
     pub fn try_checkpoint(&self) -> Result<serde_json::Value, serde_json::Error> {
-        let engine = serde_json::to_value(&*self.engine.borrow())?;
+        // Written out flat while the engine is held, and built into a tree
+        // after it is released. From the audit after speed test 1: building
+        // the tree under the lock held every bot's room tools for tens of
+        // milliseconds on each save.
+        let flat = serde_json::to_vec(&*self.engine.borrow())?;
+        let engine: serde_json::Value = serde_json::from_slice(&flat)?;
+        drop(flat);
         let bots = serde_json::to_value(
             self.bots
                 .iter()
@@ -289,6 +302,7 @@ impl Orchestrator {
             autosave: None,
             holding: Default::default(),
             stops: Default::default(),
+            stalled_with: None,
         };
         for (mut configured, provider) in providers {
             let saved = restored
@@ -339,6 +353,7 @@ impl Orchestrator {
             autosave: None,
             holding: Default::default(),
             stops: Default::default(),
+            stalled_with: None,
         }
     }
 
@@ -533,18 +548,22 @@ impl Orchestrator {
         // holding something. A bot that landed there went silent for the rest
         // of the room's life. In a real room five of twenty-one bots had.
         //
-        // Work in review is deliberately not treated the same way. That wait
-        // ends by itself — an inspector acts and the task comes back — so the
-        // bot will be woken without needing anything else to hold. A blocked
-        // task carries no such promise.
-        let parked_indefinitely = !held.is_empty()
+        // Work in review or awaiting delivery is in others' hands too. From
+        // speed test 1: authors sat idle until a verdict came back, with open
+        // work on the board. They take more meanwhile; a send-back still wakes
+        // them for it.
+        let waiting_on_others = !held.is_empty()
             && held.iter().all(|id| {
-                engine
-                    .task(*id)
-                    .is_some_and(|task| task.state == orgbot_proto::TaskState::Blocked)
-                    || engine.waits_on_dependency(*id)
+                engine.task(*id).is_some_and(|task| {
+                    matches!(
+                        task.state,
+                        orgbot_proto::TaskState::Blocked
+                            | orgbot_proto::TaskState::InReview
+                            | orgbot_proto::TaskState::Approved
+                    )
+                }) || engine.waits_on_dependency(*id)
             });
-        if held.is_empty() || parked_indefinitely {
+        if held.is_empty() || waiting_on_others {
             let open = engine.claimable_by(agent);
             if !open.is_empty() {
                 return Some(Wake::FreshWork { open });
@@ -996,6 +1015,7 @@ impl Orchestrator {
             start(self, &mut running, &mut running_backend, agent);
         }
 
+        let mut last_clock = tokio::time::Instant::now();
         let mut poll = tokio::time::interval(REFILL_POLL);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         poll.tick().await;
@@ -1009,7 +1029,11 @@ impl Orchestrator {
                     if let Ok(report) = &result {
                         self.note_turn_activity(report);
                     }
-                    if matches!(&result, Ok(report) if report.tool_calls > report.tool_errors) {
+                    // An agent CLI's own edits and tools are work too. From
+                    // speed test 1: counted by room calls alone, @grok-quick's
+                    // turns on the 3D model "achieved nothing" and waited two
+                    // minutes between turns, fourteen times.
+                    if matches!(&result, Ok(report) if report.acted()) {
                         productive.insert(agent);
                     }
                     finished_at.insert(agent, tokio::time::Instant::now());
@@ -1053,12 +1077,21 @@ impl Orchestrator {
                         }
                         // A faulted bot's retry, or a bench for a turn holding
                         // nothing, is due on its own schedule, not whenever
-                        // another turn happens to finish.
+                        // another turn happens to finish. So is everything else
+                        // the room does on a clock: a second opinion that has
+                        // not come, a lapsed claim, an expired offer, a recheck
+                        // any reviewer may now take. From speed test 1: those
+                        // waited for the next turn to end, which in a long run
+                        // could be many minutes.
                         let now = Timestamp::now();
-                        let freed = engine.retry_due(now)
+                        let clock_due = last_clock.elapsed() >= CLOCK_TICK;
+                        let freed = (engine.retry_due(now) || clock_due)
                             && engine
                                 .apply(Command::Tick { now })
                                 .is_ok_and(|events| tick_frees_work(&events));
+                        if clock_due {
+                            last_clock = tokio::time::Instant::now();
+                        }
                         // A bot benched mid-turn, by the room or the owner,
                         // stops now.
                         for agent in running_backend.keys() {
@@ -1218,7 +1251,7 @@ impl Orchestrator {
         // bot stuck repeating itself must not keep the room awake.
         let mut anyone_progressed = false;
         for report in &reports {
-            let did_work = report.tool_calls > report.tool_errors;
+            let did_work = report.acted();
             let said_something_new = report.said.as_deref().is_some_and(|said| {
                 self.last_said.get(&report.agent).map(String::as_str) != Some(said)
             });
@@ -1465,13 +1498,30 @@ impl Orchestrator {
         self.wake();
     }
 
-    /// Run the room's housekeeping tick, and wake the room if it freed work.
+    /// Run the room's housekeeping tick, and wake the room if it freed work,
+    /// or if a stalled room has someone who can act now and could not before.
+    ///
+    /// From the audit after speed test 1: a stalled room woke only for a
+    /// person or freed work, so a wait that ran out on a clock (a retry, a
+    /// provider's pause, a recheck any reviewer may now take) left it asleep
+    /// until someone spoke.
     pub fn tick(&mut self, now: Timestamp) {
         let freed = self
             .engine
             .with(|engine| engine.apply(Command::Tick { now }).is_ok_and(|events| tick_frees_work(&events)));
         if freed {
             self.wake();
+            return;
+        }
+        if self.idle_rounds < MAX_IDLE_ROUNDS {
+            self.stalled_with = None;
+            return;
+        }
+        let able: BTreeSet<AgentId> = self.next_actors(usize::MAX).into_iter().collect();
+        match &self.stalled_with {
+            Some(before) if able.iter().any(|agent| !before.contains(agent)) => self.wake(),
+            Some(_) => {}
+            None => self.stalled_with = Some(able),
         }
     }
 
@@ -1482,6 +1532,7 @@ impl Orchestrator {
     /// declaring itself stalled again on the strength of what it did before.
     pub fn wake(&mut self) {
         self.idle_rounds = 0;
+        self.stalled_with = None;
     }
 
     /// Turns taken so far.
@@ -1685,5 +1736,85 @@ mod tick_tests {
         room.tick(Timestamp::now().plus_millis(24 * 60 * 60 * 1000));
         assert_eq!(room.engine().task(task).unwrap().state, orgbot_proto::TaskState::Ready);
         assert!(room.stop_condition().is_none(), "the room is awake again");
+    }
+
+    fn room_with(handles: &[&str]) -> (Orchestrator, Vec<AgentId>) {
+        let mut room = Orchestrator::new(RoomSpec {
+            name: "release".into(),
+            goal: "ship".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        let ids = handles
+            .iter()
+            .map(|handle| {
+                let spec = orgbot_proto::AgentSpec::new(*handle, *handle, orgbot_proto::ProviderRef::Scripted { script: "test".into() })
+                    .with_roles(["writer"]);
+                room.seat(spec, Arc::new(orgbot_providers::ScriptedProvider::new(vec![]))).unwrap()
+            })
+            .collect();
+        room.start().unwrap();
+        (room, ids)
+    }
+
+    fn open(room: &mut Orchestrator, title: &str) -> TaskId {
+        let created = room
+            .engine_mut()
+            .apply(Command::CreateTask {
+                title: title.into(),
+                brief: String::new(),
+                by: None,
+                required_role: None,
+                priority: orgbot_proto::task::Priority::Normal,
+                acceptance_criteria: vec![],
+                depends_on: vec![],
+                origin: TaskOrigin::plain(),
+            })
+            .unwrap();
+        let task = created
+            .iter()
+            .find_map(|event| match &event.event {
+                Event::TaskCreated { task } => Some(task.id),
+                _ => None,
+            })
+            .unwrap();
+        room.engine_mut().apply(Command::OpenTask { task }).unwrap();
+        task
+    }
+
+    /// From speed test 1: authors sat idle until a verdict came back, with
+    /// open work on the board.
+    #[test]
+    fn a_bot_whose_work_is_in_review_is_offered_more() {
+        let (mut room, ids) = room_with(&["writer"]);
+        let writer = ids[0];
+        let done = open(&mut room, "navigation");
+        for command in [
+            Command::ClaimTask { task: done, by: writer },
+            Command::StartTask { task: done, by: writer },
+            Command::SubmitForReview { task: done, by: writer, artifacts: vec![] },
+        ] {
+            room.engine_mut().apply(command).unwrap();
+        }
+        assert!(!room.is_actionable(writer), "nothing else to do yet");
+        open(&mut room, "footer");
+        assert!(room.is_actionable(writer), "its review is in others' hands; it takes more meanwhile");
+    }
+
+    /// From the audit after speed test 1: a stalled room woke only for a
+    /// person or freed work, not for a wait that ran out on a clock.
+    #[test]
+    fn a_stalled_room_wakes_when_someone_new_can_act() {
+        let (mut room, ids) = room_with(&["writer"]);
+        let _ = ids;
+        room.idle_rounds = MAX_IDLE_ROUNDS;
+        room.tick(Timestamp::now());
+        room.tick(Timestamp::now());
+        assert!(matches!(room.stop_condition(), Some(RunOutcome::Stalled { .. })), "nobody new can act");
+        open(&mut room, "new work");
+        room.tick(Timestamp::now());
+        assert!(room.stop_condition().is_none(), "someone can act now who could not before");
     }
 }

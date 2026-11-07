@@ -1099,10 +1099,12 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool, 
     _ensure_root_paths(state, project)
     lock_fd = _lock(project)
     try:
-        source_entries = _scan(project)
         agent_root, workspace, manifest_path = _layout(state, project, agent)
-        _cache_hashes(state, project, workspace)
+        # Before the scan, so it reuses remembered hashes. From the audit
+        # after speed test 1: every prepare rehashed the whole project first.
         _safe_state_child(state, f"agents/{_project_id(project)}", create=True)
+        _cache_hashes(state, project, workspace)
+        source_entries = _scan(project)
         _ensure_private_dir(agent_root)
         _safe_state_child(state, f"manifests/{_project_id(project)}", create=True)
         profile_root = _safe_state_child(state, f"agents/{_project_id(project)}/{agent}/profiles", create=True)
@@ -3483,7 +3485,10 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
             return {"ok": False, "workspace": os.fspath(workspace), **diffs, "pending_delete": pending_delete, "review_token": approval_token, "error": "Conflicts must be resolved before applying any change"}
         journal_path = workspace.parent / "apply-journal.json"
         journal = {"format_version": FORMAT_VERSION, "project": os.fspath(project), "agent": agent, "started_at": int(time.time()), "phase": "applying", "operations": [{"path": name, "action": action, "state": "pending", "expected_current": current.get(name), "agent_entry": agent_entries.get(name)} for name, action in operations]}
-        _atomic_json(journal_path, journal)
+        # From the audit after speed test 1: an apply with nothing to move
+        # still wrote the journal twice and rescanned the whole project.
+        if operations:
+            _atomic_json(journal_path, journal)
         # Every target must still be as reviewed before anything moves.
         for name, action in operations:
             target = _file_at(project, name)
@@ -3539,7 +3544,9 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
         except (WorkspaceError, OSError):
             pass  # A record of who wrote what must never undo a merge.
         removed_here: list[str] = []
-        final_entries = _scan(project)
+        # Nothing moved under the lock, so the project is as just scanned.
+        final_entries = _scan(project) if operations else current
+        refreshed = False
         # Advance the baseline only after clean paths have also been refreshed
         # in this agent's copy. Otherwise another agent's applied change can
         # become an apparent local edit and overwrite that agent next time.
@@ -3548,6 +3555,7 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
                 continue
             if final_entries.get(name) == base.get(name):
                 continue
+            refreshed = True
             if name in final_entries:
                 _copy_from_project(project, workspace, name)
             else:
@@ -3557,14 +3565,20 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
         # folders they leave empty too.
         removed_here.extend(name for name, action in operations if action == "delete")
         _prune_empty_parents(workspace, removed_here)
+        changed_baseline = data["entries"] != final_entries
+        manifest_stale = changed_baseline or "refresh_conflicts" in data
         data["entries"] = final_entries
         data.pop("refresh_conflicts", None)
-        _atomic_json(manifest_path, data)
-        final_agent_entries = _scan_workspace(workspace, final_entries)
+        if operations or manifest_stale:
+            _atomic_json(manifest_path, data)
+        # With the same baseline and nothing refreshed into the copy, the
+        # copy's scan is the one just taken.
+        final_agent_entries = _scan_workspace(workspace, final_entries) if operations or refreshed or changed_baseline else agent_entries
         final_review_token = _review_token(project, agent, final_entries, final_entries, final_agent_entries)
         journal["phase"] = "complete"
         journal["completed_at"] = int(time.time())
-        _atomic_json(journal_path, journal)
+        if operations:
+            _atomic_json(journal_path, journal)
         result = {"ok": True, "workspace": os.fspath(workspace), "changed": diffs["changed"], "added": diffs["added"], "deleted": diffs["deleted"], "applied": [name for name, _ in operations], "pending_delete": pending_delete, "conflicts": [], "review_token": final_review_token}
         notes = []
         if set_aside_files:

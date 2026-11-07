@@ -86,45 +86,67 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            and independent-approval gate still apply.\n\n",
     );
 
-    out.push_str(
-        "\nHow work moves through this room:\n\
-         1. Take an open task with claim_task, then start_task.\n\
-         2. Do the work. Record what you produce with add_artifact — the actual \
-            deliverable goes there, not in a chat message.\n\
-         3. Before submit_for_review, go through the task's brief and acceptance \
-            criteria one by one and check each is met, saying how in your \
-            verification note; a part you missed costs a whole review round. \
-            Then submit. You cannot approve your own \
-            work; an inspector decides and may send it back. When it comes back, \
-            fix each blocking finding as its suggestion says, or say in your \
-            verification note why another way is better; the reviewers who \
-            raised them check the fix.\n\
-         4. Once approved, the coordinator delivers it. Delivered work is \
-            finished: leave its files alone, and if it needs more, ask a \
-            coordinator for a follow-up task. Once the room's goal is delivered, \
-            finish only what is still open and start nothing new unless the \
-            owner asks.\n\n",
-    );
+    // From the audit after speed test 1: review-only bots were sent the
+    // builders' steps too, on every turn.
+    if spec.autonomy.review_only {
+        out.push_str(
+            "\nHow work moves through this room: builders claim tasks, do them, check \
+             each acceptance criterion and submit them for review with a verification \
+             note. You review what is submitted; once approved, the coordinator \
+             delivers it. Delivered work is finished.\n\n",
+        );
+    } else {
+        out.push_str(
+            "\nHow work moves through this room:\n\
+             1. Take an open task with claim_task, then start_task.\n\
+             2. Do the work. Record what you produce with add_artifact — the actual \
+                deliverable goes there, not in a chat message.\n\
+             3. Before submit_for_review, go through the task's brief and acceptance \
+                criteria one by one and check each is met, saying how in your \
+                verification note; a part you missed costs a whole review round. \
+                Then submit. You cannot approve your own \
+                work; an inspector decides and may send it back. When it comes back, \
+                fix each blocking finding as its suggestion says, or say in your \
+                verification note why another way is better; the reviewers who \
+                raised them check the fix.\n\
+             4. Once approved, the coordinator delivers it. Delivered work is \
+                finished: leave its files alone, and if it needs more, ask a \
+                coordinator for a follow-up task. Once the room's goal is delivered, \
+                finish only what is still open and start nothing new unless the \
+                owner asks.\n\n",
+        );
+    }
 
+    out.push_str("Verification before review:\n");
+    if spec.autonomy.review_only {
+        out.push_str(
+            "- Save screenshots and scratch output you only look at yourself under \
+             .cache/orgbots/ in your copy, or /tmp for a single command: they never \
+             reach the owner's project. Never infer a passing test from a planned \
+             command or missing output.\n",
+        );
+    } else {
+        out.push_str(
+            "- Workers run focused checks for their changes before submit_for_review. \
+               Put the exact commands, exit results, tested files or revision, and \
+               any checks that could not run in one short verification note per task, \
+               a few thousand characters. When the work changes, record the note again under \
+               the same name: the newer one replaces the older, and reviewers read \
+               only the newest. Put code, logs and other raw data a reviewer needs in \
+               project files and give their paths and sha256 in the note; do not paste them. \
+               Save screenshots and scratch output you only look at yourself under \
+               .cache/orgbots/ in your copy: your own tools can open them there and they \
+               never reach the owner's project, while /tmp is emptied after every command. \
+               Never infer a passing test from a planned command or missing output.\n\
+             - Keep a CHANGES.md at the project root. For every change you make to \
+               the project, add an entry of 2-3 lines at its end: what changed, why, \
+               and what errors or failed checks it ran into on the way. Commit the \
+               entry with the change. If .gitattributes has no `CHANGES.md merge=union` \
+               line, add it, so entries from several copies merge cleanly.\n",
+        );
+    }
     out.push_str(
-        "Verification before review:\n\
-         - Workers run focused checks for their changes before submit_for_review. \
-           Put the exact commands, exit results, tested files or revision, and \
-           any checks that could not run in one short verification note per task, \
-           a few thousand characters. When the work changes, record the note again under \
-           the same name: the newer one replaces the older, and reviewers read \
-           only the newest. Put code, logs and other raw data a reviewer needs in \
-           project files and give their paths and sha256 in the note; do not paste them. \
-           Save screenshots and scratch output you only look at yourself under \
-           .cache/orgbots/ in your copy: your own tools can open them there and they \
-           never reach the owner's project, while /tmp is emptied after every command. \
-           Never infer a passing test from a planned command or missing output.\n\
-         - Keep a CHANGES.md at the project root. For every change you make to \
-           the project, add an entry of 2-3 lines at its end: what changed, why, \
-           and what errors or failed checks it ran into on the way. Commit the \
-           entry with the change. If .gitattributes has no `CHANGES.md merge=union` \
-           line, add it, so entries from several copies merge cleanly.\n\
-         - Use a QA/tester teammate for reproduction, broader coverage, or a \
+        "- Use a QA/tester teammate for reproduction, broader coverage, or a \
            combined suite when changes interact. Reuse current evidence instead \
            of making every teammate repeat the same full audit.\n\
          - Reviewers inspect the implementation and verification artifacts, then \
@@ -204,10 +226,6 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            report the load you measured.\n\
          - File removals waiting for the owner's review are shown to them in the app, \
            with a count per bot. Do not mention them in your messages.\n\
-         - Your copy's history follows the project: with no commits of your own, \
-           your branch moves to the project's commit by itself. With commits of \
-           your own, the project's latest is at `project/<branch>`; to build on it, \
-           run `git stash`, `git rebase project/<branch>`, then `git stash pop`.\n\
          - A parked task is the owner's to resume. Leave it alone: do not work on it, \
            claim it, plan around it as open work, or ask the owner about it.\n\
          - Avoid repeating another bot's status or asking it to confirm a requirement already stated. \
@@ -234,10 +252,24 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
            independent pieces of your own work, such as several reviews waiting on \
            you or separate files to check, and record one result. They work inside \
            your own turn and copy.\n\
+         - Each reply you send is a full round trip to your model. When the next \
+           calls do not depend on each other's results, make them together in one \
+           reply; they run in the order you write them. For example: claim_task with \
+           start_task, every part of an artifact at once, or all the files you need \
+           to read.\n\
          - Do the work in the turn you describe it. A turn that only says what you will \
            do next changes nothing; after three such turns in a row on your work you are \
-           no longer woken for it, and the coordinators are told.\n\n",
+           no longer woken for it, and the coordinators are told.\n",
     );
+    if !spec.autonomy.review_only {
+        out.push_str(
+            "- Your copy's history follows the project: with no commits of your own, \
+             your branch moves to the project's commit by itself. With commits of \
+             your own, the project's latest is at `project/<branch>`; to build on it, \
+             run `git stash`, `git rebase project/<branch>`, then `git stash pop`.\n",
+        );
+    }
+    out.push('\n');
 
     // An agent CLI reaches the board through MCP, and every MCP client
     // namespaces a server's tools by its name. The prompt above calls them
@@ -1294,6 +1326,40 @@ mod tests {
         assert!(prompt.contains("A major says what you saw go wrong and where"));
         assert!(prompt.contains("caused by another task's code is not this task's blocker"));
         assert!(prompt.contains("sub-agents"));
+    }
+
+    /// From the audit after speed test 1: review-only bots were sent the
+    /// builders' steps, and API bots made one tool call per reply.
+    #[test]
+    fn reviewers_get_the_reviewers_rules_and_everyone_batches_calls() {
+        let engine = Engine::new(RoomSpec {
+            name: "trim".into(),
+            goal: "ship".into(),
+            roster: vec![],
+            completion: CompletionRule::Manual,
+            limits: RoomLimits::default(),
+            access: Default::default(),
+        });
+        let builder = AgentSpec::new("dev", "Dev", ProviderRef::Scripted { script: "test".into() })
+            .with_roles(["engineer"]);
+        let mut reviewer = AgentSpec::new("astra", "Astra", ProviderRef::Scripted { script: "test".into() })
+            .with_roles(["reviewer"]);
+        reviewer.autonomy.review_only = true;
+        let built = system_prompt(&engine, &builder);
+        let reviewed = system_prompt(&engine, &reviewer);
+        for prompt in [&built, &reviewed] {
+            assert!(prompt.contains("make them together in one reply"), "{prompt}");
+            assert!(prompt.contains("Only these block (major)"));
+            assert!(prompt.contains("a missing one is a minor finding"));
+            assert!(prompt.contains("under .cache/orgbots/ in your copy"));
+        }
+        assert!(built.contains("1. Take an open task with claim_task"));
+        assert!(built.contains("Keep a CHANGES.md at the project root"));
+        assert!(built.contains("git rebase project/<branch>"));
+        assert!(!reviewed.contains("1. Take an open task with claim_task"));
+        assert!(!reviewed.contains("Keep a CHANGES.md at the project root"));
+        assert!(!reviewed.contains("git rebase project/<branch>"));
+        assert!(reviewed.len() + 1_500 < built.len(), "{} vs {}", reviewed.len(), built.len());
     }
 
     /// From benchmark 2: an eye check went to the "one who can view images"

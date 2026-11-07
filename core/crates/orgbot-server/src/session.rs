@@ -1000,17 +1000,30 @@ impl RoomSession {
                     .into(),
             });
         }
-        *self.committed_attachment_ids.write().unwrap() =
-            committed_attachments(&self.orchestrator.engine());
         let new: Vec<_> = self
             .orchestrator
             .engine()
             .events_since(self.broadcast_head)
             .cloned()
             .collect();
+        // From the audit after speed test 1: these were rebuilt on every
+        // step and every idle tick, under the engine lock, whether or not
+        // anything had happened.
+        if !new.is_empty() {
+            *self.committed_attachment_ids.write().unwrap() =
+                committed_attachments(&self.orchestrator.engine());
+        }
+        let now_at = {
+            let engine = self.orchestrator.engine();
+            (engine.head(), engine.room().phase)
+        };
         {
             let mut published = self.published.write().unwrap();
-            published.snapshot = snapshot_of(&self.orchestrator);
+            let current = matches!(&published.snapshot,
+                ServerMessage::Snapshot { head, room, .. } if (*head, room.phase) == now_at);
+            if !current {
+                published.snapshot = snapshot_of(&self.orchestrator);
+            }
             let head = published.backlog.last().map(|e| e.seq).unwrap_or(Seq::ZERO);
             published
                 .backlog
@@ -1454,9 +1467,15 @@ fn send_unsent(
     // Read under one lock, so the snapshot is exactly as new as the events
     // that go out with it: a client loads the snapshot, then replays only
     // what comes after it.
+    // Chat alone leaves the snapshot as it was (a reconnecting client
+    // replays every event after it), so it is rebuilt only when something
+    // else happened.
     let (unsent, snapshot) = engine.with(|engine| {
         let unsent: Vec<_> = engine.events_since(*sent_head).cloned().collect();
-        let snapshot = (!unsent.is_empty()).then(|| snapshot_from(engine));
+        let only_chat = unsent
+            .iter()
+            .all(|e| matches!(e.event, orgbot_proto::Event::MessagePosted { .. }));
+        let snapshot = (!only_chat).then(|| snapshot_from(engine));
         (unsent, snapshot)
     });
     // A client reconnecting mid-turn loads the snapshot and replays the

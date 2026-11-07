@@ -89,7 +89,7 @@ pub const HELD_TOO_LONG_MS: i64 = 45 * 60 * 1000;
 ///
 /// From speed test 1: the tech specs waited 29 minutes for @ellis, busy
 /// writing, to recheck them.
-pub const RECHECK_FALLBACK_MS: i64 = 10 * 60 * 1000;
+pub const RECHECK_FALLBACK_MS: i64 = 5 * 60 * 1000;
 
 /// How long reviews wait, while bots that cannot review sit idle, before the
 /// owner is told the room has too few reviewers.
@@ -827,12 +827,15 @@ impl Engine {
 
         // Review history lives here, not on the tasks, so the digest cannot
         // work this out for itself.
-        let reviewed: Vec<usize> = self
-            .tasks
-            .keys()
-            .map(|task| self.review_cycles(*task).len())
-            .filter(|cycles| *cycles > 0)
-            .collect();
+        // One pass over the reviews, not one per task with every finding
+        // copied (the audit after speed test 1).
+        let mut rounds: BTreeMap<TaskId, usize> = BTreeMap::new();
+        for review in self.reviews.iter().filter(|review| review.decides()) {
+            if self.tasks.contains_key(&review.task) {
+                *rounds.entry(review.task).or_default() += 1;
+            }
+        }
+        let reviewed: Vec<usize> = rounds.into_values().collect();
         view.health.average_review_cycles = if reviewed.is_empty() {
             0.0
         } else {
@@ -990,8 +993,8 @@ impl Engine {
         let Some(last) = self
             .reviews
             .iter()
-            .filter(|review| review.task == task && review.decides() && review.revision + 1 == record.revision)
-            .last()
+            .rev()
+            .find(|review| review.task == task && review.decides() && review.revision + 1 == record.revision)
         else {
             return Vec::new();
         };
@@ -1075,7 +1078,10 @@ impl Engine {
 
     /// Events after `seq`, for a client catching up mid-run.
     pub fn events_since(&self, seq: Seq) -> impl Iterator<Item = &EventEnvelope> {
-        self.log.iter().filter(move |e| e.seq > seq)
+        // The log is in sequence order: find the start rather than scan it
+        // all, as several callers do on every room tool call.
+        let start = self.log.partition_point(|e| e.seq <= seq);
+        self.log[start..].iter().filter(move |e| e.seq > seq)
     }
 
     /// The most recently assigned sequence number.
@@ -1291,6 +1297,19 @@ impl Engine {
     /// It is still a reading, not a promise: the board moves, and a claim
     /// re-evaluates at the moment it applies.
     pub fn evaluate_claim(&self, task: TaskId, agent: AgentId, now: Timestamp) -> Eligibility {
+        self.evaluate_claim_with(task, agent, now, &mut None)
+    }
+
+    /// [`Self::evaluate_claim`], reusing `waiting` (the bot's review queue
+    /// length) across tasks. From the audit after speed test 1: listing what
+    /// a reviewer could claim rebuilt its review queue once per task.
+    fn evaluate_claim_with(
+        &self,
+        task: TaskId,
+        agent: AgentId,
+        now: Timestamp,
+        waiting_reviews: &mut Option<usize>,
+    ) -> Eligibility {
         let Some(spec) = self.specs.get(&agent) else {
             return Eligibility {
                 eligible: false,
@@ -1367,7 +1386,7 @@ impl Engine {
         if spec.autonomy.may_inspect
             && !review_only_task(record.kind, record.required_role.as_deref())
         {
-            let waiting = self.review_queue_for(agent).len();
+            let waiting = *waiting_reviews.get_or_insert_with(|| self.review_queue_for(agent).len());
             if waiting > 0 {
                 result.eligible = false;
                 result.reason = Reason::ReviewsFirst;
@@ -1559,10 +1578,11 @@ impl Engine {
         // is by construction what a claim would accept. This list is the source
         // for the per-bot prompt and for `list_tasks(claimable)` alike.
         let now = Timestamp::now();
+        let mut waiting_reviews = None;
         let mut open: Vec<(&Task, RoleFit)> = self
             .tasks
             .values()
-            .filter(|t| self.evaluate_claim(t.id, agent, now).eligible)
+            .filter(|t| self.evaluate_claim_with(t.id, agent, now, &mut waiting_reviews).eligible)
             .map(|t| {
                 let fit = self
                     .roles

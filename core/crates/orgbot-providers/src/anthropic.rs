@@ -87,7 +87,20 @@ impl AnthropicProvider {
             );
         }
 
-        let messages: Vec<Value> = request.messages.iter().filter_map(turn_to_wire).collect();
+        let mut messages: Vec<Value> = request.messages.iter().filter_map(turn_to_wire).collect();
+        // A second cache point on the newest block, so each step of a turn
+        // reads the conversation so far from the cache rather than paying for
+        // all of it again. From the audit after speed test 1: only the system
+        // prompt was cached, and a turn of many tool calls resent everything.
+        if let Some(block) = messages
+            .last_mut()
+            .and_then(|message| message.get_mut("content"))
+            .and_then(Value::as_array_mut)
+            .and_then(|content| content.last_mut())
+            .and_then(Value::as_object_mut)
+        {
+            block.insert("cache_control".into(), json!({"type": "ephemeral"}));
+        }
         body.insert("messages".into(), json!(messages));
 
         if !request.tools.is_empty() {
@@ -719,6 +732,37 @@ mod tests {
             body["system"][0]["cache_control"]["type"], "ephemeral",
             "the system prompt is identical every turn, so it is the cache prefix"
         );
+    }
+
+    /// From the audit after speed test 1: only the system prompt was cached,
+    /// so each step of a turn paid for the whole conversation again.
+    #[test]
+    fn the_newest_block_is_a_cache_point_too() {
+        let mut request = request(DEFAULT_MODEL);
+        request.messages = vec![
+            Turn::user("the board"),
+            Turn {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::text("claiming"),
+                    ContentBlock::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "claim_task".into(),
+                        input: json!({"task": "task_1"}),
+                    },
+                ],
+            },
+            Turn::tool_results(vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "claimed".into(),
+                is_error: false,
+            }]),
+        ];
+        let body = provider().build_body(&request);
+        assert_eq!(body["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral");
+        // One point on the conversation: the earlier blocks stay plain.
+        assert!(body["messages"][0]["content"][0].get("cache_control").is_none());
+        assert!(body["messages"][1]["content"][1].get("cache_control").is_none());
     }
 
     #[test]

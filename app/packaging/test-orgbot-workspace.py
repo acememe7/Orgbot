@@ -155,6 +155,47 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual((work / "src/main.py").read_text(encoding="utf-8"), "agent edit\n")
         self.assertEqual((work / "README.md").read_text(encoding="utf-8"), "independent owner update\n")
 
+    def test_a_later_prepare_reuses_remembered_hashes(self):
+        """From the audit after speed test 1: every prepare rehashed the
+        whole project before the remembered hashes were loaded."""
+        self.prepare()
+        workspace._HASH_CACHES.clear()  # a fresh helper process
+        real = workspace._hash_contents
+        hashed = []
+
+        def counting(path, root, info):
+            hashed.append(path)
+            return real(path, root, info)
+
+        with patch.object(workspace, "_hash_contents", counting):
+            self.prepare()
+        self.assertEqual(hashed, [])
+
+    def test_an_apply_with_nothing_to_merge_writes_no_journal(self):
+        """From the audit after speed test 1: an apply with nothing to move
+        wrote the journal twice and rescanned the whole project."""
+        work = self.prepare()
+        scans = []
+        real = workspace._scan
+
+        def counting(root):
+            scans.append(root)
+            return real(root)
+
+        with patch.object(workspace, "_scan", counting):
+            result = workspace._apply(os.fspath(self.state), "dev", review_token=None)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["applied"], [])
+        self.assertFalse((work.parent / "apply-journal.json").exists())
+        self.assertEqual([root for root in scans if root == self.project], [self.project])
+        # The token it hands back still matches a fresh review.
+        (work / "README.md").unlink()
+        pending = workspace._apply(os.fspath(self.state), "dev", review_token=None)
+        self.assertEqual(pending["pending_delete"], ["README.md"])
+        approved = workspace._apply(os.fspath(self.state), "dev", review_token=pending["review_token"])
+        self.assertTrue(approved["ok"])
+        self.assertFalse((self.project / "README.md").exists())
+
     def test_apply_preserves_replaced_bytes_and_records_journal(self):
         work = self.prepare()
         (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")

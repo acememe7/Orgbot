@@ -4941,9 +4941,9 @@ fn a_task_held_long_while_others_wait_on_it_is_raised_with_its_holder_and_coordi
 }
 
 /// From speed test 1: the tech specs waited 29 minutes for the reviewer who
-/// asked for their fixes, busy writing. After ten minutes anyone may check.
+/// asked for their fixes, busy writing. After five minutes anyone may check.
 #[test]
-fn a_recheck_falls_back_to_any_reviewer_after_ten_minutes() {
+fn a_recheck_falls_back_to_any_reviewer_after_five_minutes() {
     let mut f = fixture();
     let (worker, inspector) = (f.worker, f.inspector);
     let task = f.start_task("tech specs", worker);
@@ -4962,7 +4962,7 @@ fn a_recheck_falls_back_to_any_reviewer_after_ten_minutes() {
     assert_eq!(f.engine.recheck_reviewers(&record, Timestamp::now()), vec![inspector], "first, the reviewer who asked");
     assert!(
         f.engine.recheck_reviewers(&record, Timestamp::now().plus_millis(11 * 60_000)).is_empty(),
-        "after ten minutes, anyone"
+        "after five minutes, anyone"
     );
 }
 

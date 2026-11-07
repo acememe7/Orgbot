@@ -824,40 +824,44 @@ impl AgentCliProvider {
             ),
             None => None,
         };
+        // Off the shared task too: seeding walks the owner's CLI folders.
         #[cfg(target_os = "linux")]
-        let private_home = prepared
-            .as_ref()
-            .map(|prepared| {
-                if matches!(self.cli, CliKind::OpenCode | CliKind::Antigravity) {
-                    let home_name = match self.cli {
-                        CliKind::OpenCode => "home-opencode",
-                        CliKind::Antigravity => "home-agy",
-                        _ => unreachable!(),
-                    };
-                    return crate::workspace_guard::private_home_for_new_cli(
-                        &prepared.profile_root.join(home_name),
-                    );
-                }
+        let private_home = match prepared.as_ref() {
+            Some(prepared) => {
+                let cli = self.cli;
+                let profile_root = prepared.profile_root.clone();
+                let expected_home = prepared.private_home.clone();
+                let resumed = resumed.map(str::to_owned);
                 #[cfg(test)]
-                if let Some(source) = self
-                    .guard
-                    .as_ref()
-                    .and_then(|guard| guard.profile_source.as_deref())
-                {
-                    return crate::workspace_guard::private_home_from_test(
-                        &prepared.profile_root,
-                        source,
-                        resumed,
-                    );
-                }
-                crate::workspace_guard::private_home(
-                    &prepared.profile_root,
-                    &prepared.private_home,
-                    resumed,
-                )
-            })
-            .transpose()
-            .map_err(ProviderError::Unsupported)?;
+                let source = self.guard.as_ref().and_then(|guard| guard.profile_source.clone());
+                let seeded = tokio::task::spawn_blocking(move || {
+                    if matches!(cli, CliKind::OpenCode | CliKind::Antigravity) {
+                        let home_name = match cli {
+                            CliKind::OpenCode => "home-opencode",
+                            CliKind::Antigravity => "home-agy",
+                            _ => unreachable!(),
+                        };
+                        return crate::workspace_guard::private_home_for_new_cli(
+                            &profile_root.join(home_name),
+                        );
+                    }
+                    #[cfg(test)]
+                    if let Some(source) = source.as_deref() {
+                        return crate::workspace_guard::private_home_from_test(
+                            &profile_root,
+                            source,
+                            resumed.as_deref(),
+                        );
+                    }
+                    crate::workspace_guard::private_home(&profile_root, &expected_home, resumed.as_deref())
+                })
+                .await
+                .map_err(|error| ProviderError::Unsupported(format!("preparing the bot's home stopped: {error}")))?
+                .map_err(ProviderError::Unsupported)?;
+                Some(seeded)
+            }
+            None => None,
+        };
         #[cfg(target_os = "linux")]
         let private_mcp_config = if let (Some(home), Some(prepared)) = (&private_home, &prepared) {
             if self.cli != CliKind::Claude {

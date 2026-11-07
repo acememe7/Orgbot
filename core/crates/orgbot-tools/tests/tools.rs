@@ -1864,3 +1864,37 @@ fn an_artifact_can_be_read_by_its_short_id() {
     let missing = f.call(f.worker, "read_artifact", json!({ "artifact": "art_00000000" }));
     assert!(missing.is_error && missing.content.contains("starts `art_00000000`"), "{}", missing.content);
 }
+
+/// From the audit after speed test 1: an earlier room's deliverable came back
+/// whole, however long, where read_artifact hands over numbered parts.
+#[test]
+fn a_long_prior_deliverable_is_read_in_parts() {
+    let mut f = fixture();
+    let path = std::env::temp_dir().join(format!(
+        "orgbot-tools-prior-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let long = "a line of the earlier design\n".repeat(600);
+    let saved = json!({
+        "engine": {
+            "room": { "spec": { "name": "Earlier", "goal": "ship things" } },
+            "tasks": { "task_1": { "title": "Design", "brief": "the design", "state": "submitted" } },
+            "artifacts": { "art_1": { "task": "task_1", "name": "design.md",
+                                      "body": { "kind": "text", "text": long } } },
+        }
+    });
+    std::fs::write(&path, serde_json::to_string(&saved).unwrap()).unwrap();
+    f.engine.set_archive(orgbot_engine::Archive::load(std::slice::from_ref(&path), None));
+    let first = f.ok(f.worker, "read_prior_artifact", json!({ "artifact": "art_1" }));
+    assert!(first.contains("BEGIN PART 1/3"), "{first}");
+    assert!(first.contains("Call read_prior_artifact again with part=2"), "{first}");
+    assert!(first.len() < 9_000);
+    let last = f.ok(f.worker, "read_prior_artifact", json!({ "artifact": "art_1", "part": 3 }));
+    assert!(last.contains("END PART 3/3"), "{last}");
+    f.err(f.worker, "read_prior_artifact", json!({ "artifact": "art_1", "part": 4 }));
+    std::fs::remove_file(path).unwrap();
+}

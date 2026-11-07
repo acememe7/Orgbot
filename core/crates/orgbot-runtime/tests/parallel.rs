@@ -1561,3 +1561,60 @@ async fn the_owner_can_stop_one_bots_turn_and_bench_it() {
     room.engine_mut().apply(Command::ResumeAgent { agent: iris }).unwrap();
     assert_eq!(room.engine().status(iris), orgbot_proto::AgentStatus::Idle);
 }
+
+/// From speed test 1: @grok-quick's CLI turns on the 3D model edited files
+/// without calling the room, counted as having achieved nothing, and waited
+/// two minutes before each next turn, fourteen times.
+#[tokio::test(start_paused = true)]
+async fn a_cli_turn_that_edits_files_counts_as_work() {
+    #[derive(Debug, Default)]
+    struct EditsOnly {
+        turns: AtomicUsize,
+    }
+    #[async_trait]
+    impl Provider for EditsOnly {
+        fn name(&self) -> &str {
+            "edits only"
+        }
+        fn last_turn_activity(&self) -> Option<usize> {
+            Some(3)
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+            _sink: Option<mpsc::Sender<StreamEvent>>,
+        ) -> orgbot_providers::Result<CompletionResponse> {
+            self.turns.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            Ok(CompletionResponse {
+                model: "test".into(),
+                content: vec![ContentBlock::text("edited the files")],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            })
+        }
+    }
+    let slow = Arc::new(HeldReview {
+        turns: AtomicUsize::new(0),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let editor = Arc::new(EditsOnly::default());
+    let mut room = Orchestrator::new(room_spec(2));
+    let slow_spec = AgentSpec::new("slow", "slow", ProviderRef::Scripted { script: "test".into() }).with_roles(vec!["reviewer"]);
+    let slow_id = room.seat(slow_spec, slow.clone() as Arc<dyn Provider>).unwrap();
+    room.seat(worker("editor"), editor.clone() as Arc<dyn Provider>).unwrap();
+    room.start().unwrap();
+    open_task(&mut room.engine_mut(), "ready work");
+    owner_asks(&mut room, slow_id, "start the long job");
+
+    let sinks = |_| None;
+    let run = room.step_rolling(2, &sinks);
+    tokio::pin!(run);
+    tokio::select! {
+        _ = &mut run => panic!("the run ended while the long turn was still going"),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+    }
+    assert!(editor.turns.load(Ordering::SeqCst) >= 3, "no two-minute wait after a turn of edits: {}", editor.turns.load(Ordering::SeqCst));
+    slow.release.add_permits(16);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(600), run).await;
+}

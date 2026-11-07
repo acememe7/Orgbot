@@ -190,9 +190,17 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
         ),
         tool(
             "read_prior_artifact",
-            "Read one deliverable an earlier room produced, in full. Get its id              from find_prior_work.",
+            "Read one deliverable an earlier room produced. Get its id from \
+             find_prior_work. A long one arrives in numbered parts: call again \
+             with `part` until you reach the last.",
             schema::object(
-                vec![("artifact", schema::string("The artifact id."))],
+                vec![
+                    ("artifact", schema::string("The artifact id.")),
+                    (
+                        "part",
+                        schema::integer("Which part to read, from 1. Defaults to the first."),
+                    ),
+                ],
                 &["artifact"],
             ),
         ),
@@ -1568,11 +1576,30 @@ fn read_prior_artifact(engine: &Engine, input: &Value) -> ToolOutcome {
         Ok(id) => id,
         Err(message) => return ToolOutcome::error(message),
     };
+    let part = match requested_part(input) {
+        Ok(part) => part,
+        Err(message) => return ToolOutcome::error(message),
+    };
     match engine.archive().artifact(id) {
-        Some((name, body)) if !body.is_empty() => ToolOutcome::ok(format!(
-            "{name} (from an earlier room)\nBEGIN\n{body}\nEND\n\nThis is prior \
-             work, not this room's. Reuse it, adapt it, or say why it does not fit."
-        )),
+        // In parts like read_artifact. From the audit after speed test 1: a
+        // prior deliverable came back whole, however long.
+        Some((name, body)) if !body.is_empty() => {
+            let body = ArtifactBody::Text { text: body };
+            match body.excerpt(part, PART_CHARS) {
+                Some(excerpt) => ToolOutcome::ok(format!(
+                    "{}\n\nThis is prior work, not this room's. Reuse it, adapt it, or \
+                     say why it does not fit.",
+                    excerpt
+                        .render(&format!("{name} (from an earlier room):"))
+                        .replace("Call read_artifact again", "Call read_prior_artifact again")
+                )),
+                None => ToolOutcome::error(format!(
+                    "PART_OUT_OF_RANGE requested={part} total_parts={} artifact={id} — \
+                     there is no such part. Nothing was returned.",
+                    body.parts(PART_CHARS)
+                )),
+            }
+        }
         Some((name, _)) => ToolOutcome::error(format!(
             "`{name}` has no readable text; it may be a file reference rather than a document."
         )),
