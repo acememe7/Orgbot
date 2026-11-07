@@ -93,6 +93,8 @@ pub enum Reason {
     LeaveToRoleHolder,
     /// This bot can review, and work waits for its review.
     ReviewsFirst,
+    /// A coordinator handed this task to another bot.
+    HandedToAnother,
     /// This review-only bot was offered work outside its permitted scope.
     ReviewOnly,
     /// This bot reviewed the task, so it describes the fix and does not
@@ -132,6 +134,7 @@ impl Reason {
             Self::LeaveToBuilders => "LEAVE_TO_BUILDERS",
             Self::LeaveToRoleHolder => "LEAVE_TO_ROLE_HOLDER",
             Self::ReviewsFirst => "REVIEWS_FIRST",
+            Self::HandedToAnother => "HANDED_TO_ANOTHER",
             Self::ReviewOnly => "REVIEW_ONLY",
             Self::ReviewedIt => "REVIEWED_IT",
             Self::BotFaulted => "BOT_FAULTED",

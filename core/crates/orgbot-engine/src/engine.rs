@@ -76,6 +76,10 @@ enum PausedBy {
 /// until the owner asked for it to be stopped.
 pub const IDLE_TURN_LIMIT_MS: i64 = 30 * 60 * 1000;
 
+/// How long a person's direct request lets a bot holding no task change the
+/// project.
+const OWNER_ASK_COVERS_MS: i64 = 60 * 60 * 1000;
+
 /// How long a task may be with one holder, while other work waits on it,
 /// before the coordinators and the holder are told to split it or hand it on.
 ///
@@ -194,6 +198,16 @@ pub struct Engine {
     /// an interval.
     #[serde(default)]
     held_nudged: BTreeMap<TaskId, Timestamp>,
+    /// The task each proposed retirement hands its waits to, used once the
+    /// owner agrees.
+    #[serde(default)]
+    retire_replacements: BTreeMap<TaskId, TaskId>,
+    /// When each bot last held work, as the clock saw it.
+    #[serde(default)]
+    last_held: BTreeMap<AgentId, Timestamp>,
+    /// Tasks a coordinator handed to one bot: only it may claim them.
+    #[serde(default)]
+    handed_to: BTreeMap<TaskId, AgentId>,
     /// When the owner was last told reviews were piling up.
     #[serde(default)]
     review_backlog_told: Option<Timestamp>,
@@ -544,6 +558,9 @@ impl Engine {
             paused: BTreeMap::new(),
             held_since: BTreeMap::new(),
             held_nudged: BTreeMap::new(),
+            retire_replacements: BTreeMap::new(),
+            last_held: BTreeMap::new(),
+            handed_to: BTreeMap::new(),
             review_backlog_told: None,
             time_spent: BTreeMap::new(),
             records_warned: BTreeSet::new(),
@@ -1397,6 +1414,16 @@ impl Engine {
                 return result;
             }
         }
+        if let Some(chosen) = self.handed_to.get(&task).filter(|chosen| **chosen != agent) {
+            result.eligible = false;
+            result.reason = Reason::HandedToAnother;
+            result.detail = format!(
+                "a coordinator handed \"{}\" to {}; leave it to them",
+                record.title,
+                self.handle_of(*chosen)
+            );
+            return result;
+        }
         // From benchmark 2: @grok-quick, a stand-in for QA, claimed the QA
         // task 30 seconds after it opened, while @quinn, who holds the role,
         // was free and not woken for 16 minutes. Stand-ins are for when every
@@ -1520,6 +1547,7 @@ impl Engine {
             | Reason::BotUnavailable
             | Reason::LeaveToBuilders
             | Reason::LeaveToRoleHolder
+            | Reason::HandedToAnother
             | Reason::ReviewsFirst
             | Reason::UnknownBot => EngineError::NotClaimable {
                 task,
@@ -2475,7 +2503,9 @@ impl Engine {
                 reason,
                 plan,
             } => self.request_new_sign_in(by, task, item, action, reason, plan),
-            Command::ProposeRetire { by, task, reason } => self.propose_retire(by, task, reason),
+            Command::ProposeRetire { by, task, reason, replaced_by } => {
+                self.propose_retire(by, task, reason, replaced_by)
+            }
             Command::RequestLanding {
                 by,
                 task,
@@ -2509,8 +2539,21 @@ impl Engine {
                 brief,
                 acceptance_criteria,
                 depends_on,
+                required_role,
+                hand_to,
                 reason,
-            } => self.amend_task(by, task, brief, acceptance_criteria, depends_on, reason),
+            } => {
+                let mut events = Vec::new();
+                if brief.is_some() || acceptance_criteria.is_some() || depends_on.is_some() {
+                    events.extend(self.amend_task(by, task, brief, acceptance_criteria, depends_on, reason.clone())?);
+                } else if required_role.is_none() && hand_to.is_none() {
+                    events.extend(self.amend_task(by, task, None, None, None, reason.clone())?);
+                }
+                if required_role.is_some() || hand_to.is_some() {
+                    events.extend(self.reroute_task(by, task, required_role, hand_to, reason)?);
+                }
+                Ok(events)
+            }
 
             Command::AnswerDecision { decision, answer } => self.answer_decision(decision, answer),
 
@@ -2753,10 +2796,20 @@ impl Engine {
     /// Bots whose turn has run [`IDLE_TURN_LIMIT_MS`] by `now` holding no
     /// task or review. Coordinators plan without holding work, so are left.
     fn idle_too_long(&self, now: Timestamp) -> Vec<(AgentId, i64)> {
+        // Counted from when the bot last held work, not from the start of its
+        // turn. From speed test 2: @quinn released its integration task to
+        // clear a stale block and claim it again, and the next tick benched it
+        // for "84 minutes holding no task", 83 of which it had held one.
         self.turn_began
             .iter()
             .filter(|(agent, _)| self.in_turn(**agent) && !self.paused.contains_key(agent))
-            .map(|(agent, began)| (*agent, began.elapsed_to(now)))
+            .map(|(agent, began)| {
+                let since = match self.last_held.get(agent) {
+                    Some(held) if held.0 > began.0 => *held,
+                    _ => *began,
+                };
+                (*agent, since.elapsed_to(now))
+            })
             .filter(|(_, ran)| *ran >= IDLE_TURN_LIMIT_MS)
             .filter(|(agent, _)| {
                 self.specs
@@ -2908,6 +2961,39 @@ impl Engine {
                 && (handoff.accepted_by == Some(agent) || handoff.to == Recipient::Agent { agent })
         });
         waits_on_held || asked_for_help
+    }
+
+    /// Whether changes this bot makes may reach the project now: it holds a
+    /// task, is helping with one, reviews, or coordinates.
+    ///
+    /// From speed test 2: @iris, holding no task, edited a delivered file,
+    /// another bot's test and others' evidence over two turns, and every
+    /// edit merged with nobody reviewing it.
+    pub fn may_change_project(&self, agent: AgentId) -> bool {
+        let Some(spec) = self.specs.get(&agent) else {
+            return false;
+        };
+        spec.roles.iter().any(|role| role == "coordinator")
+            || self.tasks.values().any(|task| task.is_held_by(agent) && task.state.is_assigned())
+            || self.handoffs.values().any(|handoff| {
+                handoff.state.is_pending() && handoff.accepted_by == Some(agent)
+            })
+            || (spec.autonomy.may_inspect && !self.review_queue_for(agent).is_empty())
+            || self.owner_asked_within(agent, spec, OWNER_ASK_COVERS_MS)
+    }
+
+    /// Whether a person asked this bot for something in the last `window`:
+    /// work the owner asks for directly needs no task.
+    fn owner_asked_within(&self, agent: AgentId, spec: &AgentSpec, window: i64) -> bool {
+        let now = Timestamp::now();
+        self.transcript
+            .iter()
+            .rev()
+            .take_while(|message| message.sent_at.elapsed_to(now) <= window)
+            .any(|message| {
+                matches!(message.author, orgbot_proto::chat::Author::Human { .. })
+                    && message.wakes(agent, &spec.roles)
+            })
     }
 
     /// Whether the owner or the room has benched this bot.
@@ -3112,7 +3198,98 @@ impl Engine {
 
     fn retire_task(&mut self, task: TaskId, reason: String) -> Result<Vec<EventEnvelope>> {
         self.require_task(task)?;
-        self.transition(task, TaskTransition::Retire { reason }, None)
+        let mut events = self.transition(task, TaskTransition::Retire { reason }, None)?;
+        events.extend(self.hand_on_waits(task)?);
+        Ok(events)
+    }
+
+    /// Move what waited on a retired task to its replacement, or say who is
+    /// left waiting. From speed test 2: the integration and two other tasks
+    /// waited on a retired race sim for an hour after its replacement landed.
+    fn hand_on_waits(&mut self, retired: TaskId) -> Result<Vec<EventEnvelope>> {
+        let replacement = self
+            .retire_replacements
+            .remove(&retired)
+            .or_else(|| self.tasks.get(&retired).and_then(|t| t.lineage.superseded_by))
+            .filter(|replacement| {
+                *replacement != retired
+                    && self.tasks.get(replacement).is_some_and(|t| t.state != TaskState::Retired)
+                    && self.follow_supersession(*replacement) != retired
+            });
+        let waiting: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| task.id != retired && !task.state.is_terminal())
+            .filter(|task| {
+                task.depends_on.contains(&retired)
+                    || task.blocked_on.iter().any(
+                        |reason| matches!(reason, BlockReason::AwaitingTask { task: awaited } if *awaited == retired),
+                    )
+            })
+            .map(|task| task.id)
+            .collect();
+        if waiting.is_empty() {
+            if let (Some(replacement), Some(record)) = (replacement, self.tasks.get_mut(&retired)) {
+                record.lineage.superseded_by = Some(replacement);
+            }
+            return Ok(Vec::new());
+        }
+        let mut events = Vec::new();
+        let titles: Vec<String> = waiting.iter().map(|task| format!("\"{}\"", self.title_of(*task))).collect();
+        let mut told: Vec<AgentId> = self
+            .specs
+            .values()
+            .filter(|spec| spec.roles.iter().any(|role| role == "coordinator"))
+            .map(|spec| spec.id)
+            .collect();
+        for task in &waiting {
+            if let Some(holder) = self.tasks.get(task).and_then(|t| t.assignee) {
+                if !told.contains(&holder) {
+                    told.push(holder);
+                }
+            }
+        }
+        let text = match replacement {
+            Some(replacement) => {
+                if let Some(record) = self.tasks.get_mut(&retired) {
+                    record.lineage.superseded_by = Some(replacement);
+                }
+                if let Some(other) = self.tasks.get_mut(&replacement) {
+                    other.lineage.supersedes.get_or_insert(retired);
+                }
+                for task in &waiting {
+                    if let Some(record) = self.tasks.get_mut(task) {
+                        for reason in record.blocked_on.iter_mut() {
+                            if matches!(reason, BlockReason::AwaitingTask { task: awaited } if *awaited == retired) {
+                                *reason = BlockReason::AwaitingTask { task: replacement };
+                            }
+                        }
+                        for dep in record.depends_on.iter_mut() {
+                            if *dep == retired {
+                                *dep = replacement;
+                            }
+                        }
+                    }
+                }
+                self.recompute_dependencies();
+                events.extend(self.clear_landed_dependencies()?);
+                format!(
+                    "\"{}\" was retired; {} now wait on its replacement, \"{}\".",
+                    self.title_of(retired),
+                    titles.join(", "),
+                    self.title_of(replacement)
+                )
+            }
+            None => format!(
+                "\"{}\" was retired with no replacement, and {} still wait on it. Coordinators: amend \
+                 their depends_on, or tell their holders to carry on without it.",
+                self.title_of(retired),
+                titles.join(", ")
+            ),
+        };
+        let message = ChatMessage::system(self.room.id, text).to_agents(told);
+        events.extend(self.post_message(message)?);
+        Ok(events)
     }
 
     /// Put an authorization hold on a task, or lift one.
@@ -4062,6 +4239,93 @@ impl Engine {
         Ok(events)
     }
 
+    /// Send a task to another role or bot, on a coordinator's decision.
+    ///
+    /// From speed test 2: moving work to another bot took a copy of the task
+    /// and a retire card for the owner (four times), and twice the owner had
+    /// to bench a bot so its task could change hands.
+    fn reroute_task(
+        &mut self,
+        by: AgentId,
+        task: TaskId,
+        required_role: Option<String>,
+        hand_to: Option<AgentId>,
+        reason: String,
+    ) -> Result<Vec<EventEnvelope>> {
+        let spec = self.require_agent(by)?;
+        if !spec.roles.iter().any(|role| role == "coordinator") {
+            return Err(EngineError::NotPermitted {
+                agent: by,
+                action: "re-route a task without the coordinator role".into(),
+            });
+        }
+        let coordinator = spec.handle.clone();
+        let reason = reason.trim().to_string();
+        if reason.is_empty() || reason.chars().count() > 500 {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "say in 1–500 characters why the task moves".into(),
+            });
+        }
+        let record = self.require_task(task)?;
+        if record.state.is_terminal() || record.state == TaskState::Parked {
+            return Err(EngineError::NotReady { task, reason: format!("the task is {}", record.state.as_str()) });
+        }
+        if hand_to.is_some() && matches!(record.state, TaskState::InReview | TaskState::Approved) {
+            return Err(EngineError::NotReady {
+                task,
+                reason: "it is in review; hand it on after the verdict".into(),
+            });
+        }
+        if let Some(target) = hand_to {
+            self.require_agent(target)?;
+            if self.paused.contains_key(&target) {
+                return Err(EngineError::NotReady {
+                    task,
+                    reason: format!("{} is benched; resume it or choose another bot", self.handle_of(target)),
+                });
+            }
+        }
+        let title = record.title.clone();
+        let holder = record.assignee;
+        let mut events = Vec::new();
+        if let Some(role) = &required_role {
+            let role = role.trim().trim_start_matches('@').to_string();
+            if let Some(record) = self.tasks.get_mut(&task) {
+                record.required_role = (!role.is_empty()).then_some(role);
+            }
+        }
+        let mut told = Vec::new();
+        if let Some(target) = hand_to {
+            if let Some(previous) = holder.filter(|previous| *previous != target) {
+                events.extend(self.transition(
+                    task,
+                    TaskTransition::Release { reason: format!("@{coordinator} handed it to {}", self.handle_of(target)) },
+                    Some(previous),
+                )?);
+                told.push(previous);
+            }
+            self.handed_to.insert(task, target);
+            told.push(target);
+        }
+        let role_note = match self.tasks.get(&task).and_then(|t| t.required_role.clone()) {
+            Some(role) if required_role.is_some() => format!(" It now needs the `{role}` role."),
+            None if required_role.is_some() => " Any builder may take it now.".to_string(),
+            _ => String::new(),
+        };
+        let hand_note = hand_to
+            .map(|target| format!(" It is {}'s to claim now.", self.handle_of(target)))
+            .unwrap_or_default();
+        let mut message = ChatMessage::system(
+            self.room.id,
+            format!("@{coordinator} moved \"{title}\": {reason}.{role_note}{hand_note}"),
+        );
+        if !told.is_empty() {
+            message = message.to_agents(told);
+        }
+        events.extend(self.post_message(message)?);
+        Ok(events)
+    }
+
     /// Propose to the owner that `task` be retired, on behalf of a coordinator.
     ///
     /// From the live room: an obsolete task stayed open and woke idle bots
@@ -4073,6 +4337,7 @@ impl Engine {
         by: AgentId,
         task: TaskId,
         reason: String,
+        replaced_by: Option<TaskId>,
     ) -> Result<Vec<EventEnvelope>> {
         let spec = self.require_agent(by)?;
         if !spec.roles.iter().any(|role| role == "coordinator") {
@@ -4099,6 +4364,22 @@ impl Engine {
             return Err(parked_refusal(task));
         }
         let title = record.title.clone();
+        // From speed test 2: a retired race sim stranded the integration and
+        // two other tasks waiting on it, though its replacement was already
+        // on the board.
+        if let Some(replacement) = replaced_by {
+            let live = self
+                .tasks
+                .get(&replacement)
+                .is_some_and(|other| !other.state.is_permanent());
+            if replacement == task || !live || self.follow_supersession(replacement) == task {
+                return Err(EngineError::NotReady {
+                    task,
+                    reason: format!("{replacement} cannot replace it: name a live task other than this one"),
+                });
+            }
+            self.retire_replacements.insert(task, replacement);
+        }
         let mut proposed = Decision::ask(
             self.room.id,
             format!("@{handle} proposes retiring \"{title}\": {reason}"),
@@ -5981,6 +6262,18 @@ impl Engine {
         let mut events = Vec::new();
         // Before any lapsed claim is returned: a bot is benched for what it
         // held while its turn ran, not for what the sweep below takes away.
+        let holding: Vec<AgentId> = self
+            .specs
+            .keys()
+            .copied()
+            .filter(|agent| {
+                self.tasks.values().any(|task| task.is_held_by(*agent) && !task.state.is_terminal())
+                    || !self.review_queue_for(*agent).is_empty()
+            })
+            .collect();
+        for agent in holding {
+            self.last_held.insert(agent, now);
+        }
         for (agent, ran) in self.idle_too_long(now) {
             events.extend(self.bench_idle(agent, ran / 60_000)?);
         }
@@ -6418,6 +6711,13 @@ impl Engine {
         let from = record.state;
         let to = from.apply(&transition)?;
         let previous_holder = record.assignee;
+        // A task handed to one bot is that bot's until it claims it, or the
+        // task closes.
+        if to.is_terminal()
+            || matches!(&transition, TaskTransition::Claim { by } if self.handed_to.get(&task) == Some(by))
+        {
+            self.handed_to.remove(&task);
+        }
 
         let record = self
             .tasks

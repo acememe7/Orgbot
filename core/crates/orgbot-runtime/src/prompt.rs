@@ -391,19 +391,34 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
         // the coordinator added cost four bots an hour and a half.
         out.push_str(
             "\nThe room beats a single agent only by working in parallel, so plan for it:\n\
+             - Open the first independent tasks within your first few minutes, before \
+               the whole plan is written, and refine the plan while they run: until a \
+               task exists, every builder waits on you.\n\
              - Split work into tasks of about 10 to 20 minutes each, each with its own \
                acceptance criteria, and run independent ones at the same time. When a \
                holder says a task is running long, split what is left.\n\
+             - A bot's roles say where work goes first, not what it can do: any bot that \
+               is not review-only can write code in its own copy. To move a task to another \
+               bot or role, use amend_task with hand_to or required_role; never copy a task \
+               to move it. When you retire a task another one replaces, name the \
+               replacement in replaced_by so what waits on it follows.\n\
              - Name one integration owner, usually QA, in the plan. They put the pieces \
                together and run the combined build as each piece lands, not only at the \
-               end, so clashes between pieces surface early.\n\
+               end, so clashes between pieces surface early. While integrating they use a \
+               fast end-to-end check (one short run, sped up where the code allows); the \
+               full real-time run is for final QA, once.\n\
              - One QA run per revision: the integration owner runs the full checks and \
                records the result; others reuse it unless the revision changed or a \
                check failed. Do not ask several bots to re-run the same suite.\n\
              - Do not add acceptance criteria or checks the owner's goal did not ask \
                for. If you think one is needed, ask the owner with ask_owner first; \
                until they agree it is a note, never a gate. A criterion you add must \
-               already pass on the current build, or it waits for the owner.\n",
+               already pass on the current build, or it waits for the owner.\n\
+             - A target the owner gives as \"aiming for\" or \"toward\" is measured and \
+               reported, not chased once the rest is done.\n\
+             - Once everything the owner's Done when names is built, open new tasks only \
+               for a Done when item that fails. List anything else you find as a known \
+               issue in the handover or README.\n",
         );
         out.push_str(
             "\nWhen you decide a task's requirement no longer applies or must change, \
@@ -481,8 +496,12 @@ fn what_it_can_do(spec: &AgentSpec) -> String {
     ) {
         parts.push("opens image files".to_string());
     }
+    // From speed test 2: a coordinator read @dennis's researcher role as
+    // "cannot implement code" though he ran Codex with write access.
     if spec.autonomy.review_only {
         parts.push("review-only".to_string());
+    } else {
+        parts.push("writes code".to_string());
     }
     parts.join("; ")
 }
@@ -1326,6 +1345,13 @@ mod tests {
         assert!(prompt.contains("A major says what you saw go wrong and where"));
         assert!(prompt.contains("caused by another task's code is not this task's blocker"));
         assert!(prompt.contains("sub-agents"));
+        // From speed test 2.
+        assert!(prompt.contains("within your first few minutes"));
+        assert!(prompt.contains("use amend_task with hand_to or required_role"));
+        assert!(prompt.contains("name the replacement in replaced_by"));
+        assert!(prompt.contains("fast end-to-end check"));
+        assert!(prompt.contains("measured and reported, not chased"));
+        assert!(prompt.contains("only for a Done when item that fails"));
     }
 
     /// From the audit after speed test 1: review-only bots were sent the
@@ -1397,8 +1423,8 @@ mod tests {
         }
         let prompt = system_prompt(&engine, &ellis);
         assert!(prompt.contains("@astra — reviewer (Grok CLI, claude-haiku-5-5; review-only)"), "{prompt}");
-        assert!(prompt.contains("@glm — qa (glm-5.3-flash by API)"), "{prompt}");
-        assert!(prompt.contains("You: Claude Code, claude-haiku-5-5; opens image files"), "{prompt}");
+        assert!(prompt.contains("@glm — qa (glm-5.3-flash by API; writes code)"), "{prompt}");
+        assert!(prompt.contains("You: Claude Code, claude-haiku-5-5; opens image files; writes code"), "{prompt}");
         assert!(prompt.contains("Your current folder is the project's root"), "{prompt}");
     }
 

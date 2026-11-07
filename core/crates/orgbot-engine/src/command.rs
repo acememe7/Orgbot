@@ -315,6 +315,10 @@ pub enum Command {
         task: TaskId,
         /// Why it is obsolete, shown to the owner.
         reason: String,
+        /// The task that takes its place, if any: what waits on the retired
+        /// task moves to this one once the owner agrees.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaced_by: Option<TaskId>,
     },
 
     /// Change what a task asks for, on a coordinator's decision: its brief,
@@ -331,6 +335,13 @@ pub enum Command {
         /// Every task it must wait for, if that changes.
         #[serde(default)]
         depends_on: Option<Vec<TaskId>>,
+        /// The role that should do it, if that changes; empty for any builder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        required_role: Option<String>,
+        /// A bot to hand it to: its holder lets go, and only this bot may
+        /// claim it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hand_to: Option<AgentId>,
         /// Why, recorded on the task and shown to the room.
         reason: String,
     },

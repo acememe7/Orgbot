@@ -2899,6 +2899,8 @@ async fn a_bot_holding_work_that_waits_on_unfinished_tasks_is_not_woken_for_it()
             brief: None,
             acceptance_criteria: None,
             depends_on: Some(vec![docs]),
+            required_role: None,
+            hand_to: None,
             reason: "commit only after the docs land".into(),
         })
         .unwrap();

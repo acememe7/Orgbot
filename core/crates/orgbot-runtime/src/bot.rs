@@ -651,6 +651,10 @@ impl Bot {
                         orgbot_tools::ToolOutcome::error(
                             "Review-only bots cannot change workspace files or run commands.",
                         )
+                    } else if is_workspace_write_tool(name)
+                        && !engine.with(|engine| engine.may_change_project(self.spec.id))
+                    {
+                        orgbot_tools::ToolOutcome::error(NO_TASK_NO_CHANGES)
                     } else {
                         match &self.workspace {
                             Some(workspace) if name == "workspace_land_commits" => {
@@ -1442,6 +1446,11 @@ impl Repeats {
     }
 }
 
+/// What a bot holding no task is told when it tries to change the project.
+const NO_TASK_NO_CHANGES: &str = "You hold no task, so changes you make would reach the owner's project \
+     with nobody reviewing them. Claim an open task (or accept a handoff) first. If you found something \
+     that needs fixing, tell the coordinators in one message so they can open a task for it.";
+
 fn is_workspace_write_tool(name: &str) -> bool {
     matches!(
         name,
@@ -1651,6 +1660,12 @@ async fn complete_with_mcp(
         OWNER_WAIT / 4,
     );
     let mut progress = (provider.live_activity(), tokio::time::Instant::now());
+    // Kept current through the turn: a bot that claims a task mid-turn has
+    // its changes merged at the end.
+    let hold_merge = |engine: &SharedEngine| {
+        provider.hold_merge(!engine.with(|engine| engine.may_change_project(spec.id)));
+    };
+    hold_merge(engine);
     loop {
         tokio::select! {
             response = &mut turn => {
@@ -1667,10 +1682,12 @@ async fn complete_with_mcp(
                 let reply = dispatch_room_mcp(&mut session, &call.request, engine, spec,
                     servers, workspace, &mut tally, capabilities, steer).await;
                 let _ = call.reply.send(reply);
+                hold_merge(engine);
             }
             // Dropping the episode stops the CLI; its session was saved as it
             // began, so the next turn resumes it.
             _ = check.tick() => {
+                hold_merge(engine);
                 let activity = provider.live_activity();
                 if activity != progress.0 {
                     progress = (activity, tokio::time::Instant::now());
@@ -1781,6 +1798,8 @@ async fn room_mcp_reply(
         orgbot_tools::ToolOutcome::error(
             "Review-only bots cannot change workspace files or run commands.",
         )
+    } else if is_workspace_write_tool(&name) && !engine.with(|engine| engine.may_change_project(actor)) {
+        orgbot_tools::ToolOutcome::error(NO_TASK_NO_CHANGES)
     } else if let Some(workspace) = workspace {
         // A CLI bot's room workspace tools arrive here mid-episode; the
         // owner's grants apply to them as to an API bot's.
@@ -3850,7 +3869,49 @@ mod mcp_tests {
         );
     }
 
+        /// From speed test 2: @iris, holding no task, edited delivered files and
+    /// others' tests, and every edit merged unreviewed.
     #[tokio::test]
+    async fn a_bot_holding_no_task_cannot_change_the_project() {
+        use crate::workspace::{Workspace, WorkspaceSpec};
+        use orgbot_providers::ScriptedProvider;
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            CompletionResponse {
+                model: "test".into(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "write1".into(),
+                    name: "workspace_write".into(),
+                    input: serde_json::json!({"path":"jockey.js", "content":"tweak"}),
+                }],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+            CompletionResponse {
+                model: "test".into(),
+                content: vec![ContentBlock::text("ok")],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ]));
+        let spec = AgentSpec::new("idle", "Idle", ProviderRef::Scripted { script: "x".into() });
+        let engine = SharedEngine::new(engine_with(&spec));
+        let mut bot = Bot::new(spec, provider.clone());
+        let (tx, mut calls) = mpsc::channel(2);
+        bot.attach_workspace(Workspace::new(
+            WorkspaceSpec { label: "test".into(), root: "/work".into(), writable: true, commands: true },
+            tx,
+        ));
+        bot.take_turn(&engine, None).await.unwrap();
+        assert!(calls.try_recv().is_err(), "the write never reached the workspace");
+        let second = &provider.requests()[1];
+        let refused = second.messages.iter().flat_map(|turn| turn.content.iter()).any(|block| matches!(
+            block,
+            ContentBlock::ToolResult { content, is_error: true, .. } if content.contains("You hold no task")
+        ));
+        assert!(refused, "the bot is told why");
+    }
+
+#[tokio::test]
     async fn human_input_preserves_an_inflight_workspace_write_and_its_result() {
         use crate::workspace::{Workspace, WorkspaceSpec};
         use orgbot_providers::ScriptedProvider;
@@ -3869,7 +3930,35 @@ mod mcp_tests {
             "Writer",
             ProviderRef::Scripted { script: "x".into() },
         );
-        let engine = SharedEngine::new(engine_with(&spec));
+        let mut room = engine_with(&spec);
+        // A bot changes the project only while it holds work.
+        let created = room
+            .apply(Command::CreateTask {
+                title: "Research notes".into(),
+                brief: String::new(),
+                by: None,
+                required_role: None,
+                priority: orgbot_proto::task::Priority::Normal,
+                acceptance_criteria: vec![],
+                depends_on: vec![],
+                origin: orgbot_proto::graph::TaskOrigin::plain(),
+            })
+            .unwrap();
+        let task = created
+            .iter()
+            .find_map(|event| match &event.event {
+                orgbot_proto::Event::TaskCreated { task } => Some(task.id),
+                _ => None,
+            })
+            .unwrap();
+        for command in [
+            Command::OpenTask { task },
+            Command::ClaimTask { task, by: spec.id },
+            Command::StartTask { task, by: spec.id },
+        ] {
+            room.apply(command).unwrap();
+        }
+        let engine = SharedEngine::new(room);
         let mut bot = Bot::new(spec, provider.clone());
         let token = bot.input_interrupt.clone();
         let (activity_tx, mut activity_rx) = mpsc::channel(16);

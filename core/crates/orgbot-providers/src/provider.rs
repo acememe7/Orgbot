@@ -109,6 +109,11 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
     fn live_activity(&self) -> Option<usize> {
         None
     }
+
+    /// Keep this turn's file changes in the bot's own copy instead of merging
+    /// them into the project, while it holds no task. Only CLI providers,
+    /// which merge at the end of a turn, act on it.
+    fn hold_merge(&self, _hold: bool) {}
 }
 
 /// A provider whose every turn runs at the bot's own effort level.
@@ -153,6 +158,10 @@ impl Provider for WithEffort {
 
     fn live_activity(&self) -> Option<usize> {
         self.inner.live_activity()
+    }
+
+    fn hold_merge(&self, hold: bool) {
+        self.inner.hold_merge(hold)
     }
 }
 

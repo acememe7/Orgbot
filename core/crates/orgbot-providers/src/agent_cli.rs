@@ -152,6 +152,8 @@ pub struct AgentCliProvider {
     /// Tool uses so far, rising while a turn runs; see
     /// [`Provider::live_activity`].
     live_activity: std::sync::atomic::AtomicUsize,
+    /// Set while the bot holds no task: the turn's changes stay in its copy.
+    merge_held: std::sync::atomic::AtomicBool,
     /// Removals waiting in this bot's copy after its last turn; `usize::MAX`
     /// until a turn has reported.
     last_pending: std::sync::atomic::AtomicUsize,
@@ -263,6 +265,7 @@ impl AgentCliProvider {
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
+            merge_held: std::sync::atomic::AtomicBool::new(false),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             timeout,
             session_store: Mutex::new(None),
@@ -518,6 +521,19 @@ fn is_orgbot_api_key(name: &std::ffi::OsStr) -> bool {
     (name.starts_with("ORGBOT_") && name.ends_with("_API_KEY")) || name.starts_with("ORGBOT_MCP_")
 }
 
+/// The tool a headless CLI refused for want of approval, from its stderr:
+/// "permission required: Bash npm test was not run, as a headless run cannot
+/// ask for approval".
+fn refused_tool(stderr: &str) -> Option<String> {
+    let line = stderr.lines().find(|line| line.contains("permission required:"))?;
+    let rest = line.split("permission required:").nth(1)?.trim();
+    let call = rest.split(" was not run").next().unwrap_or(rest).trim();
+    (!call.is_empty()).then(|| call.chars().take(120).collect())
+}
+
+/// Grok's permission rule for its shell tool.
+const GROK_SHELL_RULE: &str = "Bash";
+
 /// The sandbox/permission flag this CLI expects for a policy.
 fn policy_flags(cli: CliKind, policy: AgentPolicy) -> (&'static str, &'static str) {
     let value = match (cli, policy) {
@@ -584,6 +600,10 @@ impl Provider for AgentCliProvider {
 
     fn live_activity(&self) -> Option<usize> {
         Some(self.live_activity.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    fn hold_merge(&self, hold: bool) {
+        self.merge_held.store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn last_pending_removals(&self) -> Option<usize> {
@@ -1199,6 +1219,14 @@ impl AgentCliProvider {
                         }
                     }));
                 }
+                // From speed test 2: a CLI that ends its turn on a refused tool
+                // says so only on stderr, and the bot repeated it next turn.
+                if let Some(refused) = refused_tool(&String::from_utf8_lossy(&stderr_bytes)) {
+                    episode.text.push_str(&format!(
+                        "\nYour CLI refused `{refused}`, which needs an approval nobody can give mid-turn, and \
+                         that ended your turn. Run commands with the room's workspace_run tool instead."
+                    ));
+                }
                 if self.cli == CliKind::Antigravity && !episode.antigravity_result_seen {
                     return Err(ProviderError::Process {
                         provider: self.cli.label().to_string(),
@@ -1223,7 +1251,18 @@ impl AgentCliProvider {
                 }
                 #[cfg(target_os = "linux")]
                 if let Some(guard) = &self.guard {
-                    if !guard.read_only
+                    if self.merge_held.load(std::sync::atomic::Ordering::SeqCst)
+                        && !guard.read_only
+                    {
+                        // From speed test 2: a bot holding no task edited
+                        // delivered files and others' tests, and every edit
+                        // merged unreviewed. Its copy keeps them until it
+                        // holds a task.
+                        episode.text.push_str(
+                            "\nYour file changes stay in your own copy: you hold no task, so they would reach \
+                             the project unreviewed. They merge once you claim a task.",
+                        );
+                    } else if !guard.read_only
                         && !prepared
                             .as_ref()
                             .is_some_and(|workspace| workspace.read_only)
@@ -2604,6 +2643,14 @@ fn build_args(
             CliKind::Codex | CliKind::OpenCode | CliKind::Antigravity => {}
         }
     }
+    // From speed test 2: under acceptEdits Grok's own shell needs approval,
+    // nobody can give it headless, and Grok ended the whole turn when it was
+    // refused: the race sim lost three turns of about ten minutes each. The
+    // CLI already runs inside the bot's sandboxed copy, as Codex does with
+    // workspace-write, so its shell may run there.
+    if cli == CliKind::Grok && policy == AgentPolicy::WorkspaceWrite {
+        cmd.arg("--allow").arg(GROK_SHELL_RULE);
+    }
     // A prompt can begin with `-`: a resumed turn's prompt is the board,
     // which opens with "--- the board, as it stands now ---". Passed as a bare
     // argument, Claude Code rejects it as "unknown option" and the turn dies,
@@ -2739,6 +2786,29 @@ mod tests {
 
     const CODEX_RATE_LIMIT_FAILURE: &str = r#"{"type":"turn.failed","error":{"message":"Rate limit exceeded. Try again later."}}
 "#;
+
+    #[test]
+    fn a_refused_tool_is_named_from_stderr() {
+        assert_eq!(
+            refused_tool("x\npermission required: Bash npm test was not run, as a headless run cannot ask for approval\n"),
+            Some("Bash npm test".to_string())
+        );
+        assert_eq!(refused_tool("all fine"), None);
+    }
+
+    /// From speed test 2: Grok's own shell was refused and ended the turn.
+    #[test]
+    fn a_grok_builder_may_run_its_own_shell_in_its_copy() {
+        let args_for = |policy| {
+            let mut cmd = Command::new("grok");
+            build_args(&mut cmd, CliKind::Grok, "go", None, "grok-4.7", policy, None, true, "");
+            cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<String>>()
+        };
+        let builder = args_for(AgentPolicy::WorkspaceWrite);
+        assert!(builder.windows(2).any(|pair| pair == ["--allow", "Bash"]), "{builder:?}");
+        let reader = args_for(AgentPolicy::ReadOnly);
+        assert!(!reader.iter().any(|arg| arg == "Bash"), "{reader:?}");
+    }
 
     #[tokio::test]
     async fn stderr_capture_retains_a_bounded_tail() {
@@ -2917,6 +2987,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
+            merge_held: std::sync::atomic::AtomicBool::new(false),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -3226,6 +3297,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
+            merge_held: std::sync::atomic::AtomicBool::new(false),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -3542,6 +3614,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
+            merge_held: std::sync::atomic::AtomicBool::new(false),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: true,
             timeout: Duration::from_secs(5),
@@ -3646,6 +3719,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
+            merge_held: std::sync::atomic::AtomicBool::new(false),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -3729,6 +3803,7 @@ fi
                 grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
+            merge_held: std::sync::atomic::AtomicBool::new(false),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
                 mcp: false,
                 timeout: Duration::from_secs(5),
@@ -3833,6 +3908,7 @@ fi
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
+            merge_held: std::sync::atomic::AtomicBool::new(false),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -3902,6 +3978,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
                 grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
+            merge_held: std::sync::atomic::AtomicBool::new(false),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
                 mcp: false,
                 timeout: Duration::from_secs(5),
@@ -4118,6 +4195,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
+            merge_held: std::sync::atomic::AtomicBool::new(false),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: store.mcp,
             timeout: Duration::from_secs(5),
@@ -4266,6 +4344,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
+            merge_held: std::sync::atomic::AtomicBool::new(false),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: store.mcp,
             timeout: Duration::from_millis(50),
@@ -5120,6 +5199,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             grants: Mutex::new(crate::types::SandboxGrants::default()),
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
+            merge_held: std::sync::atomic::AtomicBool::new(false),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             effort: String::new(),

@@ -455,10 +455,15 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             "Coordinators: change what a task asks for when you have decided it should \
              change: give the full new acceptance criteria, a new brief, or both, and why. \
              Reviewers judge against the task as it stands, so a requirement you waive or \
-             change in chat alone still holds until you amend the task. The holder is told.",
+             change in chat alone still holds until you amend the task. The holder is told. \
+             To move a task to another role or bot, give required_role or hand_to here: \
+             do not copy it into a new task. hand_to takes it from its holder (unless it \
+             is in review), and only that bot may claim it.",
             schema::object(
                 vec![
                     ("task", schema::string("The task to amend.")),
+                    ("required_role", schema::string("The role that should do it now; an empty string for any builder.")),
+                    ("hand_to", schema::string("A bot's handle to hand the task to, such as @mira.")),
                     ("acceptance_criteria", schema::string_array("The complete new list of acceptance criteria, replacing the old one.")),
                     ("brief", schema::string("The new brief, if it changes.")),
                     ("depends_on", schema::string_array("Every task id this task must wait for, replacing the old list. Use it instead of writing \"after X is approved\" in the brief: a bot cannot claim the task until those land.")),
@@ -487,11 +492,14 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
              retired, for example one a later owner decision or another task superseded. \
              The owner answers with one tap; until then the task stays as it is. Use this \
              instead of asking the owner to archive a task in the app, which has no such \
-             button.",
+             button. When another task takes its place, name it in replaced_by: what waits \
+             on the retired task then waits on that one. To move work to another bot or \
+             role, amend the task instead of copying it.",
             schema::object(
                 vec![
                     ("task", schema::string("The task to retire.")),
                     ("reason", schema::string("Why it is obsolete, in one or two sentences.")),
+                    ("replaced_by", schema::string("The task that takes its place, if one does.")),
                 ],
                 &["task", "reason"],
             ),
@@ -2055,6 +2063,21 @@ fn amend_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome
         }
         None => None,
     };
+    let required_role = input.get("required_role").and_then(Value::as_str).map(str::to_string);
+    let hand_to = match optional_str(input, "hand_to") {
+        Some(handle) => {
+            let handle = handle.trim().trim_start_matches('@');
+            match engine.agent_by_handle(handle).map(|spec| spec.id).or_else(|| handle.parse().ok()) {
+                Some(agent) => Some(agent),
+                None => {
+                    return ToolOutcome::error(format!(
+                        "There is no bot with handle `{handle}`. Call room_status to see who is here."
+                    ))
+                }
+            }
+        }
+        None => None,
+    };
     let criteria_changed = acceptance_criteria.is_some();
     match engine.apply(Command::AmendTask {
         by: actor,
@@ -2062,6 +2085,8 @@ fn amend_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome
         brief,
         acceptance_criteria,
         depends_on,
+        required_role,
+        hand_to,
         reason,
     }) {
         // From benchmark 2: a timing rule the coordinator added, which the
@@ -2109,10 +2134,18 @@ fn propose_retire_task(engine: &mut Engine, actor: AgentId, input: &Value) -> To
         Ok(reason) => reason.to_string(),
         Err(message) => return ToolOutcome::error(message),
     };
+    let replaced_by = match input.get("replaced_by").filter(|value| !value.is_null()) {
+        Some(_) => match task_arg(input, "replaced_by") {
+            Ok(replacement) => Some(replacement),
+            Err(message) => return ToolOutcome::error(message),
+        },
+        None => None,
+    };
     match engine.apply(Command::ProposeRetire {
         by: actor,
         task,
         reason,
+        replaced_by,
     }) {
         Ok(events) => {
             for event in &events {

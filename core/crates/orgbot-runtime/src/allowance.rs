@@ -579,6 +579,10 @@ impl Provider for GuardedProvider {
     fn live_activity(&self) -> Option<usize> {
         self.inner.live_activity()
     }
+
+    fn hold_merge(&self, hold: bool) {
+        self.inner.hold_merge(hold)
+    }
     async fn complete(
         &self,
         mut request: CompletionRequest,

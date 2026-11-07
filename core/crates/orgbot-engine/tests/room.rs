@@ -3550,6 +3550,7 @@ fn a_coordinator_proposes_retiring_a_task_and_the_owners_answer_retires_it() {
         by: lead,
         task,
         reason: "the owner chose to keep High, which replaced this experiment".into(),
+        replaced_by: None,
     });
     let decision = asked_decision(&events);
     assert_eq!(f.state(task), TaskState::Ready, "nothing changes until the owner answers");
@@ -3563,6 +3564,7 @@ fn a_coordinator_proposes_retiring_a_task_and_the_owners_answer_retires_it() {
         by: lead,
         task,
         reason: "again".into(),
+        replaced_by: None,
     });
 }
 
@@ -3576,6 +3578,7 @@ fn keeping_a_task_proposed_for_retirement_leaves_it_as_it_was() {
         by: lead,
         task,
         reason: "looks superseded".into(),
+        replaced_by: None,
     });
     answer(&mut f, asked_decision(&events), RETIRE_TASK_KEEP);
     assert_eq!(f.state(task), TaskState::InProgress);
@@ -3591,6 +3594,7 @@ fn only_a_coordinator_may_propose_retiring_a_task() {
         by: worker,
         task,
         reason: "I think it is stale".into(),
+        replaced_by: None,
     });
 }
 
@@ -3759,7 +3763,7 @@ fn a_card_carries_the_rooms_recommendation_when_it_has_grounds() {
 
     // Retiring follows the coordinator who proposed it.
     let stale = f.open_task("try a shadow experiment", None);
-    f.apply(Command::ProposeRetire { by: lead, task: stale, reason: "replaced".into() });
+    f.apply(Command::ProposeRetire { by: lead, task: stale, reason: "replaced".into(), replaced_by: None });
     let card = f.engine.digest().needs_you.into_iter().find(|d| d.task == Some(stale)).unwrap();
     assert_eq!(card.recommended.as_deref(), Some(RETIRE_TASK_ALLOW));
 
@@ -3812,6 +3816,8 @@ fn a_coordinator_makes_a_task_wait_for_others_with_amend_task() {
         brief: None,
         acceptance_criteria: None,
         depends_on: Some(vec![docs]),
+        required_role: None,
+        hand_to: None,
         reason: "commit only after the docs card is approved".into(),
     });
     assert!(f.engine.waits_on_dependency(commit));
@@ -3826,6 +3832,8 @@ fn a_coordinator_makes_a_task_wait_for_others_with_amend_task() {
         brief: None,
         acceptance_criteria: None,
         depends_on: Some(vec![commit]),
+        required_role: None,
+        hand_to: None,
         reason: "backwards".into(),
     });
     assert!(cycle.to_string().contains("never end"), "{cycle}");
@@ -3850,6 +3858,8 @@ fn work_under_way_that_gains_an_unmet_dependency_is_paused_until_it_lands() {
         brief: None,
         acceptance_criteria: None,
         depends_on: Some(vec![fix]),
+        required_role: None,
+        hand_to: None,
         reason: "QA the build with the framing fix".into(),
     });
     assert_eq!(f.state(qa), TaskState::Blocked);
@@ -3866,6 +3876,8 @@ fn work_under_way_that_gains_an_unmet_dependency_is_paused_until_it_lands() {
         brief: None,
         acceptance_criteria: None,
         depends_on: Some(vec![qa]),
+        required_role: None,
+        hand_to: None,
         reason: "backwards".into(),
     });
     assert!(circle.to_string().contains("never end"), "{circle}");
@@ -4036,7 +4048,7 @@ fn work_the_owner_parks_is_left_alone_until_they_resume_it() {
         options: vec![],
     });
     assert!(asking.to_string().contains("parked"), "{asking}");
-    f.reject(Command::ProposeRetire { by: lead, task, reason: "it has waited a while".into() });
+    f.reject(Command::ProposeRetire { by: lead, task, reason: "it has waited a while".into(), replaced_by: None });
     f.reject(Command::ParkTask { by: None, task, reason: String::new() });
 
     // A saved room is still parked, with the question still withdrawn.
@@ -4113,6 +4125,8 @@ fn a_coordinator_amends_what_a_task_asks_for_and_the_reviewer_sees_it() {
             "a direct test covers the last-resort donor".into(),
         ]),
         depends_on: None,
+        required_role: None,
+        hand_to: None,
         reason: "the join-level test is waived: the branch cannot be reached by a real join".into(),
     });
     assert_eq!(
@@ -4137,6 +4151,8 @@ fn a_coordinator_amends_what_a_task_asks_for_and_the_reviewer_sees_it() {
         brief: None,
         acceptance_criteria: Some(vec!["anything goes".into()]),
         depends_on: None,
+        required_role: None,
+        hand_to: None,
         reason: "I would like an easier bar".into(),
     });
     assert!(matches!(refused, EngineError::NotPermitted { .. }), "{refused:?}");
@@ -4146,6 +4162,8 @@ fn a_coordinator_amends_what_a_task_asks_for_and_the_reviewer_sees_it() {
         brief: None,
         acceptance_criteria: None,
         depends_on: None,
+        required_role: None,
+        hand_to: None,
         reason: "nothing really".into(),
     });
     assert!(matches!(empty, EngineError::InvalidOwnerQuestion { .. }), "{empty:?}");
@@ -4910,6 +4928,8 @@ fn a_task_held_long_while_others_wait_on_it_is_raised_with_its_holder_and_coordi
         brief: None,
         acceptance_criteria: None,
         depends_on: Some(vec![model]),
+        required_role: None,
+        hand_to: None,
         reason: "renders need the model".into(),
     });
     let raised = |f: &Fixture| f.engine.transcript().iter().filter(|m| m.body.contains("has been with")).cloned().collect::<Vec<_>>();
@@ -4925,6 +4945,8 @@ fn a_task_held_long_while_others_wait_on_it_is_raised_with_its_holder_and_coordi
         brief: None,
         acceptance_criteria: None,
         depends_on: Some(vec![held]),
+        required_role: None,
+        hand_to: None,
         reason: "renders need the model".into(),
     });
     early.apply(Command::Tick { now: start });
@@ -5018,4 +5040,157 @@ fn the_owner_hears_when_reviews_pile_up_while_bots_that_cannot_review_sit_idle()
     assert_eq!(said[0].audience, orgbot_proto::chat::Audience::Human);
     f.apply(Command::Tick { now: Timestamp::now().plus_millis(12 * 60_000) });
     assert_eq!(told(&f).len(), 1, "once an hour at most");
+}
+
+/// From speed test 2: @quinn's integration task waited on a race sim that was
+/// retired for a replacement. The wait stranded it, and an hour later the
+/// room benched Quinn for "holding no task" while it was running checks.
+#[test]
+fn a_retired_task_hands_its_waits_to_its_replacement() {
+    use orgbot_proto::decision::RETIRE_TASK_ALLOW;
+    use orgbot_proto::task::BlockReason;
+    let mut f = fixture();
+    let (lead, worker, worker2) = (f.coordinator, f.worker, f.worker2);
+    let old_sim = f.start_task("race sim", worker2);
+    let integration = f.start_task("integration", worker);
+    f.apply(Command::BlockTask { task: integration, by: worker, reason: BlockReason::AwaitingTask { task: old_sim } });
+    let calibrate = f.open_task_after("calibrate odds", vec![old_sim]);
+    let new_sim = f.open_task("race sim, reassigned", None);
+
+    let events = f.apply(Command::ProposeRetire {
+        by: lead,
+        task: old_sim,
+        reason: "moved to another bot".into(),
+        replaced_by: Some(new_sim),
+    });
+    answer(&mut f, asked_decision(&events), RETIRE_TASK_ALLOW);
+    assert_eq!(f.engine.task(old_sim).unwrap().state, TaskState::Retired);
+    let waiting = f.engine.task(integration).unwrap();
+    assert_eq!(waiting.blocked_on, vec![BlockReason::AwaitingTask { task: new_sim }]);
+    assert_eq!(waiting.assignee, Some(worker), "the holder keeps its work");
+    assert_eq!(f.engine.task(calibrate).unwrap().depends_on, vec![new_sim]);
+    assert!(f.engine.transcript().iter().any(|m| m.body.contains("now wait on its replacement")));
+
+    // An hour on, its holder is still working and is not benched.
+    f.apply(Command::BeginTurn { agent: worker });
+    f.apply(Command::Tick { now: Timestamp::now().plus_millis(61 * 60_000) });
+    assert!(!f.engine.is_paused(worker), "a bot whose task waits is holding work");
+}
+
+/// Retiring with no replacement leaves the waits, and says who is waiting.
+#[test]
+fn retiring_a_task_others_wait_on_says_who_is_left_waiting() {
+    use orgbot_proto::decision::RETIRE_TASK_ALLOW;
+    let mut f = fixture();
+    let lead = f.coordinator;
+    let old = f.open_task("old research", None);
+    let after = f.open_task_after("write up", vec![old]);
+    let events = f.apply(Command::ProposeRetire { by: lead, task: old, reason: "not needed".into(), replaced_by: None });
+    answer(&mut f, asked_decision(&events), RETIRE_TASK_ALLOW);
+    assert_eq!(f.engine.task(after).unwrap().depends_on, vec![old]);
+    let note = f.engine.transcript().iter().rev().find(|m| m.body.contains("was retired with no replacement")).unwrap();
+    assert!(note.body.contains("\"write up\""), "{}", note.body);
+    f.reject(Command::ProposeRetire { by: lead, task: after, reason: "x".into(), replaced_by: Some(after) });
+}
+
+/// From speed test 2: @quinn released its task to claim it again, and the
+/// next tick benched it for its whole 84-minute turn.
+#[test]
+fn a_bot_that_lets_go_of_its_task_is_not_benched_for_the_time_it_held_it() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("integration", worker);
+    f.apply(Command::BeginTurn { agent: worker });
+    // Held when this tick looks; the claim lapses in the same tick, standing
+    // in for the bot letting go of it.
+    f.apply(Command::Tick { now: Timestamp::now().plus_millis(80 * 60_000) });
+    assert!(!f.engine.is_paused(worker));
+    assert_ne!(f.engine.task(task).unwrap().assignee, Some(worker));
+    f.apply(Command::Tick { now: Timestamp::now().plus_millis(81 * 60_000) });
+    assert!(!f.engine.is_paused(worker), "it held the task a minute ago");
+    f.apply(Command::Tick { now: Timestamp::now().plus_millis(112 * 60_000) });
+    assert!(f.engine.is_paused(worker), "thirty minutes holding nothing is benched");
+}
+
+/// From speed test 2: moving work to another bot took a copy and a retire
+/// card for the owner, and twice the owner had to bench a bot to free a task.
+#[test]
+fn a_coordinator_hands_a_task_to_another_bot_without_copying_it() {
+    let mut f = fixture();
+    let (lead, worker, worker2) = (f.coordinator, f.worker, f.worker2);
+    let task = f.start_task("race sim", worker);
+    f.apply(Command::AmendTask {
+        by: lead,
+        task,
+        brief: None,
+        acceptance_criteria: None,
+        depends_on: None,
+        required_role: None,
+        hand_to: Some(worker2),
+        reason: "its CLI keeps losing turns".into(),
+    });
+    let record = f.engine.task(task).unwrap();
+    assert_ne!(record.assignee, Some(worker), "the holder lets go");
+    f.reject(Command::ClaimTask { task, by: worker });
+    assert!(!f.engine.claimable_by(worker).contains(&task));
+    assert!(f.engine.claimable_by(worker2).contains(&task));
+    f.apply(Command::ClaimTask { task, by: worker2 });
+    assert_eq!(f.engine.task(task).unwrap().assignee, Some(worker2));
+    let note = f.engine.transcript().iter().rev().find(|m| m.body.contains("moved \"race sim\"")).unwrap();
+    assert!(note.body.contains("It is @w2's to claim now"), "{}", note.body);
+
+    // A role change alone re-routes an open task.
+    let open = f.open_task("renderer", Some("researcher"));
+    f.apply(Command::AmendTask {
+        by: lead,
+        task: open,
+        brief: None,
+        acceptance_criteria: None,
+        depends_on: None,
+        required_role: Some("writer".into()),
+        hand_to: None,
+        reason: "it is implementation work".into(),
+    });
+    assert_eq!(f.engine.task(open).unwrap().required_role.as_deref(), Some("writer"));
+    // Only coordinators may.
+    f.reject(Command::AmendTask {
+        by: worker,
+        task: open,
+        brief: None,
+        acceptance_criteria: None,
+        depends_on: None,
+        required_role: None,
+        hand_to: Some(worker),
+        reason: "mine".into(),
+    });
+}
+
+/// From speed test 2: @iris changed delivered files and others' tests while
+/// holding no task. A bot changes the project while it holds work, reviews,
+/// coordinates, or was asked by a person.
+#[test]
+fn who_may_change_the_project() {
+    let mut f = fixture();
+    let (lead, worker, worker2) = (f.coordinator, f.worker, f.worker2);
+    assert!(f.engine.may_change_project(lead), "coordinators deliver work");
+    assert!(!f.engine.may_change_project(worker), "nothing held, nothing asked");
+    f.start_task("notes", worker);
+    assert!(f.engine.may_change_project(worker));
+    f.apply(Command::PostMessage {
+        message: Box::new(ChatMessage {
+            id: orgbot_proto::MessageId::new(),
+            room: f.engine.room_id(),
+            author: orgbot_proto::chat::Author::Human { name: "Aece".into() },
+            audience: orgbot_proto::chat::Audience::Agents { agents: vec![worker2] },
+            intent: MessageIntent::Say,
+            body: "please fix the typo in the README".into(),
+            task: None,
+            handoff: None,
+            reply_to: None,
+            attachments: vec![],
+            files: vec![],
+            sent_at: Timestamp::now(),
+        }),
+    });
+    assert!(f.engine.may_change_project(worker2), "the owner asked it directly");
 }
