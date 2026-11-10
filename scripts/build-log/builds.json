@@ -585,5 +585,21 @@
    "Sandbox helper 92 passed",
    "Package ff2ec715"
   ]
+ },
+ {
+  "kind": "release",
+  "tag": "2.2.2",
+  "when": "10 Nov 12:00",
+  "day": "2026-11-10",
+  "title": "A room that works in parallel",
+  "what": "Bots' workspace calls run side by side, a bot keeps working while its last task is in review, and the room's clock runs every 15 seconds. Coordinators move a task to another bot directly, a retired task hands its waits to its replacement, and a bot holding no task cannot change your project. Grok bots no longer lose whole turns to a refused shell.",
+  "why": "A benchmark against solo Claude Code and Codex runs and two speed tests showed where a room's time went: one bot's build holding up everyone's files, bots waiting on reviews and timers, and turns lost to a refused tool.",
+  "commit": "fd5ccf8",
+  "facts": [
+   "Rust 1,055 passed",
+   "App 417 passed",
+   "Sandbox helper 96 passed",
+   "Package f91cbc23"
+  ]
  }
 ]

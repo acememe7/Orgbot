@@ -28,7 +28,7 @@ OUT = ROOT / "website" / "build" / "index.html"
 LOCAL = ROOT / "build.html"
 REPO = "https://github.com/acememe7/Orgbot"
 SITE = "https://orgbots.theaecestudio.com"
-VERSION = "2.2.1"
+VERSION = "2.2.2"
 ASSET_VERSION = "20261101b"
 
 KINDS = OrderedDict(
@@ -253,7 +253,7 @@ def main() -> None:
         <div><dt>Rust tests passing</dt><dd data-count="{rust_tests}">{rust_tests:,}</dd></div>
         <div><dt>app tests passing</dt><dd data-count="{app_tests}">{app_tests:,}</dd></div>
       </dl>
-      <p class="bl-proof">Test counts are from the <a href="{REPO}/blob/main/docs/RELEASE_2_2_1_VERIFICATION.md">2.2.1 release record</a>, the latest build's run.</p>
+      <p class="bl-proof">Test counts are from the <a href="{REPO}/blob/main/docs/RELEASE_{VERSION.replace('.', '_')}_VERIFICATION.md">{VERSION} release record</a>, the latest build's run.</p>
       <div class="actions"><a class="button" href="/install/">Install OrgBots {VERSION}</a><a class="text-link" href="#room">See how a room runs</a></div>
     </div>
     <section class="latest" aria-roledescription="carousel" aria-labelledby="latest-title">
