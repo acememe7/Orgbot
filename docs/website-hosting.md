@@ -85,7 +85,16 @@ The shared SSH exposure and TLS 1.2 support remain pre-existing open items;
 this scoped change is not a complete shared-server security certification.
 
 
-Current release: `71db3a8`, activated on 1 November 2026: the Evidence page
+Current release: `3bd0a91`, activated on 10 November 2026: every page names
+OrgBots 2.2.2 as the current package, the install note links the 2.2.2 release
+record, the Evidence page links it beside the 2.2.1 record, and the build log
+adds the 2.2.2 entry. The vhost's CSP carries the home and build pages' new
+JSON-LD hashes; the previous vhost is kept in `/root` and `nginx -t` passed
+before the reload. The 28 uploaded files matched the source manifest, the live
+home, install, results and build pages matched source, every public page
+returned 200, a missing page returned 404, HTTP redirected to HTTPS, and the
+pages showed no overflow or console errors at 375 pixels. A snapshot of the
+release and vhost passed a restore check. Earlier: `71db3a8`, activated on 1 November 2026: the Evidence page
 adds a 2.2.1 section and links the 2.2.1 release record, and the install page's
 release note lines up with the page (its margin had cancelled the centring);
 the live pages matched source. Earlier: `58cfbd7`, the same day: the site names

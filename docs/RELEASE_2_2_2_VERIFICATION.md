@@ -130,8 +130,17 @@ Final engine SHA-256:
 
 ## Publication
 
-The owner asked for this release on 10 November 2026. The signed archive
-revision and the Pages run are recorded here once they are published.
+The owner asked for this release on 10 November 2026. Signed archive
+revision `797dea9d21608c3b374419d7ef09776d8bac208e` adds `orgbots_2.2.2_amd64.deb`
+and `orgbot_2.2.2_all.deb` beside the earlier releases, whose package files are
+unchanged; [Pages run 42781097811](https://github.com/acememe7/Orgbot/actions/runs/42781097811)
+published it. After publication the public `InRelease` signature verified with
+the archive key, the public `Packages` index listed both 2.2.2 packages with the
+hashes above, both packages downloaded with those hashes, and the 2.2.1 package
+still downloaded unchanged. The release source was pushed as `3bd0a91`.
+
+The website names 2.2.2 as the current package from release `3bd0a91` on the
+same day (see [website hosting](website-hosting.md)).
 
 ## Known limits
 
