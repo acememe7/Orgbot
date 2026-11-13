@@ -871,12 +871,15 @@ mod tests {
             repo.add("Config", "Bearer abcdefghijklmnop", None, None),
             Err(MemoryError::SensitiveMaterial)
         ));
-        for secret in [
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk=",
-            "use sk-proj-abcdefghijklmnop1234 for it",
-            "the token ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-            "AKIAIOSFODNN7EXAMPLE is the key id",
-        ] {
+        // Built at run time so secret scanners do not take the fixtures for
+        // real keys.
+        let shaped = [
+            format!("-----BEGIN OPENSSH {} KEY-----\nb3BlbnNzaC1rZXk=", "PRIVATE"),
+            format!("use {}-proj-abcdefghijklmnop1234 for it", "sk"),
+            format!("the token {}_abcdefghijklmnopqrstuvwxyz0123456789", "ghp"),
+            format!("{}IOSFODNN7EXAMPLE is the key id", "AKIA"),
+        ];
+        for secret in &shaped {
             assert!(matches!(repo.add("Config", secret, None, None), Err(MemoryError::SensitiveMaterial)), "{secret}");
         }
         assert!(
