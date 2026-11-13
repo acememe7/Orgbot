@@ -323,7 +323,9 @@ class _OrgBotAppState extends State<OrgBotApp> {
     BackgroundRooms.channel.setMethodCallHandler((call) async {
       if (call.method == 'pauseAll') {
         for (final room in _library.sessions.values.toList()) {
-          if (room.isRunning && room.store?.isPaused == false) {
+          // Only rooms that are working. From the 13 November audit: a
+          // completed room is not paused, so "Pause" toggled it back on.
+          if (room.isRunning && room.store?.canResume == false) {
             await room.togglePause();
           }
         }

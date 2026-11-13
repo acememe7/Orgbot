@@ -10,6 +10,8 @@ import 'package:orgbot_app/state/room_store.dart';
 import 'package:orgbot_app/ui/room_screen.dart';
 
 class FakeClient implements RoomClient {
+  @override
+  bool withdrawQueued(String body) => false;
   final _messages = StreamController<Map<String, Object?>>.broadcast();
   final _state = StreamController<LinkState>.broadcast();
   void emit(Map<String, Object?> m) => _messages.add(m);

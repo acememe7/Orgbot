@@ -99,12 +99,35 @@ class _AllowancesViewState extends State<AllowancesView> {
       if (message is String && message.isNotEmpty) return message;
       final count = usage['requests'];
       if (count is int) {
-        return '$count requests${policy.requests > 0 ? ' / ${policy.requests}' : ''} · ${policy.windowSeconds == 86400 ? 'daily' : 'weekly'} window';
+        return '$count requests${policy.requests > 0 ? ' / ${policy.requests}' : ''} · ${_windowName(policy.windowSeconds)} window';
       }
     }
     return policy.requests > 0
-        ? '${policy.requests} requests per ${policy.windowSeconds == 86400 ? 'day' : 'week'}'
+        ? '${policy.requests} requests ${_windowPer(policy.windowSeconds)}'
         : 'No local cap';
+  }
+
+  /// From the 13 November audit: every window that was not a day was called
+  /// weekly, a custom one included.
+  static String _windowName(int seconds) => switch (seconds) {
+    86400 => 'daily',
+    604800 => 'weekly',
+    3600 => 'hourly',
+    _ => _span(seconds),
+  };
+
+  static String _windowPer(int seconds) => switch (seconds) {
+    86400 => 'per day',
+    604800 => 'per week',
+    3600 => 'per hour',
+    _ => 'every ${_span(seconds).replaceFirst('-', ' ')}s',
+  };
+
+  static String _span(int seconds) {
+    if (seconds % 86400 == 0) return '${seconds ~/ 86400}-day';
+    if (seconds % 3600 == 0) return '${seconds ~/ 3600}-hour';
+    if (seconds % 60 == 0) return '${seconds ~/ 60}-minute';
+    return '$seconds-second';
   }
 
   Future<void> _edit(String key) async {
@@ -343,7 +366,12 @@ class _AllowanceDialogState extends State<_AllowanceDialog> {
         cacheReadPrice: (double.parse(_cacheRead.text) * 1000000).round(),
         cacheWritePrice: (double.parse(_cacheWrite.text) * 1000000).round(),
         modelRates: _parseModelRates(_modelRates.text),
-        outputTokens: widget.cli ? 8192 : int.parse(_ceiling.text),
+        // A CLI row has no reply ceiling to edit; it keeps what it had.
+        // From the 13 November audit: saving one forced 8,192, against the
+        // engine's default of 16,000.
+        outputTokens: widget.cli
+            ? widget.policy.outputTokens
+            : int.parse(_ceiling.text),
         enabled: _enabled,
       );
       policy.validate();

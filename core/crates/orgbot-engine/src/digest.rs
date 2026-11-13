@@ -170,6 +170,10 @@ pub struct TimeSpent {
     /// The turn under way, if one is.
     #[serde(default)]
     pub current_turn_ms: i64,
+    /// Whether a turn is under way, so the app can count it up between
+    /// digests (13 November audit).
+    #[serde(default)]
+    pub in_turn: bool,
     /// Milliseconds its workspace calls took, waiting and running.
     pub workspace_ms: i64,
     /// How many workspace calls it made.
@@ -431,7 +435,13 @@ pub fn digest<'a>(tasks: impl Iterator<Item = &'a Task>, decisions: &DecisionLog
     let mut roots: Vec<&Task> = Vec::new();
     for task in &tasks {
         match objective_of(task, &by_id) {
-            Some(objective) if objective != task.id => {
+            // Live work under an objective that closed, or that is not on the
+            // board, stands as its own outcome. From the 13 November audit:
+            // it disappeared from the digest.
+            Some(objective)
+                if objective != task.id
+                    && by_id.get(&objective).is_some_and(|parent| !is_closed(parent) || is_closed(task)) =>
+            {
                 children.entry(objective).or_default().push(task);
             }
             _ => roots.push(task),

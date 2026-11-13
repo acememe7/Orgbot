@@ -86,8 +86,10 @@ impl Health {
         for wait in &self.dead_waits {
             parts.push(format!("w:{}:{}", wait.task, wait.blocker));
         }
-        for (role, count) in &self.starved {
-            parts.push(format!("s:{role}:{count}"));
+        // The role, not how many tasks: from the 13 November audit, every
+        // task added to an unstaffed role raised the same problem again.
+        for (role, _) in &self.starved {
+            parts.push(format!("s:{role}"));
         }
         for handle in &self.faulted {
             parts.push(format!("f:{handle}"));
@@ -177,6 +179,11 @@ impl Engine {
                     Some(upstream) if upstream.state.is_terminal() => {
                         format!("is {} and will not be worked again", upstream.state.as_str())
                     }
+                    // From the 13 November audit: a wait on a task that
+                    // depends on the waiter never ends, and nothing said so.
+                    Some(_) if self.waits_through_dependencies(*blocker, task.id) => {
+                        "depends on this task, so neither can finish".to_string()
+                    }
                     // Still live: this wait can still end on its own.
                     Some(_) => continue,
                 };
@@ -188,11 +195,38 @@ impl Engine {
                 });
             }
         }
+        // A dependency that failed, was cancelled or retired with no
+        // replacement holds what depends on it for good. From the 13 November
+        // audit: health never said so.
+        for task in self.tasks() {
+            if task.state.is_terminal() {
+                continue;
+            }
+            for dep in &task.depends_on {
+                let Some(upstream) = self.task(*dep) else { continue };
+                if upstream.state == TaskState::Submitted || !upstream.state.is_terminal() {
+                    continue;
+                }
+                if upstream.lineage.superseded_by.is_some() {
+                    continue;
+                }
+                dead_waits.push(DeadWait {
+                    task: task.id,
+                    title: task.title.clone(),
+                    blocker: *dep,
+                    why: format!("is {} and will not deliver what this depends on", upstream.state.as_str()),
+                });
+            }
+        }
 
+        // Not a bot the room will retry by itself shortly. From the 13
+        // November audit: one inside its automatic backoff was raised as
+        // needing attention.
         let faulted = self
             .agents()
             .filter(|spec| {
-                self.status(spec.id) == orgbot_proto::AgentStatus::Faulted || self.is_signed_out(spec.id)
+                (self.status(spec.id) == orgbot_proto::AgentStatus::Faulted || self.is_signed_out(spec.id))
+                    && !self.retries_by_itself(spec.id)
             })
             .map(|spec| match self.halted_for(spec.id) {
                 Some(why) => format!("{} ({why})", spec.handle),

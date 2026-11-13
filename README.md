@@ -108,7 +108,7 @@ hashes and known limits. Earlier comparisons are on the
 
 ## Install on Ubuntu
 
-OrgBots 2.2.1 targets **Ubuntu 24.04 amd64**. Set up the signed APT repository
+OrgBots 2.2.2 targets **Ubuntu 24.04 amd64**. Set up the signed APT repository
 once on each computer:
 
 ```bash
@@ -141,7 +141,7 @@ requirements.
 
 ## Getting started
 
-1. **Connect providers** in **Accounts**. OrgBots uses the CLIs you already
+1. **Connect providers** in **Connections & tools**. OrgBots uses the CLIs you already
    have and their existing sign-ins, plus API keys you save:
 
    | Provider | Connection |

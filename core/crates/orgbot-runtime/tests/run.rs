@@ -528,7 +528,18 @@ async fn the_turn_budget_stops_a_room_that_will_not_settle() {
         .unwrap();
     room.start().unwrap();
 
-    let outcome = room.run(None).await;
+    // Since the 13 November audit a turn that changes nothing is followed by
+    // the next one RETRY_AFTER later, not at once; the room's service waits
+    // that out between runs, as this loop does.
+    tokio::time::pause();
+    let mut outcome = room.run(None).await;
+    for _ in 0..20 {
+        if !matches!(outcome, RunOutcome::Idle) {
+            break;
+        }
+        tokio::time::advance(std::time::Duration::from_secs(121)).await;
+        outcome = room.run(None).await;
+    }
     assert!(
         matches!(outcome, RunOutcome::OutOfTurns | RunOutcome::Paused),
         "got {outcome:?}"
@@ -574,6 +585,7 @@ async fn a_bot_whose_backend_fails_does_not_take_the_room_down() {
             Err(orgbot_providers::ProviderError::Unauthorized {
                 provider: "broken".into(),
                 status: 401,
+                message: String::new(),
             })
         }
     }
@@ -619,6 +631,74 @@ async fn a_bot_whose_backend_fails_does_not_take_the_room_down() {
         .engine()
         .tasks()
         .all(|task| task.assignee != Some(broken)));
+}
+
+/// From the 13 November audit: a panic in one bot's turn took down every
+/// running turn and the room.
+#[tokio::test]
+async fn a_bot_whose_turn_panics_does_not_take_the_room_down() {
+    #[derive(Debug)]
+    struct Panics;
+
+    #[async_trait]
+    impl Provider for Panics {
+        fn name(&self) -> &str {
+            "panics"
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+            _sink: Option<mpsc::Sender<StreamEvent>>,
+        ) -> orgbot_providers::Result<CompletionResponse> {
+            panic!("a malformed argument");
+        }
+    }
+
+    let mut room = room("ship the release notes");
+    let lead = spec("lead", &["coordinator"], Autonomy::coordinator());
+    let worker = spec("w1", &["writer"], Autonomy::default());
+    let worker_id = worker.id;
+    room.seat(lead, Arc::new(Panics)).unwrap();
+    room.seat(worker, reactive("w1", |_last, _all| say("on it"))).unwrap();
+    room.start().unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), room.run(None)).await;
+    assert!(outcome.is_ok(), "the room ran on");
+    assert!(room.engine().agents().any(|spec| spec.id == worker_id));
+}
+
+/// From the 13 November audit: a turn its model service asked to wait on
+/// returned before recording anything and stayed open in the engine, so the
+/// bot showed as working and was benched 30 minutes later.
+#[tokio::test]
+async fn a_turn_the_model_service_asks_to_wait_on_is_closed() {
+    #[derive(Debug)]
+    struct Capped;
+
+    #[async_trait]
+    impl Provider for Capped {
+        fn name(&self) -> &str {
+            "capped"
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+            _sink: Option<mpsc::Sender<StreamEvent>>,
+        ) -> orgbot_providers::Result<CompletionResponse> {
+            Err(orgbot_providers::ProviderError::RateLimited {
+                provider: "capped".into(),
+                message: "weekly limit reached".into(),
+                retry_after_secs: Some(3 * 3600),
+            })
+        }
+    }
+
+    let mut room = room("ship the release notes");
+    let lead = spec("lead", &["coordinator"], Autonomy::coordinator());
+    let id = lead.id;
+    room.seat(lead, Arc::new(Capped)).unwrap();
+    room.start().unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), room.run(None)).await;
+    assert!(!room.engine().in_turn(id), "the refused turn is closed");
 }
 
 #[tokio::test]
@@ -2657,7 +2737,13 @@ async fn a_bot_that_keeps_talking_instead_of_acting_is_rested_and_the_coordinato
         room.engine_mut().apply(command).unwrap();
     }
 
+    // A turn that changes nothing is followed by the next RETRY_AFTER later.
+    tokio::time::pause();
     for turn in 1..=3 {
+        if turn > 1 {
+            assert!(room.step(None).await.is_none(), "not again at once after a turn of talk");
+            tokio::time::advance(std::time::Duration::from_secs(121)).await;
+        }
         assert!(room.is_actionable(worker), "woken for its work on turn {turn}");
         let report = room.step(None).await.expect("the worker takes a turn");
         assert_eq!(report.agent, worker);
@@ -2699,7 +2785,7 @@ async fn a_delivering_coordinator_is_not_woken_for_a_goal_still_waiting_on_its_s
         .seat(spec("qa", &["reviewer"], Autonomy::inspector()), Arc::new(ScriptedProvider::new(vec![])))
         .unwrap();
     room.start().unwrap();
-    let mut create = |room: &mut Orchestrator, title: &str, origin: TaskOrigin| {
+    let create = |room: &mut Orchestrator, title: &str, origin: TaskOrigin| {
         let created = room
             .engine_mut()
             .apply(Command::CreateTask {
@@ -2866,7 +2952,7 @@ async fn a_bot_holding_work_that_waits_on_unfinished_tasks_is_not_woken_for_it()
         .seat(spec("builder", &["engineer"], Autonomy::default()), Arc::new(ScriptedProvider::new(vec![])))
         .unwrap();
     room.start().unwrap();
-    let mut create = |room: &mut Orchestrator, title: &str| {
+    let create = |room: &mut Orchestrator, title: &str| {
         room.engine_mut()
             .apply(Command::CreateTask {
                 title: title.into(),

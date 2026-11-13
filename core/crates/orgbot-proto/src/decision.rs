@@ -452,6 +452,19 @@ impl Decision {
         self.answer.is_some() && self.superseded_by.is_none()
     }
 
+    /// Whether the answer given was a yes. From the 13 November audit: the
+    /// standing-permission and authorization paths treated any answer, "No"
+    /// included, as a grant.
+    pub fn grants(&self) -> bool {
+        self.is_authoritative()
+            && self.answer.as_ref().is_some_and(|answer| {
+                let chosen = answer.chosen.trim().to_ascii_lowercase();
+                ["allow", "add it and allow", "land", "push", "retire", "yes", "approve"]
+                    .iter()
+                    .any(|word| chosen.starts_with(word))
+            })
+    }
+
     /// Whether this is still waiting on a person.
     pub const fn is_pending(&self) -> bool {
         self.answer.is_none() && self.superseded_by.is_none() && self.withdrawn.is_none()
@@ -490,8 +503,23 @@ impl Decision {
     }
 
     /// Whether `other` asks what this decision already settled.
+    ///
+    /// An owner question is settled for the same task only, and one about no
+    /// task in particular for a day. From the 13 November audit: "Publish
+    /// now?" answered for one release answered it for every later one. (Two
+    /// tasks asking the same thing at once still share one card while it
+    /// waits.)
     pub fn already_answers(&self, other: &Self) -> bool {
-        self.is_authoritative() && self.fingerprint() == other.fingerprint()
+        let same_subject = !self.owner_question
+            || match (self.task, other.task) {
+                (Some(mine), Some(theirs)) => mine == theirs,
+                (None, None) => self
+                    .answer
+                    .as_ref()
+                    .is_some_and(|answer| answer.at.elapsed_to(crate::Timestamp::now()) < 24 * 60 * 60 * 1000),
+                _ => false,
+            };
+        self.is_authoritative() && same_subject && self.fingerprint() == other.fingerprint()
     }
 }
 
@@ -706,7 +734,7 @@ impl DecisionLog {
         let mut refusal = OutsideEnvelope::NotGranted {
             action: request.action.clone(),
         };
-        for decision in self.decisions.iter().filter(|d| d.is_authoritative()) {
+        for decision in self.decisions.iter().filter(|d| d.grants()) {
             match decision.envelope.covers(request, now) {
                 Ok(()) => return Ok(()),
                 // A standing refusal outranks every other reason: it is the
@@ -748,6 +776,18 @@ impl Settled {
 
 #[cfg(test)]
 mod tests {
+
+    /// From the 13 November audit: any answer counted as a grant.
+    #[test]
+    fn only_a_yes_grants() {
+        let room = RoomId::new();
+        let mut decision = Decision::ask(room, "Rebuild the container?");
+        decision.answer = Some(Answer { chosen: "No".into(), note: String::new(), at: Timestamp::now() });
+        assert!(decision.is_authoritative() && !decision.grants());
+        decision.answer = Some(Answer { chosen: ACCESS_ALLOW.into(), note: String::new(), at: Timestamp::now() });
+        assert!(decision.grants());
+    }
+
     use super::*;
 
     fn room() -> RoomId {

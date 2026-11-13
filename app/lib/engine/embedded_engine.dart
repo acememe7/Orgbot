@@ -129,8 +129,11 @@ class EmbeddedEngine {
       if (Platform.isLinux || Platform.isMacOS) ...[
         File(Platform.resolvedExecutable).parent.path + '/lib/liborgbot_ffi.so',
         File(Platform.resolvedExecutable).parent.path + '/liborgbot_ffi.so',
-        'core/target/release/liborgbot_ffi.so',
-        '../core/target/release/liborgbot_ffi.so',
+        // A checkout, in development builds only (13 November audit).
+        if (!const bool.fromEnvironment('dart.vm.product')) ...[
+          'core/target/release/liborgbot_ffi.so',
+          '../core/target/release/liborgbot_ffi.so',
+        ],
       ],
     ];
     Object? lastError;

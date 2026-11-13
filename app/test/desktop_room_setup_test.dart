@@ -162,8 +162,14 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     // Confirming deletes it and closes the settings.
+    // Deleting first checks for the room's background service on disk, which
+    // is real I/O, so it is given real time to answer.
     await openSettingsAndDelete();
     await tester.tap(find.byKey(const ValueKey('confirm-delete-room')));
+    for (var i = 0; i < 10 && library.rooms.isNotEmpty; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    }
     await tester.pumpAndSettle();
     expect(library.rooms, isEmpty);
     expect(find.text('Old experiment'), findsNothing);

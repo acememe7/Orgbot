@@ -109,6 +109,8 @@ gpg --homedir "$GNUPGHOME_DIR" --batch --yes --local-user "$SIGNING_KEY" \
   --armor --detach-sign --output "$STAGE/dists/stable/Release.gpg" "$STAGE/dists/stable/Release"
 gpg --homedir "$GNUPGHOME_DIR" --batch --export "$SIGNING_KEY" > "$STAGE/orgbots-archive-keyring.gpg"
 [[ -s "$STAGE/orgbots-archive-keyring.gpg" ]] || { echo "public key export was empty" >&2; exit 1; }
+# mktemp makes the folder 0700; the archive is published, so readable.
+chmod 0755 "$STAGE"
 mv -T "$STAGE" "$OUTPUT"
 trap - EXIT
 echo "built signed OrgBots APT repository at $OUTPUT"

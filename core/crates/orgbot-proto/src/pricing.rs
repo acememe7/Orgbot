@@ -69,6 +69,11 @@ const fn usd(input: u64, output: u64, cache_read: u64, cache_write: u64) -> Rate
 // uses. OpenAI: cached input as listed, 30-minute cache writes as listed (1.25x
 // input). xAI and DeepSeek list no write premium, so writes cost input.
 const LISTINGS: &[Listing] = &[
+    // From the 13 November audit: 5.2 was missing, so every Fable 5.2 turn
+    // had no price. Anthropic's list price for 5.2 is $8 / $40, cache reads
+    // $0.20 and 5-minute writes $10; Mythos 5.2 is the same model and price.
+    Listing { model: "claude-fable-5-2", rates: usd(8_000_000, 40_000_000, 200_000, 10_000_000), long: None, off_peak: false },
+    Listing { model: "claude-mythos-5-2", rates: usd(8_000_000, 40_000_000, 200_000, 10_000_000), long: None, off_peak: false },
     Listing { model: "claude-fable-5-1", rates: usd(10_000_000, 50_000_000, 250_000, 12_500_000), long: None, off_peak: false },
     Listing { model: "claude-opus-5-5", rates: usd(4_000_000, 20_000_000, 200_000, 5_000_000), long: None, off_peak: false },
     Listing { model: "claude-sonnet-5-5", rates: usd(2_000_000, 10_000_000, 200_000, 2_500_000), long: None, off_peak: false },
@@ -131,11 +136,13 @@ const LISTINGS: &[Listing] = &[
 /// account's credits while the Usage tab called them free.
 pub fn is_local(provider: &ProviderRef) -> bool {
     match provider {
+        // Whole words of the profile name. From the 13 November audit: a
+        // substring test called any profile with "local" in it free.
         ProviderRef::OpenAiCompatible { profile, .. } => {
             let profile = profile.to_ascii_lowercase();
-            ["local", "lmstudio", "llamacpp", "llama.cpp", "vllm"]
-                .iter()
-                .any(|name| profile.contains(name))
+            profile
+                .split(['-', '_', ' ', '/', ':'])
+                .any(|word| ["local", "localhost", "lmstudio", "llamacpp", "llama.cpp", "vllm"].contains(&word))
         }
         _ => false,
     }
@@ -161,8 +168,15 @@ pub fn list_price(provider: &ProviderRef, model: &str, usage: &TokenUsage, at: T
         + u64::from(usage.cache_read_tokens)
         + u64::from(usage.cache_write_tokens))
         / u64::from(usage.calls.max(1));
+    // Without a count of requests the size of each is unknown: standard
+    // rates. From the 13 November audit: older records with no count were
+    // priced as one request of all their tokens, at the long-context rate.
     let mut rates = match listing.long {
-        Some((threshold, long)) if counts_requests(provider) && prompt_per_call > u64::from(threshold) => long,
+        Some((threshold, long))
+            if counts_requests(provider) && usage.calls > 0 && prompt_per_call > u64::from(threshold) =>
+        {
+            long
+        }
         _ => listing.rates,
     };
     let off_peak = if is_ollama(provider) { ollama_off_peak(at) } else { deepseek_off_peak(at) };
@@ -200,11 +214,19 @@ fn find(model: &str) -> Option<&'static Listing> {
     let name = name.rsplit('/').next().unwrap_or(&name);
     let name = name.split(':').next().unwrap_or(name);
     LISTINGS.iter().find(|listing| listing.model == name).or_else(|| {
-        // A dated or suffixed release of a listed model, such as
-        // `claude-opus-5-5-20261001`.
+        // A dated release of a listed model, such as
+        // `claude-opus-5-5-20261001`, or its `-latest` alias. From the 13
+        // November audit: any suffix used to match, so a `-mini` or `-fast`
+        // variant was priced as its base model.
         LISTINGS
             .iter()
-            .filter(|listing| name.strip_prefix(listing.model).is_some_and(|rest| rest.starts_with('-')))
+            .filter(|listing| {
+                name.strip_prefix(listing.model)
+                    .and_then(|rest| rest.strip_prefix('-'))
+                    .is_some_and(|suffix| {
+                        suffix == "latest" || (suffix.len() >= 6 && suffix.bytes().all(|byte| byte.is_ascii_digit() || byte == b'-'))
+                    })
+            })
             .max_by_key(|listing| listing.model.len())
     })
 }
@@ -317,5 +339,21 @@ mod tests {
         let unknown = ProviderRef::OpenAiCompatible { model: "mystery-1".into(), profile: "acme".into() };
         assert_eq!(list_price(&unknown, "mystery-1", &million_out, SATURDAY), None);
         assert!(find("claude-opus-5-5-20261001").is_some_and(|l| l.model == "claude-opus-5-5"));
+    }
+
+    /// From the 13 November audit: a newer release had no price, any suffix
+    /// was priced as its base model, and "local" anywhere in a profile name
+    /// made a bot free.
+    #[test]
+    fn names_are_matched_exactly_enough_to_price_the_right_model() {
+        let fable = cli(CliKind::Claude, "claude-fable-5-2");
+        assert_eq!(list_cost(&fable, "claude-fable-5-2", &usage(1_000_000, 100_000, 0, 0), SATURDAY), Some(8_000_000 + 4_000_000));
+        assert!(find("claude-opus-5-5-latest").is_some_and(|l| l.model == "claude-opus-5-5"));
+        assert!(find("claude-opus-5-5-fast").is_none(), "a variant is not its base model");
+        assert!(find("gpt-6.1-sol-mini").is_none());
+        let hosted = ProviderRef::OpenAiCompatible { model: "glm-5.3".into(), profile: "glocal-cloud".into() };
+        assert!(!is_local(&hosted));
+        let lan = ProviderRef::OpenAiCompatible { model: "glm-5.3".into(), profile: "my-local".into() };
+        assert!(is_local(&lan));
     }
 }

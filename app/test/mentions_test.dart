@@ -130,7 +130,7 @@ void main() {
           'OrgBots has been updated. @mira your copies moved; the haze question is with @sol.',
           options,
         ),
-        'Goes to @mira and @sol only. Add @all to reach every bot',
+        'Goes to @mira and @sol only; the coordinators see a copy. Add @all to reach every bot',
       );
     });
 
@@ -158,11 +158,17 @@ void main() {
     test('a display name counts, and an unknown name reaches nobody', () {
       expect(
         messageAudience('@Julian take the cleanup', options),
-        'Goes to @opus only. Add @all to reach every bot',
+        'Goes to @opus only; the coordinators see a copy. Add @all to reach every bot',
       );
+      // From the 13 November audit: the room reads a name nobody has as no
+      // name, and an e-mail address is not a tag.
       expect(
         messageAudience('@nobody hello', options),
-        'Goes to no bot: nobody here has that name',
+        'No bot has that name, so it goes to one coordinator only',
+      );
+      expect(
+        messageAudience('write to me@host.com', options),
+        'Goes to one coordinator only. Add @all to reach every bot',
       );
     });
   });

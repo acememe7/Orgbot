@@ -23,12 +23,9 @@ real HTTP ACME challenge fixture still return 200. Nginx uses
 `$remote_addr` is rewritten to the visitor's IP. The checked origin ranges
 match Cloudflare's published list. Other site vhosts were not changed.
 
-Hermes also allows SSH/22 from Anywhere over IPv4 and IPv6. Effective `sshd`
-configuration permits root login and password authentication; the configured
-key works in BatchMode, and the Fail2ban SSH jail is active. No Tailscale,
-WireGuard, or OpenVPN administrative path was found. Do not change SSH or
-firewall policy until a second owner-controlled SSH session and provider
-console recovery are verified.
+The host's SSH and firewall settings are recorded privately, not in this
+public document. Do not change SSH or firewall policy until a second
+owner-controlled SSH session and provider console recovery are verified.
 
 ## Snapshot format
 

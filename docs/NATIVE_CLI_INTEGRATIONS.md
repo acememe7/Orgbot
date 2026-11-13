@@ -120,7 +120,8 @@ returns a busy error. Owned child processes stop on cancellation or parent
 death. The helper requires an interactive terminal for login and does not
 submit a model prompt. Status uses locked private-keyring metadata and does not
 query the desktop keyring. The package declares its D-Bus and GNOME Keyring
-dependencies, but no updated package has been installed or published.
+dependencies; packages from 2.0.3 on include this (see
+`docs/RELEASE_2_0_3_VERIFICATION.md`).
 
 The initial owner sign-in saved private credentials, then showed **Settings
 Error**: AGY's interactive startup tried to normalize and atomically replace

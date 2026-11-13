@@ -5,9 +5,9 @@
 //! and ephemeral [`ServerMessage::Stream`] deltas. In the other direction it
 //! may send the handful of things a human is allowed to do.
 //!
-//! Each connection runs two loops against a split socket — one pumping the
-//! broadcast out, one reading client control in — so a slow reader never blocks
-//! the writer and vice versa.
+//! Each connection runs one `select!` loop over a split socket, sending the
+//! broadcast out and reading client control in; a client that falls behind
+//! the broadcast is resynchronised from a snapshot.
 
 use std::sync::Arc;
 
@@ -234,11 +234,17 @@ pub(crate) fn admit(opening: Option<&str>, token: Option<&str>) -> Admission {
         return Admission::Refuse("this room needs a token; none was sent");
     };
     match serde_json::from_str::<ClientMessage>(opening) {
+        // From the 13 November audit: an app from another release was told
+        // its token was wrong, and the owner went looking for a typo.
+        Ok(ClientMessage::Hello { wire_version, .. }) if wire_version != WIRE_VERSION => Admission::Refuse(
+            "this app and this room speak different versions; update OrgBots on both ends",
+        ),
+        // A token pasted with a trailing newline is still the same token.
         Ok(ClientMessage::Hello {
             since,
             token: Some(offered),
-            wire_version: WIRE_VERSION,
-        }) if secret_eq(&offered, expected) => Admission::Accept(since),
+            ..
+        }) if secret_eq(offered.trim(), expected.trim()) => Admission::Accept(since),
         _ => Admission::Refuse("that token is not valid for this room"),
     }
 }
@@ -390,6 +396,26 @@ mod tests {
             admit(Some(&opening), Some("s3cret-token-long-enough")),
             Admission::Refuse(_)
         ));
+    }
+
+    /// An app from another release is told so, not that its token is wrong.
+    #[test]
+    fn another_wire_version_is_named_as_such() {
+        let opening = r#"{"type":"hello","wire_version":99,"since":0,"token":"s3cret-token-long-enough"}"#;
+        match admit(Some(opening), Some("s3cret-token-long-enough")) {
+            Admission::Refuse(reason) => assert!(reason.contains("versions"), "{reason}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// A token copied with its trailing newline is the same token.
+    #[test]
+    fn a_trailing_newline_does_not_change_the_token() {
+        let opening = hello(Some("s3cret-token-long-enough\\n"), 3);
+        assert_eq!(
+            admit(Some(&opening), Some("s3cret-token-long-enough\n")),
+            Admission::Accept(Seq(3))
+        );
     }
 
     /// The case that mattered: a client that says nothing used to be handed

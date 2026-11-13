@@ -985,8 +985,7 @@ List<Map<String, Object?>> _parseTomlServers(String text) {
   final disabled = <String>{};
   String? active;
   String? subsection;
-  for (final raw in const LineSplitter().convert(text)) {
-    final line = _stripTomlComment(raw).trim();
+  for (final line in _tomlLines(text)) {
     if (line.isEmpty || line.startsWith('#')) continue;
     final table = RegExp(r'^\[\[?([^\]]+)\]\]?$').firstMatch(line);
     if (table != null) {
@@ -1059,8 +1058,7 @@ List<Map<String, Object?>> _parseTomlServers(String text) {
 List<_CodexPlugin> _parseTomlPlugins(String text) {
   final plugins = <String, ({bool enabled, bool hasMcp})>{};
   String? active;
-  for (final raw in const LineSplitter().convert(text)) {
-    final line = _stripTomlComment(raw).trim();
+  for (final line in _tomlLines(text)) {
     if (line.isEmpty) continue;
     final table = RegExp(r'^\[([^\]]+)\]$').firstMatch(line);
     if (table != null) {
@@ -1108,7 +1106,10 @@ Object? _parseTomlValue(String raw) {
   if (value.startsWith('[') && value.endsWith(']')) {
     final body = value.substring(1, value.length - 1).trim();
     if (body.isEmpty) return <String>[];
-    return RegExp(r'"((?:\\.|[^"])*)"').allMatches(body).map((match) {
+    // Basic ("...") and literal ('...') strings.
+    return RegExp(r'"((?:\\.|[^"])*)"' "|'([^']*)'").allMatches(body).map((match) {
+      final literal = match.group(2);
+      if (literal != null) return literal;
       try {
         return jsonDecode('"${match.group(1)}"') as String;
       } on FormatException {
@@ -1230,18 +1231,76 @@ String? _toolFilterReason(Map<String, Object?> entry) {
   return null;
 }
 
+/// The file's lines without comments, with an array written over several
+/// lines joined into one.
+///
+/// From the 13 November audit: `args = [` followed by one argument per line
+/// was read as the text "[", so an imported MCP server ran with the wrong
+/// arguments.
+Iterable<String> _tomlLines(String text) sync* {
+  String? pending;
+  for (final raw in const LineSplitter().convert(text)) {
+    final line = _stripTomlComment(raw).trim();
+    if (pending != null) {
+      pending = '$pending $line';
+      if (_openBrackets(pending) <= 0) {
+        yield pending;
+        pending = null;
+      }
+      continue;
+    }
+    final assignment = RegExp(r'^[A-Za-z0-9_-]+\s*=\s*(.*)$').firstMatch(line);
+    if (assignment != null &&
+        assignment.group(1)!.startsWith('[') &&
+        _openBrackets(line) > 0) {
+      pending = line;
+      continue;
+    }
+    yield line;
+  }
+  if (pending != null) yield pending;
+}
+
+/// How many `[` are still open in `text`, outside strings.
+int _openBrackets(String text) {
+  var depth = 0;
+  String? quote;
+  var escaped = false;
+  for (var index = 0; index < text.length; index++) {
+    final char = text[index];
+    if (quote != null) {
+      if (escaped) {
+        escaped = false;
+      } else if (quote == '"' && char == r'\') {
+        escaped = true;
+      } else if (char == quote) {
+        quote = null;
+      }
+    } else if (char == '"' || char == "'") {
+      quote = char;
+    } else if (char == '[') {
+      depth++;
+    } else if (char == ']') {
+      depth--;
+    }
+  }
+  return depth;
+}
+
 String _stripTomlComment(String line) {
-  var quoted = false;
+  String? quote;
   var escaped = false;
   for (var index = 0; index < line.length; index++) {
     final char = line[index];
     if (escaped) {
       escaped = false;
-    } else if (quoted && char == r'\') {
+    } else if (quote == '"' && char == r'\') {
       escaped = true;
-    } else if (char == '"') {
-      quoted = !quoted;
-    } else if (char == '#' && !quoted) {
+    } else if (quote != null) {
+      if (char == quote) quote = null;
+    } else if (char == '"' || char == "'") {
+      quote = char;
+    } else if (char == '#') {
       return line.substring(0, index);
     }
   }

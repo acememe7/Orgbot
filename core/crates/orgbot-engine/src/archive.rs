@@ -51,6 +51,8 @@ pub struct PriorTask {
 /// An earlier room, distilled to what is worth searching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriorRoom {
+    /// Its id, which tells it from a room of the same name.
+    pub id: String,
     /// Its name.
     pub room: String,
     /// What it was for.
@@ -80,6 +82,11 @@ pub struct Archive {
     /// configures it from the explicit project scope after opening a room.
     #[serde(skip, default)]
     memory: Arc<Mutex<Option<crate::memory::MemoryRepository>>>,
+    /// Earlier deliverables already read, by id. From the 13 November audit:
+    /// each read of a part re-parsed that room's whole board, under the lock
+    /// every other bot's tools wait on.
+    #[serde(skip, default)]
+    read: Arc<Mutex<std::collections::HashMap<String, (String, String)>>>,
 }
 
 /// How many matches a search returns.
@@ -89,16 +96,19 @@ pub struct Archive {
 const MATCH_LIMIT: usize = 6;
 
 impl Archive {
-    /// Build an index from saved boards, skipping the room being opened.
+    /// Build an index from saved boards, skipping the room being opened,
+    /// named by its id.
     ///
     /// A board that cannot be read is skipped rather than failing: these are
     /// other rooms' files, and one of them being mid-write or from a newer
-    /// version of the app is not a reason this room cannot start.
+    /// version of the app is not a reason this room cannot start. From the 13
+    /// November audit: rooms were told apart by name, so an earlier room that
+    /// shared this one's name was hidden.
     pub fn load(boards: &[PathBuf], exclude: Option<&str>) -> Self {
         let mut rooms = Vec::new();
         for path in boards {
             match distil(path) {
-                Some(room) if Some(room.room.as_str()) != exclude => rooms.push(room),
+                Some(room) if Some(room.id.as_str()) != exclude => rooms.push(room),
                 _ => {}
             }
         }
@@ -306,6 +316,21 @@ impl Archive {
     /// Re-reads that room's board, because bodies are the part deliberately
     /// left out of the index.
     pub fn artifact(&self, id: &str) -> Option<(String, String)> {
+        if let Some(found) = self.read.lock().ok().and_then(|read| read.get(id).cloned()) {
+            return Some(found);
+        }
+        let found = self.artifact_from_board(id)?;
+        if let Ok(mut read) = self.read.lock() {
+            // A few documents at most are read in a room; keep the cache small.
+            if read.len() >= 64 {
+                read.clear();
+            }
+            read.insert(id.to_string(), found.clone());
+        }
+        Some(found)
+    }
+
+    fn artifact_from_board(&self, id: &str) -> Option<(String, String)> {
         for room in &self.rooms {
             if !room
                 .tasks
@@ -330,12 +355,14 @@ impl Archive {
             let body = artifact
                 .get("body")
                 .and_then(|body| {
-                    body.get("text")
-                        .or_else(|| body.get("diff"))
-                        .or_else(|| body.get("url"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                        .or_else(|| body.get("value").map(|v| v.to_string()))
+                    stored_body(&room.path, id, body).or_else(|| {
+                        body.get("text")
+                            .or_else(|| body.get("diff"))
+                            .or_else(|| body.get("url"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .or_else(|| body.get("value").map(|v| v.to_string()))
+                    })
                 })
                 .unwrap_or_default();
             return Some((name, body));
@@ -394,6 +421,33 @@ fn singular(word: &str) -> String {
 /// worse than none; higher and genuinely related work phrased differently is
 /// never found.
 const RELEVANCE_FLOOR: f32 = 0.34;
+
+/// A body the room's save moved out of its board into
+/// `artifact_bodies/<id>.body` beside it, checked against the digest saved
+/// with it. From the 13 November audit: every earlier deliverable of 2 KB or
+/// more read back empty.
+fn stored_body(board: &Path, id: &str, body: &serde_json::Value) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    if body.get("stored").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Some("[this deliverable's stored file has an unreadable name]".into());
+    }
+    let file = board.parent().unwrap_or(Path::new(".")).join("artifact_bodies").join(format!("{id}.body"));
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return Some("[this deliverable is missing: its stored file could not be read. Do not treat its contents as known.]".into());
+    };
+    let expected = body.get("sha256").and_then(serde_json::Value::as_str);
+    if expected.is_some_and(|expected| expected != format!("{:x}", Sha256::digest(text.as_bytes()))) {
+        return Some(
+            "[this deliverable could not be read back intact: the stored file does not match the digest \
+             recorded when it was saved. Do not treat its contents as known.]"
+                .into(),
+        );
+    }
+    Some(text)
+}
 
 /// Read one saved board down to what is worth keeping.
 fn distil(path: &Path) -> Option<PriorRoom> {
@@ -457,6 +511,7 @@ fn distil(path: &Path) -> Option<PriorRoom> {
     }
 
     Some(PriorRoom {
+        id: room.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
         room: spec
             .get("name")
             .and_then(serde_json::Value::as_str)
@@ -487,7 +542,7 @@ mod tests {
         ));
         let saved = serde_json::json!({
             "engine": {
-                "room": { "spec": { "name": name, "goal": "ship things" } },
+                "room": { "id": format!("room-{name}"), "spec": { "name": name, "goal": "ship things" } },
                 "tasks": tasks,
                 "artifacts": artifacts,
             }
@@ -607,9 +662,38 @@ mod tests {
             serde_json::json!({"t": {"title": "a thing", "brief": "do it", "state": "submitted"}}),
             serde_json::json!({}),
         );
-        let archive = Archive::load(std::slice::from_ref(&path), Some("Leo"));
+        let archive = Archive::load(std::slice::from_ref(&path), Some("room-Leo"));
         assert!(archive.is_empty());
+        // Another room of the same name is still offered.
+        let archive = Archive::load(std::slice::from_ref(&path), Some("room-other"));
+        assert!(!archive.is_empty());
         let _ = std::fs::remove_file(path);
+    }
+
+    /// From the 13 November audit: a body the save moved out of the board
+    /// read back empty.
+    #[test]
+    fn a_large_earlier_deliverable_reads_back_whole() {
+        use sha2::{Digest, Sha256};
+        let dir = std::env::temp_dir().join(format!("orgbot-archive-bodies-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("artifact_bodies")).unwrap();
+        let text = "the plan\n".repeat(400);
+        std::fs::write(dir.join("artifact_bodies/art_big.body"), &text).unwrap();
+        let path = dir.join("state.json");
+        let saved = serde_json::json!({
+            "engine": {
+                "room": { "id": "room-a", "spec": { "name": "A", "goal": "ship" } },
+                "tasks": {"t": {"title": "write the plan", "brief": "a plan", "state": "submitted"}},
+                "artifacts": {"art_big": {"name": "plan.md", "task": "t", "body": {
+                    "kind": "text", "stored": true, "bytes": text.len(),
+                    "sha256": format!("{:x}", Sha256::digest(text.as_bytes()))
+                }}}
+            }
+        });
+        std::fs::write(&path, saved.to_string()).unwrap();
+        let archive = Archive::load(std::slice::from_ref(&path), None);
+        assert_eq!(archive.artifact("art_big").unwrap().1, text);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Unrelated work is not offered; a false lead costs a read to dismiss.

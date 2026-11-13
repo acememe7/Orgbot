@@ -212,6 +212,9 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
         final value = await _invoke('status', agentId: id);
         final deleted = _paths(value['deleted']).length;
         if (!mounted) return;
+        // The copy opened meanwhile keeps its own, newer count. From the 13
+        // November audit: a late answer here restored a count just cleared.
+        if (id == _agentId) continue;
         setState(() => _counts[id] = deleted);
         widget.onStatus?.call(id, deleted);
       } catch (_) {
@@ -360,6 +363,22 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
     final added = _paths(_status?['added']);
     final deleted = _paths(_status?['deleted']);
     final conflicts = _paths(_status?['conflicts']);
+    // Not closable while a merge or refresh runs. From the 13 November audit:
+    // closing during an apply left it running with no report of how it went.
+    return PopScope(
+      canPop: !_busy,
+      child: _dialog(context, changed, added, deleted, conflicts, selected),
+    );
+  }
+
+  Widget _dialog(
+    BuildContext context,
+    List<String> changed,
+    List<String> added,
+    List<String> deleted,
+    List<String> conflicts,
+    bool selected,
+  ) {
     return AlertDialog(
       title: const Text('Agent workspace changes'),
       content: SizedBox(
@@ -498,7 +517,7 @@ class _WorkspaceChangesDialogState extends State<WorkspaceChangesDialog> {
           child: const Text('Refresh'),
         ),
         TextButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: _busy ? null : () => Navigator.pop(context),
           child: const Text('Close'),
         ),
         FilledButton.icon(

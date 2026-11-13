@@ -33,18 +33,29 @@ class _ConnectScreenState extends State<ConnectScreen> {
   Future<void> _connect() async {
     final url = _url.text.trim();
     final name = _name.text.trim().isEmpty ? 'you' : _name.text.trim();
-    if (url.isEmpty) return;
+    // From the 13 November audit: Enter in the name field connected again
+    // while a connection was under way, and the store was never disposed.
+    if (url.isEmpty || _connecting) return;
 
     setState(() => _connecting = true);
     final client = RoomClient();
     final store = RoomStore(client);
-    await client.connect(url, token: _token.text);
+    try {
+      await client.connect(url, token: _token.text);
+    } catch (_) {
+      // Reported below as a failed connection.
+    }
 
-    if (!mounted) return;
+    if (!mounted) {
+      await client.close();
+      store.dispose();
+      return;
+    }
     setState(() => _connecting = false);
 
     if (client.current == LinkState.error) {
       await client.close();
+      store.dispose();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Could not connect to $url')),
@@ -59,6 +70,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     );
     // Back from the room: tear the connection down.
     await client.close();
+    store.dispose();
   }
 
   @override

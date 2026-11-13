@@ -398,21 +398,28 @@ impl Artifact {
 
     /// The reading order and integrity of this artifact, split at `limit`.
     pub fn manifest(&self, limit: usize) -> Manifest {
+        // One pass over the text. From the 13 November audit: built part by
+        // part through `excerpt`, which re-reads and re-hashes the whole
+        // document each time, a 5 MB patch hashed some 3 GB on its first read.
+        let limit = limit.max(1);
         let total = self.body.parts(limit);
-        let parts = (1..=total)
-            .map(|index| {
-                let excerpt = self
-                    .body
-                    .excerpt(index, limit)
-                    .expect("indices run 1..=total, which are in range by construction");
-                Part {
-                    index,
-                    total,
-                    chars: excerpt.text.chars().count(),
-                    digest: excerpt.chunk_digest,
-                }
+        let chars: Vec<char> = self.body.full_text().chars().collect();
+        let chunk_digest = |text: &str| {
+            let mut hasher = Sha256::new();
+            hasher.update(text.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+        let mut parts: Vec<Part> = chars
+            .chunks(limit)
+            .enumerate()
+            .map(|(index, chunk)| {
+                let text: String = chunk.iter().collect();
+                Part { index: index as u32 + 1, total, chars: chunk.len(), digest: chunk_digest(&text) }
             })
-            .collect::<Vec<Part>>();
+            .collect();
+        if parts.is_empty() {
+            parts.push(Part { index: 1, total, chars: 0, digest: chunk_digest("") });
+        }
         let total_chars = parts.iter().map(|part| part.chars).sum();
         Manifest {
             artifact: self.id,

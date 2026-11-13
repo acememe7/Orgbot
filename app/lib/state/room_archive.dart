@@ -1,3 +1,4 @@
+import '../orgbot/data_home.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -104,7 +105,14 @@ class RoomArchive {
   ///
   /// The room being opened is left out: a room offered its own work as
   /// something an earlier room did would cheerfully cite itself.
-  static Future<List<String>> otherBoards(String exceptRoomId) async {
+  ///
+  /// Only the rooms named in [only]: from the 13 November audit, every saved
+  /// board was offered, including other projects' and deleted rooms'.
+  static Future<List<String>> otherBoards(
+    String exceptRoomId, {
+    Set<String> only = const {},
+  }) async {
+    if (only.isEmpty) return const [];
     try {
       final here = await directory(exceptRoomId);
       final history = here.parent;
@@ -113,6 +121,7 @@ class RoomArchive {
       await for (final entry in history.list()) {
         if (entry is! Directory) continue;
         if (entry.path == here.path) continue;
+        if (!only.contains(entry.uri.pathSegments.where((s) => s.isNotEmpty).last)) continue;
         final state = File('${entry.path}/state.json');
         if (await state.exists()) boards.add(state.path);
       }
@@ -130,7 +139,7 @@ class RoomArchive {
     }
     final base = Platform.isAndroid
         ? await WorkspaceConnection.phoneBase()
-        : '${Platform.environment['XDG_DATA_HOME'] ?? '${Platform.environment['HOME']}/.local/share'}/orgbot';
+        : '${linuxDataHome()}/orgbot';
     return Directory('$base/.history/$roomId');
   }
 
@@ -150,17 +159,31 @@ class RoomArchive {
     return archive;
   }
 
+  /// The newest event already written, so a reconnect's replay of events
+  /// this run already holds is not written again. From the 13 November audit:
+  /// every reconnect appended the whole replay, and ten pause and resume
+  /// cycles added some 60 MB of duplicate history.
+  int _archivedThrough = 0;
+
   void append(List<Map<String, Object?>> messages) {
     if (_failed) return;
-    final retained = messages.where(
-      (message) => [
+    final retained = messages.where((message) {
+      if (message['type'] == 'event') {
+        final envelope = message['envelope'];
+        final seq = envelope is Map ? (envelope['seq'] as num?)?.toInt() : null;
+        if (seq != null) {
+          if (seq <= _archivedThrough) return false;
+          _archivedThrough = seq;
+        }
+        return true;
+      }
+      return [
         'snapshot',
-        'event',
         'phase',
         'closed',
         'workspace_activity',
-      ].contains(message['type']),
-    );
+      ].contains(message['type']);
+    }).toList();
     if (retained.isEmpty) return;
     final text = '${retained.map(jsonEncode).join('\n')}\n';
     final length = utf8.encode(text).length;

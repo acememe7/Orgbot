@@ -192,16 +192,21 @@ class TrashSettingsClient {
         '${File(Platform.resolvedExecutable).parent.path}/orgbot-trash.py';
     if (await _isTrustedHelper(executableSibling)) return executableSibling;
 
-    final workingDirectory = Directory.current.path;
-    for (final candidate in [
-      '$workingDirectory/app/packaging/orgbot-trash.py',
-      '$workingDirectory/packaging/orgbot-trash.py',
-    ]) {
-      if (await _isTrustedHelper(candidate)) return candidate;
-    }
-
     const systemHelper = '/usr/lib/orgbot/orgbot-trash.py';
     if (await _isTrustedHelper(systemHelper)) return systemHelper;
+
+    // A checkout being worked on, in development builds only. From the 13
+    // November audit: a release build also looked in whatever folder it was
+    // started from.
+    if (!const bool.fromEnvironment('dart.vm.product')) {
+      final workingDirectory = Directory.current.path;
+      for (final candidate in [
+        '$workingDirectory/app/packaging/orgbot-trash.py',
+        '$workingDirectory/packaging/orgbot-trash.py',
+      ]) {
+        if (await _isTrustedHelper(candidate)) return candidate;
+      }
+    }
     return null;
   }
 

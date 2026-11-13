@@ -96,6 +96,16 @@ pub fn spill(board: &mut Value, dir: &Path) -> std::io::Result<usize> {
     Ok(moved.len())
 }
 
+/// Bodies that could not be read back, by file: the line shown in their
+/// place, and the digest and size they were saved with.
+static UNREADABLE: std::sync::Mutex<std::collections::BTreeMap<std::path::PathBuf, (String, Value, Value)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Bodies this process has written: their file, a quick hash of the text and
+/// its SHA-256.
+static WRITTEN: std::sync::Mutex<std::collections::BTreeMap<std::path::PathBuf, (u64, String)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// Move one body out, reporting whether it went.
 fn spill_one(id: &str, body: &mut Value, dir: &Path) -> bool {
     {
@@ -104,6 +114,26 @@ fn spill_one(id: &str, body: &mut Value, dir: &Path) -> bool {
         };
         if body.contains_key("stored") {
             return false;
+        }
+        // A body that could not be read back keeps pointing at its file
+        // instead of having the "could not be read" line written over it,
+        // while it still reads as that line. From the 13 November audit: one
+        // failed read lost it for good.
+        let file = dir.join(format!("{id}.body"));
+        let unreadable = UNREADABLE.lock().ok().and_then(|bodies| bodies.get(&file).cloned());
+        if let Some((placeholder, digest, bytes)) = unreadable {
+            let kind = body.get("kind").and_then(Value::as_str).unwrap_or("text").to_string();
+            let field = text_field(&kind);
+            let still_placeholder = field.and_then(|field| body.get(field)).and_then(Value::as_str) == Some(placeholder.as_str());
+            if still_placeholder && file.is_file() {
+                if let Some(field) = field {
+                    body.remove(field);
+                }
+                body.insert("stored".into(), json!(true));
+                body.insert("sha256".into(), digest);
+                body.insert("bytes".into(), bytes);
+                return true;
+            }
         }
         let Some(kind) = body.get("kind").and_then(Value::as_str) else {
             return false;
@@ -114,8 +144,11 @@ fn spill_one(id: &str, body: &mut Value, dir: &Path) -> bool {
         let Some(value) = body.get(field) else {
             return false;
         };
-        // A json body is arbitrary JSON; everything else is already a string.
+        // A json body is stored as JSON, a string included, so it comes back
+        // as the same type (13 November audit: a JSON string could come back
+        // as a number). Everything else is already a string.
         let text = match value {
+            other if kind == "json" => other.to_string(),
             Value::String(text) => text.clone(),
             other => other.to_string(),
         };
@@ -124,18 +157,50 @@ fn spill_one(id: &str, body: &mut Value, dir: &Path) -> bool {
         }
 
         let file = dir.join(format!("{id}.body"));
-        // Written whole under a temporary name and renamed, so a board can
-        // never find a half-written deliverable behind a reference.
-        let temp = dir.join(format!(".{id}.tmp"));
-        if std::fs::write(&temp, text.as_bytes()).is_err() {
-            return false;
-        }
-        if std::fs::rename(&temp, &file).is_err() {
-            let _ = std::fs::remove_file(&temp);
-            return false;
-        }
-
-        let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+        // A body already written by this process, unchanged, is not written
+        // or hashed again. From the 13 November audit: every save rewrote and
+        // re-hashed every large deliverable, twice (it is also in the log).
+        let quick = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hasher);
+            hasher.finish()
+        };
+        let known = WRITTEN
+            .lock()
+            .ok()
+            .and_then(|written| written.get(&file).filter(|(seen, _)| *seen == quick).map(|(_, digest)| digest.clone()));
+        // The file must still be there at its length; anything else is
+        // written again.
+        let intact = std::fs::metadata(&file).is_ok_and(|meta| meta.is_file() && meta.len() == text.len() as u64);
+        let digest = match known.filter(|_| intact) {
+            Some(digest) => digest,
+            None => {
+                // Written whole under a temporary name and renamed, so a board
+                // can never find a half-written deliverable behind a reference.
+                let temp = dir.join(format!(".{id}.tmp"));
+                // On disk before the board that points at it (13 November
+                // audit: the board was synced, the bodies were not).
+                let written = std::fs::File::create(&temp).and_then(|mut file| {
+                    use std::io::Write;
+                    file.write_all(text.as_bytes())?;
+                    file.sync_all()
+                });
+                if written.is_err() {
+                    let _ = std::fs::remove_file(&temp);
+                    return false;
+                }
+                if std::fs::rename(&temp, &file).is_err() {
+                    let _ = std::fs::remove_file(&temp);
+                    return false;
+                }
+                let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+                if let Ok(mut written) = WRITTEN.lock() {
+                    written.insert(file.clone(), (quick, digest.clone()));
+                }
+                digest
+            }
+        };
         body.remove(field);
         body.insert("stored".into(), json!(true));
         body.insert("bytes".into(), json!(text.len()));
@@ -230,8 +295,15 @@ fn restore_one(id: &str, body: &mut Value, dir: &Path) -> bool {
     };
 
     map.remove("stored");
-    map.remove("bytes");
-    map.remove("sha256");
+    let bytes = map.remove("bytes").unwrap_or(Value::Null);
+    let digest = map.remove("sha256").unwrap_or(Value::Null);
+    // Remembered, so the next save points at the file again rather than
+    // writing the "could not be read" line over it.
+    if !intact {
+        if let Ok(mut bodies) = UNREADABLE.lock() {
+            bodies.insert(dir.join(format!("{id}.body")), (text.clone(), digest, bytes));
+        }
+    }
     // A json body has to go back as JSON, not as a string of it.
     let restored = if kind == "json" && intact {
         serde_json::from_str(&text).unwrap_or(Value::String(text))
@@ -356,6 +428,11 @@ mod tests {
                 .unwrap()
                 .contains("does not match"),
         );
+        // From the 13 November audit: the next save wrote that line over the
+        // file. It keeps pointing at the file instead.
+        spill(&mut board, &dir).unwrap();
+        assert_eq!(board["engine"]["artifacts"]["art_1"]["body"]["stored"], json!(true));
+        assert_eq!(std::fs::read_to_string(dir.join("art_1.body")).unwrap(), "something else entirely");
         let _ = std::fs::remove_dir_all(dir);
     }
 

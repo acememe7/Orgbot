@@ -16,6 +16,8 @@ import 'package:orgbot_app/ui/widgets/objectives_pane.dart';
 
 /// A client that never connects; the tests push frames in by hand.
 class _Silent implements RoomClient {
+  @override
+  bool withdrawQueued(String body) => false;
   final _messages = StreamController<Map<String, Object?>>.broadcast();
   final _state = StreamController<LinkState>.broadcast();
 

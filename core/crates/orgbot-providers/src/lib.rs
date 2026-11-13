@@ -27,6 +27,7 @@
 // fields inside serde data-carrier variants, which are documented one level up.
 #![warn(missing_debug_implementations, rust_2018_idioms, unreachable_pub)]
 
+mod reload;
 pub mod agent_cli;
 pub mod anthropic;
 pub mod auth;
@@ -63,6 +64,19 @@ pub use types::{
 /// are resolved here from the environment and the local CLI sign-ins, so a room
 /// definition can be checked into a repository without secrets in it.
 pub fn build(reference: &ProviderRef) -> Result<Arc<dyn Provider>> {
+    let provider = build_once(reference)?;
+    // API sign-ins read from files are re-read when the service refuses them.
+    // From the 13 November audit: they were read once at room start, so a
+    // token the CLI refreshed on disk never reached a running room.
+    Ok(match reference {
+        ProviderRef::Anthropic { .. } | ProviderRef::DeepSeek { .. } | ProviderRef::OpenAiCompatible { .. } => {
+            Arc::new(reload::ReloadOnUnauthorized::new(reference.clone(), provider))
+        }
+        _ => provider,
+    })
+}
+
+fn build_once(reference: &ProviderRef) -> Result<Arc<dyn Provider>> {
     Ok(match reference {
         ProviderRef::Anthropic { .. } => Arc::new(AnthropicProvider::from_env()?),
         ProviderRef::DeepSeek { .. } => Arc::new(OpenAiProvider::deepseek()?),

@@ -311,18 +311,15 @@ impl TaskTransition {
 /// How urgently a task should be picked up. Higher sorts first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Priority {
     Low,
+    #[default]
     Normal,
     High,
     Urgent,
 }
 
-impl Default for Priority {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 /// A unit of work on the board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -542,6 +539,17 @@ impl Task {
                     options: Vec::new(),
                 };
             }
+        }
+
+        // A held task blocked on other work reads as blocked, with what it
+        // waits for. From the 13 November audit: it read as "in progress".
+        if self.state == TaskState::Blocked && self.assignee.is_some() {
+            return Readiness::BlockedInternal {
+                reason: self
+                    .blocked_on
+                    .first()
+                    .map_or_else(|| "an unnamed blocker".to_string(), describe_block),
+            };
         }
 
         // 4. Whatever the workflow state says last.

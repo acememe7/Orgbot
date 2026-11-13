@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -589,6 +590,40 @@ class TrashTests(unittest.TestCase):
         self.assertEqual(purged, [])
         self.assertEqual(len(errors), 1)
         self.assertTrue(entry.exists())
+
+    def test_an_unfinished_move_neither_breaks_the_list_nor_stays_for_good(self):
+        # From the 13 November audit: one entry without a manifest broke
+        # `list` and changing the recovery folder, and was never cleaned.
+        source = self.sources / "kept.txt"
+        source.write_text("kept", encoding="utf-8")
+        kept_id = trash.move(self.root, "Demo", source)
+        project_dir = trash._find_entry(self.root, kept_id)[0].parent
+        bare = project_dir / ("0" * 32)
+        bare.mkdir(mode=0o700)
+        (bare / "payload").mkdir(mode=0o500)
+        copying_source = self.sources / "half.txt"
+        copying_source.write_text("half", encoding="utf-8")
+        copying_id = trash.move(self.root, "Demo", copying_source)
+        entry, manifest = trash._find_entry(self.root, copying_id)
+        manifest["status"] = "copying"
+        trash._write_manifest(entry, manifest)
+
+        problems = []
+        listed = [row["id"] for row in trash.list_entries(self.root, problems)]
+        self.assertIn(kept_id, listed)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("0" * 32, problems[0])
+
+        purged, errors = trash.cleanup(self.root, now=time.time())
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(purged), sorted(["0" * 32, copying_id]))
+        self.assertFalse(bare.exists())
+        self.assertFalse(entry.exists())
+        self.assertEqual(trash._find_entry(self.root, kept_id)[1]["id"], kept_id)
+
+        bare.mkdir(mode=0o700)
+        trash.restore(self.root, kept_id)
+        self.assertFalse(trash._holds_entries(self.root), "only a leftover remains")
 
     def test_pending_complete_copy_can_be_restored_without_erasing_recovery_entry(self):
         source = self.sources / "recover.txt"

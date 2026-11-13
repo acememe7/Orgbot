@@ -224,6 +224,9 @@ const List<int> turnBudgetChoices = [500, 2000, 5000, 20000, 0];
 /// something chosen, by someone who can see what the room has drawn.
 const int defaultParallelTurns = 2;
 
+/// Desktop rooms run on the owner's own CLI sign-ins and are watched as they
+/// work, so they start at four; a room file with no setting runs at the
+/// engine's own default of three.
 const int desktopDefaultParallelTurns = 4;
 
 /// Concurrency settings offered in the UI.

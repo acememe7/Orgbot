@@ -18,6 +18,9 @@ const MAX_LIST_ENTRIES: usize = 500;
 const MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 
+/// The longest a command may wait for the project lock before it starts.
+const HELPER_QUEUE_LIMIT: Duration = Duration::from_secs(20 * 60);
+
 /// How long a command may go with no output and almost no processor time
 /// before it is stopped as most likely stuck.
 ///
@@ -37,12 +40,22 @@ fn tree_cpu_ticks(pid: u32) -> u64 {
         if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             if let Some((_, rest)) = stat.rsplit_once(')') {
                 let fields: Vec<&str> = rest.split_whitespace().collect();
-                total += fields.get(11).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0)
-                    + fields.get(12).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+                let field = |index: usize| fields.get(index).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+                // utime and stime, then cutime and cstime: what children that
+                // already ended used. From the 13 November audit: a child that
+                // ended took its time with it, and only the main thread's
+                // children were walked, so work forked by cargo's job threads,
+                // `go test` or a JVM was never seen and a busy link step was
+                // stopped as stuck.
+                total += field(11) + field(12) + field(13) + field(14);
             }
         }
-        if let Ok(children) = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")) {
-            stack.extend(children.split_whitespace().filter_map(|child| child.parse::<u32>().ok()));
+        if let Ok(threads) = std::fs::read_dir(format!("/proc/{pid}/task")) {
+            for thread in threads.filter_map(Result::ok) {
+                if let Ok(children) = std::fs::read_to_string(thread.path().join("children")) {
+                    stack.extend(children.split_whitespace().filter_map(|child| child.parse::<u32>().ok()));
+                }
+            }
         }
     }
     total
@@ -51,21 +64,51 @@ fn tree_cpu_ticks(pid: u32) -> u64 {
 async fn bounded_output(
     mut stream: impl tokio::io::AsyncRead + Unpin,
     seen: Arc<std::sync::atomic::AtomicUsize>,
+    started: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
-    let mut saved = Vec::new();
+    // The start and the end of the output, each up to half the room: a test
+    // run's failures are at its end. From the 13 November audit: only the
+    // first 32 KiB was kept, and nothing said the rest was cut.
+    const HALF: usize = 16 * 1024;
+    let mut head = Vec::new();
+    let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+    let mut dropped = 0usize;
     let mut buffer = [0u8; 8192];
+    let marker = format!("{STARTED_MARKER}\n");
+    let mut waiting_for_start = started.is_some();
     loop {
         let count = stream.read(&mut buffer).await.map_err(|e| e.to_string())?;
         if count == 0 {
             break;
         }
         seen.fetch_add(count, Ordering::Relaxed);
-        let keep = count.min(32768_usize.saturating_sub(saved.len()));
-        saved.extend_from_slice(&buffer[..keep]);
+        let chunk = &buffer[..count];
+        let to_head = chunk.len().min(HALF.saturating_sub(head.len()));
+        head.extend_from_slice(&chunk[..to_head]);
+        tail.extend(&chunk[to_head..]);
+        while tail.len() > HALF {
+            tail.pop_front();
+            dropped += 1;
+        }
+        if waiting_for_start && head.windows(marker.len()).any(|window| window == marker.as_bytes()) {
+            waiting_for_start = false;
+            if let Some(started) = &started {
+                started.notify_one();
+            }
+        }
     }
-    Ok(String::from_utf8_lossy(&saved).into_owned())
+    let mut text = String::from_utf8_lossy(&head).replacen(&marker, "", 1);
+    if dropped > 0 {
+        text.push_str(&format!("\n[OrgBots: {dropped} bytes of output cut from the middle]\n"));
+    }
+    text.push_str(&String::from_utf8_lossy(&tail.into_iter().collect::<Vec<u8>>()));
+    Ok(text)
 }
+
+/// What the workspace helper says on stderr when the command itself starts,
+/// after any wait for the project lock.
+const STARTED_MARKER: &str = "orgbot-workspace: command started";
 
 /// A validated local workspace and its request channel.
 #[derive(Debug)]
@@ -263,7 +306,7 @@ impl LocalWorkspaceHost {
 
     #[cfg(target_os = "linux")]
     async fn serve_call(self: Arc<Self>, call: WorkspaceCall) {
-        let WorkspaceCall { agent, name, arguments, grants, reply } = call;
+        let WorkspaceCall { agent, name, arguments, grants, mut reply } = call;
         let queued = Instant::now();
         let line = self.call_line(agent);
         let _own_turn = line.lock().await;
@@ -277,8 +320,22 @@ impl LocalWorkspaceHost {
         }
         let waited = queued.elapsed();
         let started = Instant::now();
-        let mut outcome = if matches!(name.as_str(), "workspace_run" | "workspace_verify") {
-            self.run(agent, &name, &arguments, grants).await
+        // From the 13 November audit: git run by the server inside a bot's
+        // copy read the bot's own .git/config, so a clean filter ran as the
+        // owner outside the sandbox. A bot's git runs in its sandbox now.
+        let sandboxed_git = name == "workspace_git" && self.guard_state.is_some();
+        let mut outcome = if matches!(name.as_str(), "workspace_run" | "workspace_verify") || sandboxed_git {
+            // A command whose bot was stopped or removed stops with it, and
+            // nothing it did merges. From the 13 November audit: a codemod
+            // ran on after its bot was removed and merged hundreds of files
+            // ten minutes later.
+            tokio::select! {
+                outcome = self.run(agent, &name, &arguments, grants) => outcome,
+                () = reply.closed() => {
+                    tracing::warn!(%agent, tool = %name, "workspace command stopped: its turn ended");
+                    return;
+                }
+            }
         } else {
             let host = Arc::clone(&self);
             let tool = name.clone();
@@ -313,10 +370,16 @@ impl LocalWorkspaceHost {
             );
         }
         if waited >= Duration::from_secs(5) {
-            outcome.content.push_str(&format!(
-                "\n[OrgBots] This call waited {}s for your earlier workspace call to finish.",
-                waited.as_secs()
-            ));
+            let note = format!("This call waited {}s for your earlier workspace call to finish.", waited.as_secs());
+            // A JSON result stays JSON. From the audit: the note appended to
+            // a land or push result made it unparseable.
+            match serde_json::from_str::<Value>(&outcome.content) {
+                Ok(Value::Object(mut fields)) => {
+                    fields.insert("waited_note".into(), Value::String(note));
+                    outcome.content = Value::Object(fields).to_string();
+                }
+                _ => outcome.content.push_str(&format!("\n[OrgBots] {note}")),
+            }
         }
         let _ = reply.send(outcome);
     }
@@ -395,6 +458,11 @@ impl LocalWorkspaceHost {
             // branch in the bot's own repository and reported it landed.
             if matches!(name, "workspace_land_commits" | "workspace_push_commits") {
                 return Ok(self.handle(name, args));
+            }
+            // Only in the sandbox (see serve_call): never the server's own git
+            // in a copy whose config the bot controls.
+            if name == "workspace_git" {
+                return Err("Git in a bot's copy runs in its sandbox.".into());
             }
             let guard = self.guard(agent)?;
             let prepared = guard.prepare()?;
@@ -501,27 +569,37 @@ impl LocalWorkspaceHost {
         let grants = grants.into();
         let execute = async {
             let verify = name == "workspace_verify";
-            if verify && self.guard_state.is_none() {
+            let git = name == "workspace_git";
+            if (verify || git) && self.guard_state.is_none() {
                 return Err(
                     "Read-only verification requires a protected local workspace".to_owned(),
                 );
             }
-            if !verify && !self.commands {
+            if !verify && !git && !self.commands {
                 return Err("Command execution is disabled for this workspace".to_owned());
             }
-            let script = arg_string(args, "command")?;
+            let git_script;
+            let script = if git {
+                git_script = sandboxed_git_script(arg_string(args, "action")?)?;
+                git_script.as_str()
+            } else {
+                arg_string(args, "command")?
+            };
             if script.len() > 64 * 1024 {
                 return Err("Command exceeds 64 KiB".into());
             }
-            let seconds = args
-                .get("timeout_seconds")
-                .map(|v| {
-                    v.as_u64()
-                        .filter(|n| (1..=1800).contains(n))
-                        .ok_or("timeout_seconds must be 1–1800")
-                })
-                .transpose()?
-                .unwrap_or(300);
+            let seconds = if git {
+                15
+            } else {
+                args.get("timeout_seconds")
+                    .map(|v| {
+                        v.as_u64()
+                            .filter(|n| (1..=1800).contains(n))
+                            .ok_or("timeout_seconds must be 1–1800")
+                    })
+                    .transpose()?
+                    .unwrap_or(300)
+            };
             let mut guard = self.guard(agent)?;
             if verify {
                 guard.agent.push_str("-verify");
@@ -534,7 +612,7 @@ impl LocalWorkspaceHost {
             let mut command = tokio::process::Command::from(guard.command("run")?);
             if verify {
                 command.args(["--verify", "--read-only"]);
-            } else {
+            } else if !git {
                 command.args(grants.launcher_args());
             }
             // From the benchmark room: bots write bash ("set -o pipefail",
@@ -560,10 +638,16 @@ impl LocalWorkspaceHost {
             let stdout = child.stdout.take().expect("piped stdout");
             let stderr = child.stderr.take().expect("piped stderr");
             let output_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let out = tokio::spawn(bounded_output(stdout, Arc::clone(&output_seen)));
-            let err = tokio::spawn(bounded_output(stderr, Arc::clone(&output_seen)));
+            let started = Arc::new(tokio::sync::Notify::new());
+            let out = tokio::spawn(bounded_output(stdout, Arc::clone(&output_seen), None));
+            let err = tokio::spawn(bounded_output(stderr, Arc::clone(&output_seen), Some(Arc::clone(&started))));
             let pid = child.id();
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+            // The command's limit and the stuck check start when the command
+            // does, not while the helper waits its turn for the project lock.
+            // From the 13 November audit: a run that queued 25 s of its 30
+            // was killed 5 s in.
+            let mut deadline = tokio::time::Instant::now() + HELPER_QUEUE_LIMIT + Duration::from_secs(seconds);
+            let mut waiting = true;
             let mut check = tokio::time::interval((self.quiet_limit / 10).max(Duration::from_millis(200)));
             check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut last = (0usize, pid.map_or(0, tree_cpu_ticks), tokio::time::Instant::now());
@@ -572,7 +656,12 @@ impl LocalWorkspaceHost {
                 tokio::select! {
                     status = child.wait() => break Ok(status),
                     _ = tokio::time::sleep_until(deadline) => break Err(()),
-                    _ = check.tick() => {
+                    () = started.notified(), if waiting => {
+                        waiting = false;
+                        deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+                        last = (output_seen.load(Ordering::Relaxed), pid.map_or(0, tree_cpu_ticks), tokio::time::Instant::now());
+                    }
+                    _ = check.tick(), if !waiting => {
                         let output = output_seen.load(Ordering::Relaxed);
                         let cpu = pid.map_or(0, tree_cpu_ticks);
                         // A tick of a hundred is a second of processor time.
@@ -604,6 +693,15 @@ impl LocalWorkspaceHost {
             // effects are the bot's to know about. From the live room: a bot
             // whose copy conflicted was told every command had failed, with
             // the output thrown away, though each one had run.
+            if git {
+                // Git looks; nothing it does is merged, and its plain output is the answer.
+                return if success {
+                    Ok(ToolOutcome { content: output, is_error: false })
+                } else {
+                    let detail = if error.trim().is_empty() { "Git exited unsuccessfully.".to_string() } else { error.trim().to_string() };
+                    Err(format!("Git failed: {detail}"))
+                };
+            }
             let integration = if success && !verify {
                 Some(
                     match tokio::task::spawn_blocking(move || guard.apply_setting_aside_conflicts())
@@ -823,15 +921,24 @@ impl LocalWorkspaceHost {
         self.require_repository_root(&cwd)?;
         let mut action_command = git_command(&cwd);
         action_command.args(args);
-        let result = run_bounded_git(&mut action_command, Duration::from_secs(15))?;
-        let output = String::from_utf8_lossy(&result.stdout).into_owned();
-        if !result.success || !result.stderr.is_empty() {
-            let detail = if result.stderr.is_empty() {
-                "Git exited unsuccessfully.".into()
-            } else {
-                String::from_utf8_lossy(&result.stderr).trim().to_string()
-            };
+        // From the 13 November audit: any warning on stderr (a CRLF notice)
+        // failed the call, and so did any diff over 64 KiB. A warning is
+        // passed on; a long diff is cut and says so.
+        let (result, cut) = run_git_within(&mut action_command, Duration::from_secs(15), true)?;
+        let mut output = String::from_utf8_lossy(&result.stdout).into_owned();
+        let said = String::from_utf8_lossy(&result.stderr).trim().to_string();
+        if !result.success {
+            let detail = if said.is_empty() { "Git exited unsuccessfully.".into() } else { said };
             return Err(format!("Git {action} failed: {detail}"));
+        }
+        if cut {
+            output.push_str(&format!(
+                "\n[the rest of the {action} was cut at {} KiB]",
+                MAX_GIT_OUTPUT_BYTES / 1024
+            ));
+        }
+        if !said.is_empty() {
+            output.push_str(&format!("\n[git said: {said}]"));
         }
         Ok(output)
     }
@@ -846,8 +953,39 @@ impl LocalWorkspaceHost {
     /// change must already read as they leave it, so the project stays clean
     /// instead of seeming to undo them, and the index keeps whatever was staged.
     /// Landing re-checks everything against what the owner approved.
+    /// The lock every bot's merge into this project takes (the workspace
+    /// helper's), held while a landing or push looks at the project and moves
+    /// its branch. From the 13 November audit: a landing could run while
+    /// another bot's merge had files half-replaced.
+    #[cfg(target_os = "linux")]
+    fn project_lock(&self) -> Result<std::fs::File, String> {
+        use fs2::FileExt;
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let project = std::fs::canonicalize(&self.root).map_err(|e| format!("project folder: {e}"))?;
+        let id = format!("{:x}", Sha256::digest(project.as_os_str().as_encoded_bytes()));
+        let uid = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata("/proc/self").map_err(|e| format!("project lock: {e}"))?.uid()
+        };
+        let folder = std::path::PathBuf::from(format!("/run/user/{uid}/orgbot-workspace-locks"));
+        let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&folder);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(0x20000) // O_NOFOLLOW
+            .open(folder.join(format!("{}.lock", &id[..24])))
+            .map_err(|e| format!("project lock: {e}"))?;
+        file.lock_exclusive().map_err(|e| format!("project lock: {e}"))?;
+        Ok(file)
+    }
+
     #[cfg(target_os = "linux")]
     fn land_commits(&self, args: &Value) -> Result<String, String> {
+        let _merges_wait = self.project_lock()?;
         let bundle = validate_relative(arg_string(args, "bundle")?)?;
         let branch = arg_string(args, "branch")?;
         if !landable_branch(branch) {
@@ -903,7 +1041,10 @@ impl LocalWorkspaceHost {
             ));
         }
         let range = format!("{base}..{head}");
-        let log = git(&["log", "--no-color", "--format=%h %s", "-n", "51", &range])?;
+        // With the author and committer the bot set, so the card shows whose
+        // name the owner is putting into history. From the 13 November audit:
+        // only the hash and subject were shown.
+        let log = git(&["log", "--no-color", "--format=%h %s (by %an <%ae>, committed by %cn)", "-n", "51", &range])?;
         let commits: Vec<&str> = log.lines().collect();
         if commits.len() > 50 {
             return Err("Land at most 50 commits at a time.".into());
@@ -962,6 +1103,7 @@ impl LocalWorkspaceHost {
     /// never creates a branch, and the push re-checks what was approved.
     #[cfg(target_os = "linux")]
     fn push_commits(&self, args: &Value) -> Result<String, String> {
+        let _merges_wait = self.project_lock()?;
         let remote = arg_string(args, "remote").unwrap_or("origin");
         let branch = arg_string(args, "branch")?;
         if !landable_branch(branch) || !landable_branch(remote) {
@@ -984,7 +1126,9 @@ impl LocalWorkspaceHost {
             Ok(String::from_utf8_lossy(&result.stdout).trim_end().to_string())
         };
         let branch_ref = format!("refs/heads/{branch}");
-        let url = git(&["remote", "get-url", remote], 10).map_err(|_| format!("The project has no remote called {remote}."))?;
+        // Where a push goes: the push URL when one is set. From the 13
+        // November audit: the card showed and checked the fetch URL.
+        let url = git(&["remote", "get-url", "--push", remote], 10).map_err(|_| format!("The project has no remote called {remote}."))?;
         let head = git(&["rev-parse", "--verify", "--quiet", &format!("{branch_ref}^{{commit}}")], 10)
             .map_err(|_| format!("The project has no branch {branch}."))?;
         let listed = git(&["ls-remote", "--heads", remote, &branch_ref], 60)?;
@@ -1004,7 +1148,7 @@ impl LocalWorkspaceHost {
             ));
         }
         let range = format!("{base}..{head}");
-        let log = git(&["log", "--no-color", "--format=%h %s", "-n", "51", &range], 10)?;
+        let log = git(&["log", "--no-color", "--format=%h %s (by %an <%ae>, committed by %cn)", "-n", "51", &range], 10)?;
         let commits: Vec<&str> = log.lines().collect();
         if commits.len() > 50 {
             return Err("Push at most 50 commits at a time.".into());
@@ -1071,7 +1215,12 @@ impl LocalWorkspaceHost {
                         } else {
                             let mut bytes = Vec::new();
                             File::from(fd).read_to_end(&mut bytes).map_err(io_error)?;
+                            // From the 13 November audit: a file stored
+                            // through a filter (CRLF conversion, LFS) never
+                            // matched its raw bytes, so landing was refused.
+                            // It is hashed as the owner's git would store it.
                             hash_blob(cwd, &bytes)? == new_id
+                                || hash_blob_as_stored(cwd, path, &bytes).is_ok_and(|stored| stored == new_id)
                         }
                     }
                     Err(_) => false,
@@ -1320,6 +1469,21 @@ fn read_fd_bounded(fd: std::os::fd::OwnedFd, limit: usize) -> Result<Vec<u8>, St
     Ok(bytes)
 }
 
+/// The read-only git commands a bot may run in its own copy, inside its
+/// sandbox. Hooks, fsmonitor and external diff tools are off; in the sandbox
+/// anything else its own config runs reaches only its own copy.
+fn sandboxed_git_script(action: &str) -> Result<String, String> {
+    let args = match action {
+        "status" => "status --short --branch --untracked-files=normal --no-renames",
+        "diff" => "diff --no-ext-diff --no-textconv --no-color --no-renames HEAD -- .",
+        "log" => "log -n 20 --oneline --decorate=no --no-color --no-show-signature",
+        _ => return Err("Git action must be status, diff, or log.".into()),
+    };
+    Ok(format!(
+        "git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c diff.external= --no-pager --no-optional-locks {args}"
+    ))
+}
+
 #[cfg(target_os = "linux")]
 struct GitOutput {
     success: bool,
@@ -1372,6 +1536,13 @@ fn owner_git_command(cwd: &str) -> Command {
 
 #[cfg(target_os = "linux")]
 fn run_bounded_git(command: &mut Command, timeout: Duration) -> Result<GitOutput, String> {
+    run_git_within(command, timeout, false).map(|(output, _)| output)
+}
+
+/// Run git with bounded output. With `allow_cut`, output past the limit ends
+/// the command and what was read is returned with `true`, instead of an error.
+#[cfg(target_os = "linux")]
+fn run_git_within(command: &mut Command, timeout: Duration, allow_cut: bool) -> Result<(GitOutput, bool), String> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1393,8 +1564,13 @@ fn run_bounded_git(command: &mut Command, timeout: Duration) -> Result<GitOutput
         if overflow.load(Ordering::Acquire) {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = stdout.join();
-            let _ = stderr.join();
+            let stdout = stdout.join();
+            let stderr = stderr.join();
+            if allow_cut {
+                let stdout = stdout.map_err(|_| "Git output reader failed.")?.map_err(io_error)?;
+                let stderr = stderr.map_err(|_| "Git error reader failed.")?.map_err(io_error)?;
+                return Ok((GitOutput { success: true, stdout, stderr }, true));
+            }
             return Err("Git output exceeded its limit.".into());
         }
         match child.try_wait() {
@@ -1424,14 +1600,18 @@ fn run_bounded_git(command: &mut Command, timeout: Duration) -> Result<GitOutput
         .join()
         .map_err(|_| "Git error reader failed.")?
         .map_err(io_error)?;
-    if overflow.load(Ordering::Acquire) {
+    let cut = overflow.load(Ordering::Acquire);
+    if cut && !allow_cut {
         return Err("Git output exceeded its limit.".into());
     }
-    Ok(GitOutput {
-        success: status.success(),
-        stdout,
-        stderr,
-    })
+    Ok((
+        GitOutput {
+            success: status.success(),
+            stdout,
+            stderr,
+        },
+        cut,
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -1661,8 +1841,22 @@ impl Drop for TemporaryRef {
 #[cfg(target_os = "linux")]
 fn hash_blob(cwd: &str, bytes: &[u8]) -> Result<String, String> {
     let mut command = git_command(cwd);
+    command.args(["hash-object", "--no-filters", "--stdin"]);
+    hash_with(command, bytes)
+}
+
+/// The blob id `bytes` would get if the owner's git added them at `path`:
+/// with the project's attributes and the owner's own filters, as their
+/// `git add` would run them. Hooks stay off and nothing is written.
+#[cfg(target_os = "linux")]
+fn hash_blob_as_stored(cwd: &str, path: &str, bytes: &[u8]) -> Result<String, String> {
+    let mut command = owner_git_command(cwd);
+    command.args(["hash-object", "--stdin", &format!("--path={path}")]);
+    hash_with(command, bytes)
+}
+
+fn hash_with(mut command: Command, bytes: &[u8]) -> Result<String, String> {
     command
-        .args(["hash-object", "--no-filters", "--stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -1887,6 +2081,45 @@ mod tests {
         let _ = fs::remove_dir_all(copy);
     }
 
+    /// From the 13 November audit: a file checked out through a conversion
+    /// (here CRLF line ends) never matched its raw bytes, so it could not land.
+    #[test]
+    fn a_file_stored_through_a_line_end_conversion_still_lands() {
+        let root = temp_dir();
+        let copy = temp_dir();
+        run_git(&root, &["init", "--quiet", "-b", "main"]);
+        let configure = |dir: &Path| {
+            run_git(dir, &["config", "user.name", "Workspace test"]);
+            run_git(dir, &["config", "user.email", "test@example.invalid"]);
+        };
+        configure(&root);
+        fs::write(root.join(".gitattributes"), "*.txt text eol=crlf\n").unwrap();
+        fs::write(root.join("a.txt"), "a\r\n").unwrap();
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "--quiet", "-m", "base"]);
+        let base = run_git(&root, &["rev-parse", "HEAD"]);
+        let _ = fs::remove_dir_all(&copy);
+        run_git(Path::new("/"), &["clone", "--quiet", root.to_str().unwrap(), copy.to_str().unwrap()]);
+        configure(&copy);
+        fs::write(copy.join("a.txt"), "a2\r\n").unwrap();
+        run_git(&copy, &["commit", "--quiet", "-am", "change a"]);
+        fs::create_dir(root.join("artifacts")).unwrap();
+        run_git(&copy, &["bundle", "create", root.join("artifacts/crlf.bundle").to_str().unwrap(), &format!("{base}..main")]);
+        // In the project as the checkout writes it: with CRLF.
+        fs::write(root.join("a.txt"), "a2\r\n").unwrap();
+        let host = LocalWorkspaceHost::open_root(
+            root.to_string_lossy().into_owned(),
+            true,
+            None,
+            Arc::new(RwLock::new(std::collections::HashSet::new())),
+        )
+        .unwrap();
+        let inspected = host.handle("workspace_land_commits", &json!({"bundle": "artifacts/crlf.bundle", "branch": "main"}));
+        assert!(!inspected.is_error, "{}", inspected.content);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(copy);
+    }
+
     #[test]
     fn a_push_goes_out_only_as_approved_and_never_overwrites_the_remote() {
         let remote = temp_dir();
@@ -1996,6 +2229,46 @@ mod tests {
         let _ = fs::remove_dir_all(copy);
     }
 
+    /// From the 13 November audit: the server ran git as the owner inside a
+    /// bot's copy, whose .git/config the bot controls, so a clean filter ran
+    /// outside the sandbox. A bot's git now runs in its sandbox.
+    #[tokio::test]
+    async fn a_bots_git_runs_in_its_sandbox_not_as_the_owner() {
+        let root = temp_dir();
+        let state = temp_dir();
+        run_git(&root, &["init", "--quiet", "-b", "main"]);
+        run_git(&root, &["config", "user.email", "t@example.com"]);
+        run_git(&root, &["config", "user.name", "t"]);
+        fs::write(root.join("tracked.txt"), "before\n").unwrap();
+        run_git(&root, &["add", "tracked.txt"]);
+        run_git(&root, &["commit", "--quiet", "-m", "initial"]);
+        let host = Arc::new(protected_host(&root, &state, true));
+        let agent = AgentId::new();
+        // The bot plants a filter that writes outside its copy when git runs it.
+        let marker = temp_dir().join("filter-ran");
+        let plant = format!(
+            "git config filter.x.clean 'touch {}; cat' && printf '* filter=x\\n' > .gitattributes && printf after > tracked.txt",
+            marker.display()
+        );
+        let planted = host.run(agent, "workspace_run", &json!({"command": plant}), false).await;
+        assert!(!planted.is_error, "{}", planted.content);
+        let _ = fs::remove_file(&marker);
+        let (tx, rx) = mpsc::channel(4);
+        let serving = tokio::spawn(Arc::clone(&host).serve(rx));
+        let workspace = Workspace::with_capabilities(
+            WorkspaceSpec { label: "test".into(), root: root.to_string_lossy().into_owned(), writable: true, commands: true },
+            tx,
+            WorkspaceCapabilities { git_read: true, attachment_import: false, verification: false, private_home: false, concurrent: true },
+        );
+        let status = workspace.call(agent, "workspace_git", &json!({"action":"status"})).await;
+        assert!(!status.is_error, "{}", status.content);
+        assert!(status.content.contains("tracked.txt"), "{}", status.content);
+        assert!(!marker.exists(), "the bot's filter ran on the host as the owner");
+        serving.abort();
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(state);
+    }
+
     #[tokio::test]
     async fn a_command_in_a_conflicting_copy_still_runs_reports_its_output_and_merges_the_rest() {
         // From the live room: a bot whose copy conflicted with files others
@@ -2026,7 +2299,7 @@ mod tests {
             .await;
         assert!(!second.is_error, "{}", second.content);
         assert!(second.content.contains("health-ok"), "the output reaches the bot: {}", second.content);
-        assert!(second.content.contains("orgbot-conflicts"), "{}", second.content);
+        assert!(second.content.contains(".cache/orgbots/conflicts"), "{}", second.content);
         assert_eq!(fs::read_to_string(root.join("shared.txt")).unwrap(), "someone else's", "the newer version is kept");
         assert_eq!(fs::read_to_string(root.join("other.txt")).unwrap(), "fresh", "the rest merges");
         let _ = fs::remove_dir_all(&root);
@@ -2088,6 +2361,30 @@ mod tests {
 
     /// From speed test 1: one QA test sat waiting with its browser idle, and
     /// the suite would have run to its time limit.
+    #[test]
+    fn processor_time_of_children_that_ended_still_counts() {
+        // A child that worked and ended: its time is kept by the parent that
+        // waited for it.
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("(i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done); sleep 5")
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let mut ticks = 0;
+        while started.elapsed() < std::time::Duration::from_secs(4) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let children = std::fs::read_to_string(format!("/proc/{0}/task/{0}/children", child.id())).unwrap_or_default();
+            ticks = tree_cpu_ticks(child.id());
+            if children.split_whitespace().count() == 1 && ticks >= 10 {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(ticks >= 10, "the ended child's time is counted: {ticks}");
+    }
+
     #[tokio::test]
     async fn a_command_that_goes_quiet_is_stopped_and_one_that_talks_is_not() {
         let root = temp_dir();
@@ -2105,6 +2402,8 @@ mod tests {
         assert_eq!(hung["timed_out"], false);
         assert!(hung["stdout"].as_str().unwrap().contains("starting"));
         assert!(hung["note"].as_str().unwrap().contains("most likely stuck"));
+        // The helper's start line times the command; the bot never sees it.
+        assert!(!hung.to_string().contains(STARTED_MARKER), "{hung}");
 
         let talking = host
             .run(
@@ -2188,7 +2487,11 @@ mod tests {
             .await;
         assert!(!output.is_error, "{}", output.content);
         let output: Value = serde_json::from_str(&output.content).unwrap();
-        assert_eq!(output["stdout"].as_str().unwrap().len(), 32768);
+        // The start and the end are kept, with a note of what was cut.
+        let stdout = output["stdout"].as_str().unwrap();
+        assert!(stdout.len() < 32768 + 100, "{}", stdout.len());
+        assert!(stdout.contains("bytes of output cut from the middle"));
+        assert!(stdout.starts_with("xxx") && stdout.ends_with("xxx"));
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(state).unwrap();
     }
@@ -2550,6 +2853,14 @@ mod tests {
                 .await
                 .is_error
         );
+        // From the 13 November audit: a diff over the limit was an error.
+        let long: String = (0..20_000).map(|line| format!("line {line} of a long change\n")).collect();
+        fs::write(root.join("tracked.txt"), long).unwrap();
+        let big = workspace
+            .call(agent, "workspace_git", &json!({"action":"diff"}))
+            .await;
+        assert!(!big.is_error, "a long diff is cut, not refused: {}", big.content);
+        assert!(big.content.contains("was cut at"), "{}", &big.content[big.content.len().saturating_sub(200)..]);
         assert!(!workspace
             .definitions()
             .iter()

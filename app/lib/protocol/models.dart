@@ -246,7 +246,7 @@ class Task {
   final String? requiredRole;
 
   /// Tasks that must land before this one can start. The edges of the graph.
-  final List<String> dependsOn;
+  List<String> dependsOn;
   List<Map<String, Object?>> blockReasons;
 
   factory Task.fromJson(Map<String, Object?> json) => Task(
@@ -648,6 +648,8 @@ class BotTime {
     this.currentTurnMs = 0,
     this.workspaceMs = 0,
     this.workspaceCalls = 0,
+    this.inTurn = false,
+    this.receivedAt,
   });
 
   final int turns;
@@ -661,7 +663,17 @@ class BotTime {
   final int workspaceMs;
   final int workspaceCalls;
 
-  bool get isEmpty => turns == 0 && currentTurnMs == 0 && workspaceCalls == 0;
+  /// Whether a turn is under way, and when this was read: the current turn
+  /// counts up from here between digests.
+  final bool inTurn;
+  final DateTime? receivedAt;
+
+  /// The current turn's length now.
+  int get liveTurnMs => inTurn && receivedAt != null
+      ? currentTurnMs + DateTime.now().difference(receivedAt!).inMilliseconds
+      : currentTurnMs;
+
+  bool get isEmpty => turns == 0 && !inTurn && currentTurnMs == 0 && workspaceCalls == 0;
 
   factory BotTime.fromJson(Map<String, Object?> json) {
     int read(String key) => (json[key] as num?)?.toInt() ?? 0;
@@ -672,6 +684,8 @@ class BotTime {
       currentTurnMs: read('current_turn_ms'),
       workspaceMs: read('workspace_ms'),
       workspaceCalls: read('workspace_calls'),
+      inTurn: json['in_turn'] == true,
+      receivedAt: DateTime.now(),
     );
   }
 
@@ -687,7 +701,7 @@ class BotTime {
 
   /// One line for the Team panel.
   String get summary => [
-    if (currentTurnMs > 0) 'This turn ${span(currentTurnMs)}',
+    if (inTurn || currentTurnMs > 0) 'This turn ${span(liveTurnMs)}',
     if (turns > 0)
       '${span(turnMs)} in $turns ${turns == 1 ? 'turn' : 'turns'}'
           '${turns > 1 ? ', longest ${span(longestTurnMs)}' : ''}',

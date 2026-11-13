@@ -42,10 +42,7 @@ impl SseDecoder {
         let mut events = Vec::new();
 
         // Consume whole lines only; anything after the last newline stays.
-        loop {
-            let Some(newline) = self.buffer.iter().position(|&b| b == b'\n') else {
-                break;
-            };
+        while let Some(newline) = self.buffer.iter().position(|&b| b == b'\n') {
             let mut line = self.buffer.drain(..=newline).collect::<Vec<u8>>();
             line.pop(); // the '\n'
             if line.last() == Some(&b'\r') {

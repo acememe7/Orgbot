@@ -1,3 +1,4 @@
+import 'confirm.dart';
 import 'package:flutter/material.dart';
 
 import '../orgbot/desktop_integrations.dart';
@@ -49,7 +50,10 @@ class _DesktopIntegrationsViewState extends State<DesktopIntegrationsView> {
         registry: _registry,
       );
 
+  // From the 13 November audit: called after an await, when the view may
+  // already be gone.
   void _refresh() {
+    if (!mounted) return;
     setState(() {
       _snapshot = _discover();
     });
@@ -284,7 +288,17 @@ class _DesktopIntegrationsViewState extends State<DesktopIntegrationsView> {
             if (skill.source == DesktopIntegrationSource.managed)
               IconButton(
                 tooltip: 'Remove ${skill.name}',
-                onPressed: () => _removeSkill(skill.name),
+                onPressed: () async {
+                  if (await confirmDestructive(
+                    context,
+                    title: 'Remove ${skill.name}?',
+                    body:
+                        'The skill is removed from OrgBots; bots stop using it in new turns.',
+                    action: 'Remove',
+                  )) {
+                    await _removeSkill(skill.name);
+                  }
+                },
                 icon: const Icon(Icons.delete_outline, size: 18),
               ),
           ],
@@ -327,6 +341,7 @@ class _DesktopIntegrationsViewState extends State<DesktopIntegrationsView> {
     final id = status.managedId;
     if (id == null) return;
     final entries = await _registry.listMcp();
+    if (!mounted) return;
     final matching = entries.where((entry) => entry.id == id);
     if (matching.isNotEmpty) await _editServer(server: matching.first);
   }
@@ -411,7 +426,9 @@ class _DesktopIntegrationsViewState extends State<DesktopIntegrationsView> {
 
   Future<void> _installSkill() async {
     final controller = TextEditingController();
-    final path = await showDialog<String>(
+    // Disposed once the dialog has finished closing: its field still reads
+    // the controller while it animates out.
+    final route = DialogRoute<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Install a skill'),
@@ -432,8 +449,10 @@ class _DesktopIntegrationsViewState extends State<DesktopIntegrationsView> {
         ],
       ),
     );
+    final path = await Navigator.of(context).push(route);
+    await route.completed;
     controller.dispose();
-    if (path == null || path.isEmpty) return;
+    if (path == null || path.isEmpty || !mounted) return;
     try {
       if (path.toLowerCase().endsWith('.zip')) {
         await _registry.installSkillArchive(path);
@@ -464,10 +483,13 @@ class _DesktopIntegrationsViewState extends State<DesktopIntegrationsView> {
     }
     final plugin = TextEditingController();
     var busy = false;
-    await showDialog<void>(
+    var open = true;
+    final route = DialogRoute<void>(
       context: context,
       builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
+        builder: (context, setDialogState) => PopScope(
+          canPop: !busy,
+          child: AlertDialog(
           title: const Text('Provider plugins'),
           content: SizedBox(
             width: 500,
@@ -530,7 +552,9 @@ class _DesktopIntegrationsViewState extends State<DesktopIntegrationsView> {
                                           );
                                         }
                                       } finally {
-                                        setDialogState(() => busy = false);
+                                        if (open) {
+                                          setDialogState(() => busy = false);
+                                        }
                                       }
                                     },
                               child: Text(switch (action) {
@@ -553,8 +577,12 @@ class _DesktopIntegrationsViewState extends State<DesktopIntegrationsView> {
             ),
           ],
         ),
+        ),
       ),
     );
+    await Navigator.of(context).push(route);
+    open = false;
+    await route.completed;
     plugin.dispose();
   }
 

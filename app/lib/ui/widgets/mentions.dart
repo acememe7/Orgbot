@@ -271,11 +271,17 @@ String? messageAudience(
       named.add(matches.single.handle);
     }
   }
-  if (named.isEmpty) return 'Goes to no bot: nobody here has that name';
+  // A name nobody has is read as no name, as the room reads it.
+  if (named.isEmpty) {
+    if (replyHandle != null) {
+      return 'No bot has that name, so it goes to @$replyHandle only, as a reply';
+    }
+    return 'No bot has that name, so it goes to one coordinator only';
+  }
   final who = named.length == 1
       ? '@${named.single}'
       : '${named.take(named.length - 1).map((h) => '@$h').join(', ')} and @${named.last}';
-  return 'Goes to $who only. Add @all to reach every bot';
+  return 'Goes to $who only; the coordinators see a copy. Add @all to reach every bot';
 }
 
 /// Whether a long draft reaches only one or two bots: worth a second look

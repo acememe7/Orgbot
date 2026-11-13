@@ -135,11 +135,18 @@ impl RoomLimits {
     pub const fn parallel_turns(&self) -> usize {
         if self.max_parallel_turns == 0 {
             1
+        } else if self.max_parallel_turns > MAX_PARALLEL_TURNS {
+            // From the 13 November audit: "up to 16" was only the app's list
+            // of choices; a hand-written room file could ask for any number.
+            MAX_PARALLEL_TURNS as usize
         } else {
             self.max_parallel_turns as usize
         }
     }
 }
+
+/// The most turns a room runs at once, whatever its file asks for.
+pub const MAX_PARALLEL_TURNS: u32 = 16;
 
 /// What a room is for, supplied when it is created.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,7 +249,7 @@ pub struct LendItem {
 /// What OrgBots never lends: its own data, SSH and GnuPG keys, and the model
 /// CLIs' sign-ins, which bots get their own copies of.
 pub const NEVER_LENT: &[&str] = &[
-    ".local/share/orgbot", ".config/orgbot", ".local/share/com.orgbot.app",
+    ".local/share/orgbot", ".config/orgbot", ".local/share/com.orgbot.app", ".local/share/orgbots",
     ".ssh", ".gnupg", ".codex", ".claude", ".claude.json", ".grok",
     ".gemini", ".config/opencode", ".local/share/opencode",
 ];

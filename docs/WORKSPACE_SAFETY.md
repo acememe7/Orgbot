@@ -74,12 +74,19 @@ and D-Bus variables are not inherited. The sandbox has a read-only host root,
 new PID/IPC/UTS namespaces, a private `/run` tmpfs (and `/var/run` when it is a
 real directory), a private 1 GiB `/tmp`, and a
 1 GiB per-file write limit. Its writable locations are the worktree, private
-CLI home under `/run/user/<uid>`, and bounded `/tmp`. The helper rejects project
+CLI home under `/run/user/<uid>`, bounded `/tmp`, its private `/run` and
+`/var/run`, `/dev/shm`, and the graphics device nodes passed in for GPU work.
+The folder holding every bot's copy and private home is hidden from each
+sandbox, which sees only its own. The helper rejects project
 copies above 150,000 files, 20 GiB total, or 512 MiB per file. A
 passed Unix room-MCP socket is mounted into that private runtime tree. Other
 Unix sockets under host-visible paths outside `/run` (including a socket stored
 in a readable home directory or project) are not automatically hidden; this is
-not a general Unix-socket filtering boundary.
+not a general Unix-socket filtering boundary. The sandbox shares the host
+network namespace, so sockets in the abstract namespace (an X11 display, for
+example) would be reachable too; on Linux 6.12 and later the helper scopes
+them out with Landlock before starting the sandbox, so a bot cannot connect to
+an abstract socket created outside it. On older kernels that limit remains.
 
 The helper also points native CLIs at their private profile directories with
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `GROK_HOME`. Those directories remain
@@ -95,8 +102,8 @@ provider's existing API-key credential, excludes remote `wellknown`
 configuration, and masks `/etc/opencode` configuration. Project configuration
 and external plugin autoloading are disabled. Its private home is read-only,
 with writable data, state and cache directories. OAuth credential reuse is
-blocked. `--agent-cli agy` fails before starting a child process because
-isolated Antigravity authentication has not been verified. See
+blocked. `--agent-cli agy` runs Antigravity in its own protected launcher with
+a private home and the room relay. See
 [native CLI integration status](NATIVE_CLI_INTEGRATIONS.md).
 
 ## Access modes and lent sign-ins
@@ -134,7 +141,8 @@ bots may use** (saved in `$XDG_DATA_HOME/orgbot/lending.json`, which bots cannot
 read). Every tool there is off until turned on. A room passes the enabled ones
 to its engine when it starts, as `[[room.lend]]` tables in its room file, and the
 paths of every switched-off entry, the owner's own included, as `hide`. Every
-listed path, on or off, is hidden from every sandbox where it lives; the
+listed path, on or off, is hidden from every sandbox where it lives (a path that
+is a link to a folder of the owner's elsewhere is hidden there too); the
 launcher also hides every tool the app's list knows, whatever a room file says.
 The list knows 33 tools. Under "Found on this computer" it suggests those signed
 in here but not turned on, and names those installed (a program on the owner's
@@ -306,7 +314,8 @@ Scans of the project and of each copy remember every file's SHA-256 in private
 state (`.project-hashes.json` beside the copies, `.hashes.json` in each copy's
 folder), with its size, modification time, change time, inode and device. A file
 is read again only when one of those differs. A bot can set a file's
-modification time back but not its change time, so an edit is always seen.
+modification time back but not its change time, so an edit is seen, except in
+the narrow case of a same-size rewrite within one timestamp tick of the scan.
 
 After an approved apply, and when a copy drops files the project removed, each
 folder that held a removed file is removed once it is empty, deepest first. None
@@ -333,8 +342,11 @@ that was absent during conflict checking is never moved to trash: if it appears
 before integration, the operation fails and preserves it. If the trusted trash
 helper is missing, cannot verify its selected storage, or rejects the path, the
 workspace helper stops without replacing existing bytes. An
-out-of-tree journal records each planned operation and its progress so an
-interrupted application leaves preserved originals recoverable.
+out-of-tree journal records each planned operation, the staged copy of each new
+version and its progress. Every new version is written beside its file before
+the original goes to the trash, and the next prepare or apply into the project
+finishes an application that was stopped part way from that journal, before it
+scans anything.
 `apply` must be invoked by the trusted host integration after the sandboxed
 process exits; project and state paths are read-only from inside `run`.
 
@@ -360,11 +372,14 @@ approval from model output.
 
 Workspace copies preserve relative symlinks only when their resolved targets
 stay inside the project and are included in the copy. Absolute, dangling,
-external, and generated-tree symlinks fail closed. Special files,
-multiply-linked files, unsafe path components, oversized files, and trees
-beyond the configured entry and byte limits are rejected. The helper omits
+external, and generated-tree symlinks are left out and named, never followed.
+In the project, special files, multiply-linked files, unsafe path components,
+oversized files, and trees beyond the configured entry and byte limits are
+rejected; in a bot's copy such an entry (a socket, a hard link, an oversized
+build output) is left out of the merge and named instead. The helper omits
 rebuildable directories such as `node_modules`, `.dart_tool`, `target`, `build`,
-`dist`, virtual environments, and common tool caches. These folders are not
+`dist`, virtual environments, and common tool caches, unless the project's git
+tracks files in one, which is then copied and merged like any source. These folders are not
 copied or merged; rebuild them inside the agent workspace as needed. `.git` is
 copied once so local Git commands can inspect the project, but is excluded from
 status and apply. Empty directories remain staged in the private workspace;
@@ -382,8 +397,9 @@ side effects require separate controls. This helper does not claim to confine
 remote tools or every kernel attack surface.
 
 On Linux, OrgBots routes configured external MCP tools through the room bridge.
-Each call pauses for an **Allow once / Deny** owner question showing the server,
-tool and arguments. Approval binds the exact agent, arguments, configuration and
+In Approval and Half approval rooms each call pauses for an **Allow once /
+Deny** owner question showing the server, tool and arguments; Auto and Full
+write rooms approve them as their access mode says. Approval binds the exact agent, arguments, configuration and
 room; its use is durably recorded before dispatch. Private CLI profiles inherit
 only the room bridge, leaving original host configurations untouched. Review-only
 agents cannot invoke external MCP tools. Approving a remote tool permits its

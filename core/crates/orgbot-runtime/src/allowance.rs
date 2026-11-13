@@ -98,6 +98,9 @@ struct Reservation {
     cost: u64,
     policy: Policy,
     metered: bool,
+    /// The owner's rates the reservation was priced with, kept so the reply
+    /// is priced the same way whatever model name the service reports.
+    rates: Option<TokenRates>,
 }
 
 /// Recorded when a capped request used more than it reserved.
@@ -292,11 +295,27 @@ impl Allowances {
         Ok(result)
     }
 
+    #[cfg(test)]
     fn reserve(
         &self,
         backend: &str,
         request: &mut CompletionRequest,
         metered: bool,
+        time: u64,
+    ) -> Result<Reservation, ProviderError> {
+        self.reserve_with(backend, request, metered, metered, time)
+    }
+
+    /// `bounded`: each request is one HTTP call with a known reply ceiling,
+    /// so it can be reserved against a token or money cap. `metered`: it is
+    /// billed per token. From the 13 November audit: Ollama's cloud is the
+    /// first without the second, and any cap on it refused every request.
+    fn reserve_with(
+        &self,
+        backend: &str,
+        request: &mut CompletionRequest,
+        metered: bool,
+        bounded: bool,
         time: u64,
     ) -> Result<Reservation, ProviderError> {
         let policy = self
@@ -308,7 +327,7 @@ impl Allowances {
             .unwrap_or_default();
         request.max_tokens = request.max_tokens.min(policy.max_output_tokens);
         let strict = policy.max_tokens > 0 || policy.max_cost_microusd > 0;
-        if strict && !metered {
+        if strict && !bounded {
             return Err(waiting(
                 backend,
                 "This backend does not expose a bounded API request. Use a request/episode limit instead of a token or money cap.",
@@ -340,17 +359,18 @@ impl Allowances {
             .map_err(|e| waiting(backend, e.to_string(), 60))?
             .len() as u64
             + 4096;
-        let tokens = if metered {
+        let tokens = if bounded {
             input.saturating_add(request.max_tokens as u64)
         } else {
             0
         };
-        let rates = token_rates(&policy, &request.model).unwrap_or_default();
+        let chosen_rates = token_rates(&policy, &request.model);
+        let rates = chosen_rates.unwrap_or_default();
         let input_reservation_rate = rates
             .input_microusd_per_million
             .max(rates.cache_read_microusd_per_million)
             .max(rates.cache_write_microusd_per_million);
-        let cost = if metered {
+        let cost = if bounded {
             price(
                 input,
                 request.max_tokens as u64,
@@ -397,6 +417,7 @@ impl Allowances {
                     cost,
                     policy,
                     metered,
+                    rates: chosen_rates,
                 }))
             })
             .map_err(|e| waiting(backend, e, 60))?;
@@ -435,12 +456,15 @@ impl Allowances {
                             .cost_microusd
                             .saturating_sub(reservation.cost)
                             .saturating_add(cost);
-                        // Overrunning a reservation only matters when a cap
-                        // depends on it. Uncapped providers, including every
+                        // Overrunning a reservation only matters for the cap
+                        // it overran. Uncapped providers, including every
                         // agent CLI, reserve nothing and always "overrun".
-                        if reservation.policy.capped()
-                            && (tokens > reservation.tokens || cost > reservation.cost)
-                        {
+                        // From the 13 November audit: a token cap with no
+                        // prices reserved $0, the reply was priced at list,
+                        // and the provider was paused for the whole window.
+                        let over_tokens = reservation.policy.max_tokens > 0 && tokens > reservation.tokens;
+                        let over_cost = reservation.policy.max_cost_microusd > 0 && cost > reservation.cost;
+                        if over_tokens || over_cost {
                             record.cooldown_until = record
                                 .window_start
                                 .saturating_add(reservation.policy.window_secs);
@@ -448,15 +472,50 @@ impl Allowances {
                         }
                     }
                 }
+                // A request the service refused outright was not served, so
+                // its reservation is given back. From the 13 November audit:
+                // every failure kept its worst-case reservation for the whole
+                // window, so a few refusals could use up a cap.
+                Err(
+                    error @ (ProviderError::Allowance { .. }
+                    | ProviderError::MissingCredential { .. }
+                    | ProviderError::Unauthorized { .. }
+                    | ProviderError::BadRequest { .. }
+                    | ProviderError::Upstream { .. }),
+                ) => {
+                    if record.window_start == reservation.start {
+                        record.tokens = record.tokens.saturating_sub(reservation.tokens);
+                        record.cost_microusd = record.cost_microusd.saturating_sub(reservation.cost);
+                    }
+                    if error.is_retryable() {
+                        if record.cooldown_until <= time {
+                            record.consecutive_limits = record.consecutive_limits.saturating_add(1);
+                        }
+                        let delay = error
+                            .retry_after_secs()
+                            .unwrap_or(15 * (1u64 << record.consecutive_limits.min(8)));
+                        record.cooldown_until = record.cooldown_until.max(time.saturating_add(delay.clamp(1, 604800)));
+                        record.message = format!(
+                            "Provider unavailable; retry in {} seconds",
+                            record.cooldown_until - time
+                        );
+                    }
+                }
                 Err(error) => {
                     // Interrupted and failed calls may still be billed. Never refund unknown usage.
                     record.unreported_requests = record.unreported_requests.saturating_add(1);
                     if error.is_retryable() {
-                        record.consecutive_limits = record.consecutive_limits.saturating_add(1);
+                        // One incident is counted once: requests already in
+                        // flight when it began fail with it too. From the 13
+                        // November audit: five parallel requests hitting one
+                        // 529 paused the backend for eight minutes.
+                        if record.cooldown_until <= time {
+                            record.consecutive_limits = record.consecutive_limits.saturating_add(1);
+                        }
                         let delay = error
                             .retry_after_secs()
                             .unwrap_or(15 * (1u64 << record.consecutive_limits.min(8)));
-                        record.cooldown_until = time.saturating_add(delay.clamp(1, 604800));
+                        record.cooldown_until = record.cooldown_until.max(time.saturating_add(delay.clamp(1, 604800)));
                         record.message = format!(
                             "Provider unavailable; retry in {} seconds",
                             record.cooldown_until - time
@@ -557,6 +616,8 @@ struct GuardedProvider {
     allowances: Allowances,
     backend: String,
     metered: bool,
+    /// Each request can be reserved against a token or money cap.
+    bounded: bool,
     /// The bot's backend, for its list price when the room sets no rates.
     reference: ProviderRef,
 }
@@ -583,6 +644,18 @@ impl Provider for GuardedProvider {
     fn hold_merge(&self, hold: bool) {
         self.inner.hold_merge(hold)
     }
+
+    fn end_turn_early(&self) {
+        self.inner.end_turn_early()
+    }
+
+    fn tool_in_flight(&self) -> bool {
+        self.inner.tool_in_flight()
+    }
+
+    fn last_failed_usage(&self) -> Option<orgbot_providers::Usage> {
+        self.inner.last_failed_usage()
+    }
     async fn complete(
         &self,
         mut request: CompletionRequest,
@@ -591,8 +664,9 @@ impl Provider for GuardedProvider {
         let manager = self.allowances.clone();
         let backend = self.backend.clone();
         let metered = self.metered;
+        let bounded = self.bounded;
         let (reservation, request) = tokio::task::spawn_blocking(move || {
-            let reservation = manager.reserve(&backend, &mut request, metered, now())?;
+            let reservation = manager.reserve_with(&backend, &mut request, metered, bounded, now())?;
             Ok::<_, ProviderError>((reservation, request))
         })
         .await
@@ -601,8 +675,9 @@ impl Provider for GuardedProvider {
         let mut result = self.inner.complete(request, sink).await;
         if let Ok(response) = &mut result {
             if response.usage.reported {
-                // The room's own rates first, then the model's list price.
-                let priced = match token_rates(&reservation.policy, &response.model) {
+                // The room's own rates first (those the reservation used),
+                // then the model's list price.
+                let priced = match reservation.rates.or_else(|| token_rates(&reservation.policy, &response.model)) {
                     Some(rates) => Some(price_usage(response.usage, rates)),
                     None => orgbot_proto::pricing::list_cost(
                         &self.reference,
@@ -634,7 +709,12 @@ impl Provider for GuardedProvider {
         })
         .await
         .map_err(|_| waiting(&self.backend, "Allowance settlement task failed", 60))?;
-        settlement.map_err(|e| waiting(&self.backend, e, 60))?;
+        // The reply stands even when the ledger cannot be written: from the
+        // 13 November audit, a full disk turned a finished 15-minute turn
+        // into a failed one that the bot then repeated.
+        if let Err(error) = settlement {
+            tracing::warn!(backend = %self.backend, %error, "could not record this reply's usage");
+        }
         result
     }
 }
@@ -652,11 +732,13 @@ pub fn wrap(
         reference,
         ProviderRef::DeepSeek { .. } | ProviderRef::Anthropic { .. }
     ) || matches!(reference, ProviderRef::OpenAiCompatible { profile, .. } if profile != "codex" && profile != "chatgpt" && profile != "ollama");
+    let bounded = metered || matches!(reference, ProviderRef::OpenAiCompatible { profile, .. } if profile == "ollama");
     Arc::new(GuardedProvider {
         inner: provider,
         allowances,
         backend,
         metered,
+        bounded,
         reference: reference.clone(),
     })
 }
@@ -1016,6 +1098,69 @@ mod tests {
         ));
         let ledger: Ledger = read_json(&fixture.manager.ledger).unwrap();
         assert_eq!(ledger.providers["deepseek"].requests, 1);
+    }
+
+    /// From the 13 November audit: five requests in flight when one 529 came
+    /// back counted as five incidents and paused the backend for minutes.
+    #[test]
+    fn one_incident_is_counted_once_however_many_requests_it_hit() {
+        let fixture = Fixture::new(Policy::default());
+        let busy = || -> Result<CompletionResponse, ProviderError> {
+            Err(ProviderError::Upstream { provider: "deepseek".into(), status: 529, message: "overloaded".into() })
+        };
+        let reservations: Vec<_> = (0..5)
+            .map(|_| fixture.manager.reserve("deepseek", &mut request(), true, 700000).unwrap())
+            .collect();
+        for reservation in reservations {
+            fixture.manager.settle("deepseek", reservation, &busy(), 700001).unwrap();
+        }
+        let ledger: Ledger = read_json(&fixture.manager.ledger).unwrap();
+        assert_eq!(ledger.providers["deepseek"].consecutive_limits, 1);
+        assert!(ledger.providers["deepseek"].cooldown_until <= 700001 + 30);
+    }
+
+    /// From the 13 November audit: a token cap with no prices reserved $0,
+    /// the reply was priced at list, and that "overrun" paused the provider
+    /// for the rest of the window.
+    #[test]
+    fn a_token_cap_without_prices_does_not_pause_a_list_priced_provider() {
+        let fixture = Fixture::new(Policy {
+            max_tokens: 1_000_000,
+            window_secs: 7 * 24 * 3600,
+            ..Default::default()
+        });
+        let reservation = fixture.manager.reserve("deepseek", &mut request(), true, 700000).unwrap();
+        let mut reply = response(100, 20);
+        if let Ok(response) = &mut reply {
+            response.usage.actual_api_cost_microusd = Some(5_000);
+        }
+        fixture.manager.settle("deepseek", reservation, &reply, 700001).unwrap();
+        assert!(fixture.manager.reserve("deepseek", &mut request(), true, 700002).is_ok(), "the next request goes through");
+        let ledger: Ledger = read_json(&fixture.manager.ledger).unwrap();
+        assert_eq!(ledger.providers["deepseek"].cooldown_until, 0);
+    }
+
+    /// From the 13 November audit: a refused request kept its worst-case
+    /// reservation for the window, and a cap on Ollama's cloud refused all.
+    #[test]
+    fn a_refused_request_gives_its_reservation_back_and_ollama_can_be_capped() {
+        let fixture = Fixture::new(Policy {
+            max_tokens: 1_000_000,
+            window_secs: 7 * 24 * 3600,
+            ..Default::default()
+        });
+        let reservation = fixture.manager.reserve("deepseek", &mut request(), true, 700000).unwrap();
+        let refused: Result<CompletionResponse, ProviderError> =
+            Err(ProviderError::BadRequest { provider: "deepseek".into(), message: "bad".into() });
+        fixture.manager.settle("deepseek", reservation, &refused, 700001).unwrap();
+        let ledger: Ledger = read_json(&fixture.manager.ledger).unwrap();
+        assert_eq!(ledger.providers["deepseek"].tokens, 0);
+
+        // Capped, billed in credits rather than per token, but bounded: as
+        // Ollama's cloud is. Only an unbounded backend is refused a cap.
+        let ollama_like = fixture.manager.reserve_with("deepseek", &mut request(), false, true, 700002);
+        assert!(ollama_like.is_ok(), "{ollama_like:?}");
+        assert!(fixture.manager.reserve_with("deepseek", &mut request(), false, false, 700003).is_err());
     }
 
     #[test]

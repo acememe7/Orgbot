@@ -66,9 +66,48 @@ void main() {
     expect(credential.toString(), contains('redacted'));
   });
 
+  // From the 13 November audit: a keyring locked at startup made the next
+  // save write only the new sign-in, erasing the others.
+  test('a keyring that was locked at startup is read again before a save',
+      () async {
+    await const FlutterSecureStorage().write(key: _key, value: bundle('kept'));
+    final flaky = _LockedOnce();
+    final credentials = Credentials(secure: flaky);
+    await credentials.load();
+    expect(credentials.all, isEmpty, reason: 'the first read failed');
+
+    await credentials.saveApiKey(ProviderKind.deepseek, 'sk-new-key');
+
+    final stored = await const FlutterSecureStorage().read(key: _key);
+    expect(stored, contains('kept'), reason: 'the other sign-in survives');
+    expect(stored, contains('sk-new-key'));
+  });
+
   test('an empty store simply loads nothing', () async {
     final credentials = Credentials();
     await credentials.load();
     expect(credentials.all, isEmpty);
   });
+}
+
+/// A keystore whose first read fails, as a locked keyring does.
+class _LockedOnce extends FlutterSecureStorage {
+  _LockedOnce();
+
+  var _reads = 0;
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) {
+    _reads++;
+    if (_reads == 1) throw Exception('keyring locked');
+    return const FlutterSecureStorage().read(key: key);
+  }
 }

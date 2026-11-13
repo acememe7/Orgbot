@@ -199,7 +199,7 @@ async fn a_room_killed_mid_turn_reopens_with_its_work_intact() {
 /// A room reopens paused, so an interrupted operation is never replayed blind.
 #[tokio::test]
 async fn a_reopened_room_waits_to_be_told_to_carry_on() {
-    let (mut room, worker, task) = started();
+    let (mut room, worker, _task) = started();
     room.step_many(1, None).await;
 
     let reopened =
@@ -282,7 +282,7 @@ async fn tightening_cli_policy_discards_previous_conversation_context() {
 /// Nothing is lost and nothing is duplicated across the restart.
 #[tokio::test]
 async fn the_board_is_the_same_board_after_a_restart() {
-    let (mut room, worker, first) = started();
+    let (mut room, worker, _first) = started();
     let second = {
         let mut engine = room.engine_mut();
         open_task(&mut engine, "a second, quite different piece of work")
@@ -430,7 +430,7 @@ fn the_workspace_brief_points_at_the_computers_own_playbooks() {
         },
         tokio::sync::mpsc::channel(1).0,
     );
-    let brief = workspace.instruction();
+    let brief = workspace.instruction(false);
     assert!(brief.contains("skills"), "{brief}");
     assert!(brief.contains("SKILL.md"), "{brief}");
     assert!(

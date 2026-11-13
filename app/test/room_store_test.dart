@@ -12,6 +12,8 @@ import 'package:orgbot_app/state/room_store.dart';
 
 /// A fake client that lets a test push server messages by hand.
 class FakeClient implements RoomClient {
+  @override
+  bool withdrawQueued(String body) => false;
   final _messages = StreamController<Map<String, Object?>>.broadcast();
   final _state = StreamController<LinkState>.broadcast();
   final sent = <Map<String, Object?>>[];
@@ -725,6 +727,41 @@ void main() {
       'b',
       reason: 'the brief stays when only the criteria change',
     );
+  });
+
+  // From the 13 November audit: a removed bot stayed on the roster, and a
+  // changed dependency list was dropped.
+  test('a bot that leaves is gone and new dependencies show', () async {
+    final client = FakeClient();
+    final store = RoomStore(client);
+    client.emit(
+      event({
+        'event': 'agent_joined',
+        'spec': {'id': 'bot_iris', 'handle': 'iris', 'display_name': 'Iris', 'roles': ['engineer']},
+      }),
+    );
+    client.emit(
+      event({
+        'event': 'task_created',
+        'task': {'id': 'task_1', 'title': 't', 'brief': 'b', 'state': 'open', 'priority': 'normal', 'revision': 0},
+      }, seq: 2),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(store.agents.map((a) => a.id), contains('bot_iris'));
+    client.emit(event({'event': 'agent_left', 'agent': 'bot_iris', 'reason': 'removed'}, seq: 3));
+    client.emit(
+      event({
+        'event': 'task_amended',
+        'task': 'task_1',
+        'title': 't',
+        'by': 'bot_lead',
+        'depends_on': ['task_0'],
+        'reason': 'needs the model first',
+      }, seq: 4),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(store.agents.map((a) => a.id), isNot(contains('bot_iris')));
+    expect(store.tasks.first.dependsOn, ['task_0']);
   });
 
   test(

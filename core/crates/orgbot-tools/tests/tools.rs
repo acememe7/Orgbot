@@ -379,6 +379,35 @@ fn review_only_coordinator_can_plan_and_deliver_but_cannot_implement() {
     }
 }
 
+/// From the 13 November audit: "Bumped @types/node and fixed the @media
+/// breakpoint" was refused because `types` is not a bot.
+#[test]
+fn an_at_word_that_is_not_a_bot_is_just_text() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let out = f.call(worker, "post_message", json!({"body": "Bumped @types/node and fixed the @media breakpoint"}));
+    assert!(!out.is_error, "{}", out.content);
+    let out = f.call(worker, "post_message", json!({"body": "@w2 I bumped @types/node, please check"}));
+    assert!(!out.is_error, "{}", out.content);
+    let w2 = f.engine.agent_by_handle("w2").unwrap().id;
+    assert_eq!(
+        f.engine.transcript().last().unwrap().audience,
+        orgbot_proto::chat::Audience::Agents { agents: vec![w2] }
+    );
+}
+
+/// From the 13 November audit: findings sent as a JSON string were read as
+/// none and the work approved; an unknown handoff kind became an assist.
+#[test]
+fn a_wrong_typed_or_unknown_argument_is_refused() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let out = f.call(worker, "post_message", json!({"body": "hello", "intent": "shout"}));
+    assert!(out.is_error && out.content.contains("`intent` must be one of"), "{}", out.content);
+    let out = f.call(worker, "post_message", json!({"body": 42}));
+    assert!(out.is_error && out.content.contains("`body` must be string"), "{}", out.content);
+}
+
 #[test]
 fn every_tool_schema_rejects_unknown_arguments() {
     let f = fixture();
@@ -1406,7 +1435,7 @@ fn work_that_already_exists_is_pointed_at_rather_than_duplicated() {
         told.contains("B3-C"),
         "it should name the existing task: {told}"
     );
-    assert!(told.contains("supersede"), "and say what to do: {told}");
+    assert!(told.contains("retire the old one"), "and say what to do: {told}");
 }
 
 /// Genuinely separate work still gets through, once the caller says so.

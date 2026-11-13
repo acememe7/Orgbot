@@ -1,3 +1,4 @@
+import 'data_home.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -80,6 +81,7 @@ const neverLent = [
   '.local/share/orgbot',
   '.config/orgbot',
   '.local/share/com.orgbot.app',
+  '.local/share/orgbots',
   '.ssh',
   '.gnupg',
   '.codex',
@@ -295,10 +297,8 @@ class LendSettings {
     return true;
   }
 
-  static String _dataHome(Map<String, String> environment, String home) {
-    final xdg = environment['XDG_DATA_HOME'];
-    return xdg != null && xdg.startsWith('/') ? xdg : '$home/.local/share';
-  }
+  static String _dataHome(Map<String, String> environment, String home) =>
+      linuxDataHome({...environment, 'HOME': home});
 
   /// Load the list, with every known tool present and your choices applied.
   static LendSettings load({Map<String, String>? environment}) {

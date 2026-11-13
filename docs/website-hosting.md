@@ -9,7 +9,7 @@ change the GitHub Pages archive domain or its `apt` branch.
 
 `deploy/website/nginx-orgbots.https.conf` is the installed Nginx virtual host.
 It redirects HTTP to HTTPS, serves a real custom 404 and sets security headers.
-Scripts and styles come from this origin. Optional analytics remains disabled. The two inline JSON-LD blocks have
+Scripts and styles come from this origin. Optional analytics remains disabled. The seven inline JSON-LD blocks (one per page that has one) have
 explicit CSP SHA-256 hashes, checked by `scripts/check-website.py`; update those
 hashes when changing structured data. The bootstrap configuration is retained
 only for rebuilding the ACME webroot setup.
@@ -58,7 +58,7 @@ complete security or legal audit.
 The website has no account database, forms, active analytics or provider
 credentials. Cloudflare may process security cookies and network error reports.
 Search Console ownership was verified during initial deployment, when its
-sitemap reported five discovered pages. The current five-URL sitemap passes
+sitemap reported five discovered pages. The current ten-URL sitemap passes
 local and public checks; Search Console indexing was not refreshed for this
 content release. A private Google Drive snapshot has passed a download and
 isolated restore check; the owner explicitly selected Drive instead of Cloud Storage.

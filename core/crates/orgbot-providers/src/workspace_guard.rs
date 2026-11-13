@@ -211,7 +211,7 @@ pub fn clear_private_agent_config(
     if !contents[end_at..].trim().is_empty() {
         return Err("room bridge config is not at the end of the private profile".into());
     }
-    write_private_file(&config, contents[..start].as_bytes())
+    write_private_file(&config, &contents.as_bytes()[..start])
 }
 
 /// Remove copied external MCP registrations before any protected CLI launch.
@@ -352,7 +352,7 @@ fn configure_new_cli_profile_inner(
                 if !socket.is_absolute() {
                     return Err("Antigravity room MCP socket must be absolute".into());
                 }
-                if !relay_command.is_some() {
+                if relay_command.is_none() {
                     return Err("Antigravity room MCP relay is unavailable".into());
                 }
             }
@@ -666,14 +666,17 @@ fn ensure_managed_private_file(path: &Path, bytes: &[u8], label: &str) -> Result
                 || metadata.file_type().is_symlink()
                 || metadata.uid() != current_uid()
                 || metadata.nlink() != 1
-                || metadata.mode() & 0o077 != 0
-                || metadata.len() != bytes.len() as u64 =>
+                || metadata.mode() & 0o077 != 0 =>
         {
-            return Err(format!("unsafe {label} file"));
+            Err(format!("unsafe {label} file"))
         }
+        // From the 13 November audit: a managed file that no longer matched
+        // (the room's tools were switched on or off, or the room socket moved)
+        // stopped the bot from ever starting again. A file of ours that is
+        // out of date is replaced; one that is not ours is still refused.
         Ok(_) => {
             if std::fs::read(path).map_err(|error| format!("read {label}: {error}"))? != bytes {
-                return Err(format!("{label} differs from the managed profile"));
+                write_private_file(path, bytes)?;
             }
             Ok(())
         }
@@ -965,6 +968,12 @@ impl WorkspaceGuard {
             .arg(&self.state)
             .arg("--agent")
             .arg(&self.agent);
+        // Which project's copy, for a bot that has one for an earlier project
+        // folder too. From the 13 November audit: a second manifest made
+        // every command fail.
+        if matches!(operation, "run" | "status" | "apply" | "set-aside") {
+            command.arg("--project").arg(&self.project);
+        }
         Ok(command)
     }
 
@@ -995,12 +1004,7 @@ impl WorkspaceGuard {
         let output = output_within(&mut command, HELPER_TIME_LIMIT)
             .map_err(|e| format!("workspace setup failed: {e}"))?;
         if !output.status.success() {
-            let text = if output.stderr.is_empty() {
-                &output.stdout
-            } else {
-                &output.stderr
-            };
-            return Err(String::from_utf8_lossy(text).chars().take(2048).collect());
+            return Err(helper_failure(&output));
         }
         serde_json::from_slice(&output.stdout)
             .map_err(|e| format!("invalid workspace setup result: {e}"))
@@ -1026,15 +1030,50 @@ impl WorkspaceGuard {
         let output = output_within(&mut command, HELPER_TIME_LIMIT)
             .map_err(|e| format!("workspace integration failed: {e}"))?;
         if !output.status.success() {
-            let text = if output.stderr.is_empty() {
-                &output.stdout
-            } else {
-                &output.stderr
-            };
-            return Err(String::from_utf8_lossy(text).chars().take(4096).collect());
+            return Err(helper_failure(&output));
         }
         serde_json::from_slice(&output.stdout)
             .map_err(|e| format!("invalid workspace integration result: {e}"))
+    }
+
+    /// Put the changes a bot made while it held no task aside, out of its
+    /// copy, so they never merge under a task it takes later. The copy takes
+    /// the project's files back; the bot's versions go to a leftovers folder
+    /// the owner can open and bots cannot.
+    ///
+    /// From the 13 November audit: held changes merged at the end of the
+    /// first later turn in which the bot held any task, under that task.
+    pub fn set_aside_changes(&self) -> Result<serde_json::Value, String> {
+        let mut command = self.command("set-aside")?;
+        let output = output_within(&mut command, HELPER_TIME_LIMIT)
+            .map_err(|e| format!("setting changes aside failed: {e}"))?;
+        if !output.status.success() {
+            return Err(helper_failure(&output));
+        }
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("invalid set-aside result: {e}"))
+    }
+}
+
+/// Why a helper failed: its `{"ok": false, "error"}` on stdout first, then
+/// the end of what it wrote to stderr. From the 13 November audit: stderr
+/// came first, and it holds progress lines, so a failed merge reported
+/// `{"progress": ...}` instead of the error.
+fn helper_failure(output: &std::process::Output) -> String {
+    let reported = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()
+        .and_then(|value| value.get("error").and_then(serde_json::Value::as_str).map(str::to_owned));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let notes: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with("{\"progress\""))
+        .collect();
+    let tail = notes[notes.len().saturating_sub(5)..].join("\n");
+    let tail: String = tail.chars().rev().take(2048).collect::<Vec<_>>().into_iter().rev().collect();
+    match (reported, tail.is_empty()) {
+        (Some(error), true) => error,
+        (Some(error), false) => format!("{error}\n{tail}"),
+        (None, false) => tail,
+        (None, true) => String::from_utf8_lossy(&output.stdout).chars().take(2048).collect(),
     }
 }
 
@@ -1104,13 +1143,14 @@ pub fn private_home(
     profile_root: &Path,
     expected_home: &Path,
     resume_id: Option<&str>,
+    cli_dir: &str,
 ) -> Result<PathBuf, String> {
     let original = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
     let expected = profile_root.join("home");
     if expected != expected_home {
         return Err("workspace helper returned an unexpected CLI home".into());
     }
-    private_home_from(profile_root, Path::new(&original), resume_id)
+    private_home_from(profile_root, Path::new(&original), resume_id, cli_dir)
 }
 
 /// Create an empty private HOME for CLIs that must not inherit any other
@@ -1149,6 +1189,7 @@ fn private_home_from(
     profile_root: &Path,
     source_home: &Path,
     resume_id: Option<&str>,
+    cli_dir: &str,
 ) -> Result<PathBuf, String> {
     let home = profile_root.join("home");
     ensure_private_directory(&home)?;
@@ -1157,9 +1198,27 @@ fn private_home_from(
         bytes: 0,
     };
     let mut seeded = SeedStamp::load(profile_root);
-    for name in [".codex", ".claude", ".grok"] {
-        let from = source_home.join(name);
+    // Only the bot's own CLI. From the 13 November audit: every bot was
+    // seeded with all three CLIs' sign-ins and configs, so a Grok bot could
+    // read the owner's Claude and Codex sign-ins.
+    for name in [".codex", ".claude", ".grok"].into_iter().filter(|name| *name == cli_dir) {
+        let mut from = source_home.join(name);
         let to = home.join(name);
+        // From the 13 November audit: an owner whose folder is a link (stow,
+        // chezmoi) had nothing seeded, and their bots were told to sign in
+        // again. A link to a folder of the owner's own is followed, once.
+        if std::fs::symlink_metadata(&from).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            use std::os::unix::fs::MetadataExt;
+            match std::fs::canonicalize(&from) {
+                Ok(target)
+                    if std::fs::symlink_metadata(&target)
+                        .is_ok_and(|meta| meta.is_dir() && meta.uid() == current_uid()) =>
+                {
+                    from = target;
+                }
+                _ => continue,
+            }
+        }
         if let Ok(metadata) = std::fs::symlink_metadata(&from) {
             if metadata.file_type().is_symlink() {
                 continue;
@@ -1189,7 +1248,7 @@ fn private_home_from(
                         // signing in again) replaces the bot's copy.
                         refresh_credential(&from.join(file), &to.join(file), &mut budget)?;
                     } else {
-                        copy_file_if_missing(&from.join(file), &to.join(file), &mut budget)?;
+                        copy_file_following_owner(&from.join(file), &to.join(file), &mut budget)?;
                     }
                 }
                 for directory in [
@@ -1218,12 +1277,17 @@ fn private_home_from(
                         ".claude" => &["projects", "sessions"],
                         _ => &["sessions", "history", "projects"],
                     };
+                    // Looking is not copying: the search has its own limit, and
+                    // reaching it means "not found". From the 13 November
+                    // audit: walking an owner's 50,000 history files counted
+                    // against the copy budget, and every resumed turn failed.
+                    let mut looked = 0;
                     for directory in session_dirs {
                         let src = from.join(directory);
                         if std::fs::symlink_metadata(&src)
                             .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
                         {
-                            copy_matching_session(&src, &to.join(directory), id, &mut budget, 0)?;
+                            copy_matching_session(&src, &to.join(directory), id, &mut budget, &mut looked, 0)?;
                         }
                     }
                     seeded.checked_session(name, id);
@@ -1231,11 +1295,13 @@ fn private_home_from(
             }
         }
     }
-    copy_file_if_missing(
-        &source_home.join(".claude.json"),
-        &home.join(".claude.json"),
-        &mut budget,
-    )?;
+    if cli_dir == ".claude" {
+        copy_file_if_missing(
+            &source_home.join(".claude.json"),
+            &home.join(".claude.json"),
+            &mut budget,
+        )?;
+    }
     seeded.save();
     Ok(home)
 }
@@ -1344,8 +1410,9 @@ pub fn private_home_from_test(
     profile_root: &Path,
     source_home: &Path,
     resume_id: Option<&str>,
+    cli_dir: &str,
 ) -> Result<PathBuf, String> {
-    private_home_from(profile_root, source_home, resume_id)
+    private_home_from(profile_root, source_home, resume_id, cli_dir)
 }
 
 #[derive(Default)]
@@ -1415,27 +1482,31 @@ fn copy_tree_bounded(from: &Path, to: &Path, budget: &mut CopyBudget) -> Result<
             ensure_private_directory(&dst)?;
             copy_tree_bounded(&src, &dst, budget)?;
         } else if meta.is_file() {
-            copy_file_if_missing(&src, &dst, budget)?;
+            copy_file_following_owner(&src, &dst, budget)?;
         }
     }
     Ok(())
 }
+
+/// How many entries of the owner's CLI history a session search looks at.
+const SESSION_SEARCH_LIMIT: usize = 500_000;
 
 fn copy_matching_session(
     from: &Path,
     to: &Path,
     session_id: &str,
     budget: &mut CopyBudget,
+    looked: &mut usize,
     depth: usize,
 ) -> Result<(), String> {
     if depth > 20 {
-        return Err("CLI session profile nesting exceeds the limit".into());
+        return Ok(());
     }
     for entry in std::fs::read_dir(from).map_err(|e| format!("read CLI session profile: {e}"))? {
         let entry = entry.map_err(|e| format!("read CLI session entry: {e}"))?;
-        budget.entries += 1;
-        if budget.entries > PROFILE_MAX_ENTRIES {
-            return Err("CLI profile exceeds the 50,000-entry limit".into());
+        *looked += 1;
+        if *looked > SESSION_SEARCH_LIMIT {
+            return Ok(());
         }
         let src = entry.path();
         let meta = std::fs::symlink_metadata(&src)
@@ -1445,9 +1516,20 @@ fn copy_matching_session(
         }
         let dst = to.join(entry.file_name());
         if meta.is_dir() {
-            copy_matching_session(&src, &dst, session_id, budget, depth + 1)?;
+            copy_matching_session(&src, &dst, session_id, budget, looked, depth + 1)?;
         } else if meta.is_file() && entry.file_name().to_string_lossy().contains(session_id) {
+            // Codex keeps sessions by date, folders deep; each is made.
             if let Some(parent) = dst.parent() {
+                let mut missing = Vec::new();
+                let mut current = parent;
+                while std::fs::symlink_metadata(current).is_err() {
+                    missing.push(current.to_path_buf());
+                    let Some(up) = current.parent() else { break };
+                    current = up;
+                }
+                for folder in missing.iter().rev() {
+                    ensure_private_directory(folder)?;
+                }
                 ensure_private_directory(parent)?;
             }
             copy_file_if_missing(&src, &dst, budget)?;
@@ -1555,45 +1637,243 @@ fn refresh_credential(source: &Path, copy: &Path, budget: &mut CopyBudget) -> Re
     replace_private_file(source, copy)
 }
 
+/// The longest a refreshed sign-in may say it is good for. A file claiming
+/// years was written by hand, not by a refresh.
+const SIGN_IN_MAX_LIFETIME_MS: i64 = 30 * 24 * 3_600_000;
+/// How many of the owner's earlier sign-ins are kept.
+const SIGN_IN_BACKUPS_KEPT: usize = 5;
+
+/// Where the owner's earlier sign-ins are kept: OrgBots' own data folder,
+/// which the sandbox hides from every bot. From the 13 November audit: the
+/// backup sat beside the sign-in as `<name>.orgbot-previous`, readable from
+/// every sandbox, and a second hand-back overwrote it.
+fn sign_in_backup_dir(owner_home: &Path, cli_dir: &str) -> PathBuf {
+    owner_home
+        .join(".local/share/orgbot/sign-in-backups")
+        .join(cli_dir.trim_start_matches('.'))
+}
+
+/// Keep the owner's current sign-in before it is replaced, with the last few.
+fn keep_previous_sign_in(owner_home: &Path, cli_dir: &str, file: &str, current: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = sign_in_backup_dir(owner_home, cli_dir);
+    std::fs::create_dir_all(&folder).map_err(|e| format!("keep the previous sign-in: {e}"))?;
+    for dir in [folder.parent().unwrap_or(&folder), folder.as_path()] {
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis());
+    write_sign_in(current, None, &folder.join(format!("{file}.{stamp}")))?;
+    let mut kept: Vec<PathBuf> = std::fs::read_dir(&folder)
+        .map_err(|e| format!("list the kept sign-ins: {e}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.strip_prefix(file).is_some_and(|rest| rest.starts_with('.')))
+        })
+        .collect();
+    kept.sort();
+    let excess = kept.len().saturating_sub(SIGN_IN_BACKUPS_KEPT);
+    for old in kept.into_iter().take(excess) {
+        let _ = std::fs::remove_file(old);
+    }
+    Ok(())
+}
+
+/// Write a sign-in from bytes already read and checked, atomically and
+/// private to the owner, never through a link.
+fn write_sign_in(bytes: &[u8], modified: Option<std::time::SystemTime>, to: &Path) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = to.parent().ok_or("CLI sign-in has no folder")?;
+    let temp = parent.join(format!(
+        ".orgbot-signin-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(0x20000) // O_NOFOLLOW
+            .open(&temp)?;
+        file.write_all(bytes)?;
+        if let Some(modified) = modified {
+            file.set_modified(modified)?;
+        }
+        file.sync_all()?;
+        std::fs::rename(&temp, to)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result.map_err(|e| format!("update CLI sign-in: {e}"))
+}
+
+/// A sign-in read once: its bytes, its JSON object and its time. The file is
+/// opened without following a link and checked through the open handle, and
+/// the same bytes are what gets written. From the 13 November audit: a bot
+/// could swap its file for a link between the check and the copy.
+struct ReadSignIn {
+    bytes: Vec<u8>,
+    map: serde_json::Map<String, serde_json::Value>,
+    modified: std::time::SystemTime,
+}
+
+fn read_sign_in(path: &Path) -> Option<ReadSignIn> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(0x20000 | 0x800) // O_NOFOLLOW | O_NONBLOCK
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > OPENCODE_AUTH_MAX_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.read_to_end(&mut bytes).ok()?;
+    match serde_json::from_slice::<serde_json::Value>(&bytes).ok()? {
+        serde_json::Value::Object(map) if !map.is_empty() => Some(ReadSignIn { bytes, map, modified: meta.modified().ok()? }),
+        _ => None,
+    }
+}
+
+/// Whether `fresh` keeps every field of `owner`, with the same kind of value,
+/// a few levels down: the same kind of sign-in, not just any JSON object.
+fn same_shape(owner: &serde_json::Value, fresh: &serde_json::Value, depth: usize) -> bool {
+    use serde_json::Value;
+    match (owner, fresh) {
+        (Value::Object(owner), Value::Object(fresh)) => owner.iter().all(|(key, value)| {
+            fresh.get(key).is_some_and(|other| depth == 0 || same_shape(value, other, depth - 1))
+        }),
+        (Value::Null, _) | (_, Value::Null) => true,
+        (Value::String(_), Value::String(_))
+        | (Value::Number(_), Value::Number(_))
+        | (Value::Bool(_), Value::Bool(_))
+        | (Value::Array(_), Value::Array(_)) => true,
+        _ => false,
+    }
+}
+
+/// A claim from a JWT's payload, read without checking its signature: only
+/// to tell one account from another, never to trust it.
+fn jwt_claim(token: Option<&serde_json::Value>, claim: &str) -> Option<serde_json::Value> {
+    use base64::Engine;
+    let payload = token?.as_str()?.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    serde_json::from_slice::<serde_json::Value>(&bytes).ok()?.get(claim).cloned()
+}
+
+/// Whether the fresh sign-in is for the same account as the owner's, as far
+/// as the file can say.
+fn same_account(cli_dir: &str, owner: &serde_json::Value, fresh: &serde_json::Value) -> bool {
+    let differs = |a: Option<&serde_json::Value>, b: Option<&serde_json::Value>| matches!((a, b), (Some(a), Some(b)) if !a.is_null() && a != b);
+    match cli_dir {
+        ".codex" => {
+            let tokens = |v: &serde_json::Value| v.get("tokens").cloned().unwrap_or_default();
+            let (o, f) = (tokens(owner), tokens(fresh));
+            !differs(o.get("account_id"), f.get("account_id"))
+                && !differs(
+                    jwt_claim(o.get("id_token"), "email").as_ref(),
+                    jwt_claim(f.get("id_token"), "email").as_ref(),
+                )
+        }
+        ".claude" => {
+            let oauth = |v: &serde_json::Value| v.get("claudeAiOauth").cloned().unwrap_or_default();
+            let (o, f) = (oauth(owner), oauth(fresh));
+            !differs(o.get("scopes"), f.get("scopes")) && !differs(o.get("subscriptionType"), f.get("subscriptionType"))
+        }
+        _ => true,
+    }
+}
+
+/// When the CLI's own token in a sign-in runs out, in milliseconds. From the
+/// 13 November audit: the latest expiry anywhere in the file counted, so an
+/// MCP token good for a month hid every real refresh.
+fn own_expiry(cli_dir: &str, value: &serde_json::Value) -> Option<i64> {
+    let millis = |n: i64| if n < 100_000_000_000 { n * 1000 } else { n };
+    let number = |v: Option<&serde_json::Value>| v.and_then(serde_json::Value::as_i64).map(millis);
+    match cli_dir {
+        ".claude" => number(value.get("claudeAiOauth").and_then(|o| o.get("expiresAt"))),
+        ".codex" => jwt_claim(value.get("tokens").and_then(|t| t.get("access_token")), "exp")
+            .and_then(|exp| exp.as_i64())
+            .map(millis),
+        _ => {
+            // The object that holds a token holds its expiry.
+            let expiry_of = |object: &serde_json::Map<String, serde_json::Value>| {
+                ["expiresAt", "expires_at", "expiry"].into_iter().find_map(|key| number(object.get(key)))
+            };
+            let map = value.as_object()?;
+            expiry_of(map).or_else(|| {
+                map.values().filter_map(serde_json::Value::as_object).find_map(|child| {
+                    let holds_token = ["access_token", "accessToken", "token"].iter().any(|key| child.contains_key(*key));
+                    holds_token.then(|| expiry_of(child)).flatten()
+                })
+            })
+        }
+    }
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as i64)
+}
+
+/// Whether a bot's sign-in may replace the owner's: the same kind of sign-in
+/// for the same account, holding a token good for longer than the owner's,
+/// past now and not absurdly far out. Without expiries on either side, and
+/// only at the end of a turn, a newer file counts.
+fn may_hand_back(cli_dir: &str, owner: &ReadSignIn, fresh: &ReadSignIn, end_of_turn: bool) -> bool {
+    let (owner_value, fresh_value) = (serde_json::Value::Object(owner.map.clone()), serde_json::Value::Object(fresh.map.clone()));
+    if owner.bytes == fresh.bytes || !same_shape(&owner_value, &fresh_value, 3) || !same_account(cli_dir, &owner_value, &fresh_value) {
+        return false;
+    }
+    let now = now_millis();
+    match (own_expiry(cli_dir, &fresh_value), own_expiry(cli_dir, &owner_value)) {
+        (Some(fresh), owners) => {
+            fresh > now && fresh <= now + SIGN_IN_MAX_LIFETIME_MS && owners.is_none_or(|owners| fresh > owners)
+        }
+        (None, None) => end_of_turn && fresh.modified > owner.modified,
+        (None, Some(_)) => false,
+    }
+}
+
+/// Copy the bot's sign-in over the owner's, keeping the owner's first.
+fn hand_back(owner_home: &Path, cli_dir: &str, file: &str, owner: &ReadSignIn, fresh: &ReadSignIn) -> Result<(), String> {
+    keep_previous_sign_in(owner_home, cli_dir, file, &owner.bytes)?;
+    write_sign_in(&fresh.bytes, Some(fresh.modified), &owner_home.join(cli_dir).join(file))
+}
+
 /// After a turn, hand a sign-in the bot refreshed back to the owner's file,
 /// so the owner and the other bots continue from the newest token rather than
-/// one the refresh has just invalidated.
-///
-/// Only when the bot's copy is newer: if the owner signed in meanwhile, their
-/// file wins and reaches the bot on its next turn. Only a real sign-in that
-/// keeps every field the owner's file has is written, and the owner's previous
-/// file is kept beside it as `<name>.orgbot-previous`.
+/// one the refresh has just invalidated. Only the bot's own CLI's sign-in,
+/// and only under [`may_hand_back`]; a signed-out owner stays signed out.
 ///
 /// `owner_home` must be the home the private copy was made from. It is passed
 /// in rather than read from `HOME`, so nothing but the real owner's profile is
 /// ever written; a test run once replaced a real sign-in with a fixture here.
-pub fn write_back_credentials_to(private_home: &Path, owner_home: &Path) -> Result<(), String> {
-    let source_home = owner_home;
-    for cli_dir in [".claude", ".codex", ".grok"] {
-        for file in credential_files(cli_dir) {
-            let copy = private_home.join(cli_dir).join(file);
-            let source = source_home.join(cli_dir).join(file);
-            let (Some(copy_time), Some(source_time)) =
-                (regular_file_mtime(&copy), regular_file_mtime(&source))
-            else {
-                // A signed-out owner stays signed out.
-                continue;
-            };
-            if copy_time <= source_time || std::fs::read(&copy).ok() == std::fs::read(&source).ok() {
-                continue;
-            }
-            let Some(refreshed) = holds_sign_in(&copy) else {
-                continue;
-            };
-            if let Some(current) = holds_sign_in(&source) {
-                if !current.keys().all(|key| refreshed.contains_key(key)) {
-                    // Not the same kind of sign-in; leave the owner's alone.
-                    continue;
-                }
-            }
-            let previous = source.with_file_name(format!("{file}.orgbot-previous"));
-            replace_private_file(&source, &previous)?;
-            replace_private_file(&copy, &source)?;
+pub fn write_back_credentials_to(private_home: &Path, owner_home: &Path, cli_dir: &str) -> Result<(), String> {
+    for file in credential_files(cli_dir) {
+        let Some(owner) = read_sign_in(&owner_home.join(cli_dir).join(file)) else {
+            continue;
+        };
+        let Some(fresh) = read_sign_in(&private_home.join(cli_dir).join(file)) else {
+            continue;
+        };
+        if may_hand_back(cli_dir, &owner, &fresh, true) {
+            hand_back(owner_home, cli_dir, file, &owner, &fresh)?;
         }
     }
     Ok(())
@@ -1620,24 +1900,6 @@ pub fn take_owner_sign_in(private_home: &Path, owner_home: &Path, cli_dir: &str)
     Ok(took)
 }
 
-/// How far ahead a sign-in is good for, as written in it: its latest
-/// `expiresAt`, `expires_at` or `expiry` (seconds or milliseconds since the
-/// epoch), in milliseconds. `None` when it records no expiry.
-fn sign_in_expiry(value: &serde_json::Value) -> Option<i64> {
-    match value {
-        serde_json::Value::Object(map) => map
-            .iter()
-            .filter_map(|(key, value)| match (key.as_str(), value) {
-                ("expiresAt" | "expires_at" | "expiry", serde_json::Value::Number(number)) => {
-                    number.as_i64().map(|n| if n < 100_000_000_000 { n * 1000 } else { n })
-                }
-                (_, nested) => sign_in_expiry(nested),
-            })
-            .max(),
-        _ => None,
-    }
-}
-
 /// While a bot's CLI is still running, hand a sign-in it has just refreshed
 /// back to the owner's file, returning whether it did.
 ///
@@ -1647,33 +1909,17 @@ fn sign_in_expiry(value: &serde_json::Value) -> Option<i64> {
 /// seconds in. Only a sign-in good for longer than the owner's, and for
 /// longer than now, goes back: a refresh that failed is never written over a
 /// working one.
-pub fn hand_back_fresh_sign_in(private_home: &Path, owner_home: &Path) -> Result<bool, String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_millis() as i64);
+pub fn hand_back_fresh_sign_in(private_home: &Path, owner_home: &Path, cli_dir: &str) -> Result<bool, String> {
     let mut handed = false;
-    for cli_dir in [".claude", ".codex", ".grok"] {
-        for file in credential_files(cli_dir) {
-            let copy = private_home.join(cli_dir).join(file);
-            let source = owner_home.join(cli_dir).join(file);
-            let (Some(refreshed), Some(current)) = (holds_sign_in(&copy), holds_sign_in(&source)) else {
-                continue;
-            };
-            if !current.keys().all(|key| refreshed.contains_key(key)) {
-                continue;
-            }
-            let fresh = sign_in_expiry(&serde_json::Value::Object(refreshed));
-            let owners = sign_in_expiry(&serde_json::Value::Object(current));
-            let good_for_longer = match (fresh, owners) {
-                (Some(fresh), Some(owners)) => fresh > owners && fresh > now,
-                _ => false,
-            };
-            if !good_for_longer || std::fs::read(&copy).ok() == std::fs::read(&source).ok() {
-                continue;
-            }
-            let previous = source.with_file_name(format!("{file}.orgbot-previous"));
-            replace_private_file(&source, &previous)?;
-            replace_private_file(&copy, &source)?;
+    for file in credential_files(cli_dir) {
+        let (Some(owner), Some(fresh)) = (
+            read_sign_in(&owner_home.join(cli_dir).join(file)),
+            read_sign_in(&private_home.join(cli_dir).join(file)),
+        ) else {
+            continue;
+        };
+        if may_hand_back(cli_dir, &owner, &fresh, false) {
+            hand_back(owner_home, cli_dir, file, &owner, &fresh)?;
             handed = true;
         }
     }
@@ -1722,29 +1968,103 @@ fn copy_file_if_missing(from: &Path, to: &Path, budget: &mut CopyBudget) -> Resu
     };
     let mut reader = input.take(PROFILE_MAX_FILE_BYTES + 1);
     let mut writer = output;
-    let copied = std::io::copy(&mut reader, &mut writer)
-        .map_err(|e| format!("copy CLI profile file: {e}"))?;
-    if copied != source_meta.len() {
-        return Err(format!(
-            "CLI profile file changed or exceeded limit: {}",
-            from.display()
-        ));
-    }
-    writer
-        .flush()
-        .map_err(|e| format!("flush CLI profile file: {e}"))?;
-    writer
-        .set_permissions(std::fs::Permissions::from_mode(
-            source_meta.permissions().mode() & 0o700,
-        ))
-        .map_err(|e| format!("protect private CLI profile file: {e}"))?;
+    let written = (|| -> Result<u64, String> {
+        let copied = std::io::copy(&mut reader, &mut writer)
+            .map_err(|e| format!("copy CLI profile file: {e}"))?;
+        if copied != source_meta.len() {
+            return Err(format!(
+                "CLI profile file changed or exceeded limit: {}",
+                from.display()
+            ));
+        }
+        writer
+            .flush()
+            .map_err(|e| format!("flush CLI profile file: {e}"))?;
+        writer
+            .set_permissions(std::fs::Permissions::from_mode(
+                source_meta.permissions().mode() & 0o700,
+            ))
+            .map_err(|e| format!("protect private CLI profile file: {e}"))?;
+        Ok(copied)
+    })();
+    // From the 13 November audit: a copy cut short was kept, and being
+    // there, was never copied again.
+    let copied = match written {
+        Ok(copied) => copied,
+        Err(error) => {
+            drop(writer);
+            let _ = std::fs::remove_file(to);
+            return Err(error);
+        }
+    };
     budget.bytes += copied;
+    Ok(())
+}
+
+/// Keep a bot's copy of one of the owner's settings or tree files current.
+///
+/// From the 13 November audit: seeding only ever added files, so an owner's
+/// fixed hook or changed settings never reached a bot that already had a
+/// copy. The owner's file replaces the copy when it changed after the copy
+/// was made (copies carry the owner's time), so a change the bot made to its
+/// own copy since stays until the owner changes theirs. Written beside the
+/// copy and renamed into place, so a cut-short copy never replaces a good one.
+fn copy_file_following_owner(from: &Path, to: &Path, budget: &mut CopyBudget) -> Result<(), String> {
+    let source = match std::fs::symlink_metadata(from) {
+        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => meta,
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("inspect CLI profile file: {error}")),
+    };
+    match std::fs::symlink_metadata(to) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("inspect private CLI profile file: {error}")),
+        Ok(existing) if !existing.is_file() || existing.file_type().is_symlink() => {
+            return Err(format!("unsafe private CLI profile file: {}", to.display()));
+        }
+        Ok(existing) => {
+            let changed_since = match (source.modified(), existing.modified()) {
+                (Ok(owner), Ok(copy)) => owner > copy,
+                _ => false,
+            };
+            if !changed_since {
+                return Ok(());
+            }
+        }
+    }
+    let parent = to.parent().ok_or("private CLI profile file has no folder")?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = parent.join(format!(".orgbot-seed-{}-{nonce}", std::process::id()));
+    copy_file_if_missing(from, &temp, budget)?;
+    let placed = (|| -> std::io::Result<()> {
+        if let Ok(modified) = source.modified() {
+            std::fs::OpenOptions::new().write(true).open(&temp)?.set_modified(modified)?;
+        }
+        std::fs::rename(&temp, to)
+    })();
+    if let Err(error) = placed {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("update private CLI profile file: {error}"));
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The owner's kept sign-ins, oldest first.
+    fn kept_sign_ins(owner: &Path, cli_dir: &str) -> Vec<String> {
+        let folder = sign_in_backup_dir(owner, cli_dir);
+        let mut kept: Vec<PathBuf> = std::fs::read_dir(&folder)
+            .map(|entries| entries.filter_map(Result::ok).map(|entry| entry.path()).collect())
+            .unwrap_or_default();
+        kept.sort();
+        kept.iter().map(|path| std::fs::read_to_string(path).unwrap()).collect()
+    }
 
     fn temp() -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1767,18 +2087,18 @@ mod tests {
         std::fs::create_dir_all(owner.join(".claude/skills/deep")).unwrap();
         std::fs::create_dir_all(&profiles).unwrap();
         std::fs::write(owner.join(".claude/skills/deep/one.md"), "one").unwrap();
-        let home = private_home_from(&profiles, &owner, None).unwrap();
+        let home = private_home_from(&profiles, &owner, None, ".claude").unwrap();
         assert!(home.join(".claude/skills/deep/one.md").exists());
 
         // A file added deep inside leaves the folder's own time alone: the
         // next turn doesn't walk it again.
         std::fs::write(owner.join(".claude/skills/deep/two.md"), "two").unwrap();
-        private_home_from(&profiles, &owner, None).unwrap();
+        private_home_from(&profiles, &owner, None, ".claude").unwrap();
         assert!(!home.join(".claude/skills/deep/two.md").exists());
 
         // A new entry at the top changes the folder: it is walked again.
         std::fs::write(owner.join(".claude/skills/three.md"), "three").unwrap();
-        private_home_from(&profiles, &owner, None).unwrap();
+        private_home_from(&profiles, &owner, None, ".claude").unwrap();
         assert!(home.join(".claude/skills/deep/two.md").exists());
         assert!(home.join(".claude/skills/three.md").exists());
 
@@ -1788,15 +2108,36 @@ mod tests {
         let mut stamp: serde_json::Value = serde_json::from_slice(&std::fs::read(&stamp_path).unwrap()).unwrap();
         stamp["trees"][".claude/skills"]["walked_at"] = serde_json::json!(0);
         std::fs::write(&stamp_path, stamp.to_string()).unwrap();
-        private_home_from(&profiles, &owner, None).unwrap();
+        private_home_from(&profiles, &owner, None, ".claude").unwrap();
         assert!(home.join(".claude/skills/deep/four.md").exists());
 
         // A session is looked for in the owner's folders once.
         std::fs::create_dir_all(owner.join(".codex/sessions")).unwrap();
-        private_home_from(&profiles, &owner, Some("session-789")).unwrap();
+        private_home_from(&profiles, &owner, Some("session-789"), ".codex").unwrap();
         std::fs::write(owner.join(".codex/sessions/rollout-session-789.jsonl"), "late").unwrap();
-        private_home_from(&profiles, &owner, Some("session-789")).unwrap();
+        private_home_from(&profiles, &owner, Some("session-789"), ".codex").unwrap();
         assert!(!home.join(".codex/sessions/rollout-session-789.jsonl").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// From the 13 November audit: searching a large CLI history for the
+    /// session to resume used up the copy budget, and the turn failed.
+    #[test]
+    fn a_session_search_never_fails_a_turn_for_its_size() {
+        let root = temp();
+        let (from, to) = (root.join("owner/sessions"), root.join("home/sessions"));
+        std::fs::create_dir_all(from.join("2026/11")).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        std::fs::write(from.join("2026/11/rollout-abc.jsonl"), "session").unwrap();
+        let mut budget = CopyBudget { entries: PROFILE_MAX_ENTRIES, bytes: 0 };
+        let mut looked = 0;
+        copy_matching_session(&from, &to, "abc", &mut budget, &mut looked, 0).unwrap();
+        assert!(to.join("2026/11/rollout-abc.jsonl").exists(), "found though the copy budget was used up");
+        let mut looked = SESSION_SEARCH_LIMIT;
+        std::fs::remove_dir_all(&to).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        copy_matching_session(&from, &to, "abc", &mut budget, &mut looked, 0).unwrap();
+        assert!(!to.join("2026/11/rollout-abc.jsonl").exists(), "a search that runs out is \"not found\"");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1815,8 +2156,6 @@ mod tests {
         assert_eq!(output.stdout, b"done\n");
     }
 
-    #[cfg(unix)]
-    #[test]
     /// From speed test 1: one Claude bot's refresh left the owner's sign-in,
     /// and every other bot's copy of it, refused until that bot's turn ended.
     #[test]
@@ -1840,21 +2179,115 @@ mod tests {
 
         // A refresh that failed leaves nothing good for longer: kept back.
         std::fs::write(&bot_file, sign_in("refused", now - 30_000)).unwrap();
-        assert!(!hand_back_fresh_sign_in(&home, &owner).unwrap());
+        assert!(!hand_back_fresh_sign_in(&home, &owner, ".claude").unwrap());
         assert_eq!(read(&owner_file), sign_in("old", now - 60_000));
 
         // A refresh that worked goes back at once, the owner's kept beside it.
         std::fs::write(&bot_file, sign_in("fresh", now + 8 * 3_600_000)).unwrap();
-        assert!(hand_back_fresh_sign_in(&home, &owner).unwrap());
+        assert!(hand_back_fresh_sign_in(&home, &owner, ".claude").unwrap());
         assert_eq!(read(&owner_file), sign_in("fresh", now + 8 * 3_600_000));
-        assert_eq!(read(&owner.join(".claude/.credentials.json.orgbot-previous")), sign_in("old", now - 60_000));
-        assert!(!hand_back_fresh_sign_in(&home, &owner).unwrap(), "handed back once");
+        assert_eq!(kept_sign_ins(&owner, ".claude"), vec![sign_in("old", now - 60_000)]);
+        assert!(!hand_back_fresh_sign_in(&home, &owner, ".claude").unwrap(), "handed back once");
 
         // The owner signs in again, good for longer: the bot's never replaces it.
         std::fs::write(&owner_file, sign_in("login", now + 9 * 3_600_000)).unwrap();
-        assert!(!hand_back_fresh_sign_in(&home, &owner).unwrap());
+        assert!(!hand_back_fresh_sign_in(&home, &owner, ".claude").unwrap());
         assert_eq!(read(&owner_file), sign_in("login", now + 9 * 3_600_000));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// From the 13 November audit: a bot could hand the owner a sign-in for
+    /// another account, a link to a file of its choosing, or one claiming
+    /// years; an MCP token good for a month hid every real refresh; one
+    /// backup sat beside the sign-in; and every bot got every CLI's sign-in.
+    #[test]
+    fn only_a_real_refresh_of_the_owners_own_sign_in_goes_back() {
+        use base64::Engine;
+        let root = temp();
+        let (owner, home) = (root.join("owner"), root.join("profiles/home"));
+        for dir in [&owner, &home] {
+            std::fs::create_dir_all(dir.join(".codex")).unwrap();
+            std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        }
+        let now = now_millis();
+        let jwt = |claims: serde_json::Value| {
+            let part = |v: &serde_json::Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+            format!("{}.{}.sig", part(&serde_json::json!({"alg": "none"})), part(&claims))
+        };
+        let codex = |account: &str, email: &str, exp_secs: i64| {
+            serde_json::json!({
+                "tokens": {
+                    "account_id": account,
+                    "id_token": jwt(serde_json::json!({"email": email})),
+                    "access_token": jwt(serde_json::json!({"exp": exp_secs})),
+                    "refresh_token": "r"
+                }
+            })
+            .to_string()
+        };
+        let (owner_codex, bot_codex) = (owner.join(".codex/auth.json"), home.join(".codex/auth.json"));
+        let read = |path: &Path| std::fs::read_to_string(path).unwrap();
+        let hour = 3_600;
+        std::fs::write(&owner_codex, codex("acct-1", "owner@example.com", now / 1000 + hour)).unwrap();
+
+        // Another account, by id or by email: kept back.
+        std::fs::write(&bot_codex, codex("acct-2", "owner@example.com", now / 1000 + 8 * hour)).unwrap();
+        assert!(!hand_back_fresh_sign_in(&home, &owner, ".codex").unwrap());
+        std::fs::write(&bot_codex, codex("acct-1", "bot@example.com", now / 1000 + 8 * hour)).unwrap();
+        assert!(!hand_back_fresh_sign_in(&home, &owner, ".codex").unwrap());
+        // Claiming more than a month: kept back.
+        std::fs::write(&bot_codex, codex("acct-1", "owner@example.com", now / 1000 + 400 * 24 * hour)).unwrap();
+        assert!(!hand_back_fresh_sign_in(&home, &owner, ".codex").unwrap());
+        write_back_credentials_to(&home, &owner, ".codex").unwrap();
+        assert_eq!(read(&owner_codex), codex("acct-1", "owner@example.com", now / 1000 + hour));
+        // A link to another file is never followed.
+        let elsewhere = root.join("elsewhere.json");
+        std::fs::write(&elsewhere, codex("acct-1", "owner@example.com", now / 1000 + 8 * hour)).unwrap();
+        std::fs::remove_file(&bot_codex).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &bot_codex).unwrap();
+        assert!(!hand_back_fresh_sign_in(&home, &owner, ".codex").unwrap());
+        // A real refresh of the same account goes back.
+        std::fs::remove_file(&bot_codex).unwrap();
+        std::fs::write(&bot_codex, codex("acct-1", "owner@example.com", now / 1000 + 8 * hour)).unwrap();
+        assert!(hand_back_fresh_sign_in(&home, &owner, ".codex").unwrap());
+        assert_eq!(read(&owner_codex), read(&bot_codex));
+        // The other CLIs' folders are never handed back from a Codex bot.
+        let claude = |token: &str, expires: i64, mcp: i64| {
+            serde_json::json!({
+                "claudeAiOauth": {"accessToken": token, "expiresAt": expires},
+                "mcpOAuth": {"server": {"accessToken": "m", "expiresAt": mcp}}
+            })
+            .to_string()
+        };
+        let (owner_claude, bot_claude) = (owner.join(".claude/.credentials.json"), home.join(".claude/.credentials.json"));
+        std::fs::write(&owner_claude, claude("old", now + 60_000, now + 20 * 24 * 3_600_000)).unwrap();
+        std::fs::write(&bot_claude, claude("fresh", now + 8 * 3_600_000, now + 20 * 24 * 3_600_000)).unwrap();
+        assert!(!hand_back_fresh_sign_in(&home, &owner, ".codex").unwrap());
+        assert!(read(&owner_claude).contains("\"old\""));
+        // A long-lived MCP token doesn't hide Claude's own refresh.
+        assert!(hand_back_fresh_sign_in(&home, &owner, ".claude").unwrap());
+        assert!(read(&owner_claude).contains("\"fresh\""));
+
+        // Only the last few of the owner's sign-ins are kept, out of the
+        // CLI's folder.
+        for round in 0..7 {
+            std::fs::write(&bot_claude, claude(&format!("r{round}"), now + (9 + round) * 3_600_000, 0)).unwrap();
+            assert!(hand_back_fresh_sign_in(&home, &owner, ".claude").unwrap());
+        }
+        let kept = kept_sign_ins(&owner, ".claude");
+        assert_eq!(kept.len(), SIGN_IN_BACKUPS_KEPT);
+        assert!(kept.last().unwrap().contains("\"r5\""));
+        assert!(std::fs::read_dir(owner.join(".claude")).unwrap().all(|entry| {
+            !entry.unwrap().file_name().to_string_lossy().contains("orgbot-previous")
+        }));
+
+        // A Codex bot's home holds Codex's folder only.
+        let profiles_two = root.join("profiles-two");
+        std::fs::create_dir_all(&profiles_two).unwrap();
+        let seeded = private_home_from(&profiles_two, &owner, None, ".codex").unwrap();
+        assert!(seeded.join(".codex/auth.json").exists());
+        assert!(!seeded.join(".claude/.credentials.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1884,43 +2317,43 @@ mod tests {
 
         // First turn: the bot gets the owner's sign-in.
         set(&owner_file, &sign_in("t1"), 500);
-        let home = private_home_from(&profiles, &owner, None).unwrap();
+        let home = private_home_from(&profiles, &owner, None, ".claude").unwrap();
         let bot_file = home.join(".claude/.credentials.json");
         assert_eq!(read(&bot_file), sign_in("t1"));
 
         // The owner signs in again: the bot's next turn uses the new sign-in.
         set(&owner_file, &sign_in("t2"), 400);
-        private_home_from(&profiles, &owner, None).unwrap();
+        private_home_from(&profiles, &owner, None, ".claude").unwrap();
         assert_eq!(read(&bot_file), sign_in("t2"));
 
         // The bot's CLI refreshes its copy: it goes back to the owner, the
         // owner's previous file is kept, and the older owner file does not
         // overwrite the bot's on the next turn.
         set(&bot_file, &sign_in("t3"), 300);
-        write_back_credentials_to(&home, &owner).unwrap();
+        write_back_credentials_to(&home, &owner, ".claude").unwrap();
         assert_eq!(read(&owner_file), sign_in("t3"));
-        assert_eq!(read(&owner.join(".claude/.credentials.json.orgbot-previous")), sign_in("t2"));
-        private_home_from(&profiles, &owner, None).unwrap();
+        assert_eq!(kept_sign_ins(&owner, ".claude"), vec![sign_in("t2")]);
+        private_home_from(&profiles, &owner, None, ".claude").unwrap();
         assert_eq!(read(&bot_file), sign_in("t3"));
 
         // Anything that is not a real sign-in is never written to the owner:
         // not a placeholder, and not a different kind of file.
         set(&bot_file, "modified-private-auth", 200);
-        write_back_credentials_to(&home, &owner).unwrap();
+        write_back_credentials_to(&home, &owner, ".claude").unwrap();
         assert_eq!(read(&owner_file), sign_in("t3"));
         set(&bot_file, r#"{"somethingElse":true}"#, 100);
-        write_back_credentials_to(&home, &owner).unwrap();
+        write_back_credentials_to(&home, &owner, ".claude").unwrap();
         assert_eq!(read(&owner_file), sign_in("t3"));
 
         // And a damaged owner file is not spread to the bot.
         set(&owner_file, "garbage", 50);
-        private_home_from(&profiles, &owner, None).unwrap();
+        private_home_from(&profiles, &owner, None, ".claude").unwrap();
         assert_eq!(read(&bot_file), r#"{"somethingElse":true}"#);
 
         // A signed-out owner is not signed back in by a bot.
         std::fs::remove_file(&owner_file).unwrap();
         set(&bot_file, &sign_in("t4"), 0);
-        write_back_credentials_to(&home, &owner).unwrap();
+        write_back_credentials_to(&home, &owner, ".claude").unwrap();
         assert!(!owner_file.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1975,7 +2408,7 @@ mod tests {
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::create_dir_all(home.join(".grok")).unwrap();
 
-        let private = private_home_from(&profiles, &source, Some("resume-id-123")).unwrap();
+        let private = private_home_from(&profiles, &source, Some("resume-id-123"), ".codex").unwrap();
         let session = private.join(".codex/sessions/rollout-resume-id-123.jsonl");
         assert_eq!(std::fs::read_to_string(&session).unwrap(), "resume-id-123");
         std::fs::write(&session, "private-resume-state").unwrap();
@@ -1984,7 +2417,7 @@ mod tests {
                 .unwrap(),
             "resume-id-123"
         );
-        private_home_from(&profiles, &source, Some("claude-session-456")).unwrap();
+        private_home_from(&profiles, &source, Some("claude-session-456"), ".claude").unwrap();
         assert_eq!(
             std::fs::read_to_string(private.join(".claude/projects/claude-session-456.jsonl"))
                 .unwrap(),
@@ -1994,12 +2427,61 @@ mod tests {
         let private_auth = private.join(".codex/auth.json");
         std::fs::remove_file(&private_auth).unwrap();
         symlink(source.join(".codex/auth.json"), &private_auth).unwrap();
-        assert!(private_home_from(&profiles, &source, Some("resume-id-123")).is_err());
+        assert!(private_home_from(&profiles, &source, Some("resume-id-123"), ".codex").is_err());
         assert!(write_private_file(&private_auth, b"attack").is_err());
         assert_eq!(
             std::fs::read_to_string(source.join(".codex/auth.json")).unwrap(),
             "original-auth"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// From the 13 November audit: seeding only added files, so an owner's
+    /// fixed hook never reached a bot that already had a copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_changed_owner_setting_reaches_the_bot_and_a_bot_edit_since_is_kept() {
+        let root = temp();
+        std::fs::create_dir_all(&root).unwrap();
+        let owner = root.join("hook.sh");
+        let copy = root.join("hook-copy.sh");
+        let at = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        let stamp = |path: &Path, secs: u64| {
+            std::fs::OpenOptions::new().write(true).open(path).unwrap().set_modified(at(secs)).unwrap();
+        };
+        std::fs::write(&owner, "echo broken").unwrap();
+        stamp(&owner, 1_000);
+        let mut budget = CopyBudget::default();
+        copy_file_following_owner(&owner, &copy, &mut budget).unwrap();
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "echo broken");
+
+        std::fs::write(&owner, "echo fixed").unwrap();
+        stamp(&owner, 2_000);
+        copy_file_following_owner(&owner, &copy, &mut budget).unwrap();
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "echo fixed", "the owner's fix reaches the bot");
+
+        std::fs::write(&copy, "echo the bot's own change").unwrap();
+        stamp(&copy, 3_000);
+        copy_file_following_owner(&owner, &copy, &mut budget).unwrap();
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "echo the bot's own change");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2, "no temp file is left");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An owner whose CLI folder is a link (stow, chezmoi) still has it seeded.
+    #[cfg(unix)]
+    #[test]
+    fn an_owners_linked_cli_folder_is_followed() {
+        let root = temp();
+        let owner = root.join("owner");
+        let profiles = root.join("profiles");
+        std::fs::create_dir_all(owner.join("dotfiles/claude")).unwrap();
+        std::fs::create_dir_all(&profiles).unwrap();
+        std::fs::write(owner.join("dotfiles/claude/settings.json"), "{\"theme\":\"dark\"}").unwrap();
+        std::os::unix::fs::symlink(owner.join("dotfiles/claude"), owner.join(".claude")).unwrap();
+        let home = private_home_from(&profiles, &owner, None, ".claude").unwrap();
+        assert_eq!(std::fs::read_to_string(home.join(".claude/settings.json")).unwrap(), "{\"theme\":\"dark\"}");
+        assert!(!std::fs::symlink_metadata(home.join(".claude")).unwrap().file_type().is_symlink());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2352,7 +2834,9 @@ mod tests {
             br#"{"permissions":{"allow":["command(*)"]}}"#,
         )
         .unwrap();
-        assert!(configure_new_cli_profile_inner(
+        // A changed settings file is put back to the managed one rather than
+        // stopping the bot for good; what it had granted itself is gone.
+        configure_new_cli_profile_inner(
             &agy_home,
             mount,
             CliKind::Antigravity,
@@ -2360,8 +2844,28 @@ mod tests {
             Some(Path::new("/run/user/1000/orgbot-room-mcp.sock")),
             None,
         )
-        .unwrap_err()
-        .contains("Antigravity settings"));
+        .unwrap();
+        let restored: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(agy_home.join(".gemini/antigravity-cli/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(!restored["permissions"]["allow"].as_array().unwrap().iter().any(|rule| rule == "command(*)"));
+        assert!(restored["permissions"]["deny"].as_array().unwrap().iter().any(|rule| rule == "command(*)"));
+        // A link in its place is still refused.
+        let settings = agy_home.join(".gemini/antigravity-cli/settings.json");
+        std::fs::remove_file(&settings).unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", &settings).unwrap();
+        let refused = configure_new_cli_profile_inner(
+            &agy_home,
+            mount,
+            CliKind::Antigravity,
+            "gemini-3.8-flash-medium",
+            Some(Path::new("/run/user/1000/orgbot-room-mcp.sock")),
+            None,
+        )
+        .unwrap_err();
+        assert!(refused.contains("unsafe"), "{refused}");
+        std::fs::remove_file(&settings).unwrap();
         strip_private_agent_mcp_config(&home, CliKind::OpenCode).unwrap();
         clear_private_agent_config(&home, CliKind::Antigravity).unwrap();
         std::fs::remove_dir_all(root).unwrap();

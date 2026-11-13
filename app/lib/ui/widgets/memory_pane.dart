@@ -110,11 +110,25 @@ class _ProjectMemoryPanelState extends State<ProjectMemoryPanel> {
       _loading = true;
       _error = null;
     });
+    final before = {for (final entry in _entries) entry.id};
     try {
       final maps = await action();
       if (!mounted) return;
       setState(() {
         _entries = maps.map(_item).toList(growable: false);
+        // Search hits follow the list. From the 13 November audit: a deleted
+        // memory stayed among the search results, and a change to one left
+        // its old copy there.
+        final current = {for (final entry in _entries) entry.id: entry};
+        final gone = before.difference(current.keys.toSet());
+        _hits = [
+          for (final hit in _hits)
+            if (!gone.contains(hit.item.id))
+              ProjectMemoryHit(
+                item: current[hit.item.id] ?? hit.item,
+                score: hit.score,
+              ),
+        ];
         _loading = false;
       });
     } catch (error) {

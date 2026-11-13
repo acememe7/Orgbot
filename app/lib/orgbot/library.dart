@@ -98,13 +98,16 @@ class Library extends ChangeNotifier {
     );
   }
 
+  /// Stop a room's session. A stop that fails leaves the session in place
+  /// and throws, so the room is never shown stopped while it runs.
   Future<void> stopRoom(String id) async {
-    final session = sessions.remove(id);
+    final session = sessions[id];
     if (session != null) {
+      await session.stop();
+      sessions.remove(id);
       final listener = _sessionListeners.remove(id);
       if (listener != null) session.removeListener(listener);
       _sessionSummaries.remove(id);
-      await session.stop();
       session.dispose();
     }
     if (!_disposed) notifyListeners();
@@ -322,10 +325,20 @@ class Library extends ChangeNotifier {
   /// Delete a room from the list and stop it, including a background
   /// service this app did not open in this session. Saved history stays on
   /// disk.
-  void removeRoom(String id) {
-    unawaited(stopRoom(id).then((_) => stopLinuxRoomService(id)));
+  ///
+  /// Returns why it could not, with the room left in the list, when its
+  /// service would not stop.
+  Future<String?> removeRoom(String id) async {
+    try {
+      await stopRoom(id);
+      await stopLinuxRoomService(id);
+    } catch (error) {
+      return error.toString();
+    }
     rooms.removeWhere((r) => r.id == id);
     _persist();
+    if (!_disposed) notifyListeners();
+    return null;
   }
 }
 

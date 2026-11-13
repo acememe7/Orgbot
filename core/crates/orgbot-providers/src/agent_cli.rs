@@ -154,6 +154,13 @@ pub struct AgentCliProvider {
     live_activity: std::sync::atomic::AtomicUsize,
     /// Set while the bot holds no task: the turn's changes stay in its copy.
     merge_held: std::sync::atomic::AtomicBool,
+    /// Bumped to end the turn under way early; see
+    /// [`Provider::end_turn_early`].
+    stop_turn: tokio::sync::watch::Sender<u64>,
+    /// Whether the last thing the CLI did was start a tool of its own.
+    tool_running: std::sync::atomic::AtomicBool,
+    /// What the last turn used, when it ended in an error.
+    failed_usage: Mutex<Option<Usage>>,
     /// Removals waiting in this bot's copy after its last turn; `usize::MAX`
     /// until a turn has reported.
     last_pending: std::sync::atomic::AtomicUsize,
@@ -266,6 +273,9 @@ impl AgentCliProvider {
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
             merge_held: std::sync::atomic::AtomicBool::new(false),
+            stop_turn: tokio::sync::watch::channel(0).0,
+            tool_running: std::sync::atomic::AtomicBool::new(false),
+            failed_usage: Mutex::new(None),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             timeout,
             session_store: Mutex::new(None),
@@ -606,6 +616,18 @@ impl Provider for AgentCliProvider {
         self.merge_held.store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
+    fn end_turn_early(&self) {
+        self.stop_turn.send_modify(|count| *count += 1);
+    }
+
+    fn tool_in_flight(&self) -> bool {
+        self.tool_running.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn last_failed_usage(&self) -> Option<Usage> {
+        *self.failed_usage.lock().unwrap()
+    }
+
     fn last_pending_removals(&self) -> Option<usize> {
         let count = self.last_pending.load(std::sync::atomic::Ordering::SeqCst);
         (count != usize::MAX).then_some(count)
@@ -622,11 +644,11 @@ impl Provider for AgentCliProvider {
     ) -> Result<CompletionResponse> {
         *self.last_socket.lock().unwrap() = request.mcp_socket.clone();
         *self.grants.lock().unwrap() = request.grants();
-        let resumed = self.session.lock().unwrap().clone();
+        let mut resumed = self.session.lock().unwrap().clone();
         let situation = latest_instruction(&request.messages);
         let system_brief = antigravity_system_brief(self.cli, self.mcp, &request)?;
         let previous_brief = self.session_system_brief.lock().unwrap().clone();
-        let prompt = compose_prompt(
+        let mut prompt = compose_prompt(
             &system_brief,
             situation.as_deref(),
             resumed.is_some(),
@@ -665,6 +687,9 @@ impl Provider for AgentCliProvider {
         } else {
             (None, None)
         };
+        // Removed however the turn ends, a dropped one included. From the 13
+        // November audit: a turn ended early left these in /tmp.
+        let _temporary = TemporaryPaths { file: claude_config.clone(), dir: codex_home.clone() };
         let mut result = self
             .run_episode(
                 &prompt,
@@ -701,6 +726,10 @@ impl Provider for AgentCliProvider {
                     codex_home.as_deref(),
                 )
                 .await;
+            // A retry below starts fresh too. From the 13 November audit: it
+            // reused the session just found missing.
+            resumed = None;
+            prompt = fresh_prompt;
         }
         // From benchmark 2: three Claude bots failed "OAuth session expired"
         // two seconds after another bot's refresh replaced the sign-in they
@@ -720,12 +749,8 @@ impl Provider for AgentCliProvider {
                 )
                 .await;
         }
-        if let Some(path) = &claude_config {
-            let _ = std::fs::remove_file(path);
-        }
-        if let Some(dir) = &codex_home {
-            let _ = std::fs::remove_dir_all(dir);
-        }
+        drop(_temporary);
+        *self.failed_usage.lock().unwrap() = (result.is_err() && episode.usage.reported).then_some(episode.usage);
         self.last_activity.store(
             episode.tool_uses + episode.workspace_changes,
             std::sync::atomic::Ordering::SeqCst,
@@ -753,7 +778,9 @@ impl Provider for AgentCliProvider {
         }
         if self.session.lock().unwrap().is_some() {
             *self.session_system_brief.lock().unwrap() = Some(system_brief.clone());
-            self.persist_session_brief(&system_brief)?;
+            if let Err(error) = self.persist_session_brief(&system_brief) {
+                tracing::warn!(%error, "could not save the CLI session brief");
+            }
         }
 
         let _ = emit(
@@ -871,9 +898,10 @@ impl AgentCliProvider {
                             &profile_root,
                             source,
                             resumed.as_deref(),
+                            sign_in_dir(cli),
                         );
                     }
-                    crate::workspace_guard::private_home(&profile_root, &expected_home, resumed.as_deref())
+                    crate::workspace_guard::private_home(&profile_root, &expected_home, resumed.as_deref(), sign_in_dir(cli))
                 })
                 .await
                 .map_err(|error| ProviderError::Unsupported(format!("preparing the bot's home stopped: {error}")))?
@@ -1076,7 +1104,13 @@ impl AgentCliProvider {
                 let previous_session = episode.session_id.clone();
                 let tools_before = episode.tool_uses;
                 ingest_line(provider.cli, &line, sink, episode);
-                if episode.tool_uses != tools_before {
+                // A tool starting is activity, and so is the next line after
+                // it: the tool has finished. While one runs, the CLI is not
+                // reasoning. From the 13 November audit: a 12-minute test run
+                // in the CLI's own shell was stopped as "reasoning".
+                let started = episode.tool_uses != tools_before;
+                let finished = provider.tool_running.swap(started, std::sync::atomic::Ordering::SeqCst) && !started;
+                if started || finished {
                     provider.live_activity.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 if previous_session != episode.session_id {
@@ -1093,11 +1127,12 @@ impl AgentCliProvider {
                     ) {
                         let applied_brief = provider.session_system_brief.lock().unwrap().clone();
                         let native_usage = *provider.native_usage.lock().unwrap();
-                        write_session(&store, session_id, applied_brief.as_deref(), native_usage)
-                            .map_err(|error| ProviderError::Process {
-                            provider: provider.cli.label().to_string(),
-                            detail: format!("could not persist native session state: {error}"),
-                        })?;
+                        // Housekeeping never ends the turn: from the 13
+                        // November audit, on a full disk every CLI turn was
+                        // abandoned at its first line of output.
+                        if let Err(error) = write_session(&store, session_id, applied_brief.as_deref(), native_usage) {
+                            tracing::warn!(%error, "could not save the CLI session state");
+                        }
                     }
                 }
             }
@@ -1114,7 +1149,7 @@ impl AgentCliProvider {
             };
             loop {
                 tokio::time::sleep(SIGN_IN_POLL).await;
-                match crate::workspace_guard::hand_back_fresh_sign_in(home, &owner) {
+                match crate::workspace_guard::hand_back_fresh_sign_in(home, &owner, sign_in_dir(self.cli)) {
                     Ok(true) => tracing::info!(cli = self.cli.binary(), "handed a refreshed sign-in back mid-turn"),
                     Ok(false) => {}
                     Err(error) => tracing::warn!(%error, "could not hand a refreshed sign-in back mid-turn"),
@@ -1123,10 +1158,21 @@ impl AgentCliProvider {
         };
         #[cfg(not(target_os = "linux"))]
         let hand_back = std::future::pending::<()>();
+        let mut stop_turn = self.stop_turn.subscribe();
+        stop_turn.borrow_and_update();
+        let mut stopped_early = false;
         let outcome = timeout(self.timeout, async {
+            let mut run = std::pin::pin!(run);
             let parsed = tokio::select! {
-                parsed = run => parsed,
+                parsed = &mut run => parsed,
                 () = hand_back => unreachable!("the sign-in watch never ends"),
+                _ = stop_turn.changed() => {
+                    // Ended early: the CLI stops, and the turn finishes as
+                    // any other does with what it did so far.
+                    stopped_early = true;
+                    let _ = child.start_kill();
+                    run.await
+                }
             };
             let stderr_bytes = stderr_task.await.unwrap_or_default();
             let status = child.wait().await;
@@ -1142,7 +1188,7 @@ impl AgentCliProvider {
                 let refused = |error: Option<ProviderError>| matches!(error, Some(ProviderError::MissingCredential { .. }));
                 refused(episode.structured_error.as_deref().map(|message| classify_cli_error(self.cli, message)))
                     || (status.as_ref().is_ok_and(|status| !status.success())
-                        && refused(classify_cli_failure(self.cli, &String::from_utf8_lossy(stderr_bytes))))
+                        && refused(classify_cli_failure(self.cli, &stderr_tail(stderr_bytes))))
             }
             Err(_) => false,
         };
@@ -1173,7 +1219,7 @@ impl AgentCliProvider {
                                 Err(error) => tracing::warn!(%error, "could not take the owner's sign-in"),
                             }
                         } else if let Err(error) =
-                            crate::workspace_guard::write_back_credentials_to(home, &owner)
+                            crate::workspace_guard::write_back_credentials_to(home, &owner, sign_in_dir(self.cli))
                         {
                             tracing::warn!(%error, "could not hand a refreshed sign-in back");
                         }
@@ -1190,7 +1236,9 @@ impl AgentCliProvider {
         }
         #[cfg(target_os = "linux")]
         if outcome.is_ok() {
-            cleanup_private_profile(episode)?;
+            if let Err(error) = cleanup_private_profile(episode) {
+                tracing::warn!(%error, "could not tidy the bot's private profile after its turn");
+            }
         }
 
         match outcome {
@@ -1200,18 +1248,13 @@ impl AgentCliProvider {
                     provider: self.cli.label().to_string(),
                     detail: format!("waiting for exit: {error}"),
                 })?;
-                if let Some(message) = episode.structured_error.as_deref() {
+                // A CLI stopped on purpose exits with a signal; that is the
+                // end of its turn, not a failure.
+                if let Some(message) = episode.structured_error.as_deref().filter(|_| !stopped_early) {
                     return Err(classify_cli_error(self.cli, message));
                 }
-                if !exit.success() {
-                    let stderr = String::from_utf8_lossy(&stderr_bytes);
-                    let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
-                    let tail = tail.iter().rev().cloned().collect::<Vec<_>>().join("\n");
-                    let tail = if tail.is_empty() {
-                        "no error output".to_string()
-                    } else {
-                        tail
-                    };
+                if !exit.success() && !stopped_early {
+                    let tail = stderr_tail(&stderr_bytes);
                     return Err(classify_cli_failure(self.cli, &tail).unwrap_or_else(|| {
                         ProviderError::Process {
                             provider: self.cli.label().to_string(),
@@ -1224,17 +1267,17 @@ impl AgentCliProvider {
                 if let Some(refused) = refused_tool(&String::from_utf8_lossy(&stderr_bytes)) {
                     episode.text.push_str(&format!(
                         "\nYour CLI refused `{refused}`, which needs an approval nobody can give mid-turn, and \
-                         that ended your turn. Run commands with the room's workspace_run tool instead."
+                         that ended your turn. Use a tool your CLI runs without approval, or tell the coordinators what you need."
                     ));
                 }
-                if self.cli == CliKind::Antigravity && !episode.antigravity_result_seen {
+                if self.cli == CliKind::Antigravity && !episode.antigravity_result_seen && !stopped_early {
                     return Err(ProviderError::Process {
                         provider: self.cli.label().to_string(),
                         detail: "exited without a terminal result event".into(),
                     });
                 }
                 if self.cli == CliKind::OpenCode {
-                    if !episode.opencode_terminal_finish {
+                    if !episode.opencode_terminal_finish && !stopped_early {
                         return Err(ProviderError::Process {
                             provider: self.cli.label().to_string(),
                             detail: "exited without a terminal step_finish event".into(),
@@ -1256,12 +1299,31 @@ impl AgentCliProvider {
                     {
                         // From speed test 2: a bot holding no task edited
                         // delivered files and others' tests, and every edit
-                        // merged unreviewed. Its copy keeps them until it
-                        // holds a task.
-                        episode.text.push_str(
-                            "\nYour file changes stay in your own copy: you hold no task, so they would reach \
-                             the project unreviewed. They merge once you claim a task.",
-                        );
+                        // merged unreviewed. From the 13 November audit:
+                        // keeping them in its copy only postponed the merge
+                        // to its next task, so they are set aside instead.
+                        let setting_aside = guard.clone();
+                        let set_aside = tokio::task::spawn_blocking(move || setting_aside.set_aside_changes())
+                            .await
+                            .unwrap_or_else(|error| Err(format!("setting changes aside stopped: {error}")));
+                        match set_aside {
+                            Ok(result) if result.get("set_aside").and_then(Value::as_u64).unwrap_or(0) > 0 => {
+                                let count = result.get("set_aside").and_then(Value::as_u64).unwrap_or(0);
+                                episode.text.push_str(&format!(
+                                    "\nYou hold no task, so your {count} file change(s) were not merged: they were \
+                                     set aside for the owner and your copy matches the project again. Claim a task \
+                                     (or ask the coordinators for one) before changing files."
+                                ));
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::warn!(%error, "could not set a bot's untasked changes aside");
+                                episode.text.push_str(
+                                    "\nYour file changes stay in your own copy: you hold no task, so they would \
+                                     reach the project unreviewed.",
+                                );
+                            }
+                        }
                     } else if !guard.read_only
                         && !prepared
                             .as_ref()
@@ -1307,7 +1369,9 @@ impl AgentCliProvider {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 #[cfg(target_os = "linux")]
-                cleanup_private_profile(episode)?;
+                if let Err(error) = cleanup_private_profile(episode) {
+                tracing::warn!(%error, "could not tidy the bot's private profile after its turn");
+            }
                 Err(ProviderError::Process {
                     provider: self.cli.label().to_string(),
                     detail: format!("timed out after {}s", self.timeout.as_secs()),
@@ -2045,18 +2109,24 @@ fn classify_cli_error(cli: CliKind, message: &str) -> ProviderError {
 fn classify_cli_failure(cli: CliKind, message: &str) -> Option<ProviderError> {
     let normalized = message.to_ascii_lowercase();
     let has = |phrases: &[&str]| phrases.iter().any(|phrase| normalized.contains(phrase));
-    let waits = has(&[
-        "rate limit",
-        "rate-limit",
-        "rate limited",
-        "rate-limited",
-        "too many requests",
-        "quota",
-        "weekly limit",
-        "usage limit",
-        "at capacity",
-        "overloaded",
-    ]);
+    // From the 13 November audit: "quota" matched "Disk quota exceeded", and
+    // a bare 401 matched `cli.js:401:13` in a stack trace, which threw away a
+    // sign-in the CLI had just renewed.
+    let quota = normalized.contains("quota")
+        && !normalized.contains("disk quota")
+        && has(&["usage", "exceeded your", "quota exceeded", "insufficient_quota", "plan", "billing", "requests"]);
+    let waits = quota
+        || has(&[
+            "rate limit",
+            "rate-limit",
+            "rate limited",
+            "rate-limited",
+            "too many requests",
+            "weekly limit",
+            "usage limit",
+            "at capacity",
+            "overloaded",
+        ]);
     if waits {
         return Some(ProviderError::RateLimited {
             provider: cli.label().to_string(),
@@ -2064,9 +2134,14 @@ fn classify_cli_failure(cli: CliKind, message: &str) -> Option<ProviderError> {
             retry_after_secs: None,
         });
     }
-    let status_401 = normalized
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|word| word == "401");
+    let status_401 = normalized.lines().any(|line| {
+        let words: Vec<&str> = line.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+        words.contains(&"401")
+            && !line.contains(".js:401")
+            && !line.contains(".ts:401")
+            && !line.contains(".rs:401")
+            && ["unauthorized", "status", "http", "auth", "token", "api"].iter().any(|word| line.contains(word))
+    });
     let signed_out = status_401
         || has(&[
             "oauth session expired",
@@ -2093,6 +2168,18 @@ fn classify_cli_failure(cli: CliKind, message: &str) -> Option<ProviderError> {
     })
 }
 
+/// The end of what a failed CLI wrote to stderr: what its failure is judged
+/// by, and what the bot is shown. One text for both, so the sign-out decision
+/// and the error never disagree.
+fn stderr_tail(stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let tail: Vec<&str> = stderr.lines().rev().filter(|line| !line.trim().is_empty()).take(6).collect();
+    if tail.is_empty() {
+        return "no error output".to_string();
+    }
+    tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+}
+
 /// How often a running CLI's sign-in is checked for a refresh to hand back.
 const SIGN_IN_POLL: Duration = Duration::from_secs(5);
 
@@ -2110,7 +2197,7 @@ fn sign_in_dir(cli: CliKind) -> &'static str {
 /// Token accounting from either vocabulary. Every field is optional so an
 /// event that omits usage degrades to zeros instead of failing the turn.
 fn usage_from_json(value: &Value) -> Usage {
-    let num = |key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0) as u32;
+    let num = |key: &str| u32::try_from(value.get(key).and_then(Value::as_u64).unwrap_or(0)).unwrap_or(u32::MAX);
     let openai_cached = num("cached_input_tokens");
     let cache_read = openai_cached.max(num("cache_read_input_tokens"));
     let input = num("input_tokens");
@@ -2346,7 +2433,7 @@ fn write_agent_home_at(
     }
 
     let mut config = String::new();
-    for entry in std::fs::read_dir(&home).map_err(|error| {
+    for entry in std::fs::read_dir(home).map_err(|error| {
         ProviderError::Unsupported(format!(
             "cannot read {label} home {}: {error}",
             home.display()
@@ -2379,6 +2466,24 @@ fn write_agent_home_at(
         })?;
     Ok(overlay)
 }
+/// A turn's temporary MCP config file and CLI home overlay, removed when the
+/// turn's future ends, however it ends.
+struct TemporaryPaths {
+    file: Option<std::path::PathBuf>,
+    dir: Option<std::path::PathBuf>,
+}
+
+impl Drop for TemporaryPaths {
+    fn drop(&mut self) {
+        if let Some(file) = &self.file {
+            let _ = std::fs::remove_file(file);
+        }
+        if let Some(dir) = &self.dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
 fn write_claude_mcp_config(socket: &str) -> Result<std::path::PathBuf> {
     let exe = relay_binary()?;
     let config = serde_json::json!({
@@ -2892,7 +2997,7 @@ mod tests {
             name.to_string_lossy(),
             std::process::id(),
         ));
-        let mut writer = match std::process::Command::new("/bin/sh")
+        let mut writer = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg("set -eu; umask 077; cat > \"$1\"; chmod 700 \"$1\"; mv -f \"$1\" \"$2\"")
             .arg("orgbot-fixture-writer")
@@ -2901,11 +3006,7 @@ mod tests {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(error) => return Err(error),
-        };
+            .spawn()?;
         let result = (|| {
             writer
                 .stdin
@@ -2988,6 +3089,9 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
             merge_held: std::sync::atomic::AtomicBool::new(false),
+            stop_turn: tokio::sync::watch::channel(0).0,
+            tool_running: std::sync::atomic::AtomicBool::new(false),
+            failed_usage: Mutex::new(None),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -3298,6 +3402,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
             merge_held: std::sync::atomic::AtomicBool::new(false),
+            stop_turn: tokio::sync::watch::channel(0).0,
+            tool_running: std::sync::atomic::AtomicBool::new(false),
+            failed_usage: Mutex::new(None),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -3326,6 +3433,78 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
         assert_eq!(episode.usage.input_tokens, 7);
         assert_eq!(episode.usage.output_tokens, 2);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// From the 13 November audit: a CLI turn ended early was dropped, so
+    /// its end-of-turn steps never ran. Stopped now, it finishes its turn
+    /// with what it did, and a killed CLI is not a failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cli_asked_to_end_early_finishes_its_turn() {
+        let directory = test_directory("orgbot-cli-end-early");
+        let binary = directory.join("fake-claude");
+        write_executable_fixture(&binary, r##"#!/bin/sh
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"working on it"}]}}'
+exec sleep 30
+"##,).unwrap();
+        let provider = std::sync::Arc::new(AgentCliProvider {
+            cli: CliKind::Claude,
+            bin: binary.to_string_lossy().into_owned(),
+            model: "claude-opus-5-5".into(),
+            workdir: PathBuf::new(),
+            policy: AgentPolicy::ReadOnly,
+            session: Mutex::new(None),
+            session_system_brief: Mutex::new(None),
+            last_socket: Mutex::new(None),
+            grants: Mutex::new(crate::types::SandboxGrants::default()),
+            last_activity: std::sync::atomic::AtomicUsize::new(0),
+            live_activity: std::sync::atomic::AtomicUsize::new(0),
+            merge_held: std::sync::atomic::AtomicBool::new(false),
+            stop_turn: tokio::sync::watch::channel(0).0,
+            tool_running: std::sync::atomic::AtomicBool::new(false),
+            failed_usage: Mutex::new(None),
+            last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            mcp: false,
+            timeout: Duration::from_secs(60),
+            session_store: Mutex::new(None),
+            effort: String::new(),
+            native_usage: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            guard: None,
+        });
+        let stopper = std::sync::Arc::clone(&provider);
+        let started = std::time::Instant::now();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            stopper.end_turn_early();
+        });
+        let mut episode = Episode::default();
+        provider
+            .run_episode("test prompt", None, &None, &mut episode, None, None)
+            .await
+            .expect("a CLI stopped on purpose ends its turn normally");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(episode.text.contains("working on it"), "{}", episode.text);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// From the 13 November audit: a line number in a stack trace read as
+    /// HTTP 401, and a full disk as a usage quota.
+    #[test]
+    fn sign_outs_and_limits_need_their_own_words() {
+        let trace = "TypeError: x is undefined\n    at run (/usr/lib/node_modules/cli.js:401:13)";
+        assert!(classify_cli_failure(CliKind::Codex, trace).is_none());
+        assert!(classify_cli_failure(CliKind::Codex, "write failed: Disk quota exceeded").is_none());
+        assert!(matches!(
+            classify_cli_failure(CliKind::Codex, "error: HTTP status 401 Unauthorized"),
+            Some(ProviderError::MissingCredential { .. })
+        ));
+        assert!(matches!(
+            classify_cli_failure(CliKind::Codex, "You exceeded your current quota, please check your plan"),
+            Some(ProviderError::RateLimited { .. })
+        ));
+        assert_eq!(stderr_tail(b""), "no error output");
+        assert_eq!(stderr_tail(b"a\n\nb\n"), "a\nb");
     }
 
     #[test]
@@ -3615,6 +3794,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
             merge_held: std::sync::atomic::AtomicBool::new(false),
+            stop_turn: tokio::sync::watch::channel(0).0,
+            tool_running: std::sync::atomic::AtomicBool::new(false),
+            failed_usage: Mutex::new(None),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: true,
             timeout: Duration::from_secs(5),
@@ -3720,6 +3902,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"we
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
             merge_held: std::sync::atomic::AtomicBool::new(false),
+            stop_turn: tokio::sync::watch::channel(0).0,
+            tool_running: std::sync::atomic::AtomicBool::new(false),
+            failed_usage: Mutex::new(None),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -3804,6 +3989,9 @@ fi
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
             merge_held: std::sync::atomic::AtomicBool::new(false),
+            stop_turn: tokio::sync::watch::channel(0).0,
+            tool_running: std::sync::atomic::AtomicBool::new(false),
+            failed_usage: Mutex::new(None),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
                 mcp: false,
                 timeout: Duration::from_secs(5),
@@ -3909,6 +4097,9 @@ fi
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
             merge_held: std::sync::atomic::AtomicBool::new(false),
+            stop_turn: tokio::sync::watch::channel(0).0,
+            tool_running: std::sync::atomic::AtomicBool::new(false),
+            failed_usage: Mutex::new(None),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             timeout: Duration::from_secs(5),
@@ -3979,6 +4170,9 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
             merge_held: std::sync::atomic::AtomicBool::new(false),
+            stop_turn: tokio::sync::watch::channel(0).0,
+            tool_running: std::sync::atomic::AtomicBool::new(false),
+            failed_usage: Mutex::new(None),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
                 mcp: false,
                 timeout: Duration::from_secs(5),
@@ -4196,6 +4390,9 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
             merge_held: std::sync::atomic::AtomicBool::new(false),
+            stop_turn: tokio::sync::watch::channel(0).0,
+            tool_running: std::sync::atomic::AtomicBool::new(false),
+            failed_usage: Mutex::new(None),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: store.mcp,
             timeout: Duration::from_secs(5),
@@ -4345,6 +4542,9 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
             merge_held: std::sync::atomic::AtomicBool::new(false),
+            stop_turn: tokio::sync::watch::channel(0).0,
+            tool_running: std::sync::atomic::AtomicBool::new(false),
+            failed_usage: Mutex::new(None),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: store.mcp,
             timeout: Duration::from_millis(50),
@@ -4572,9 +4772,7 @@ printf '{"type":"turn.completed",%s}\n' "$usage"
         std::fs::write(project.join("kept.txt"), "original-project").unwrap();
 
         let binary = project.join("fake-codex");
-        let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$HOME|$CODEX_HOME\" > \"$CODEX_HOME/env-record.txt\"\nif [ ! -f \"$CODEX_HOME/auth.json\" ] || [ ! -f \"$CODEX_HOME/skills/local/SKILL.md\" ]; then exit 41; fi\nif grep -q 'remote\\|mcp_servers' \"$CODEX_HOME/config.toml\"; then exit 43; fi\ncase \"$*\" in *stable-session*) [ -f \"$CODEX_HOME/sessions/stable-session.jsonl\" ] || exit 42 ;; *) mkdir -p \"$CODEX_HOME/sessions\"; printf 'resume state\\n' > \"$CODEX_HOME/sessions/stable-session.jsonl\" ;; esac\nprintf 'modified-private-auth' > \"$CODEX_HOME/auth.json\"\nprintf 'generated-by-cli' > /tmp/orgbot-workspace/generated.txt\nprintf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"stable-session\"}}'\nprintf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"protected-ok\"}}}}'\n"
-        );
+        let script = "#!/bin/sh\nprintf '%s\\n' \"$HOME|$CODEX_HOME\" > \"$CODEX_HOME/env-record.txt\"\nif [ ! -f \"$CODEX_HOME/auth.json\" ] || [ ! -f \"$CODEX_HOME/skills/local/SKILL.md\" ]; then exit 41; fi\nif grep -q 'remote\\|mcp_servers' \"$CODEX_HOME/config.toml\"; then exit 43; fi\ncase \"$*\" in *stable-session*) [ -f \"$CODEX_HOME/sessions/stable-session.jsonl\" ] || exit 42 ;; *) mkdir -p \"$CODEX_HOME/sessions\"; printf 'resume state\\n' > \"$CODEX_HOME/sessions/stable-session.jsonl\" ;; esac\nprintf 'modified-private-auth' > \"$CODEX_HOME/auth.json\"\nprintf 'generated-by-cli' > /tmp/orgbot-workspace/generated.txt\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"stable-session\"}'\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"protected-ok\"}}'\n".to_string();
         write_executable_fixture(&binary, script.as_str()).unwrap();
 
         let session_path = root.join("state/cli-session.json");
@@ -5200,6 +5398,9 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"
             last_activity: std::sync::atomic::AtomicUsize::new(0),
             live_activity: std::sync::atomic::AtomicUsize::new(0),
             merge_held: std::sync::atomic::AtomicBool::new(false),
+            stop_turn: tokio::sync::watch::channel(0).0,
+            tool_running: std::sync::atomic::AtomicBool::new(false),
+            failed_usage: Mutex::new(None),
             last_pending: std::sync::atomic::AtomicUsize::new(usize::MAX),
             mcp: false,
             effort: String::new(),

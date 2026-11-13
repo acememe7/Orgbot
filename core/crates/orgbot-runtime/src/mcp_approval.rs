@@ -168,12 +168,24 @@ fn consume_approval_sync(state_dir: &Path, decision: DecisionId) -> Result<(), S
                 format!("consume MCP owner approval: {error}")
             }
         })?;
-    file.write_all(b"consumed\n")
+    // From the 13 November audit: a marker that could not be written (a full
+    // disk) still existed, so the call was refused and the approval was spent
+    // anyway. The marker goes when it cannot be made durable, and the owner's
+    // approval stays usable once there is room.
+    let persisted = file
+        .write_all(b"consumed\n")
         .and_then(|_| file.sync_all())
-        .map_err(|error| format!("persist MCP owner approval use: {error}"))?;
-    std::fs::File::open(&approvals)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("sync MCP approval ledger: {error}"))
+        .map_err(|error| format!("persist MCP owner approval use: {error}"))
+        .and_then(|_| {
+            std::fs::File::open(&approvals)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| format!("sync MCP approval ledger: {error}"))
+        });
+    if persisted.is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+    }
+    persisted
 }
 
 #[cfg(test)]

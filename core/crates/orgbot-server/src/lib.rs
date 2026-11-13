@@ -161,13 +161,27 @@ async fn serve_room_inner(
         }
     };
     let workspace_spec = resolved.workspace.clone();
-    let (mut session, handle) = RoomSession::build_with_resume(resolved, resume_was_running)?;
+    // A room that cannot be built says so on the readiness channel too, not
+    // only in the log (13 November audit).
+    let (mut session, handle) = match RoomSession::build_with_resume(resolved, resume_was_running) {
+        Ok(built) => built,
+        Err(error) => {
+            report(Err(format!("cannot start room: {error}")));
+            return Err(error);
+        }
+    };
     #[cfg(target_os = "linux")]
     if resume_was_running {
         session.enable_desktop_notifications();
     }
     let workspace_host = match workspace_spec {
-        Some(spec) => Some(local_workspace::LocalWorkspaceHost::attach(spec, &mut session).await?),
+        Some(spec) => match local_workspace::LocalWorkspaceHost::attach(spec, &mut session).await {
+            Ok(host) => Some(host),
+            Err(error) => {
+                report(Err(format!("cannot open the room's workspace: {error}")));
+                return Err(error);
+            }
+        },
         None => None,
     };
 

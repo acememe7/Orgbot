@@ -39,3 +39,9 @@ core/.cargo/
 
 # Engine library, produced by core/scripts/build-android.sh
 app/android/app/src/main/jniLibs/
+
+# Local tooling: preview launch config, review harness, worktrees.
+/.claude/
+
+# Local preview written by scripts/build-log/render.py.
+/build.html

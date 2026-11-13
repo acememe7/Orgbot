@@ -277,12 +277,14 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
     // Without this it hunts for the bare names, concludes it has no room tools,
     // and does nothing — which is exactly a room where the board stays empty.
     if let orgbot_proto::agent::ProviderRef::CliAgent { mcp: true, .. } = spec.provider {
+        // Each CLI prefixes them its own way (13 November audit: all five
+        // were told one form that only some use).
         out.push_str(
-            "Your room tools arrive over MCP and are prefixed with the server \
-             name. Every tool named above is called as `orgbot_room__<name>` — \
-             `orgbot_room__claim_task`, `orgbot_room__create_task`, \
-             `orgbot_room__add_artifact`, and so on. Use those exact names; the \
-             unprefixed ones do not exist.\n\n",
+            "Your room tools arrive over MCP from the server `orgbot_room`, and your \
+             CLI lists them under its own prefix for that server, for example \
+             `mcp__orgbot_room__claim_task` or `orgbot_room__claim_task`. Every tool \
+             named above is called by the name your CLI lists for it; the bare, \
+             unprefixed names do not exist.\n\n",
         );
         // From speed test 1: a bot wrote `project/src/...` and an empty `_t`
         // into the owner's project.
@@ -296,9 +298,7 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
         out.push_str(
             "Images you make with your own image tool are posted to the room for \
              you, so the owner sees them; say in a sentence what you made. Do not \
-             copy them into the project unless the owner or the task asks. To work \
-             from an image someone replied to, import it with \
-             workspace_import_attachment.\n\n",
+             copy them into the project unless the owner or the task asks.\n\n",
         );
     }
 
@@ -456,6 +456,14 @@ pub fn system_prompt(engine: &Engine, spec: &AgentSpec) -> String {
              offline in a read-only project copy; direct generated files to /tmp. \
              It cannot install dependencies or use host credentials. If a required \
              check cannot run there, report the limit instead of claiming it passed.\n",
+        );
+        // From the 13 November audit: the rules above name tools a reviewer
+        // is not given, and its questions went to chat untracked.
+        out.push_str(
+            "As a reviewer you do not have ask_owner, offer_handoff or block_on, \
+             though the rules above mention them. Where they say to use one, post \
+             one message to the coordinators saying what you need, and carry on \
+             with your review.\n",
         );
     }
     if !spec.autonomy.may_inspect {
@@ -1195,9 +1203,7 @@ fn review_request(engine: &orgbot_engine::Engine, agent: orgbot_proto::AgentId, 
     if engine.last_round_reviewers(task.id).contains(&agent) {
         if let Some(last) = engine
             .reviews()
-            .iter()
-            .filter(|r| r.task == task.id && r.decides() && r.revision + 1 == task.revision)
-            .last()
+            .iter().rfind(|r| r.task == task.id && r.decides() && r.revision + 1 == task.revision)
         {
             out.push_str("    you asked for these fixes last round; check each one and run the checks that show the workaround works:\n");
             for finding in last.blockers() {

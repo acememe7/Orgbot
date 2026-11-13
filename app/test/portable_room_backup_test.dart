@@ -254,19 +254,29 @@ void main() {
     );
   });
 
-  test('rejects symbolic links in selected project folders', () async {
+  // From the 13 November audit: a link anywhere refused the whole project,
+  // and source files named like secrets were dropped without a word.
+  test('links and rebuilt folders are left out and named, source is kept', () async {
     final root = await Directory.systemTemp.createTemp('orgbot-project-link-');
     final external = await File(
       '${root.path}/outside.txt',
     ).writeAsString('outside');
     await Link('${root.path}/linked.txt').create(external.path);
+    await File('${root.path}/node_modules/.bin/tool').create(recursive: true);
+    await File('${root.path}/src/tokenizer.rs').create(recursive: true);
+    await File('${root.path}/lib/credentials.dart').create(recursive: true);
+    await File('${root.path}/credentials.json').writeAsString('{"key":"x"}');
     addTearDown(() => root.delete(recursive: true));
-    await expectLater(
-      PortableRoomBackup.readProjectFiles(
-        root,
-        readFile: (_, path) => File(path).readAsBytes(),
-      ),
-      throwsFormatException,
+    List<String> omitted = const [];
+    final files = await PortableRoomBackup.readProjectFiles(
+      root,
+      readFile: (_, path) => File(path).readAsBytes(),
+      onOmitted: (left) => omitted = left,
     );
+    expect(files.keys, containsAll(['project/src/tokenizer.rs', 'project/lib/credentials.dart', 'project/outside.txt']));
+    expect(files.keys, isNot(contains('project/credentials.json')));
+    expect(omitted, contains('linked.txt (a link)'));
+    expect(omitted.any((line) => line.startsWith('node_modules')), isTrue);
+    expect(omitted, contains('credentials.json (may hold secrets)'));
   });
 }

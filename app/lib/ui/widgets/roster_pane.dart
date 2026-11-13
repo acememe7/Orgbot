@@ -4,6 +4,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../protocol/models.dart';
+import '../bot_status.dart';
 import '../../state/room_store.dart';
 
 /// The left pane: the bots, with live status.
@@ -46,7 +47,7 @@ class _AgentTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final (statusColor, statusLabel) = _status(doing);
+    final (statusColor, statusLabel) = botStatus(doing);
     return ListTile(
       dense: true,
       leading: Stack(
@@ -83,16 +84,6 @@ class _AgentTile extends StatelessWidget {
       ),
     );
   }
-
-  static (Color, String) _status(String doing) => switch (doing) {
-    'working' => (Colors.blue, 'working'),
-    'reviewing' => (Colors.purple, 'reviewing'),
-    'waiting' => (Colors.amber, 'waiting'),
-    'between turns' => (Colors.blueGrey, 'between turns'),
-    'faulted' => (Colors.red, 'faulted'),
-    'offline' => (Colors.grey, 'offline'),
-    _ => (Colors.green, 'idle'),
-  };
 }
 
 /// A compact strip of in-flight handoffs at the bottom of the roster.

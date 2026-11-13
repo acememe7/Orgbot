@@ -4,7 +4,9 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
+import 'dart:async';
 import 'dart:ui' as ui;
+
 
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart' show PointerScrollEvent;
@@ -21,6 +23,7 @@ import '../workspace/desktop_files.dart';
 import 'brand.dart';
 import 'polish.dart';
 import 'widgets/mentions.dart';
+import 'bot_status.dart';
 
 export 'widgets/mentions.dart' show MentionOption;
 
@@ -112,7 +115,15 @@ class ActivityRail extends StatelessWidget {
   /// A one-line summary of the board, so progress is visible at a glance.
   Widget _footer(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final tasks = store.tasks;
+    // Work that was dropped or replaced is not owed. From the 13 November
+    // audit: cancelled and retired records counted, so the bar never filled.
+    const dropped = {
+      TaskState.cancelled,
+      TaskState.superseded,
+      TaskState.retired,
+      TaskState.archived,
+    };
+    final tasks = store.tasks.where((t) => !dropped.contains(t.state)).toList();
     if (tasks.isEmpty) return const SizedBox.shrink();
     final done = tasks.where((t) => t.state == TaskState.submitted).length;
     final active = tasks.where((t) => t.state.isActive).length;
@@ -248,7 +259,7 @@ class _BotRow extends StatelessWidget {
         ? (Colors.amber, entry.retryStatus!)
         : live && activeStep != null
         ? (Colors.lightBlue, activeStep.label)
-        : _status(doing, entry.lastError != null && !live);
+        : botStatus(doing, lastTurnFailed: entry.lastError != null && !live);
 
     return AnimatedContainer(
       duration: motionDuration(context, 180),
@@ -326,12 +337,7 @@ class _BotRow extends StatelessWidget {
           ),
           if (!time.isEmpty) ...[
             const SizedBox(height: 6),
-            Text(
-              time.summary,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
-            ),
+            _TurnTime(time: time, color: scheme.onSurfaceVariant),
           ],
           if (entry.taskTitle != null) ...[
             const SizedBox(height: 10),
@@ -527,21 +533,6 @@ class _BotRow extends StatelessWidget {
         ],
       ),
     );
-  }
-
-  static (Color, String) _status(String doing, bool failing) {
-    if (failing) return (Colors.red, 'last turn failed');
-    return switch (doing) {
-      'working' => (Colors.blue, 'working'),
-      'reviewing' => (Colors.purple, 'reviewing'),
-      'waiting' => (Colors.amber, 'waiting'),
-      'between turns' => (Colors.blueGrey, 'between turns'),
-      'faulted' => (Colors.red, 'faulted'),
-      'offline' => (Colors.grey, 'offline'),
-      'paused' => (Colors.grey, 'paused by you'),
-      'benched' => (Colors.grey, 'benched: long turn, no task'),
-      _ => (Colors.green, 'idle'),
-    };
   }
 
   static String _ago(DateTime? at) {
@@ -1940,11 +1931,22 @@ class _ProjectImageThumbState extends State<ProjectImageThumb> {
 
   Future<Uint8List> _load() {
     if (_cache.length > 64) _cache.remove(_cache.keys.first);
-    return _cache[widget.path] ??=
+    // Keyed by project, path and the file's time and size. From the 13
+    // November audit: keyed by path alone, an overwritten screenshot kept
+    // showing its first version.
+    final root = expandHome(widget.root);
+    var key = '$root\u0000${widget.path}';
+    try {
+      final stat = FileStat.statSync('$root/${widget.path}');
+      key = '$key\u0000${stat.modified.microsecondsSinceEpoch}\u0000${stat.size}';
+    } catch (_) {
+      // Unreadable here: the checked read below says why.
+    }
+    return _cache[key] ??=
         checkedImage(
-          DesktopFiles.readProjectFile(expandHome(widget.root), widget.path),
+          DesktopFiles.readProjectFile(root, widget.path),
         ).catchError((Object error) {
-          _cache.remove(widget.path);
+          _cache.remove(key);
           throw error;
         });
   }
@@ -1958,7 +1960,9 @@ class _ProjectImageThumbState extends State<ProjectImageThumb> {
   @override
   void didUpdateWidget(covariant ProjectImageThumb oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.path != widget.path) _bytes = _load();
+    if (oldWidget.path != widget.path || oldWidget.root != widget.root) {
+      _bytes = _load();
+    }
   }
 
   @override
@@ -2214,8 +2218,12 @@ class _BoardStripState extends State<BoardStrip> {
 
   /// Waiting on the owner's reply: this pulls the list to its tab and marks
   /// the tab. Parked work is the owner's own choice and does neither.
-  bool _needsOwner(Task task) =>
-      task.blockReasons.any((r) => r['kind'] == 'awaiting_human');
+  ///
+  /// A question to the owner counts too; it is answered on its own card.
+  /// From the 13 November audit: a task held on one was not marked.
+  bool _needsOwner(Task task) => task.blockReasons.any(
+    (r) => r['kind'] == 'awaiting_human' || r['kind'] == 'awaiting_decision',
+  );
 
   /// Opens unfolded, so its buttons show: a reply to give, or a resume.
   bool _isOpen(Task task) =>
@@ -2707,32 +2715,6 @@ Color taskColor(TaskState state) {
 }
 
 /// The message input.
-/// Who a message will reach, shown above the box as it is typed, or null
-/// when it names nobody.
-///
-/// From speed test 1: the owner wrote "@grok-quick ... I'm asking the room",
-/// and only @grok-quick heard it. A tagged message goes to the bots it tags;
-/// the coordinators see a copy.
-String? composerReach(String text, List<String> handles) {
-  final tags = RegExp(r'@([A-Za-z0-9_-]+)')
-      .allMatches(text)
-      .map((match) => match.group(1)!.toLowerCase())
-      .toList();
-  if (tags.isEmpty) return null;
-  if (tags.any((tag) => const ['all', 'everyone', 'everybody'].contains(tag))) {
-    return 'Goes to everyone in the room.';
-  }
-  final known = {for (final handle in handles) handle.toLowerCase(): handle};
-  final reached = <String>[];
-  for (final tag in tags) {
-    final handle = known[tag];
-    if (handle != null && !reached.contains(handle)) reached.add(handle);
-  }
-  if (reached.isEmpty) return null;
-  final names = reached.map((handle) => '@$handle').join(', ');
-  return 'Goes to $names. The coordinators see a copy; @all reaches everyone.';
-}
-
 class Composer extends StatefulWidget {
   const Composer({
     super.key,
@@ -2983,25 +2965,6 @@ class _ComposerState extends State<Composer> {
                     ),
                 ],
               ),
-            ),
-          if (widget.replyTo == null && widget.mentions.isNotEmpty)
-            ValueListenableBuilder<TextEditingValue>(
-              valueListenable: controller,
-              builder: (context, value, _) {
-                final reach = composerReach(value.text, widget.mentions);
-                if (reach == null) return const SizedBox.shrink();
-                return Padding(
-                  padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
-                  child: Text(
-                    reach,
-                    key: const ValueKey('composer-reach'),
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                );
-              },
             ),
           if (busy)
             Padding(
@@ -3522,4 +3485,57 @@ class _FailureBanner extends StatelessWidget {
       ),
     );
   }
+}
+
+
+/// A bot's time line, its current turn counting up between digests. From
+/// the 13 November audit: it showed the value at the last digest, and a
+/// digest sent as the turn began hid it.
+class _TurnTime extends StatefulWidget {
+  const _TurnTime({required this.time, required this.color});
+
+  final BotTime time;
+  final Color color;
+
+  @override
+  State<_TurnTime> createState() => _TurnTimeState();
+}
+
+class _TurnTimeState extends State<_TurnTime> {
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _schedule();
+  }
+
+  @override
+  void didUpdateWidget(_TurnTime old) {
+    super.didUpdateWidget(old);
+    _schedule();
+  }
+
+  void _schedule() {
+    _tick?.cancel();
+    _tick = widget.time.inTurn
+        ? Timer.periodic(const Duration(seconds: 10), (_) {
+            if (mounted) setState(() {});
+          })
+        : null;
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(
+    widget.time.summary,
+    maxLines: 2,
+    overflow: TextOverflow.ellipsis,
+    style: TextStyle(fontSize: 11, color: widget.color),
+  );
 }

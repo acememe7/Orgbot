@@ -447,7 +447,7 @@ def _write_dropin(path: Path, content: bytes) -> None:
 
 
 def _configure_root_locked_root(requested: Path, current_root: Path | None, previous: dict[str, Any] | None, *, sync_systemd: bool) -> dict[str, Any]:
-    if current_root is not None and current_root != requested and list_entries(current_root):
+    if current_root is not None and current_root != requested and _holds_entries(current_root):
         _fail("Cannot change trash location while the current trash contains entries")
     if not requested.parent.exists() and requested == _default_root():
         _create_absolute_dirs(requested.parent)
@@ -623,13 +623,19 @@ def _selected_root_locked(*, persist_selection: bool = False) -> Iterator[Path]:
 
 
 def _reject_overlap(path: Path, root: Path) -> None:
-    protected_roots = (Path.home(), Path("/mnt/storage"), HDD_MOUNT)
-    for protected in protected_roots:
+    # The home folder, and any whole mounted filesystem. From the 13 November
+    # audit: this named one machine's own disks (/mnt/storage, /mnt/hdd).
+    for protected in (Path.home(), HDD_MOUNT):
         try:
             if path == protected or path in protected.parents:
                 _fail(f"Refusing protected or overlapping path: {path}")
         except OSError as exc:
             raise TrashError(f"Cannot inspect path: {exc.strerror}") from exc
+    try:
+        if os.path.ismount(path):
+            _fail(f"Refusing protected or overlapping path: {path}")
+    except OSError as exc:
+        raise TrashError(f"Cannot inspect path: {exc.strerror}") from exc
     if path == root or path in root.parents or root in path.parents:
         _fail(f"Refusing protected or overlapping path: {path}")
 
@@ -1322,15 +1328,72 @@ def _find_entry(root: Path, entry_id: str) -> tuple[Path, dict[str, Any]]:
     return matches[0], _load_entry(matches[0])
 
 
-def list_entries(root: Path) -> list[dict[str, Any]]:
+def list_entries(root: Path, problems: list[str] | None = None) -> list[dict[str, Any]]:
+    """Every readable entry. From the 13 November audit: one entry that could
+    not be read (a move that stopped before its manifest) failed the whole
+    list. Unreadable entries are reported in `problems` and skipped."""
     result = []
     for project_dir in sorted((root / "projects").iterdir()):
         if project_dir.is_symlink() or not project_dir.is_dir():
             _fail("Unsafe project directory in trash")
         for entry in sorted(project_dir.iterdir()):
-            manifest = _load_entry(entry)
+            try:
+                manifest = _load_entry(entry)
+            except (TrashError, OSError, ValueError, json.JSONDecodeError) as exc:
+                if problems is not None:
+                    problems.append(f"{project_dir.name}/{entry.name}: {exc}")
+                continue
             result.append(manifest)
     return result
+
+
+def _unfinished(entry: Path) -> bool:
+    """A move that stopped before its source was touched: the entry has no
+    manifest yet, or its manifest still says it is copying. Every move holds
+    the trash lock, so under the lock such an entry is a leftover; its source
+    is still where it was, and the entry holds nothing anyone needs."""
+    try:
+        info = entry.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        return False
+    manifest_path = entry / "manifest.json"
+    try:
+        manifest_info = manifest_path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if not stat.S_ISREG(manifest_info.st_mode):
+        return False
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("status") == "copying"
+
+
+def _holds_entries(root: Path) -> bool:
+    """Whether the trash holds anything besides unfinished leftovers."""
+    for project_dir in (root / "projects").iterdir():
+        if project_dir.is_symlink() or not project_dir.is_dir():
+            return True
+        if any(not _unfinished(entry) for entry in project_dir.iterdir()):
+            return True
+    return False
+
+
+def _remove_unfinished(entry: Path) -> None:
+    """Remove a leftover entry, making its folders writable first so a copied
+    read-only folder does not stop it."""
+    for folder, dirs, _files in os.walk(entry, topdown=True, followlinks=False):
+        for name in dirs:
+            path = os.path.join(folder, name)
+            if not os.path.islink(path):
+                os.chmod(path, 0o700)
+    os.chmod(entry, 0o700)
+    shutil.rmtree(entry)
 
 
 def restore(root: Path, entry_id: str) -> None:
@@ -1427,6 +1490,16 @@ def cleanup(root: Path, *, now: float | None = None, dry_run: bool = False) -> t
             errors.append(f"Skipped unsafe project directory: {project_dir.name}")
             continue
         for entry in sorted(project_dir.iterdir()):
+            # From the 13 November audit: a move that stopped part way left
+            # its copy here for good.
+            if _unfinished(entry):
+                try:
+                    if not dry_run:
+                        _remove_unfinished(entry)
+                    purged.append(entry.name)
+                except OSError as exc:
+                    errors.append(f"Could not remove the unfinished copy {entry.name}: {exc}")
+                continue
             try:
                 manifest = _load_entry(entry)
                 if manifest["status"] != "complete":
@@ -1578,8 +1651,11 @@ def _cli() -> int:
                 for source, digest in batch:
                     print(move(root, args.project, source, expected_sha256=digest), flush=True)
             elif args.command == "list":
-                for row in list_entries(root):
+                problems: list[str] = []
+                for row in list_entries(root, problems):
                     print(json.dumps({key: row[key] for key in ("id", "project", "status", "moved_at", "original_path", "source_recovery")}, ensure_ascii=False, sort_keys=True))
+                for problem in problems:
+                    print(f"Unreadable entry {problem}", file=sys.stderr)
             elif args.command == "restore":
                 restore(root, args.entry_id)
                 print(f"Restored {args.entry_id}")

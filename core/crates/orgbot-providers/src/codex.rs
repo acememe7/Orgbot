@@ -259,7 +259,7 @@ impl Provider for CodexProvider {
 
         // The endpoint only streams, so a non-streaming caller still reads the
         // event stream and is simply handed the assembled result.
-        collect_stream(response, sink).await
+        collect_stream(response, sink, request.thinking_limit.unwrap_or(THINKING_LIMIT)).await
     }
 }
 
@@ -288,6 +288,7 @@ async fn check_status(response: reqwest::Response) -> Result<reqwest::Response> 
         401 | 403 => ProviderError::Unauthorized {
             provider: "codex".into(),
             status: status.as_u16(),
+            message: message.clone(),
         },
         429 => ProviderError::RateLimited {
             provider: "codex".into(),
@@ -306,22 +307,42 @@ async fn check_status(response: reqwest::Response) -> Result<reqwest::Response> 
     })
 }
 
-/// Read the event stream and assemble the finished turn.
+/// How long a reply may only reason, when the room sets no limit, and how
+/// long the stream may stay silent: as for the other API adapters (13 November
+/// audit: only the OpenAI-compatible one had them).
+const THINKING_LIMIT: std::time::Duration = std::time::Duration::from_secs(25 * 60);
+const QUIET_STREAM_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Read the event stream and assemble the finished turn. A reply that only
+/// reasons for `thinking_limit` is cut off as if it had reached its limit.
 async fn collect_stream(
     response: reqwest::Response,
     sink: Option<mpsc::Sender<StreamEvent>>,
+    thinking_limit: std::time::Duration,
 ) -> Result<CompletionResponse> {
     let mut decoder = SseDecoder::new();
     let mut state = StreamState::default();
     let mut body = response.bytes_stream();
+    let mut last_answer = tokio::time::Instant::now();
+    let mut thinking_since: Option<tokio::time::Instant> = None;
 
-    'stream: while let Some(chunk) = body.next().await {
+    'stream: loop {
+        let next = tokio::time::timeout_at(last_answer + QUIET_STREAM_LIMIT, body.next()).await;
+        let Ok(next) = next else {
+            return Err(ProviderError::RateLimited {
+                provider: "codex".into(),
+                message: "the service held the reply 5 minutes without a word, so it is too busy".into(),
+                retry_after_secs: Some(60),
+            });
+        };
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|source| ProviderError::Transport {
             provider: "codex".into(),
             source,
         })?;
         for event in decoder.push(&chunk) {
-            if event.data == "[DONE]" {
+            last_answer = tokio::time::Instant::now();
+            if event.data.trim() == "[DONE]" {
                 continue;
             }
             let Ok(value) = serde_json::from_str::<Value>(&event.data) else {
@@ -330,6 +351,17 @@ async fn collect_stream(
             state.apply(&value, &sink).await?;
             if state.completed {
                 break 'stream;
+            }
+            if !state.thinking.is_empty() && state.text.is_empty() && state.calls.is_empty() {
+                let since = *thinking_since.get_or_insert_with(tokio::time::Instant::now);
+                if since.elapsed() >= thinking_limit {
+                    // Cut off: finished as a reply that reached its limit.
+                    state.completed = true;
+                    state.cut_off = true;
+                    break 'stream;
+                }
+            } else {
+                thinking_since = None;
             }
         }
     }
@@ -370,6 +402,8 @@ struct StreamState {
     /// Whether the terminal `response.completed` event arrived. Without it the
     /// stream was cut short and the turn must not be reported as complete.
     completed: bool,
+    /// Whether the reply was cut off for reasoning too long.
+    cut_off: bool,
 }
 
 impl StreamState {
@@ -507,7 +541,9 @@ impl StreamState {
         CompletionResponse {
             model: self.model,
             content,
-            stop_reason: if had_calls {
+            stop_reason: if self.cut_off {
+                StopReason::MaxTokens
+            } else if had_calls {
                 StopReason::ToolUse
             } else if self.completed {
                 StopReason::EndTurn
@@ -540,34 +576,12 @@ fn account_from_token(token: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Decode unpadded base64url. Written out rather than pulled in as a
-/// dependency because a JWT payload is the only thing this crate decodes.
+/// Decode base64url, padded or not, as a JWT payload is.
 fn base64url_decode(input: &str) -> Option<Vec<u8>> {
-    let value = |byte: u8| -> Option<u32> {
-        Some(match byte {
-            b'A'..=b'Z' => u32::from(byte - b'A'),
-            b'a'..=b'z' => u32::from(byte - b'a') + 26,
-            b'0'..=b'9' => u32::from(byte - b'0') + 52,
-            b'-' => 62,
-            b'_' => 63,
-            _ => return None,
-        })
-    };
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    let mut acc: u32 = 0;
-    let mut bits = 0u32;
-    for byte in input.bytes() {
-        if byte == b'=' {
-            break;
-        }
-        acc = (acc << 6) | value(byte)?;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    Some(out)
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(input.trim_end_matches('='))
+        .ok()
 }
 
 #[cfg(test)]
@@ -594,7 +608,7 @@ mod tests {
                 crate::sse::test_response(&format!("{tool}{terminal}"), keep_open).await;
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
-                collect_stream(http, None),
+                collect_stream(http, None, THINKING_LIMIT),
             )
             .await
             .expect("a completed turn must not wait for the server to close HTTP");

@@ -59,6 +59,24 @@ fn set_error(message: impl Into<String>) {
     LAST_ERROR.with(|slot| *slot.borrow_mut() = Some(message));
 }
 
+/// Run one call from the app, turning a panic into the call's failure value
+/// with the reason kept for `orgbot_last_error`. From the 13 November audit:
+/// a panic crossing the C boundary aborted the whole app.
+fn ffi_guard<T>(failed: T, call: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+        Ok(value) => value,
+        Err(panic) => {
+            let why = panic
+                .downcast_ref::<&str>()
+                .map(|text| text.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "an internal error".into());
+            set_error(format!("the engine stopped on an internal error: {why}"));
+            failed
+        }
+    }
+}
+
 fn with_rooms<T>(f: impl FnOnce(&mut HashMap<u64, Room>) -> T) -> Option<T> {
     let mut guard = ROOMS.lock().ok()?;
     Some(f(guard.get_or_insert_with(HashMap::new)))
@@ -114,30 +132,32 @@ fn parse_environment(raw: Option<&str>) -> Vec<(String, String)> {
 /// Both arguments must be null or valid NUL-terminated strings.
 #[no_mangle]
 pub unsafe extern "C" fn orgbot_room_open(toml: *const c_char, environment: *const c_char) -> u64 {
-    // SAFETY: the caller guarantees valid strings; see the doc comment.
-    let Some(toml) = (unsafe { borrow(toml) }) else {
-        set_error("a room file is required");
-        return 0;
-    };
-    // SAFETY: as above.
-    let environment = parse_environment(unsafe { borrow(environment) });
+    ffi_guard(0, move || {
+        // SAFETY: the caller guarantees valid strings; see the doc comment.
+        let Some(toml) = (unsafe { borrow(toml) }) else {
+            set_error("a room file is required");
+            return 0;
+        };
+        // SAFETY: as above.
+        let environment = parse_environment(unsafe { borrow(environment) });
 
-    match Room::open(toml, &environment) {
-        Ok(room) => {
-            let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-            match with_rooms(|rooms| rooms.insert(handle, room)) {
-                Some(_) => handle,
-                None => {
-                    set_error("the room registry was poisoned");
-                    0
+        match Room::open(toml, &environment) {
+            Ok(room) => {
+                let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+                match with_rooms(|rooms| rooms.insert(handle, room)) {
+                    Some(_) => handle,
+                    None => {
+                        set_error("the room registry was poisoned");
+                        0
+                    }
                 }
             }
+            Err(error) => {
+                set_error(error);
+                0
+            }
         }
-        Err(error) => {
-            set_error(error);
-            0
-        }
-    }
+    })
 }
 
 /// Everything the room has broadcast since the last poll, as a JSON array.
@@ -145,39 +165,43 @@ pub unsafe extern "C" fn orgbot_room_open(toml: *const c_char, environment: *con
 /// Returns null on an unknown handle. The caller owns the result.
 #[no_mangle]
 pub extern "C" fn orgbot_room_poll(handle: u64) -> *mut c_char {
-    let events = with_rooms(|rooms| rooms.get(&handle).map(|room| room.drain()));
-    match events.flatten() {
-        Some(events) => match serde_json::to_string(&events) {
-            Ok(json) => out(json),
-            Err(error) => {
-                set_error(format!("could not encode events: {error}"));
+    ffi_guard(std::ptr::null_mut(), move || {
+        let events = with_rooms(|rooms| rooms.get(&handle).map(|room| room.drain()));
+        match events.flatten() {
+            Some(events) => match serde_json::to_string(&events) {
+                Ok(json) => out(json),
+                Err(error) => {
+                    set_error(format!("could not encode events: {error}"));
+                    std::ptr::null_mut()
+                }
+            },
+            None => {
+                set_error(format!("no room {handle}"));
                 std::ptr::null_mut()
             }
-        },
-        None => {
-            set_error(format!("no room {handle}"));
-            std::ptr::null_mut()
         }
-    }
+    })
 }
 
 /// The room's current state, as a JSON snapshot. The caller owns the result.
 #[no_mangle]
 pub extern "C" fn orgbot_room_snapshot(handle: u64) -> *mut c_char {
-    let snapshot = with_rooms(|rooms| rooms.get(&handle).and_then(|room| room.snapshot()));
-    match snapshot.flatten() {
-        Some(message) => match serde_json::to_string(&message) {
-            Ok(json) => out(json),
-            Err(error) => {
-                set_error(format!("could not encode the snapshot: {error}"));
+    ffi_guard(std::ptr::null_mut(), move || {
+        let snapshot = with_rooms(|rooms| rooms.get(&handle).and_then(|room| room.snapshot()));
+        match snapshot.flatten() {
+            Some(message) => match serde_json::to_string(&message) {
+                Ok(json) => out(json),
+                Err(error) => {
+                    set_error(format!("could not encode the snapshot: {error}"));
+                    std::ptr::null_mut()
+                }
+            },
+            None => {
+                set_error(format!("no room {handle}, or it has stopped"));
                 std::ptr::null_mut()
             }
-        },
-        None => {
-            set_error(format!("no room {handle}, or it has stopped"));
-            std::ptr::null_mut()
         }
-    }
+    })
 }
 
 /// Say something to the room as a person. Returns 1 on success, 0 otherwise.
@@ -190,19 +214,21 @@ pub unsafe extern "C" fn orgbot_room_say(
     author: *const c_char,
     body: *const c_char,
 ) -> i32 {
-    // SAFETY: the caller guarantees valid strings; see the doc comment.
-    let (Some(author), Some(body)) = (unsafe { borrow(author) }, unsafe { borrow(body) }) else {
-        set_error("author and body are both required");
-        return 0;
-    };
-    let sent = with_rooms(|rooms| rooms.get(&handle).map(|room| room.say(author, body)));
-    match sent.flatten() {
-        Some(true) => 1,
-        _ => {
-            set_error(format!("no room {handle}, or it has stopped"));
-            0
+    ffi_guard(0, move || {
+        // SAFETY: the caller guarantees valid strings; see the doc comment.
+        let (Some(author), Some(body)) = (unsafe { borrow(author) }, unsafe { borrow(body) }) else {
+            set_error("author and body are both required");
+            return 0;
+        };
+        let sent = with_rooms(|rooms| rooms.get(&handle).map(|room| room.say(author, body)));
+        match sent.flatten() {
+            Some(true) => 1,
+            _ => {
+                set_error(format!("no room {handle}, or it has stopped"));
+                0
+            }
         }
-    }
+    })
 }
 
 /// Deliver a JSON client control or workspace tool result.
@@ -210,38 +236,46 @@ pub unsafe extern "C" fn orgbot_room_say(
 /// `message` must be a valid NUL-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn orgbot_room_control(handle: u64, message: *const c_char) -> i32 {
-    // SAFETY: the caller guarantees a valid C string.
-    let Some(message) = (unsafe { borrow(message) }) else {
-        return 0;
-    };
-    i32::from(
-        with_rooms(|rooms| rooms.get(&handle).is_some_and(|room| room.control(message)))
-            .unwrap_or(false),
-    )
+    ffi_guard(0, move || {
+        // SAFETY: the caller guarantees a valid C string.
+        let Some(message) = (unsafe { borrow(message) }) else {
+            return 0;
+        };
+        i32::from(
+            with_rooms(|rooms| rooms.get(&handle).is_some_and(|room| room.control(message)))
+                .unwrap_or(false),
+        )
+    })
 }
 
 /// Pause the room. Returns 1 on success.
 #[no_mangle]
 pub extern "C" fn orgbot_room_pause(handle: u64) -> i32 {
-    let ok = with_rooms(|rooms| {
-        rooms
-            .get(&handle)
-            .map(|room| room.pause("paused from the app"))
-    });
-    matches!(ok.flatten(), Some(true)) as i32
+    ffi_guard(0, move || {
+        let ok = with_rooms(|rooms| {
+            rooms
+                .get(&handle)
+                .map(|room| room.pause("paused from the app"))
+        });
+        matches!(ok.flatten(), Some(true)) as i32
+    })
 }
 
 /// Resume a paused room. Returns 1 on success.
 #[no_mangle]
 pub extern "C" fn orgbot_room_resume(handle: u64) -> i32 {
-    let ok = with_rooms(|rooms| rooms.get(&handle).map(|room| room.resume()));
-    matches!(ok.flatten(), Some(true)) as i32
+    ffi_guard(0, move || {
+        let ok = with_rooms(|rooms| rooms.get(&handle).map(|room| room.resume()));
+        matches!(ok.flatten(), Some(true)) as i32
+    })
 }
 
 /// Stop a room and release it. Closing an unknown handle is not an error.
 #[no_mangle]
 pub extern "C" fn orgbot_room_close(handle: u64) {
-    let _ = with_rooms(|rooms| rooms.remove(&handle));
+    ffi_guard((), move || {
+        let _ = with_rooms(|rooms| rooms.remove(&handle));
+    })
 }
 
 /// The last error message, or null if there has not been one. The caller owns

@@ -124,7 +124,7 @@ Breaks: orgbot (<< $VERSION)
 Replaces: orgbot (<< $VERSION)
 Installed-Size: $INSTALLED_KB
 Depends: $DEPENDS, python3, bubblewrap, dbus-daemon, gnome-keyring, libnotify-bin, libsecret-tools, ffmpeg, gstreamer1.0-libav, gstreamer1.0-plugins-good
-Maintainer: OrgBot <theaeceme@gmail.com>
+Maintainer: OrgBots <theaece@theaecestudio.com>
 Description: CLI and API agents working together in shared rooms
  Bots hold different roles, pick up tasks, hand work off to one another, wait
  on those handoffs, get their work inspected, and submit it - in one room you
@@ -145,7 +145,7 @@ Section: oldlibs
 Priority: optional
 Architecture: all
 Depends: orgbots (= $VERSION)
-Maintainer: OrgBot <theaeceme@gmail.com>
+Maintainer: OrgBots <theaece@theaecestudio.com>
 Description: transitional package for OrgBots
  This package upgrades installations of the former orgbot package to orgbots.
 TRANSITIONAL

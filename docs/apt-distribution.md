@@ -88,6 +88,10 @@ scoped key, and the package hashes are covered by that signed metadata.
 
 ## Published release and maintenance
 
+The section below records the first releases. Each later release has its own
+record, `docs/RELEASE_<version>_VERIFICATION.md`; the current published
+package is 2.2.2 (`docs/RELEASE_2_2_2_VERIFICATION.md`).
+
 OrgBots **2.0.3** was published on 2026-10-27 with
 [GitHub Actions run 40532408637](https://github.com/acememe7/Orgbot/actions/runs/40532408637).
 Both public signatures, a fresh isolated APT refresh, the 2.0.2-to-2.0.3

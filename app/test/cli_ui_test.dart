@@ -264,6 +264,10 @@ void main() {
       await tester.pump(const Duration(milliseconds: 200));
       await tester.tap(find.byTooltip('Remove DeepSeek API key'));
       await pumpUiTransition(tester);
+      // Asked first, since bots using it would stop working.
+      expect(credentials.forProvider(ProviderKind.deepseek), isNotNull);
+      await tester.tap(find.text('Forget key'));
+      await pumpUiTransition(tester);
       expect(credentials.forProvider(ProviderKind.deepseek), isNull);
 
       await tester.tap(find.text('Team').first);

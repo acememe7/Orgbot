@@ -46,7 +46,10 @@ python3 -m unittest -v scripts/test-linux-acceptance.py
 
 ## Controlled run evidence
 
-On 2026-10-26, the current shared tree passed all 12 configured Linux checks:
+The suite now has 16 checks (17 when a D-Bus session is available); it was
+last run in full on 2026-10-26 and has not been rerun since 2.2.2.
+
+On 2026-10-26, the tree of that day passed all 12 then-configured Linux checks:
 12 passed, zero failed, zero skipped. This included the established-socket MCP
 disconnect and private synthetic D-Bus notification/action checks.
 Machine-readable evidence is `/tmp/gptbots-linux-acceptance-current.json`.

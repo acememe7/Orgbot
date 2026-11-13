@@ -13,6 +13,7 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
+import 'confirm.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -200,9 +201,11 @@ class _SignInScreenState extends State<SignInScreen> {
             : 'Signed in to $count providers.',
       );
     } on PairingError catch (e) {
-      _report(error: e.message);
+      _bundle.clear();
+      _report(error: '${e.message} The bundle was cleared; paste it again.');
     } catch (e) {
-      _report(error: e.toString());
+      _bundle.clear();
+      _report(error: '$e The bundle was cleared; paste it again.');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -407,16 +410,19 @@ class _SignInScreenState extends State<SignInScreen> {
                   ),
                 ),
                 const SizedBox(height: 12),
+                // Hidden like a password: it holds live sign-ins. From the
+                // 13 November audit: it sat in plain view, and stayed there
+                // after an import failed.
                 TextField(
                   controller: _bundle,
-                  maxLines: 4,
-                  minLines: 2,
+                  obscureText: true,
+                  enableSuggestions: false,
+                  autocorrect: false,
                   style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
                   decoration: const InputDecoration(
                     labelText: 'Pairing bundle',
-                    hintText: '{"version":1,...}',
+                    helperText: 'Hidden, because it holds live sign-ins',
                     border: OutlineInputBorder(),
-                    alignLabelWithHint: true,
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -441,7 +447,18 @@ class _SignInScreenState extends State<SignInScreen> {
               if (widget.credentials.all.isNotEmpty) ...[
                 const SizedBox(height: 24),
                 TextButton.icon(
-                  onPressed: widget.credentials.forgetAll,
+                  onPressed: () async {
+                    if (await confirmDestructive(
+                      context,
+                      title: 'Sign out of everything?',
+                      body:
+                          'Every sign-in and API key saved on this device is removed. '
+                          'Rooms that use them stop working until you sign in again.',
+                      action: 'Sign out',
+                    )) {
+                      await widget.credentials.forgetAll();
+                    }
+                  },
                   icon: const Icon(Icons.logout, size: 18),
                   label: const Text('Sign out of everything'),
                   style: TextButton.styleFrom(foregroundColor: scheme.error),

@@ -44,6 +44,28 @@ Future<void> _until(bool Function() done) async {
 }
 
 void main() {
+  // From the 13 November audit: a discarded message was still delivered on
+  // reconnect, and a pause pressed while disconnected was dropped.
+  test('a discarded message is not delivered and a pause waits for the link', () async {
+    final room = _Room();
+    await room.start();
+    final client = RoomClient();
+    addTearDown(() async {
+      await client.close();
+      await room.server.close(force: true);
+    });
+
+    client.send({'type': 'send_message', 'author': 'Aece', 'body': 'drop the staging table'});
+    client.send({'type': 'send_message', 'author': 'Aece', 'body': 'keep this one'});
+    expect(client.withdrawQueued('drop the staging table'), isTrue);
+    expect(client.withdrawQueued('drop the staging table'), isFalse);
+    client.pause(reason: 'owner');
+    await client.connect(room.url);
+    await _until(() => room.frames.any((f) => f['type'] == 'pause'));
+    expect(room.said, ['keep this one']);
+    expect(room.frames.where((f) => f['type'] == 'pause'), hasLength(1));
+  });
+
   test('what the person says while disconnected is delivered on connect', () async {
     final room = _Room();
     await room.start();

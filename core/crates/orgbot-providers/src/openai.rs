@@ -191,7 +191,13 @@ impl Provider for OpenAiProvider {
         request: CompletionRequest,
         sink: Option<mpsc::Sender<StreamEvent>>,
     ) -> Result<CompletionResponse> {
-        let request = crate::provider::prepare_images(request, self.name != "deepseek").await?;
+        // DeepSeek takes no images, however the profile is named. From the
+        // 13 November audit: per-bot DeepSeek profiles were sent images and
+        // every later turn failed.
+        let text_only = self.name == "deepseek"
+            || self.base_url.contains("deepseek.com")
+            || request.model.to_ascii_lowercase().contains("deepseek");
+        let request = crate::provider::prepare_images(request, !text_only).await?;
         let mut body = self.build_body(&request);
         let send = |body: &Value| {
             self.request_builder(&request.model).json(body).send()
@@ -270,6 +276,7 @@ async fn check_status(provider: &str, response: reqwest::Response) -> Result<req
         401 | 403 => ProviderError::Unauthorized {
             provider: provider.into(),
             status: status.as_u16(),
+            message: message.clone(),
         },
         429 => ProviderError::RateLimited {
             provider: provider.into(),
@@ -389,6 +396,7 @@ pub(crate) fn parse_completion(value: &Value) -> Result<CompletionResponse> {
             // DeepSeek's reasoning models return their reasoning separately.
             if let Some(reasoning) = message
                 .get("reasoning_content")
+                .or_else(|| message.get("reasoning"))
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
@@ -506,7 +514,11 @@ const QUIET_STREAM_LIMIT: std::time::Duration = std::time::Duration::from_secs(3
 /// reply, at some 200 tokens a second, without a single tool call, holding
 /// the render pipeline. DeepSeek's output limit does not cover its reasoning.
 /// The room sets a shorter limit while teammates wait on the bot.
-const THINKING_LIMIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+///
+/// Shorter than the client's 30-minute request timeout. From the 13 November
+/// audit: at 30 minutes the transport gave up first, and the reply was
+/// retried twice more, 90 minutes and three billed replies with no usage.
+const THINKING_LIMIT: std::time::Duration = std::time::Duration::from_secs(25 * 60);
 
 async fn stream_response(
     provider: &str,
@@ -560,6 +572,18 @@ async fn stream_response_within(
                 let since = *thinking_since.get_or_insert_with(tokio::time::Instant::now);
                 if since.elapsed() >= thinking_limit {
                     accumulator.stop_reason = Some(StopReason::MaxTokens);
+                    // The service reports usage at the end, which a cut-off
+                    // reply never reaches: what it reasoned is estimated and
+                    // marked incomplete rather than recorded as nothing.
+                    if accumulator.usage.calls == 0 {
+                        accumulator.usage = Usage {
+                            reported: true,
+                            complete: false,
+                            calls: 1,
+                            output_tokens: u32::try_from(accumulator.thinking.chars().count() / 4).unwrap_or(u32::MAX),
+                            ..Usage::default()
+                        };
+                    }
                     break 'stream;
                 }
             } else {
@@ -643,8 +667,11 @@ impl Accumulator {
             return;
         };
 
+        // DeepSeek streams `reasoning_content`; Ollama and OpenRouter stream
+        // `reasoning` (13 November audit: that one was not seen).
         if let Some(reasoning) = delta
             .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
         {
@@ -811,7 +838,7 @@ mod tests {
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = [0; 4096];
-                socket.read(&mut request).await.unwrap();
+                let _ = socket.read(&mut request).await.unwrap();
                 socket.write_all(format!(
                     "HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\nRetry-After: 12\r\nConnection: close\r\n\r\n{body}", body.len()
                 ).as_bytes()).await.unwrap();

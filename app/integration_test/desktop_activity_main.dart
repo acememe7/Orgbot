@@ -37,6 +37,9 @@ class _FakeRoomLink implements RoomLink {
   }) {}
   @override
   void answerBot(String task, String answer) {}
+
+  @override
+  bool withdrawQueued(String body) => false;
   @override
   void answerDecision(String decision, String chosen, {String note = ''}) {}
   @override

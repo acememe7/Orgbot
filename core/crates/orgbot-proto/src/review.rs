@@ -238,7 +238,7 @@ impl Review {
             .iter()
             .filter(|f| f.severity.blocks_approval())
             .collect();
-        blockers.sort_by(|a, b| b.severity.cmp(&a.severity));
+        blockers.sort_by_key(|finding| std::cmp::Reverse(finding.severity));
         blockers
     }
 }

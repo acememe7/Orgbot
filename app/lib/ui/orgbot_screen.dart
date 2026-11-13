@@ -3,6 +3,8 @@
 // OrgBot home: your bots, and rooms as group chats of those bots.
 library;
 
+import 'confirm.dart';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -948,10 +950,10 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                     size: 20,
                     color: scheme.onSurfaceVariant,
                   ),
-                  onSelected: (value) {
+                  onSelected: (value) async {
                     if (value == 'edit') {
                       _botDialog(b);
-                    } else {
+                    } else if (await _confirmRemoveBot(b.name)) {
                       lib.removeBot(b.id);
                     }
                   },
@@ -1040,10 +1042,10 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                   size: 20,
                   color: scheme.onSurfaceVariant,
                 ),
-                onSelected: (value) {
+                onSelected: (value) async {
                   if (value == 'edit') {
                     _botDialog(bot);
-                  } else {
+                  } else if (await _confirmRemoveBot(bot.name)) {
                     library.removeBot(bot.id);
                   }
                 },
@@ -1140,7 +1142,15 @@ class _OrgBotScreenState extends State<OrgBotScreen>
           tooltip: 'Room options',
           onSelected: (action) async {
             if (action == 'edit') _roomDialog(room);
-            if (action == 'stop') await lib.stopRoom(room.id);
+            if (action == 'stop') {
+              try {
+                await lib.stopRoom(room.id);
+              } catch (error) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+                }
+              }
+            }
             if (action == 'history' && context.mounted) {
               Navigator.push(
                 context,
@@ -1358,8 +1368,31 @@ class _OrgBotScreenState extends State<OrgBotScreen>
       ),
     );
     if (confirmed != true || !mounted) return false;
-    widget.library.removeRoom(room.id);
+    final problem = await widget.library.removeRoom(room.id);
+    if (problem != null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(problem)));
+      }
+      return false;
+    }
     return true;
+  }
+
+  /// Ask before a bot is removed: it leaves every room it is in. From the 13
+  /// November audit: one tap removed it with no question.
+  Future<bool> _confirmRemoveBot(String name) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Remove $name?'),
+        content: const Text('It leaves every room it is in. Rooms keep the work it already did.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Remove bot')),
+        ],
+      ),
+    );
+    return confirmed == true && mounted;
   }
 
   Future<void> _roomDialog([RoomDef? existing]) async {
@@ -1393,6 +1426,10 @@ class _OrgBotScreenState extends State<OrgBotScreen>
       for (final slot in existing?.bots ?? <RoomSlot>[]) slot.botId: '',
     }; // botId -> role
 
+    // From the 13 November audit: Save could be pressed twice while the
+    // room was being stopped, and any edit, a rename included, stopped a
+    // running room without a word.
+    var saving = false;
     final route = DialogRoute<void>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -1662,7 +1699,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
               child: const Text('Cancel'),
             ),
             FilledButton(
-              onPressed: () async {
+              onPressed: saving ? null : () async {
                 if (name.text.trim().isEmpty) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('Give the room a name')),
@@ -1690,26 +1727,77 @@ class _OrgBotScreenState extends State<OrgBotScreen>
                       .toList(),
                   bots: selected.keys.map(RoomSlot.new).toList(),
                 );
-                if (existing == null) {
-                  widget.library.addRoom(room);
-                } else {
-                  await widget.library.stopRoom(existing.id);
-                  // Also a background service this app run never opened:
-                  // otherwise it keeps running on the old settings, and the
-                  // next open reuses it without reading the new ones.
-                  await stopLinuxRoomService(existing.id);
-                  final index = widget.library.rooms.indexWhere(
-                    (r) => r.id == existing.id,
+                // A new name changes nothing the running room uses.
+                final renamedOnly =
+                    existing != null &&
+                    jsonEncode({...room.toJson(), 'name': ''}) ==
+                        jsonEncode({...existing.toJson(), 'name': ''});
+                final running =
+                    existing != null &&
+                    widget.library.sessions[existing.id]?.isRunning == true;
+                if (running && !renamedOnly) {
+                  final restart = await showDialog<bool>(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: const Text('Restart the room?'),
+                      content: const Text(
+                        'This room is running. Saving stops it, including '
+                        'any turns under way, so it can start again with the '
+                        'new settings.',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context, false),
+                          child: const Text('Keep it running'),
+                        ),
+                        FilledButton(
+                          onPressed: () => Navigator.pop(context, true),
+                          child: const Text('Save and stop'),
+                        ),
+                      ],
+                    ),
                   );
-                  if (index >= 0) widget.library.rooms[index] = room;
-                  widget.library.save();
+                  if (restart != true || !context.mounted) return;
                 }
-                await widget.library.save();
-                if (context.mounted && widget.library.error == null) {
-                  Navigator.pop(context);
+                setLocal(() => saving = true);
+                try {
+                  if (existing == null) {
+                    widget.library.addRoom(room);
+                  } else {
+                    if (!renamedOnly) {
+                      await widget.library.stopRoom(existing.id);
+                      // Also a background service this app run never
+                      // opened: otherwise it keeps running on the old
+                      // settings, and the next open reuses it without
+                      // reading the new ones.
+                      await stopLinuxRoomService(existing.id);
+                    }
+                    final index = widget.library.rooms.indexWhere(
+                      (r) => r.id == existing.id,
+                    );
+                    if (index >= 0) widget.library.rooms[index] = room;
+                  }
+                  await widget.library.save();
+                  if (context.mounted && widget.library.error == null) {
+                    Navigator.pop(context);
+                  }
+                } catch (error) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('The room was not saved: $error')),
+                    );
+                  }
+                } finally {
+                  if (context.mounted) setLocal(() => saving = false);
                 }
               },
-              child: Text(existing == null ? 'Create' : 'Save'),
+              child: Text(
+                saving
+                    ? 'Saving…'
+                    : existing == null
+                    ? 'Create'
+                    : 'Save',
+              ),
             ),
           ],
         ),
@@ -1857,7 +1945,17 @@ class _CliSetupState extends State<_CliSetup> {
                 widget.credentials?.forProvider(provider)?.kind ==
                 CredentialKind.apiKey,
             onEdit: () => _editApiKey(provider),
-            onRemove: () => widget.credentials?.forget(provider),
+            onRemove: () async {
+              if (await confirmDestructive(
+                context,
+                title: 'Forget the ${provider.label} key?',
+                body:
+                    'Bots that use it stop working until you enter a key again.',
+                action: 'Forget key',
+              )) {
+                await widget.credentials?.forget(provider);
+              }
+            },
           ),
         const DesktopIntegrationsView(),
         const AllowancesView(),

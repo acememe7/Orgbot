@@ -46,8 +46,8 @@ cannot erase already-read text from those native transcripts. It does not reset
 sessions or edit host profiles to simulate that. Unloading cannot refund tokens
 already consumed; any effect on provider cache usage requires measurement.
 
-This describes the source change. It does not imply that the installed desktop
-package has been rebuilt or distributed.
+This was written for the source change of 26 October 2026; it has shipped in
+every package since 2.0.3.
 
 ## Verification on 26 October 2026
 

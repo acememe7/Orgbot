@@ -789,6 +789,12 @@ impl Provider for WorksOnce {
         "works once"
     }
 
+    /// Its first turn changes something (as edits inside a CLI do); a board
+    /// listing alone no longer counts as work.
+    fn last_turn_activity(&self) -> Option<usize> {
+        Some(usize::from(self.turns.load(Ordering::SeqCst) == 1))
+    }
+
     async fn complete(
         &self,
         request: CompletionRequest,
@@ -1292,10 +1298,12 @@ async fn an_offer_made_mid_turn_is_still_open_when_the_recipients_next_turn_begi
             .expect("the run should end once the long turn does");
         handoff
     };
-    assert_eq!(
-        state(handoff),
-        HandoffState::Offered,
-        "nor while it waits for the turn in which it will read it"
+    // Since the 13 November audit a bot someone is waiting on goes again in
+    // the same run, so the offer may already be taken; it never expires.
+    assert!(
+        matches!(state(handoff), HandoffState::Offered | HandoffState::Completed),
+        "nor while it waits for the turn in which it will read it: {:?}",
+        state(handoff)
     );
 
     tokio::time::timeout(std::time::Duration::from_secs(5), room.step_rolling(2, &sinks))

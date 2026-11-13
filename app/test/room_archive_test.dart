@@ -11,9 +11,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:orgbot_app/state/room_archive.dart';
 
 void main() {
+  var nextSeq = 0;
   Map<String, Object?> frame(String filler) => {
         'type': 'event',
-        'envelope': {'seq': 1, 'body': filler},
+        'envelope': {'seq': ++nextSeq, 'body': filler},
       };
 
   test('a run log rolls to a new segment rather than stopping', () async {
@@ -64,5 +65,18 @@ void main() {
     // The folder is this run's own (its id is unique); leaving it behind left
     // an empty room in the owner's history after every test run.
     await (await RoomArchive.directory(room)).delete(recursive: true);
+  });
+
+  // From the 13 November audit: every reconnect appended the whole replay.
+  test('events a run already holds are not written again', () async {
+    final room = 'replay_${DateTime.now().microsecondsSinceEpoch}';
+    final archive = await RoomArchive.open(room, (_) {});
+    final first = [frame('a'), frame('b')];
+    archive.append(first);
+    archive.append(first);
+    archive.append([frame('c')]);
+    await archive.close();
+    final lines = (await archive.segments.first.readAsString()).trim().split('\n');
+    expect(lines, hasLength(3));
   });
 }

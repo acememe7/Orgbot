@@ -212,11 +212,10 @@ fn ownership_holds_together(engine: &Engine, found: &mut Vec<Violation>) {
 /// wrongly to a person, which is worth knowing about.
 fn projections_match_the_board(engine: &Engine, found: &mut Vec<Violation>) {
     for task in engine.tasks() {
-        let waiting_by_edges = task.depends_on.iter().any(|dep| {
-            engine
-                .task(*dep)
-                .is_none_or(|upstream| upstream.state != TaskState::Submitted)
-        });
+        // Through replacements, as the engine reads them. From the 13
+        // November audit: the raw edge still named the replaced upstream, so
+        // this fired for good once its replacement landed.
+        let waiting_by_edges = engine.first_unmet_dependency(task).is_some();
         let waiting_by_projection = matches!(task.dependency, DependencyState::Waiting { .. });
         if waiting_by_edges != waiting_by_projection {
             found.push(Violation {
@@ -438,6 +437,32 @@ mod tests {
         engine.task_mut(orphan).unwrap().lineage.superseded_by = Some(TaskId::new());
 
         assert!(check(&engine).iter().any(|v| v.rule == "replacement-exists"));
+    }
+
+    /// Work that waited on a replaced upstream is met once the replacement
+    /// lands, and the check reads it the way the engine does.
+    #[test]
+    fn a_landed_replacement_meets_the_dependency_on_what_it_replaced() {
+        let (mut engine, lead) = engine();
+        let original = task(&mut engine, lead, "first attempt");
+        let replacement = task(&mut engine, lead, "canonical version");
+        let downstream = task(&mut engine, lead, "uses it");
+        engine.task_mut(downstream).unwrap().depends_on.push(original);
+        engine
+            .apply(Command::SupersedeTask {
+                task: original,
+                replacement,
+                reason: "merged".into(),
+            })
+            .unwrap();
+        engine.task_mut(replacement).unwrap().state = TaskState::Submitted;
+        engine.task_mut(downstream).unwrap().dependency = DependencyState::Satisfied;
+
+        assert!(
+            !check(&engine).iter().any(|v| v.rule == "dependency-projection-current"),
+            "{:?}",
+            check(&engine)
+        );
     }
 
     #[test]

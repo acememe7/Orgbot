@@ -78,6 +78,7 @@ fn lock_file(directory: &Path, name: &str) -> anyhow::Result<std::fs::File> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .mode(0o600)
         .open(path)?;
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
@@ -296,7 +297,7 @@ fn install_unit(directory: &Path, unit: &str) -> anyhow::Result<PathBuf> {
         .collect::<Vec<_>>()
         .join(" ");
     let body = format!(
-        "[Unit]\nDescription=OrgBots persistent room {unit}\nAfter=default.target\n\n[Service]\nType=simple\nExecStart={exec}\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=20\nEnvironment=RUST_LOG=warn\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=OrgBots persistent room {unit}\nAfter=default.target\nStartLimitIntervalSec=900\nStartLimitBurst=8\n\n[Service]\nType=simple\nExecStart={exec}\nRestart=on-failure\nRestartSec=3\nRestartSteps=6\nRestartMaxDelaySec=300\nTimeoutStopSec=20\nEnvironment=RUST_LOG=warn\n\n[Install]\nWantedBy=default.target\n"
     );
     write_private(&path, body.as_bytes())?;
     Ok(path)
@@ -590,6 +591,8 @@ pub fn start(
             "could not reload the Linux user service manager"
         );
         let start = if was_active {
+            // The owner's restart is never held back by the crash limit.
+            systemctl(&["reset-failed", &unit])?;
             systemctl(&["restart", &unit])?
         } else {
             systemctl(&["reset-failed", &unit])?;
@@ -734,20 +737,34 @@ pub fn supervise(directory: &Path) -> anyhow::Result<()> {
         std::process::id().to_string().as_bytes(),
     )?;
     let executable = std::env::current_exe()?;
+    // From the 13 November audit: a room that failed on start was restarted
+    // every few seconds for good, resuming paid turns each time. Quick
+    // failures back off, up to five minutes; a run that lasted resets it.
+    let mut quick_failures: u32 = 0;
     loop {
         if directory.join("stop").exists() {
             break;
         }
-        let mut child: Child = Command::new(&executable)
-            .args(["room-service-run", "--directory"])
-            .arg(&directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let started = Instant::now();
+        // In a process group of its own, so what it started can be found
+        // when it is gone. From the 13 November audit: without systemd, a
+        // killed room left its helpers, sandboxes and CLIs running.
+        let mut child: Child = {
+            use std::os::unix::process::CommandExt;
+            Command::new(&executable)
+                .args(["room-service-run", "--directory"])
+                .arg(&directory)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()?
+        };
+        let group = child.id();
         loop {
             if directory.join("stop").exists() {
                 terminate_child(&mut child);
+                end_group(group);
                 return Ok(());
             }
             if child.try_wait()?.is_some() {
@@ -755,12 +772,38 @@ pub fn supervise(directory: &Path) -> anyhow::Result<()> {
             }
             std::thread::sleep(Duration::from_millis(250));
         }
+        end_group(group);
         if directory.join("stop").exists() {
             break;
         }
-        std::thread::sleep(Duration::from_secs(2));
+        if started.elapsed() < Duration::from_secs(60) {
+            quick_failures = quick_failures.saturating_add(1);
+        } else {
+            quick_failures = 0;
+        }
+        let wait = Duration::from_secs((2u64 << quick_failures.min(8)).min(300));
+        let until = Instant::now() + wait;
+        while Instant::now() < until {
+            if directory.join("stop").exists() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
     Ok(())
+}
+
+/// Stop whatever a room left running in its process group.
+fn end_group(group: u32) {
+    let target = format!("-{group}");
+    for signal in ["-TERM", "-KILL"] {
+        let _ = Command::new("kill")
+            .args([signal, "--", &target])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 fn terminate_child(child: &mut Child) {

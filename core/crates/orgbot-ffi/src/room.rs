@@ -1,10 +1,10 @@
 //! A room running in this process, driven from another language.
 //!
 //! The engine is async and the caller is not, so each room owns a Tokio
-//! runtime on its own thread. The FFI layer never blocks on it: commands go in
-//! over a channel, events come out into a buffer the caller drains when it
-//! likes. That is what lets a phone UI stay responsive while a model turn runs
-//! for a minute.
+//! runtime on its own thread. Commands go in over a channel and events come
+//! out into a buffer the caller drains when it likes, so a model turn never
+//! holds the caller up; `drain` after a resync and `snapshot` do wait briefly
+//! on the runtime for the board and backlog.
 
 use orgbot_runtime::workspace::Workspace;
 use orgbot_server::protocol::ClientMessage;
@@ -56,6 +56,18 @@ pub struct Room {
     resync: Arc<AtomicBool>,
     calls: Arc<Mutex<Vec<Value>>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ToolOutcome>>>>,
+}
+
+/// Whether a resync's snapshot and backlog carry this again.
+fn comes_back_with_a_resync(message: &ServerMessage) -> bool {
+    matches!(
+        message,
+        ServerMessage::Snapshot { .. }
+            | ServerMessage::Digest { .. }
+            | ServerMessage::Event { .. }
+            | ServerMessage::Stream { .. }
+            | ServerMessage::Phase { .. }
+    )
 }
 
 /// How many undrained events to keep.
@@ -123,7 +135,9 @@ impl Room {
                     Ok(message) => {
                         let mut inbox = collector.lock().unwrap();
                         if inbox.len() >= INBOX_LIMIT {
-                            inbox.clear();
+                            // Room state comes back with the resync; replies
+                            // to the caller's own requests do not.
+                            inbox.retain(|message| !comes_back_with_a_resync(message));
                             needs_resync.store(true, Ordering::Release);
                         }
                         inbox.push(message);
@@ -162,6 +176,15 @@ impl Room {
                     replay.push(json!({"type":"event","envelope":envelope}));
                 }
             }
+            // From the 13 November audit: a resync threw away replies waiting
+            // in the inbox (a memory result, an error, a saved notice), and
+            // the caller waited for them for good.
+            replay.extend(
+                messages
+                    .into_iter()
+                    .filter(|message| !comes_back_with_a_resync(message))
+                    .map(|message| serde_json::to_value(message).unwrap()),
+            );
             replay
         } else {
             messages
@@ -346,10 +369,39 @@ impl Drop for Room {
     }
 }
 
+impl std::fmt::Debug for Room {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Room").finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use orgbot_providers::{ScriptedProvider, Turn};
+
+    /// A resync replays room state; it must not swallow a reply the caller
+    /// is waiting for.
+    #[test]
+    fn a_resync_keeps_replies_waiting_in_the_inbox() {
+        let room = Room::open(r#"[room]
+name="ffi-resync"
+goal="fixture"
+completion="manual"
+[[bots]]
+handle="fixture"
+provider={kind="scripted",script=""}
+"#, &[]).unwrap();
+        let _ = room.drain();
+        room.inbox.lock().unwrap().push(ServerMessage::Error { message: "kept for the caller".into() });
+        room.resync.store(true, Ordering::Release);
+        let drained = room.drain();
+        assert!(drained.iter().any(|message| message["type"] == "snapshot"), "the resync still happens");
+        assert!(
+            drained.iter().any(|message| message["type"] == "error" && message["message"] == "kept for the caller"),
+            "{drained:?}"
+        );
+    }
 
     #[test]
     fn native_memory_requests_return_owner_response_without_blocking() {
@@ -383,11 +435,5 @@ provider={kind="scripted",script=""}
         let second = provider.complete(request, None).await.unwrap();
         assert_ne!(first.text(), second.text());
         assert_eq!(second.text(), "after renewal");
-    }
-}
-
-impl std::fmt::Debug for Room {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Room").finish_non_exhaustive()
     }
 }

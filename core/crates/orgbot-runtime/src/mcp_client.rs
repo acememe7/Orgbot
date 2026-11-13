@@ -52,7 +52,9 @@ pub const NAMESPACE: &str = "__";
 
 /// Keep an unreachable optional tool server from holding room startup open for
 /// a minute. Multiple configured servers are also attempted concurrently.
-const MCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+// From the 13 November audit: 8 seconds killed a server started cold with
+// `npx -y`, which downloads it first.
+const MCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// How to reach one MCP server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,8 +164,11 @@ struct LazyRegistry {
     specs: BTreeMap<String, McpServerSpec>,
     workspace: Option<crate::workspace::Workspace>,
     loaded: Mutex<HashMap<AgentId, BTreeMap<String, Arc<Connected>>>>,
-    locks: Mutex<HashMap<(AgentId, String), Arc<Mutex<()>>>>,
+    locks: Mutex<ConnectionLocks>,
 }
+
+/// One lock per bot and server, held while that connection is made or let go.
+type ConnectionLocks = HashMap<(AgentId, String), Arc<Mutex<()>>>;
 
 impl LazyRegistry {
     async fn connection_lock(&self, actor: AgentId, server: &str) -> Arc<Mutex<()>> {
@@ -407,28 +412,42 @@ impl McpClient {
         &self,
         engine: &crate::SharedEngine,
         actor: AgentId,
+        server_name: &str,
         tool: &str,
         arguments: &Value,
     ) -> ToolOutcome {
         let Some(lazy) = &self.lazy else {
             return ToolOutcome::error("No MCP server offers that loaded tool.");
         };
+        // The server the tool was loaded from, and no other. From the 13
+        // November audit: the first server offering a tool of that name was
+        // called.
         let server = lazy.loaded.lock().await.get(&actor).and_then(|servers| {
-            servers.values().find_map(|connected| {
-                connected
-                    .tools
-                    .iter()
-                    .any(|definition| definition.name == tool)
-                    .then(|| Arc::clone(connected))
-            })
+            servers
+                .get(server_name)
+                .filter(|connected| connected.tools.iter().any(|definition| definition.name == tool))
+                .cloned()
         });
         let Some(server) = server else {
             return ToolOutcome::error("No MCP server offers that loaded tool.");
         };
         // Keep this Arc for the in-flight operation. Release removes the
         // registry's reference immediately; this call may finish on its own.
-        self.call_for_server(engine, actor, server.as_ref(), tool, arguments, true)
-            .await
+        let outcome = self
+            .call_for_server(engine, actor, server.as_ref(), tool, arguments, true)
+            .await;
+        // A connection that stopped answering is dropped, so the next call
+        // connects again. From the 13 November audit: after a server crashed
+        // once, every call to it failed for the rest of the room.
+        if outcome.is_error && outcome.content == NO_ANSWER {
+            let mut loaded = lazy.loaded.lock().await;
+            if let Some(servers) = loaded.get_mut(&actor) {
+                if servers.get(server_name).is_some_and(|current| Arc::ptr_eq(current, &server)) {
+                    servers.remove(server_name);
+                }
+            }
+        }
+        outcome
     }
 
     async fn call_for_server(
@@ -584,11 +603,28 @@ fn render(result: &Value) -> String {
     let Some(content) = result.get("content").and_then(Value::as_array) else {
         return result.to_string();
     };
+    // From the 13 November audit: a screenshot reached the model as raw
+    // base64, hundreds of kilobytes of it. What a bot cannot read is named.
+    let describe = |kind: &str, block: &Value| {
+        let mime = block.get("mimeType").and_then(Value::as_str).unwrap_or("unknown type");
+        let bytes = block.get("data").or_else(|| block.get("blob")).and_then(Value::as_str).map_or(0, |data| data.len() * 3 / 4);
+        format!("[{kind} ({mime}, about {} KB) left out: this conversation carries text only]", bytes / 1024)
+    };
     let text: Vec<String> = content
         .iter()
         .map(|block| match block.get("text").and_then(Value::as_str) {
             Some(text) => text.to_string(),
-            None => block.to_string(),
+            None => match block.get("type").and_then(Value::as_str) {
+                Some(kind @ ("image" | "audio")) => describe(kind, block),
+                Some("resource") => match block.get("resource") {
+                    Some(resource) => match resource.get("text").and_then(Value::as_str) {
+                        Some(text) => text.to_string(),
+                        None => describe("file", resource),
+                    },
+                    None => describe("file", block),
+                },
+                _ => block.to_string().chars().take(4_000).collect(),
+            },
         })
         .collect();
     if text.is_empty() {
@@ -606,6 +642,9 @@ fn safe_server_name(name: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
+
+/// What a bot is told when a loaded tool's server did not answer.
+const NO_ANSWER: &str = "The loaded MCP tool did not answer; its details were withheld.";
 
 async fn call_connected(
     server: &Connected,
@@ -633,7 +672,7 @@ async fn call_connected(
         },
         Err(error) if redact_errors => {
             let _ = error;
-            ToolOutcome::error("The loaded MCP tool did not answer; its details were withheld.")
+            ToolOutcome::error(NO_ANSWER)
         }
         Err(error) => ToolOutcome::error(format!(
             "`{tool}` did not answer: {error}. The server may have stopped."
@@ -753,7 +792,18 @@ fn strip_inherited_credentials(
 ) {
     for name in names {
         let normalized = name.to_string_lossy().to_ascii_uppercase();
-        if normalized.starts_with("ORGBOT_")
+        // Bare names and connection strings too. From the 13 November audit:
+        // `API_KEY`, `TOKEN`, `PASSWORD`, `SSH_AUTH_SOCK` and `DATABASE_URL`
+        // reached unsandboxed MCP servers.
+        let bare = matches!(
+            normalized.as_str(),
+            "API_KEY" | "APIKEY" | "TOKEN" | "SECRET" | "PASSWORD" | "PASSWD" | "CREDENTIALS" | "SSH_AUTH_SOCK"
+                | "GPG_AGENT_INFO" | "DATABASE_URL" | "REDIS_URL" | "MONGODB_URI" | "AWS_SECRET_ACCESS_KEY"
+                | "AWS_SESSION_TOKEN" | "NETRC"
+        ) || normalized.ends_with("_DATABASE_URL")
+            || normalized.ends_with("_DSN");
+        if bare
+            || normalized.starts_with("ORGBOT_")
             || normalized.contains("_API_KEY")
             || normalized.contains("_TOKEN")
             || normalized.contains("_SECRET")
@@ -765,6 +815,10 @@ fn strip_inherited_credentials(
         }
     }
 }
+
+/// How long one request to a local MCP server may take, whatever it prints
+/// meanwhile.
+const STDIO_EXCHANGE_LIMIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 impl Channel {
     /// Send a request and wait for its result.
@@ -784,22 +838,36 @@ impl Channel {
                 pipe.stdin.flush().await.map_err(|e| e.to_string())?;
 
                 // Read until the response to *this* id arrives; a server may
-                // interleave notifications of its own.
-                for _ in 0..64 {
+                // interleave notifications and requests of its own. From the
+                // 13 November audit: each line had its own minute (64 minutes
+                // at worst), more than 64 lines of progress failed the call,
+                // and a server's own request (a ping) was never answered.
+                let deadline = tokio::time::Instant::now() + STDIO_EXCHANGE_LIMIT;
+                loop {
                     let mut answer = String::new();
-                    let read = tokio::time::timeout(
-                        std::time::Duration::from_secs(60),
-                        pipe.stdout.read_line(&mut answer),
-                    )
-                    .await
-                    .map_err(|_| "timed out".to_string())?
-                    .map_err(|e| e.to_string())?;
+                    let read = tokio::time::timeout_at(deadline, pipe.stdout.read_line(&mut answer))
+                        .await
+                        .map_err(|_| "timed out".to_string())?
+                        .map_err(|e| e.to_string())?;
                     if read == 0 {
                         return Err("the server closed its output".into());
                     }
                     let Ok(value) = serde_json::from_str::<Value>(answer.trim()) else {
                         continue;
                     };
+                    // A request from the server: answer it, so it does not
+                    // wait on us while we wait on it.
+                    if let (Some(method), Some(their_id)) = (value.get("method").and_then(Value::as_str), value.get("id")) {
+                        let reply = if method == "ping" {
+                            json!({"jsonrpc": "2.0", "id": their_id, "result": {}})
+                        } else {
+                            json!({"jsonrpc": "2.0", "id": their_id, "error": {"code": -32601, "message": "not supported by this client"}})
+                        };
+                        let line = format!("{reply}\n");
+                        pipe.stdin.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
+                        pipe.stdin.flush().await.map_err(|e| e.to_string())?;
+                        continue;
+                    }
                     if value.get("id").and_then(Value::as_u64) != Some(id) {
                         continue;
                     }
@@ -812,7 +880,6 @@ impl Channel {
                     }
                     return Ok(value.get("result").cloned().unwrap_or(Value::Null));
                 }
-                Err("the server never answered".into())
             }
             Self::Workspace {
                 workspace,
@@ -898,8 +965,21 @@ impl Channel {
                         current.session_id = Some(session_id.to_owned());
                     }
                 }
+                // From the 13 November audit: the status was never looked at,
+                // and the first `data:` line was taken as the answer, so a
+                // log notification ahead of the result read as `null`.
+                let status = response.status();
                 let text = response.text().await.map_err(|e| e.to_string())?;
+                if !status.is_success() {
+                    return Err(format!(
+                        "the server answered HTTP {status}: {}",
+                        text.chars().take(160).collect::<String>()
+                    ));
+                }
                 let value = parse_http_body(&text)?;
+                if value.get("result").is_none() && value.get("error").is_none() {
+                    return Err("the server's reply held neither a result nor an error".into());
+                }
                 if let Some(error) = value.get("error") {
                     return Err(error
                         .get("message")
@@ -1103,15 +1183,20 @@ fn shell_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 
-/// An HTTP MCP server may answer with plain JSON or with one SSE event.
+/// An HTTP MCP server may answer with plain JSON or with SSE events: the
+/// answer is the message that responds to this request (id 1), not a
+/// notification or log line sent before it.
 fn parse_http_body(text: &str) -> Result<Value, String> {
+    let answers = |value: &Value| value.get("id") == Some(&json!(1)) && (value.get("result").is_some() || value.get("error").is_some());
     if let Ok(value) = serde_json::from_str::<Value>(text.trim()) {
         return Ok(value);
     }
     for line in text.lines() {
         if let Some(data) = line.strip_prefix("data:") {
             if let Ok(value) = serde_json::from_str::<Value>(data.trim()) {
-                return Ok(value);
+                if answers(&value) {
+                    return Ok(value);
+                }
             }
         }
     }
@@ -1299,7 +1384,7 @@ mod tests {
         let client = client.with_owner_approval(root.clone());
 
         let unknown = client
-            .call_loaded_for(&engine, first, "fixture__not-listed", &json!({}))
+            .call_loaded_for(&engine, first, "fixture", "fixture__not-listed", &json!({}))
             .await;
         assert!(unknown.is_error);
         assert!(unknown.content.contains("No MCP server offers"));
@@ -1311,7 +1396,7 @@ mod tests {
 
         let args = json!({"query":"approved"});
         let pending = client
-            .call_loaded_for(&engine, second, "fixture__lookup", &args)
+            .call_loaded_for(&engine, second, "fixture", "fixture__lookup", &args)
             .await;
         assert!(pending.content.contains("Waiting for owner approval"));
         assert_eq!(engine.borrow().decisions().pending().count(), 1);
@@ -1333,14 +1418,14 @@ mod tests {
             .unwrap()
         });
         let called = client
-            .call_loaded_for(&engine, second, "fixture__lookup", &args)
+            .call_loaded_for(&engine, second, "fixture", "fixture__lookup", &args)
             .await;
         assert!(!called.is_error, "{}", called.content);
         assert!(called.content.contains("fixture result"));
 
         client.release_for(first, "fixture").await.unwrap();
         let released = client
-            .call_loaded_for(&engine, first, "fixture__lookup", &args)
+            .call_loaded_for(&engine, first, "fixture", "fixture__lookup", &args)
             .await;
         assert!(released.is_error, "released tools must no longer route");
         let reloaded = client.load_for(first, "fixture").await.unwrap();
@@ -1358,7 +1443,7 @@ mod tests {
             "releasing another actor must not stop or recreate this connection"
         );
         let other_actor_still_loaded = client
-            .call_loaded_for(&engine, second, "fixture__lookup", &args)
+            .call_loaded_for(&engine, second, "fixture", "fixture__lookup", &args)
             .await;
         assert!(other_actor_still_loaded
             .content
@@ -1607,7 +1692,7 @@ mod tests {
                 env: BTreeMap::new(),
             },
         };
-        let client = McpClient::connect(&[spec.clone()])
+        let client = McpClient::connect(std::slice::from_ref(&spec))
             .await
             .with_owner_approval(root.clone());
         assert_eq!(client.len(), 1, "the local fixture server should connect");
@@ -2045,6 +2130,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plain, sse);
+        // From the 13 November audit: a log notification sent ahead of the
+        // result was taken as the answer.
+        let noisy = parse_http_body(
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"info\"}}\n\n\
+             data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n",
+        )
+        .unwrap();
+        assert_eq!(noisy, plain);
+        assert!(parse_http_body("data: {\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n\n").is_err());
     }
 
     /// A room inherits the connected computer's own list, so there is nothing

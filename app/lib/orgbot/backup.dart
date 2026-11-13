@@ -269,7 +269,7 @@ class PortableRoomBackup {
       }
       totalBytes += content.length;
       if (totalBytes > maxExpandedBytes) {
-        throw const FormatException('The backup expands beyond 48 MiB.');
+        throw const FormatException('The backup expands beyond 44 MiB.');
       }
       payloads[path] = content;
       if (mode is int) projectModes[path] = mode;
@@ -499,73 +499,120 @@ class PortableRoomBackup {
     void Function(int count)? onProgress,
     Future<List<int>> Function(String root, String file)? readFile,
     void Function(String path, int mode)? onFileMode,
+    void Function(List<String> omitted)? onOmitted,
     int maxBytes = maxExpandedBytes,
     int maxFileCount = maxFiles,
   }) async {
     final canonicalRoot = await root.resolveSymbolicLinks();
     final files = <String, List<int>>{};
+    // What is left out, and why, for the owner to see. From the 13 November
+    // audit: a link anywhere (node_modules/.bin) refused the whole project,
+    // and source files named like secrets were dropped without a word.
+    final omitted = <String>[];
     var total = 0;
     var count = 0;
     var visited = 0;
-    await for (final entity in root.list(recursive: true, followLinks: false)) {
-      if (++visited > maxFiles * 8) {
-        throw const FormatException(
-          'The selected project has too many entries.',
+    final folders = <Directory>[root];
+    while (folders.isNotEmpty) {
+      final folder = folders.removeLast();
+      await for (final entity in folder.list(followLinks: false)) {
+        if (++visited > maxFiles * 8) {
+          throw const FormatException(
+            'The selected project has too many entries.',
+          );
+        }
+        if (cancelled?.call() == true) throw StateError('Backup canceled.');
+        final kind = await FileSystemEntity.type(
+          entity.path,
+          followLinks: false,
         );
-      }
-      if (cancelled?.call() == true) throw StateError('Backup canceled.');
-      final kind = await FileSystemEntity.type(entity.path, followLinks: false);
-      if (kind == FileSystemEntityType.link) {
-        throw const FormatException(
-          'Project folders containing symbolic links cannot be backed up.',
+        final shown = entity.path.length > root.path.length
+            ? entity.path.substring(root.path.length + 1)
+            : entity.path;
+        if (kind == FileSystemEntityType.link) {
+          omitted.add('$shown (a link)');
+          continue;
+        }
+        if (kind == FileSystemEntityType.directory) {
+          final name = shown.split(Platform.pathSeparator).last;
+          if (_generatedFolders.contains(name)) {
+            omitted.add('$shown${Platform.pathSeparator} (rebuilt by tools)');
+          } else if (_isSecretPath(shown)) {
+            omitted.add('$shown${Platform.pathSeparator} (may hold secrets)');
+          } else {
+            folders.add(Directory(entity.path));
+          }
+          continue;
+        }
+        if (kind != FileSystemEntityType.file) continue;
+        final file = File(entity.path);
+        final canonicalFile = await file.resolveSymbolicLinks();
+        if (!canonicalFile.startsWith(
+          '$canonicalRoot${Platform.pathSeparator}',
+        )) {
+          throw const FormatException(
+            'A project file leaves the selected folder.',
+          );
+        }
+        final relative = canonicalFile.substring(canonicalRoot.length + 1);
+        if (_isSecretPath(relative)) {
+          omitted.add('$relative (may hold secrets)');
+          continue;
+        }
+        final before = await file.stat();
+        if (before.type != FileSystemEntityType.file) {
+          throw const FormatException('A project file is not a regular file.');
+        }
+        final content = await (readFile ?? DesktopFiles.readProjectFile)(
+          canonicalRoot,
+          entity.path,
         );
+        final after = await file.stat();
+        if (before.size != after.size ||
+            before.modified != after.modified ||
+            before.mode != after.mode ||
+            content.length != after.size) {
+          throw const FileSystemException(
+            'A project file changed while being read.',
+          );
+        }
+        final length = content.length;
+        if (length > maxProjectFileBytes) {
+          throw FormatException('Project file exceeds 16 MiB: $relative');
+        }
+        total += length;
+        if (total > maxBytes || files.length >= maxFileCount) {
+          throw const FormatException(
+            'The selected project exceeds backup limits.',
+          );
+        }
+        files['project/$relative'] = content;
+        onFileMode?.call('project/$relative', before.mode);
+        onProgress?.call(++count);
       }
-      if (kind != FileSystemEntityType.file) continue;
-      final file = File(entity.path);
-      final canonicalFile = await file.resolveSymbolicLinks();
-      if (!canonicalFile.startsWith(
-        '$canonicalRoot${Platform.pathSeparator}',
-      )) {
-        throw const FormatException(
-          'A project file leaves the selected folder.',
-        );
-      }
-      final relative = canonicalFile.substring(canonicalRoot.length + 1);
-      if (_isSecretPath(relative)) continue;
-      final before = await file.stat();
-      if (before.type != FileSystemEntityType.file) {
-        throw const FormatException('A project file is not a regular file.');
-      }
-      final content = await (readFile ?? DesktopFiles.readProjectFile)(
-        canonicalRoot,
-        entity.path,
-      );
-      final after = await file.stat();
-      if (before.size != after.size ||
-          before.modified != after.modified ||
-          before.mode != after.mode ||
-          content.length != after.size) {
-        throw const FileSystemException(
-          'A project file changed while being read.',
-        );
-      }
-      final length = content.length;
-      if (length > maxProjectFileBytes) {
-        throw FormatException('Project file exceeds 16 MiB: $relative');
-      }
-      total += length;
-      if (total > maxBytes || files.length >= maxFileCount) {
-        throw const FormatException(
-          'The selected project exceeds backup limits.',
-        );
-      }
-      files['project/$relative'] = content;
-      onFileMode?.call('project/$relative', before.mode);
-      onProgress?.call(++count);
     }
     _validatePayloads(files);
+    omitted.sort();
+    onOmitted?.call(omitted);
     return files;
   }
+
+  /// Folders tools rebuild, left out of a backup.
+  static const _generatedFolders = {
+    'node_modules',
+    '.dart_tool',
+    '__pycache__',
+    '.venv',
+    'venv',
+    '.gradle',
+    '.next',
+    '.turbo',
+    '.cache',
+    'target',
+    '.pytest_cache',
+    '.mypy_cache',
+    '.ruff_cache',
+  };
 
   static Future<String?> chooseExportPath() =>
       _picker.invokeMethod<String>('choose_backup_export');
@@ -608,9 +655,25 @@ class PortableRoomBackup {
         parts.contains('.kube') ||
         name == '.env' ||
         name.startsWith('.env.') ||
-        name.contains('credential') ||
-        name.contains('token') ||
-        name.contains('secret') ||
+        // Data files named for secrets, not source code that mentions them
+        // (src/tokenizer.rs, credentials.dart).
+        (const {
+              '',
+              'json',
+              'yaml',
+              'yml',
+              'txt',
+              'env',
+              'ini',
+              'toml',
+              'cfg',
+              'conf',
+              'properties',
+              'xml',
+            }.contains(name.contains('.') ? name.split('.').last : '') &&
+            (name.contains('credential') ||
+                name.contains('token') ||
+                name.contains('secret'))) ||
         name.contains('private_key') ||
         name == '.envrc' ||
         const {'.netrc', '.npmrc', '.pypirc'}.contains(name) ||
@@ -697,7 +760,7 @@ class PortableRoomBackup {
       total += entry.value.length;
     }
     if (total > maxExpandedBytes) {
-      throw const FormatException('The backup expands beyond 48 MiB.');
+      throw const FormatException('The backup expands beyond 44 MiB.');
     }
   }
 

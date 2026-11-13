@@ -347,6 +347,7 @@ class RoomStore extends ChangeNotifier {
 
   /// Take a pending message off the screen, to discard it or send it again.
   void removePending(ChatMessage message) {
+    _client.withdrawQueued(message.body);
     _pending.removeWhere((candidate) => identical(candidate, message));
     _unsent.remove(message.id);
     _unconfirmed.remove(message.id)?.cancel();
@@ -665,9 +666,12 @@ class RoomStore extends ChangeNotifier {
         }
       case 'closed':
         _closedReason = message['reason'] as String?;
-        _room?.phase = _limitReached || _closedReason == 'the room was paused'
-            ? RoomPhase.paused
-            : RoomPhase.completed;
+        // Finished only when the room says its goal was met. From the 13
+        // November audit: a service restart closed with a reason read as a
+        // finished room.
+        _room?.phase = _closedReason == "the room's goal was met"
+            ? RoomPhase.completed
+            : RoomPhase.paused;
         _notifyChanged();
       case 'error':
         // A lag notice: ask for a fresh snapshot to catch back up.
@@ -762,7 +766,7 @@ class RoomStore extends ChangeNotifier {
           _tasks[task.id] = task;
         }
       case 'task_transitioned':
-        _applyTaskTransition(event);
+        _applyTaskTransition(event, seq);
       case 'task_amended':
         // A coordinator changed what the task asks for; reviewers judge
         // against this, so the card shows it as soon as it changes.
@@ -773,6 +777,11 @@ class RoomStore extends ChangeNotifier {
           final criteria = event['acceptance_criteria'];
           if (criteria is List) {
             task.acceptanceCriteria = criteria.whereType<String>().toList();
+          }
+          // From the 13 November audit: a changed dependency list was dropped.
+          final dependsOn = event['depends_on'];
+          if (dependsOn is List) {
+            task.dependsOn = dependsOn.whereType<String>().toList();
           }
         }
       case 'agent_status_changed':
@@ -865,6 +874,14 @@ class RoomStore extends ChangeNotifier {
       case 'room_closed':
         _closedReason = event['reason'] as String?;
         _room?.phase = RoomPhase.completed;
+      case 'agent_left':
+        // From the 13 November audit: a removed bot stayed on the roster as
+        // "idle", with a menu that answered "unknown agent".
+        final id = event['agent'] as String?;
+        if (id != null) {
+          _agents.remove(id);
+          _activity.remove(id);
+        }
       case 'agent_joined':
         final spec = (event['spec'] as Map?)?.cast<String, Object?>();
         if (spec != null) {
@@ -883,7 +900,7 @@ class RoomStore extends ChangeNotifier {
     _notifyChanged(coalesce: seq != 0 && seq <= _snapshotHead);
   }
 
-  void _applyTaskTransition(Map<String, Object?> event) {
+  void _applyTaskTransition(Map<String, Object?> event, int seq) {
     final id = event['task'] as String?;
     final task = id == null ? null : _tasks[id];
     if (task == null) return;
@@ -942,7 +959,9 @@ class RoomStore extends ChangeNotifier {
       task.blockedCount = 0;
     } else if (kind == 'unblock') {
       task.blockedCount = 0;
-    } else if (kind == 'request_changes') {
+    } else if (kind == 'request_changes' && seq > _snapshotHead) {
+      // The snapshot already counts rounds before its head. From the 13
+      // November audit: replayed on top of it, a task at revision 3 showed 5.
       task.revision += 1;
     }
   }

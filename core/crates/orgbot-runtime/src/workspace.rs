@@ -143,7 +143,7 @@ impl Workspace {
                 json!(["path"]),
             ));
             if self.spec.commands {
-                tools.push(tool("workspace_run", "Run a shell command in the selected workspace (bash in a local Linux workspace; the result gives its exit code). Linux local commands use an isolated working copy: original project files are read-only, edits integrate after success, and removals await owner approval. A file that changed in the project since your copy was made is not overwritten: your version is kept under ~/orgbot-conflicts/ and your copy takes the project's, so redo the change on top if it is still needed. SSH commands retain the SSH account's permissions. Output is bounded to 64 KiB. Timeout defaults to 300 seconds (1–1800 allowed). /tmp is emptied when the command ends: write screenshots and scratch files under .cache/orgbots/, which stays in your copy and is never merged. A command with no output and almost no processor use for 5 minutes is stopped as stuck. Inspect partial effects after interruption; do not start background processes.", json!({"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":1800}}), json!(["command"])));
+                tools.push(tool("workspace_run", "Run a shell command in the selected workspace (bash in a local Linux workspace; the result gives its exit code). Linux local commands use an isolated working copy: original project files are read-only, edits integrate after success, and removals await owner approval. A file that changed in the project since your copy was made is not overwritten: your version is kept under .cache/orgbots/conflicts/ in your copy and your copy takes the project's, so redo the change on top if it is still needed. SSH commands retain the SSH account's permissions. Output is bounded to 64 KiB. Timeout defaults to 300 seconds (1–1800 allowed). /tmp is emptied when the command ends: write screenshots and scratch files under .cache/orgbots/, which stays in your copy and is never merged. A command with no output and almost no processor use for 5 minutes is stopped as stuck. Inspect partial effects after interruption; do not start background processes.", json!({"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":1800}}), json!(["command"])));
             }
         }
         if self.capabilities.verification {
@@ -191,8 +191,12 @@ impl Workspace {
         tools
     }
 
-    pub fn instruction(&self) -> String {
-        let landing = if self.capabilities.git_read && self.spec.writable && self.spec.commands {
+    /// What an API bot is told about the computer it works on. A review-only
+    /// bot is told what it may actually do there. From the 13 November audit:
+    /// review-only bots read "File writes allowed: true".
+    pub fn instruction(&self, review_only: bool) -> String {
+        let writes = self.spec.writable && !review_only;
+        let landing = if self.capabilities.git_read && writes && self.spec.commands {
             " Commits you make in your copy stay in your copy: to put them on the owner's branch, bundle them in the project and use workspace_land_commits, which the owner approves once. Never ask the owner to run git commands or scripts for you."
         } else {
             ""
@@ -201,8 +205,8 @@ impl Workspace {
             "\n\nCOMPUTER: {}. Working directory: {}. Use workspace_* tools for actual computer work. All paths must be relative to this root. File writes allowed: {}. Shell commands available: {}. You are an API model; do not claim files were changed or commands ran without successful tool results. Preserve existing user files; ask before destructive operations. After an interrupted write, inspect its effects using workspace_read or workspace_list before deciding what remains. Never blindly repeat a mutation or tell others the computer is unavailable without checking it. This workspace may already carry playbooks written for it — look in .agents/skills, .claude/skills, .codex/skills or ~/.codex/skills with workspace_list, and read a SKILL.md with workspace_read when its name matches your work. Prefer one written for this machine over a general approach; it knows things about this setup that you do not.",
             self.spec.label,
             self.spec.root,
-            self.spec.writable,
-            self.spec.writable && self.spec.commands
+            writes,
+            writes && self.spec.commands
         );
         text + landing
     }
@@ -249,8 +253,12 @@ impl Workspace {
             grants,
             reply,
         };
+        // The device's own limits apply from when the work starts; this wait
+        // also covers its queue for the project (up to 20 minutes behind other
+        // bots' copies and merges). From the 13 November audit: a plain listing
+        // failed while it queued.
         match tokio::time::timeout(
-            std::time::Duration::from_secs(command_seconds + 180),
+            std::time::Duration::from_secs(command_seconds + 180 + 20 * 60),
             async {
                 self.tx.send(call).await.map_err(|_| ())?;
                 result.await.map_err(|_| ())

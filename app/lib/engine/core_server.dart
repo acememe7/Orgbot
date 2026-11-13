@@ -10,10 +10,13 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
+import '../orgbot/data_home.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+
+import 'package:crypto/crypto.dart';
 
 import '../orgbot/room_file.dart';
 
@@ -49,9 +52,13 @@ EngineBinary findEngine() {
     if (home.isNotEmpty) '$home/.local/bin/orgbot-engine',
     for (final dir in (Platform.environment['PATH'] ?? '').split(':'))
       if (dir.isNotEmpty) '$dir/orgbot-engine',
-    // A checkout being worked on.
-    'core/target/release/orgbot',
-    '../core/target/release/orgbot',
+    // A checkout being worked on, in development builds only. From the 13
+    // November audit: a release build also looked in the folder it was
+    // started from.
+    if (!const bool.fromEnvironment('dart.vm.product')) ...[
+      'core/target/release/orgbot',
+      '../core/target/release/orgbot',
+    ],
   ];
   for (final candidate in candidates) {
     final file = File(candidate);
@@ -112,8 +119,10 @@ class CoreServer {
         '--directory',
         directory,
       ]);
-      if (result.exitCode != 0) {
-        throw EngineStartError('Could not stop the Linux room service.');
+      if (result.exitCode != 0 && await _serviceStillRunning(_enginePath, directory)) {
+        throw EngineStartError(
+          'The room\'s background service did not stop. Try again, or stop it from a terminal.',
+        );
       }
       return;
     }
@@ -223,16 +232,16 @@ Future<CoreServer> startRoom(
 
 /// Where a room's Linux background service keeps its config and saved state.
 String linuxServiceDirectory(String roomId) {
-  final dataHome = Platform.environment['XDG_DATA_HOME']?.trim();
-  final home = dataHome == null || dataHome.isEmpty
-      ? '${Platform.environment['HOME'] ?? '.'}/.local/share'
-      : dataHome;
-  return '$home/orgbot/.services/$roomId';
+  return '${linuxDataHome()}/orgbot/.services/$roomId';
 }
 
 /// Stop a room's background service if one is running, whether or not this
 /// app opened the room in this session. Used when a room is deleted, so a
 /// deleted room cannot keep running out of sight. Its saved state stays.
+///
+/// Throws when the service is still running afterwards. From the 13 November
+/// audit: a failed stop was swallowed, the room was deleted from the list,
+/// and nothing in the app could reach the service it left running.
 Future<void> stopLinuxRoomService(String roomId) async {
   if (!Platform.isLinux || !RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(roomId)) {
     return;
@@ -241,22 +250,57 @@ Future<void> stopLinuxRoomService(String roomId) async {
   if (!await directory.exists()) return;
   final engine = findEngine();
   if (!engine.available) return;
+  if (!await _serviceStillRunning(engine.path!, directory.path)) return;
   try {
-    final status = await _serviceCommand(engine.path!, [
-      'status',
-      '--directory',
-      directory.path,
-    ]);
-    if (_decodeServiceResult(status, required: false)?['running'] == true) {
-      await _serviceCommand(engine.path!, [
-        'stop',
-        '--directory',
-        directory.path,
-      ]);
-    }
+    await _serviceCommand(engine.path!, ['stop', '--directory', directory.path]);
   } catch (_) {
-    // Deleting the room from the list must not fail on a service hiccup.
+    // Judged by whether it is still running, below.
   }
+  if (await _serviceStillRunning(engine.path!, directory.path)) {
+    throw EngineStartError(
+      'The room\'s background service did not stop. Try again, or stop it from a terminal.',
+    );
+  }
+}
+
+/// Whether a room's background service still runs. Unknown counts as yes:
+/// a room is never reported stopped on a guess.
+Future<bool> _serviceStillRunning(String enginePath, String directory) async {
+  try {
+    final status = await _serviceCommand(enginePath, ['status', '--directory', directory]);
+    return _decodeServiceResult(status, required: false)?['running'] != false;
+  } catch (_) {
+    return true;
+  }
+}
+
+/// A salted digest of a room's file and environment: whether a running
+/// service was started with the same settings, without keeping the keys.
+///
+/// Signed-in tokens renew themselves, so only their presence counts: a
+/// renewed token must not restart a room that is working.
+String _settingsDigest(RoomFile room, String salt) {
+  final keys = room.environment.keys.toList()..sort();
+  final environment = [
+    for (final key in keys) key.endsWith('_AUTH_TOKEN') ? key : '$key=${room.environment[key]}',
+  ].join('\n');
+  return sha256.convert(utf8.encode('$salt\n${room.toml}\n$environment')).toString();
+}
+
+Future<bool> _sameSettings(File file, RoomFile room) async {
+  try {
+    final parts = (await file.readAsString()).trim().split(':');
+    return parts.length == 2 && _settingsDigest(room, parts[0]) == parts[1];
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<void> _recordSettings(File file, RoomFile room) async {
+  final random = Random.secure();
+  final salt = List.generate(16, (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+  await file.writeAsString('$salt:${_settingsDigest(room, salt)}', flush: true);
+  await _setMode(file.path, '600');
 }
 
 Future<CoreServer> _startLinuxService(
@@ -281,10 +325,18 @@ Future<CoreServer> _startLinuxService(
   final current = _decodeServiceResult(existing, required: false);
   // An outdated service (the engine was updated underneath it) is restarted
   // by `start`, so it gets the current configuration as well.
-  final alreadyRunning =
+  var alreadyRunning =
       current != null &&
       current['running'] == true &&
       current['outdated'] != true;
+  // So is one started with other settings. From the 13 November audit: a
+  // bot switched to another model, a replaced key or a sign-in switched off
+  // did not reach a service already running in the background.
+  final settingsFile = File('${directory.path}/settings.fingerprint');
+  if (alreadyRunning && !await _sameSettings(settingsFile, room)) {
+    await _serviceCommand(enginePath, ['stop', '--directory', directory.path]);
+    alreadyRunning = false;
+  }
   if (!alreadyRunning) {
     final existingType = await FileSystemEntity.type(
       roomFile.path,
@@ -295,6 +347,7 @@ Future<CoreServer> _startLinuxService(
     }
     await roomFile.writeAsString(room.toml, flush: true);
     await _setMode(roomFile.path, '600');
+    await _recordSettings(settingsFile, room);
   }
   final port = await _freePort();
   final address = '127.0.0.1:$port';

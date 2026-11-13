@@ -30,6 +30,10 @@ pub struct BotMemory {
     capabilities: crate::capabilities::Capabilities,
 }
 
+/// Stop reasons the runtime sets for a turn that failed or was put off, as
+/// distinct from a provider's own: such a turn says nothing about the bot.
+pub const DEFERRED_TURN_MARKERS: &[&str] = &["stopped", "human_input", "provider_wait", "owner_approval", "provider_error"];
+
 /// What one turn accomplished.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnReport {
@@ -50,6 +54,9 @@ pub struct TurnReport {
     /// What an agent CLI did on its own: tool uses inside it and files it
     /// changed, which the room sees only through this count.
     pub own_activity: usize,
+    /// Room tool calls that changed something: not reads, listings or
+    /// messages.
+    pub changes: usize,
 }
 
 impl TurnReport {
@@ -64,6 +71,7 @@ impl TurnReport {
             usage: Usage::default(),
             stop_reason: StopReason::Other("stopped".into()),
             own_activity: 0,
+            changes: 0,
         }
     }
 }
@@ -123,10 +131,13 @@ impl TurnReport {
         self.tool_calls > self.tool_errors || self.said.is_some()
     }
 
-    /// Whether the bot did anything at all, as opposed to only talking: a
-    /// board tool that went through, or a tool or edit inside its CLI.
+    /// Whether the bot did anything at all, as opposed to only talking or
+    /// looking: a board tool that changed something, or a tool or edit inside
+    /// its CLI.
+    /// From the 13 November audit: any successful call counted, so a bot
+    /// that only listed tasks or read an artifact went again at once.
     pub fn acted(&self) -> bool {
-        self.tool_calls > self.tool_errors || self.own_activity > 0
+        self.changes > 0 || self.own_activity > 0
     }
 }
 
@@ -168,6 +179,8 @@ pub struct Bot {
     retry_at: Option<std::time::Instant>,
     /// Since when its model service has refused every turn, if it is.
     unavailable_since: Option<std::time::Instant>,
+    /// Refused requests in a row since then.
+    refused_attempts: u32,
     /// Told to the bot at the start of its next turn, once.
     next_turn_note: Option<String>,
     /// When this bot last posted the closing words of a turn that changed
@@ -212,15 +225,24 @@ impl Bot {
             input_interrupt: CancellationToken::new(),
             retry_at: None,
             unavailable_since: None,
+            refused_attempts: 0,
             next_turn_note: None,
             last_idle_post: None,
         }
     }
 
     pub fn attach_workspace(&mut self, workspace: crate::workspace::Workspace) {
+        // An agent CLI reads, edits and runs commands in its own copy with its
+        // own tools; the room's file and command tools work in another copy,
+        // which never had its edits. From the 13 November audit: a CLI bot
+        // edited a file, ran workspace_verify, and recorded that tests passed
+        // on a copy without the edit. It keeps landing and pushing commits,
+        // which act on the project itself.
+        let cli = matches!(self.spec.provider, ProviderRef::CliAgent { .. });
         self.tools
             .extend(workspace.definitions().into_iter().filter(|tool| {
-                !self.spec.autonomy.review_only || !is_workspace_write_tool(&tool.name)
+                (!self.spec.autonomy.review_only || !is_workspace_write_tool(&tool.name))
+                    && (!cli || matches!(tool.name.as_str(), "workspace_land_commits" | "workspace_push_commits"))
             }));
         self.workspace = Some(workspace);
     }
@@ -350,8 +372,11 @@ impl Bot {
             Ok(None) => {}
             Err(error) => tracing::warn!(%error, "project memory repository unavailable"),
         }
-        if let Some(workspace) = &self.workspace {
-            system.push_str(&workspace.instruction());
+        // An agent CLI works on its own copy with its own tools; the room's
+        // computer paragraph (which says "You are an API model") is not for
+        // it. From the 13 November audit.
+        if let Some(workspace) = self.workspace.as_ref().filter(|_| !matches!(self.spec.provider, ProviderRef::CliAgent { .. })) {
+            system.push_str(&workspace.instruction(self.spec.autonomy.review_only));
         }
         // A cancelled turn can leave unanswered tool uses. Discard that incomplete
         // assistant turn; the next situation reports the actual committed board.
@@ -375,7 +400,10 @@ impl Bot {
             let _ = engine.apply(Command::BeginTurn { agent: self.spec.id });
             let mut situation = prompt::situation(engine, self.spec.id, self.last_seen);
             situation.push_str(&memory_notes);
-            if let Some(note) = self.next_turn_note.take() {
+            // Kept until the turn gets past its first call: a turn refused at
+            // once (and its situation dropped) still carries it next time.
+            // From the 13 November audit: the note was lost that way.
+            if let Some(note) = self.next_turn_note.clone() {
                 situation.push_str("\n\n");
                 situation.push_str(&note);
             }
@@ -405,6 +433,7 @@ impl Bot {
             usage: Usage::default(),
             stop_reason: StopReason::EndTurn,
             own_activity: 0,
+            changes: 0,
         };
         let mut usage_checkpoint = UsageCheckpoint::new(engine, self.spec.id);
         let mut posted_to_chat = false;
@@ -422,6 +451,7 @@ impl Bot {
         // Every ten minutes of a turn it hears how long it has run.
         let mut steer = TurnSteer::new(seen_through);
         let mut cut_off: u32 = 0;
+        let mut shrunk_for_context = false;
         loop {
             step += 1;
             self.capabilities
@@ -451,6 +481,10 @@ impl Bot {
             }
 
             let mut interrupted = false;
+            // Without the room bridge too: from the 13 November audit, a CLI
+            // bot with no bridge (or whose socket failed) merged untasked edits.
+            self.provider
+                .hold_merge(!engine.with(|engine| engine.may_change_project(self.spec.id)));
             let response = match self.mcp_rx.as_mut() {
                 Some(rx) => {
                     let (response, mcp) = complete_with_mcp(
@@ -473,6 +507,7 @@ impl Bot {
                     }
                     report.tool_calls += mcp.ok;
                     report.tool_errors += mcp.err;
+                    report.changes += mcp.changed;
                     // Said through the room tool already; the closing prose
                     // is the CLI's own summary and must not be posted again.
                     posted_to_chat |= mcp.posted;
@@ -508,18 +543,33 @@ impl Bot {
             let response = match response {
                 Ok(response) => {
                     self.unavailable_since = None;
+                    self.refused_attempts = 0;
                     response
+                }
+                // From the 13 November audit: the model's "too long" refusal
+                // faulted the bot and released its tasks. Older tool results
+                // are shortened and the call is made once more.
+                Err(error) if is_context_too_long(&error) && !shrunk_for_context => {
+                    shrunk_for_context = true;
+                    tracing::warn!(agent = %self.spec.handle, %error, "the conversation was too long; shortening older tool results");
+                    shrink_tool_results(&mut self.history, MAX_HISTORY_CHARS / 4, 2);
+                    continue;
                 }
                 Err(error) => {
                     if matches!(error, ProviderError::RateLimited { .. }) {
                         let since = *self.unavailable_since.get_or_insert_with(std::time::Instant::now);
+                        self.refused_attempts += 1;
                         tracing::warn!(
                             agent = %self.spec.handle,
                             refused_for_secs = since.elapsed().as_secs(),
                             %error,
                             "the model service refused a turn; waiting"
                         );
-                        if since.elapsed() >= SERVICE_DOWN_RELEASE {
+                        // Refused again and again, not twice with a long wait
+                        // between. From the 13 November audit: one 429, a
+                        // 20-minute retry wait and a second 429 released all
+                        // a bot held as "refused for 20 minutes".
+                        if since.elapsed() >= SERVICE_DOWN_RELEASE && self.refused_attempts >= SERVICE_DOWN_ATTEMPTS {
                             let minutes = since.elapsed().as_secs() / 60;
                             engine.with(|engine| hand_on_held_work(engine, &self.spec, minutes, &error));
                         }
@@ -546,6 +596,13 @@ impl Bot {
                         }
                         break;
                     }
+                    // What the failed turn used still counts.
+                    if let Some(usage) = self.provider.last_failed_usage() {
+                        report.usage.add(usage);
+                        engine.with(|engine| {
+                            let _ = engine.apply(Command::RecordUsage { agent: self.spec.id, usage });
+                        });
+                    }
                     // Tell the engine, so repeated failures fault the bot and
                     // release whatever it is holding.
                     let _ = engine.with(|engine| {
@@ -566,6 +623,12 @@ impl Bot {
             // it: the turn ends here and the next one resumes the same session
             // with the message in front of it.
             if interrupted {
+                // Cut short: what it was shown stays unseen, by the rule above.
+                // From the 13 November audit: these turns marked it seen.
+                mark_seen = false;
+                // What the CLI used before it was stopped still counts.
+                report.usage.add(response.usage);
+                usage_checkpoint.update(report.usage, report.steps + 1);
                 report.stop_reason = StopReason::Other(
                     if self.next_turn_note.is_some() { "thinking_limit" } else { "human_input" }.into(),
                 );
@@ -576,6 +639,9 @@ impl Bot {
             }
 
             report.steps += 1;
+            if report.steps == 1 && !interrupted {
+                self.next_turn_note = None;
+            }
             // Pictures an agent CLI drew this turn go to the room, not into
             // the conversation it carries forward.
             let mut response = response;
@@ -617,9 +683,21 @@ impl Bot {
             // splitting them teaches the model to stop calling tools in
             // parallel.
             let mut results = Vec::with_capacity(calls.len());
-            for (id, name, input) in calls {
-                if name == "post_message" {
-                    posted_to_chat = true;
+            // A reply cut off at its output limit may have been cut inside its
+            // last call's arguments. From the 13 November audit: such a
+            // workspace_write ran with no arguments, failed, and was made
+            // again just as large. It is not run; the bot is told why.
+            let truncated_call = (response.stop_reason == StopReason::MaxTokens).then(|| calls.len() - 1);
+            for (index, (id, name, input)) in calls.into_iter().enumerate() {
+                if truncated_call == Some(index) {
+                    report.tool_calls += 1;
+                    report.tool_errors += 1;
+                    results.push(ContentBlock::ToolResult {
+                        tool_use_id: id.to_string(),
+                        content: TRUNCATED_CALL_NOTE.into(),
+                        is_error: true,
+                    });
+                    continue;
                 }
                 let outcome = if crate::capabilities::handles(name) {
                     self.capabilities
@@ -652,7 +730,7 @@ impl Bot {
                             "Review-only bots cannot change workspace files or run commands.",
                         )
                     } else if is_workspace_write_tool(name)
-                        && !engine.with(|engine| engine.may_change_project(self.spec.id))
+                        && !engine.with(|engine| may_write(engine, self.spec.id, name))
                     {
                         orgbot_tools::ToolOutcome::error(NO_TASK_NO_CHANGES)
                     } else {
@@ -698,13 +776,20 @@ impl Bot {
                         .await;
                 }
                 report.tool_calls += 1;
+                // Posted only if it went through, as on the CLI path. From
+                // the 13 November audit: a refused post still counted, so the
+                // bot's answer, given as prose next, was dropped.
+                if name == "post_message" && !outcome.is_error {
+                    posted_to_chat = true;
+                }
                 if !outcome.is_error && !QUIET_TOOLS.contains(&name) {
                     changed = true;
+                    report.changes += 1;
                 }
                 if outcome.is_error {
                     report.tool_errors += 1;
                 }
-                let mut content = outcome.content;
+                let mut content = bound_tool_result(outcome.content, MAX_TOOL_RESULT_CHARS);
                 if let Some(note) = repeats.note(name, input) {
                     content.push_str(&note);
                 }
@@ -793,8 +878,11 @@ impl Bot {
             });
         });
         usage_checkpoint.disarm();
+        // What was passed on mid-turn has been seen too. From the 13 November
+        // audit: an owner's question relayed and answered mid-turn woke the
+        // bot again at once and was shown to it as new.
         if mark_seen {
-            self.last_seen = seen_through;
+            self.last_seen = seen_through.max(steer.relayed_through);
         }
         // Where a turn's time went, for the room's log, which keeps warnings
         // only: a long turn is one.
@@ -870,7 +958,13 @@ impl Bot {
         // If one half still exceeds the byte budget, advance to another safe
         // user boundary. Keep as much recent history as fits, while reserving
         // room for the compacted summary.
-        if heavy {
+        // A first cut that already fits is kept (13 November audit: the
+        // history was always cut one segment further).
+        if heavy
+            && cut.is_some_and(|first| {
+                history_chars(&self.history[first..]) > MAX_HISTORY_CHARS - MAX_COMPACTED_SUMMARY_CHARS
+            })
+        {
             if let Some(mut chosen) = cut {
                 for next in chosen + 1..self.history.len() {
                     if is_safe_cut_point(&self.history[next]) {
@@ -900,7 +994,91 @@ impl Bot {
                     .insert(0, ContentBlock::text(summary));
             }
         }
+        // Inside one turn every user turn carries tool results, so there is
+        // no safe place to cut. From the 13 November audit: the ceiling then
+        // did nothing, and a long turn grew until the model refused it.
+        if self.history_chars() > MAX_HISTORY_CHARS {
+            shrink_tool_results(&mut self.history, MAX_HISTORY_CHARS, 2);
+        }
     }
+}
+
+/// The most of one tool result a bot's conversation keeps.
+const MAX_TOOL_RESULT_CHARS: usize = 60_000;
+/// What an older tool result is shortened to when the conversation is full.
+const SHORTENED_RESULT_CHARS: usize = 1_500;
+
+/// Keep the start and end of a long tool result, saying what was left out.
+fn bound_tool_result(content: String, limit: usize) -> String {
+    if content.len() <= limit {
+        return content;
+    }
+    let head_end = floor_char_boundary(&content, limit * 2 / 3);
+    let tail_start = ceil_char_boundary(&content, content.len() - (limit - head_end).min(content.len()));
+    let cut = content.len() - head_end - (content.len() - tail_start);
+    format!(
+        "{}\n[OrgBots: {cut} characters cut from the middle of this result to keep the conversation in bounds. \
+         Read a narrower part, for example with workspace_run and sed -n or grep, if you need it.]\n{}",
+        &content[..head_end],
+        &content[tail_start..]
+    )
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+/// Shorten tool results in place, oldest first, until the conversation fits
+/// `budget`, leaving the last `keep_recent` turns whole. Calls and results
+/// stay paired, which every backend requires.
+fn shrink_tool_results(history: &mut [Turn], budget: usize, keep_recent: usize) {
+    let end = history.len().saturating_sub(keep_recent);
+    for index in 0..end {
+        if history_chars(history) <= budget {
+            return;
+        }
+        for block in &mut history[index].content {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                // A result already shortened (its note included) stays as is.
+                if content.len() > SHORTENED_RESULT_CHARS + 400 {
+                    let shortened = bound_tool_result(std::mem::take(content), SHORTENED_RESULT_CHARS);
+                    *content = shortened;
+                }
+            }
+        }
+    }
+}
+
+/// Whether a model refused a request for being longer than it can read.
+fn is_context_too_long(error: &ProviderError) -> bool {
+    let message = match error {
+        ProviderError::BadRequest { message, .. } | ProviderError::Upstream { message, .. } => message.to_ascii_lowercase(),
+        _ => return false,
+    };
+    [
+        "prompt is too long",
+        "context length",
+        "context_length_exceeded",
+        "maximum context",
+        "context window",
+        "too many tokens",
+        "input is too long",
+        "request too large",
+    ]
+    .iter()
+    .any(|phrase| message.contains(phrase))
 }
 
 fn history_chars(history: &[Turn]) -> usize {
@@ -1228,6 +1406,10 @@ const CUT_OFF_NOTE: &str = "[OrgBots] Your reply was cut off before you called a
 /// holds goes back to the board.
 const SERVICE_DOWN_RELEASE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
+/// Refused requests in a row, with [`SERVICE_DOWN_RELEASE`] gone by, before
+/// a bot's work is handed back.
+const SERVICE_DOWN_ATTEMPTS: u32 = 3;
+
 /// Put a bot's work back on the board while its model service refuses it,
 /// and tell the coordinators.
 ///
@@ -1360,8 +1542,7 @@ impl TurnSteer {
             return None;
         }
         self.minutes_told = minutes - minutes % TURN_MINUTES_NOTE;
-        let holds_work = engine.tasks().any(|task| task.is_held_by(agent) && !task.state.is_terminal())
-            || !engine.review_queue_for(agent).is_empty();
+        let holds_work = engine.has_reason_to_work(agent);
         Some(turn_minutes_reminder(minutes, holds_work))
     }
 
@@ -1450,6 +1631,14 @@ impl Repeats {
 const NO_TASK_NO_CHANGES: &str = "You hold no task, so changes you make would reach the owner's project \
      with nobody reviewing them. Claim an open task (or accept a handoff) first. If you found something \
      that needs fixing, tell the coordinators in one message so they can open a task for it.";
+
+/// Whether `agent` may use the workspace tool `name` that changes the project.
+fn may_write(engine: &orgbot_engine::Engine, agent: AgentId, name: &str) -> bool {
+    match name {
+        "workspace_land_commits" | "workspace_push_commits" => engine.may_land(agent),
+        _ => engine.may_change_project(agent),
+    }
+}
 
 fn is_workspace_write_tool(name: &str) -> bool {
     matches!(
@@ -1581,9 +1770,12 @@ async fn complete_api(
     let mut attempt = 0;
     loop {
         match provider.complete(request.clone(), sink.clone()).await {
+            // A request that ran into the client's total time limit is not
+            // retried: it was producing, slowly, and would run as long again.
             Err(error)
                 if attempt < MAX_RETRIES
                     && error.is_retryable()
+                    && !matches!(&error, ProviderError::Transport { source, .. } if source.is_timeout())
                     && !matches!(
                         error,
                         ProviderError::RateLimited { .. } | ProviderError::Allowance { .. }
@@ -1616,11 +1808,22 @@ fn is_safe_cut_point(turn: &Turn) -> bool {
             .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
 }
 
+/// What a bot is told about a call its reply was cut off inside.
+const TRUNCATED_CALL_NOTE: &str = "Your reply reached its output limit inside this call, so its arguments \
+     may be incomplete and it was not run. Make it again in smaller parts: for a large file, write \
+     it in several workspace_write calls or build it with workspace_run.";
+
+/// How long a CLI asked to end its turn early may take to stop and finish it
+/// (its merge included) before the room stops waiting.
+const END_TURN_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 /// What the room-MCP calls of one episode amounted to.
 #[derive(Debug, Default)]
 struct McpTally {
     ok: usize,
     err: usize,
+    /// Successful calls that changed something (see [`QUIET_TOOLS`]).
+    changed: usize,
     /// A post_message call succeeded during the episode.
     posted: bool,
     /// The episode was ended for the owner's message; see [`OWNER_WAIT`].
@@ -1638,6 +1841,7 @@ struct McpTally {
 /// immediately, so the bot acts on the board mid-episode. Returns the provider
 /// result plus how many MCP calls succeeded or were rejected, which the caller
 /// folds into the turn report so a board action counts as progress.
+#[allow(clippy::too_many_arguments)]
 async fn complete_with_mcp(
     provider: &Arc<dyn Provider>,
     tools: &[ToolDef],
@@ -1697,6 +1901,11 @@ async fn complete_with_mcp(
                 } else {
                     CLI_THINKING_CAP
                 };
+                // The clock stops while the CLI runs a tool of its own: a long
+                // test run is acting, not reasoning.
+                if provider.tool_in_flight() {
+                    progress.1 = tokio::time::Instant::now();
+                }
                 let thinking_only = activity.is_some() && progress.1.elapsed() >= limit;
                 if thinking_only {
                     tracing::warn!(
@@ -1708,12 +1917,21 @@ async fn complete_with_mcp(
                 }
                 if thinking_only || engine.with(|engine| steer.owner_kept_waiting(engine, spec)) {
                     tally.interrupted = !thinking_only;
-                    let stopped = CompletionResponse {
-                        model,
-                        content: Vec::new(),
-                        stop_reason: StopReason::Other("human_input".into()),
-                        usage: Usage::default(),
+                    // The CLI stops and finishes its turn: its edits merge,
+                    // its usage and words are kept. From the 13 November
+                    // audit: the turn was dropped and all of that was lost.
+                    provider.end_turn_early();
+                    let finished = tokio::time::timeout(END_TURN_GRACE, &mut turn).await;
+                    let mut stopped = match finished {
+                        Ok(Ok(response)) => response,
+                        _ => CompletionResponse {
+                            model,
+                            content: Vec::new(),
+                            stop_reason: StopReason::EndTurn,
+                            usage: Usage::default(),
+                        },
                     };
+                    stopped.stop_reason = StopReason::Other("human_input".into());
                     return (Ok(stopped), tally);
                 }
             }
@@ -1735,8 +1953,21 @@ async fn dispatch_room_mcp(
     steer: &mut TurnSteer,
 ) -> Option<String> {
     let reply = room_mcp_reply(session, request, engine, spec, servers, workspace, tally, capabilities).await;
+    // Only a reply that can carry it takes the note. From the 13 November
+    // audit: the handshake, tool list and error replies used it up, and a
+    // message written while the CLI started was never heard.
+    if !can_carry_note(reply.as_deref()) {
+        return reply;
+    }
     let note = engine.with(|engine| steer.note(engine, spec));
     with_note(reply, &note)
+}
+
+/// Whether a room tool reply has a text result a note can be added to.
+fn can_carry_note(reply: Option<&str>) -> bool {
+    reply
+        .and_then(|reply| serde_json::from_str::<serde_json::Value>(reply).ok())
+        .is_some_and(|response| response.pointer("/result/content/0/text").is_some_and(serde_json::Value::is_string))
 }
 
 /// A room tool's MCP reply with `note` after its result text.
@@ -1798,7 +2029,7 @@ async fn room_mcp_reply(
         orgbot_tools::ToolOutcome::error(
             "Review-only bots cannot change workspace files or run commands.",
         )
-    } else if is_workspace_write_tool(&name) && !engine.with(|engine| engine.may_change_project(actor)) {
+    } else if is_workspace_write_tool(&name) && !engine.with(|engine| may_write(engine, actor, &name)) {
         orgbot_tools::ToolOutcome::error(NO_TASK_NO_CHANGES)
     } else if let Some(workspace) = workspace {
         // A CLI bot's room workspace tools arrive here mid-episode; the
@@ -1833,6 +2064,9 @@ impl McpTally {
         } else {
             self.ok += 1;
             self.posted |= tool == "post_message";
+            if !QUIET_TOOLS.contains(&tool) {
+                self.changed += 1;
+            }
         }
     }
 }
@@ -2166,6 +2400,30 @@ mod tests {
 
     fn bot() -> Bot {
         Bot::new(spec(), Arc::new(ScriptedProvider::always_says("ok")))
+    }
+
+    /// From the 13 November audit: a CLI bot's room workspace tools worked in
+    /// a copy that never had its CLI's edits.
+    #[test]
+    fn an_agent_cli_bot_is_offered_only_the_commit_tools() {
+        use crate::workspace::{Workspace, WorkspaceCapabilities, WorkspaceSpec};
+        let cli = ProviderRef::CliAgent {
+            cli: orgbot_proto::agent::CliKind::Claude,
+            model: String::new(),
+            workdir: String::new(),
+            policy: orgbot_proto::agent::AgentPolicy::WorkspaceWrite,
+            mcp: true,
+            effort: String::new(),
+        };
+        let mut bot = Bot::new(AgentSpec::new("c1", "Claude", cli), Arc::new(ScriptedProvider::always_says("ok")));
+        let (tx, _calls) = mpsc::channel(1);
+        bot.attach_workspace(Workspace::with_capabilities(
+            WorkspaceSpec { label: "test".into(), root: "/work".into(), writable: true, commands: true },
+            tx,
+            WorkspaceCapabilities { verification: true, private_home: false, ..WorkspaceCapabilities::default() },
+        ));
+        let names: Vec<&str> = bot.tools.iter().map(|tool| tool.name.as_str()).filter(|name| name.starts_with("workspace_")).collect();
+        assert!(names.iter().all(|name| matches!(*name, "workspace_land_commits" | "workspace_push_commits")), "{names:?}");
     }
 
     #[tokio::test]
@@ -2678,7 +2936,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_cli_that_only_reasons_is_stopped_only_while_teammates_wait_on_it() {
         #[derive(Debug)]
-        struct Cli(Arc<AtomicUsize>, bool);
+        struct Cli(Arc<AtomicUsize>, bool, tokio::sync::Notify);
         #[async_trait::async_trait]
         impl Provider for Cli {
             fn name(&self) -> &str {
@@ -2688,22 +2946,29 @@ mod tests {
                 // An acting CLI uses a tool every time it is asked.
                 Some(if self.1 { self.0.fetch_add(1, Ordering::SeqCst) + 1 } else { self.0.load(Ordering::SeqCst) })
             }
+            fn end_turn_early(&self) {
+                self.2.notify_one();
+            }
             async fn complete(
                 &self,
                 _request: CompletionRequest,
                 _sink: Option<mpsc::Sender<StreamEvent>>,
             ) -> orgbot_providers::Result<CompletionResponse> {
-                tokio::time::sleep(std::time::Duration::from_secs(15 * 60)).await;
+                // Asked to end early, it finishes its turn with what it has.
+                let text = tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(15 * 60)) => "done",
+                    _ = self.2.notified() => "stopped part way",
+                };
                 Ok(CompletionResponse {
                     model: "grok".into(),
-                    content: vec![ContentBlock::text("done")],
+                    content: vec![ContentBlock::text(text)],
                     stop_reason: StopReason::EndTurn,
                     usage: Default::default(),
                 })
             }
         }
         let run = |engine: SharedEngine, spec: AgentSpec, acting: bool| async move {
-            let provider: Arc<dyn Provider> = Arc::new(Cli(Arc::new(AtomicUsize::new(0)), acting));
+            let provider: Arc<dyn Provider> = Arc::new(Cli(Arc::new(AtomicUsize::new(0)), acting, tokio::sync::Notify::new()));
             let (_tx, mut rx) = mpsc::channel(1);
             let mut steer = TurnSteer::new(engine.with(|engine| engine.head()));
             let (result, tally) = complete_with_mcp(
@@ -2756,7 +3021,8 @@ mod tests {
             room.apply(created("render pipeline", vec![model])).unwrap();
             assert!(room.others_wait_on(spec.id));
         });
-        assert_eq!(run(engine.clone(), spec.clone(), false).await, (true, String::new()));
+        // Stopped, it still finishes its turn: what it said is kept.
+        assert_eq!(run(engine.clone(), spec.clone(), false).await, (true, "stopped part way".to_string()));
         // Using tools all along, it is never stopped.
         assert_eq!(run(engine.clone(), spec.clone(), true).await, (false, "done".to_string()));
     }
@@ -2874,7 +3140,11 @@ mod tests {
         bot.take_turn(&engine, None).await.unwrap();
         assert_eq!(engine.with(|e| e.task(task).unwrap().assignee), Some(worker.id), "a first refusal is waited out");
 
+        // A second refusal long after the first is not "refused for 5
+        // minutes" on its own (13 November audit); a third in a row is.
         bot.unavailable_since = Some(std::time::Instant::now() - SERVICE_DOWN_RELEASE);
+        bot.take_turn(&engine, None).await.unwrap();
+        assert_eq!(engine.with(|e| e.task(task).unwrap().assignee), Some(worker.id), "two refusals are not enough");
         bot.take_turn(&engine, None).await.unwrap();
         assert_ne!(engine.with(|e| e.task(task).unwrap().assignee), Some(worker.id), "its work went back to the board");
         let told = engine.with(|e| {
@@ -3142,7 +3412,7 @@ mod tests {
         assert!(rejected.is_error);
         assert!(
             client
-                .call_loaded_for(&engine, spec.id, "external__mutate", &json!({}))
+                .call_loaded_for(&engine, spec.id, "external", "external__mutate", &json!({}))
                 .await
                 .is_error
         );
@@ -3636,6 +3906,55 @@ mod tests {
         assert!(!summary.contains("PRIVATE_PLAYBOOK_BODY"));
     }
 
+    /// From the 13 November audit: inside one turn nothing could be cut, a
+    /// tool result of any size went into the conversation, and the model's
+    /// "too long" refusal faulted the bot.
+    #[test]
+    fn a_long_turn_stays_within_the_conversation_ceiling() {
+        let big = format!("{}é{}", "a".repeat(200_000), "z".repeat(200_000));
+        let bounded = bound_tool_result(big.clone(), MAX_TOOL_RESULT_CHARS);
+        assert!(bounded.len() < MAX_TOOL_RESULT_CHARS + 400);
+        assert!(bounded.starts_with("aaa") && bounded.ends_with("zzz"));
+        assert!(bounded.contains("characters cut from the middle"));
+        assert_eq!(bound_tool_result("short".into(), MAX_TOOL_RESULT_CHARS), "short");
+
+        let mut subject = bot();
+        subject.history.push(Turn::user("do the long job"));
+        for index in 0..40 {
+            subject.history.push(Turn {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse { id: format!("c{index}"), name: "workspace_read".into(), input: json!({}) }],
+            });
+            subject.history.push(Turn::tool_results(vec![ContentBlock::ToolResult {
+                tool_use_id: format!("c{index}"),
+                content: bound_tool_result("x".repeat(100_000), MAX_TOOL_RESULT_CHARS),
+                is_error: false,
+            }]));
+        }
+        assert!(subject.history_chars() > MAX_HISTORY_CHARS);
+        subject.trim_history();
+        assert!(subject.history_chars() <= MAX_HISTORY_CHARS, "{}", subject.history_chars());
+        // Every call keeps its result, and the newest result is whole.
+        let calls = subject.history.iter().flat_map(|t| &t.content).filter(|b| matches!(b, ContentBlock::ToolUse { .. })).count();
+        let results = subject.history.iter().flat_map(|t| &t.content).filter(|b| matches!(b, ContentBlock::ToolResult { .. })).count();
+        assert_eq!(calls, results);
+        assert!(matches!(&subject.history.last().unwrap().content[0], ContentBlock::ToolResult { content, .. } if content.len() > 50_000));
+
+        let too_long = ProviderError::BadRequest { provider: "anthropic".into(), message: "prompt is too long: 210000 tokens > 200000 maximum".into() };
+        assert!(is_context_too_long(&too_long));
+        assert!(!is_context_too_long(&ProviderError::BadRequest { provider: "x".into(), message: "unknown model".into() }));
+    }
+
+    /// From the 13 November audit: handshake and error replies used up the
+    /// note of new messages, which then never reached the CLI.
+    #[test]
+    fn only_a_tool_result_carries_a_note() {
+        assert!(!can_carry_note(Some(r#"{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-06-18"}}"#)));
+        assert!(!can_carry_note(Some(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no"}}"#)));
+        assert!(!can_carry_note(None));
+        assert!(can_carry_note(Some(r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"ok"}]}}"#)));
+    }
+
     #[test]
     fn trimming_persists_summary_in_the_restorable_bot_memory() {
         let mut subject = bot();
@@ -3684,10 +4003,13 @@ mod tests {
             usage: Usage::default(),
             stop_reason: StopReason::EndTurn,
             own_activity: 0,
+            changes: 0,
         };
         assert!(!base.made_progress(), "an empty turn is not progress");
         assert!(!TurnReport { said: Some("I'm changing it".into()), ..base.clone() }.acted(), "talking is not acting");
         assert!(TurnReport { own_activity: 2, ..base.clone() }.acted(), "edits inside a CLI are");
+        assert!(!TurnReport { tool_calls: 3, ..base.clone() }.acted(), "reads and listings are not");
+        assert!(TurnReport { tool_calls: 3, changes: 1, ..base.clone() }.acted(), "a change is");
 
         assert!(TurnReport {
             said: Some("done".into()),

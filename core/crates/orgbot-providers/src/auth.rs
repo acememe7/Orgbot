@@ -161,12 +161,21 @@ pub fn openai_compatible(profile: &str, env: &str) -> Result<Credential> {
     if let Some(key) = env_var(env) {
         return Ok(Credential::ApiKey(key));
     }
-    if let Ok(session) = codex_cli() {
-        return Ok(session);
+    // The Codex sign-in is OpenAI's, and goes only to OpenAI. From the 13
+    // November audit: a custom profile with no key of its own sent it, with
+    // the account id, to whatever host the room file named.
+    if profile == "openai" {
+        if let Ok(session) = codex_cli() {
+            return Ok(session);
+        }
+        return Err(ProviderError::MissingCredential {
+            provider: profile.to_string(),
+            detail: format!("set {env}, or sign in with `codex login`"),
+        });
     }
     Err(ProviderError::MissingCredential {
         provider: profile.to_string(),
-        detail: format!("set {env}, or sign in with `codex login`"),
+        detail: format!("set {env}"),
     })
 }
 
@@ -259,6 +268,17 @@ pub fn base_url(provider: &str, default: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// From the 13 November audit: a custom profile with no key of its own
+    /// was sent the owner's Codex sign-in. (Never reads the real sign-in: the
+    /// fallback is not tried for such a profile.)
+    #[test]
+    fn a_custom_profile_without_a_key_gets_no_borrowed_sign_in() {
+        let error = openai_compatible("local", "ORGBOT_LOCAL_TEST_KEY_THAT_IS_NOT_SET").unwrap_err();
+        assert!(matches!(error, ProviderError::MissingCredential { .. }));
+        assert!(!error.to_string().contains("codex login"), "{error}");
+    }
+
     use super::*;
     use std::io::Write;
 

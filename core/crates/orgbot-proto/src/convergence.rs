@@ -221,8 +221,11 @@ pub fn assess(cycles: &[Vec<Finding>]) -> Convergence {
         .collect();
     let outstanding = *blocking.last().unwrap_or(&0);
 
-    // Shrinking against the cycle before it is progress, however slow.
-    let improving = blocking
+    // Shrinking against the cycle before it is progress, however slow, but
+    // only lately: the last STALL_THRESHOLD cycles. From the 13 November
+    // audit: one improvement anywhere earlier meant a stall was never seen.
+    let recent = &blocking[blocking.len().saturating_sub(STALL_THRESHOLD)..];
+    let improving = recent
         .windows(2)
         .any(|pair| pair[1] < pair[0]);
     if improving || outstanding == 0 {
@@ -444,6 +447,27 @@ mod tests {
 
     /// Cycles that keep finding just as much are not making progress, and more
     /// of them will not help.
+    #[test]
+    fn an_early_improvement_does_not_hide_a_later_stall() {
+        // Five blocking, then two for three cycles running, all different.
+        let words = [
+            "the parser drops commas", "the writer emits tabs", "the index is off by one",
+            "the cache never evicts", "the socket leaks", "the timer drifts", "the log rotates early",
+            "the font is missing", "the menu overlaps", "the save button sticks", "the sound clips",
+        ];
+        let mut next = words.iter().enumerate();
+        let mut cycle = |count: usize| -> Vec<Finding> {
+            (0..count)
+                .map(|_| {
+                    let (index, words) = next.next().unwrap();
+                    major(words, Some(&index.to_string()))
+                })
+                .collect()
+        };
+        let cycles = vec![cycle(5), cycle(2), cycle(2), cycle(2)];
+        assert!(matches!(assess(&cycles), Convergence::Stalled { .. }), "{:?}", assess(&cycles));
+    }
+
     #[test]
     fn a_set_that_never_shrinks_is_stalled() {
         // Fresh problems every cycle, never fewer of them.

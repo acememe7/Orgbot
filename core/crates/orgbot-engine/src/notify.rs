@@ -57,7 +57,7 @@ impl Reason {
             Self::RoomStuck => "The room cannot continue",
             Self::Mentioned => "A bot is asking you something",
             Self::NeedsAttention => "Some work has nowhere to go",
-            Self::BudgetSpent => "The room is out of turns",
+            Self::BudgetSpent => "The room paused at its limit",
         }
     }
 
@@ -101,7 +101,7 @@ pub fn reason_for(event: &Event) -> Option<Reason> {
             );
             if message.intent.expects_reply() && message.author.agent().is_some() && to_the_owner {
                 Some(Reason::Mentioned)
-            } else if message.body.contains("turn budget exhausted") {
+            } else if paused_at_a_limit(message) {
                 Some(Reason::BudgetSpent)
             } else {
                 None
@@ -128,6 +128,19 @@ pub fn reason_for(event: &Event) -> Option<Reason> {
         Event::RoomHealthChanged { ok, .. } => (!ok).then_some(Reason::NeedsAttention),
         _ => None,
     }
+}
+
+/// Whether `message` is the room's own notice that it paused at its turn
+/// budget or its time limit.
+///
+/// From the 13 November audit: any message containing "turn budget
+/// exhausted", a bot's included, raised it, and the time limit raised nothing.
+fn paused_at_a_limit(message: &orgbot_proto::ChatMessage) -> bool {
+    matches!(message.author, orgbot_proto::Author::System)
+        && message.body.starts_with("room paused: ")
+        && ["turn budget exhausted", "spent its turn budget", "ran out of time"]
+            .iter()
+            .any(|limit| message.body.contains(limit))
 }
 
 /// One thing a person should be told, ready to render or push.
@@ -351,6 +364,11 @@ mod attention_tests {
         assert_eq!(notification.reason, Reason::BudgetSpent);
         assert!(notification.urgent, "it is waiting on you to act");
         assert!(notification.body.contains("Resume it"));
+        // The time limit too, and never a bot quoting the words.
+        let timed_out = said("room paused: the room ran out of time", MessageIntent::SystemNotice, false);
+        assert_eq!(reason_for(&timed_out), Some(Reason::BudgetSpent));
+        let quoted = said("room paused: turn budget exhausted, apparently", MessageIntent::Say, true);
+        assert_eq!(reason_for(&quoted), None);
     }
 
     #[test]

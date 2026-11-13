@@ -26,7 +26,9 @@ from typing import Sequence
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "core"
 APP = ROOT / "app"
-DEFAULT_FLUTTER = Path("/home/theaece/development/flutter/bin/flutter")
+# Flutter on PATH, or the usual per-user install. From the 13 November audit:
+# this named one developer's home folder.
+DEFAULT_FLUTTER = Path(shutil.which("flutter") or Path.home() / "development/flutter/bin/flutter")
 
 
 @dataclass(frozen=True)

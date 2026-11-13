@@ -27,8 +27,16 @@ workspace = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(workspace)
 
 
+def _inside_path(path, root):
+    return path == root or root in path.parents
+
+
 class WorkspaceTests(unittest.TestCase):
     def setUp(self):
+        # Copies made by a test are always "recent"; the guard has its own test.
+        recent = patch.object(workspace, "PRUNE_RECENT_SECONDS", 0)
+        recent.start()
+        self.addCleanup(recent.stop)
         # Keep the fixture on the read-only host root rather than /tmp, which
         # the sandbox intentionally replaces with private tmpfs.
         self.tmp = tempfile.TemporaryDirectory(prefix="orgbot-workspace-test-", dir=Path.home())
@@ -134,6 +142,155 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(stat.S_IMODE(source.stat().st_mode), 0o444)
 
+    def test_a_file_a_bot_added_survives_a_second_prepare_and_merges(self):
+        # From the 13 November audit: a second prepare recorded the new file
+        # as baseline, so it never merged and the next prepare deleted it.
+        work = self.prepare()
+        (work / "src/new.py").write_text("new work\n", encoding="utf-8")
+        self.prepare()
+        self.assertIn("src/new.py", workspace._status(os.fspath(self.state), "dev")["added"])
+        self.prepare()
+        self.assertTrue((work / "src/new.py").is_file())
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
+            result = workspace._apply(os.fspath(self.state), "dev", review_token=None)
+        self.assertTrue(result["ok"])
+        self.assertEqual((self.project / "src/new.py").read_text(encoding="utf-8"), "new work\n")
+
+    def test_a_first_copy_that_stopped_part_way_does_not_block_the_bot(self):
+        # From the 13 November audit: a copy left without a manifest made
+        # every later prepare fail for good.
+        real_copy = workspace._copy_tree
+
+        def stops(source, destination):
+            real_copy(source, destination)
+            raise OSError(28, "No space left on device")
+
+        with patch.object(workspace, "_copy_tree", stops):
+            with self.assertRaises(OSError):
+                self.prepare()
+        agent_root = self.state / "agents" / workspace._project_id(self.project.resolve()) / "dev"
+        self.assertFalse((agent_root / "project").exists())
+        self.assertEqual(list(agent_root.glob("project.partial-*")), [])
+        work = self.prepare()
+        self.assertEqual((work / "src/main.py").read_text(encoding="utf-8"), "original\n")
+        # A copy an earlier version left without its manifest is moved aside.
+        manifest = next((self.state / "manifests").rglob("dev.json"))
+        manifest.unlink()
+        xdg = self.root / "xdg"
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg)}):
+            again = self.prepare()
+        self.assertTrue((again / "src/main.py").is_file())
+        self.assertEqual(len(list((xdg / "orgbot" / "leftovers").glob("dev-incomplete-copy-*"))), 1)
+
+    def test_read_only_folders_and_fifos_do_not_stop_a_discard(self):
+        # From the 13 November audit: a read-only Go cache stopped prune, and
+        # a FIFO made discard wait forever.
+        work = self.prepare("gone")
+        cache = work / "go/pkg/mod/example.com"
+        cache.mkdir(parents=True)
+        (cache / "a.go").write_text("package a\n", encoding="utf-8")
+        os.chmod(cache / "a.go", 0o444)
+        os.chmod(cache, 0o555)
+        os.mkfifo(work / "pipe")
+        xdg = self.root / "xdg"
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg)}):
+            result = workspace._discard(os.fspath(self.state), "gone", [])
+        self.assertTrue(result["ok"])
+        self.assertFalse(work.exists())
+
+    def test_a_bot_with_copies_of_two_projects_uses_the_one_it_is_told(self):
+        # From the 13 November audit: pointing a room at a renamed project
+        # folder left two manifests, and every command failed.
+        self.prepare()
+        other = self.root / "renamed"
+        other.mkdir(mode=0o700)
+        (other / "only-here.txt").write_text("new folder\n", encoding="utf-8")
+        workspace._prepare(os.fspath(other), os.fspath(self.state), "dev", False)
+        with self.assertRaises(workspace.WorkspaceError):
+            workspace._status(os.fspath(self.state), "dev")
+        workspace._PROJECT_HINT[:] = [os.fspath(other)]
+        try:
+            status = workspace._status(os.fspath(self.state), "dev")
+            self.assertTrue(status["workspace"].endswith("/project"))
+            self.assertTrue((Path(status["workspace"]) / "only-here.txt").is_file())
+        finally:
+            workspace._PROJECT_HINT.clear()
+
+    @unittest.skipUnless(workspace.shutil.which("git"), "requires git")
+    def test_tracked_files_in_a_build_named_folder_are_merged(self):
+        # From the 13 November audit: a tracked website/build/index.html was
+        # left out of the copy, and the bot's fix never reached the project.
+        site = self.project / "website/build"
+        site.mkdir(parents=True)
+        (site / "index.html").write_text("<p>old</p>\n", encoding="utf-8")
+        (self.project / "dist").mkdir()
+        (self.project / "dist/bundle.js").write_text("generated\n", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"})
+        for args in (["init", "-q"], ["add", "README.md", "src/main.py", "website/build/index.html"]):
+            subprocess.run(["git", "-C", os.fspath(self.project), *args], check=True, env=env)
+        work = self.prepare()
+        self.assertTrue((work / "website/build/index.html").is_file())
+        self.assertFalse((work / "dist/bundle.js").exists(), "untracked build output stays out")
+        (work / "website/build/index.html").write_text("<p>new</p>\n", encoding="utf-8")
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
+            result = workspace._apply(os.fspath(self.state), "dev", review_token=None)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual((site / "index.html").read_text(encoding="utf-8"), "<p>new</p>\n")
+
+    def test_refs_named_like_build_folders_are_copied_into_a_bots_git(self):
+        # From the 13 November audit.
+        refs = self.project / ".git/refs/heads/release"
+        refs.mkdir(parents=True)
+        (refs / "dist").write_text("0" * 40 + "\n", encoding="utf-8")
+        (self.project / ".git/refs/heads/build").write_text("1" * 40 + "\n", encoding="utf-8")
+        work = self.prepare()
+        self.assertTrue((work / ".git/refs/heads/release/dist").is_file())
+        self.assertTrue((work / ".git/refs/heads/build").is_file())
+        self.assertTrue(workspace._excluded("build/out.js"))
+
+    def test_a_socket_or_hard_link_in_a_copy_does_not_stop_the_bot(self):
+        # From the 13 November audit: one such entry failed every later call,
+        # the one that would remove it included.
+        import socket as socketlib
+        work = self.prepare()
+        (work / "tmp").mkdir()
+        server = socketlib.socket(socketlib.AF_UNIX)
+        server.bind(os.fspath(work / "tmp/app.sock"))
+        try:
+            os.link(work / "src/main.py", work / "src/linked.py")
+            (work / "src/new.py").write_text("new\n", encoding="utf-8")
+            status = workspace._status(os.fspath(self.state), "dev")
+            self.assertEqual(status["added"], ["src/new.py"])
+            self.assertEqual(status["deleted"], [])
+            self.assertIn("tmp/app.sock", workspace._SKIPPED_ENTRIES)
+            self.prepare()
+        finally:
+            server.close()
+
+    def test_changes_made_without_a_task_are_set_aside_not_merged_later(self):
+        # From the 13 November audit: held changes merged under the bot's
+        # next task.
+        work = self.prepare()
+        (work / "src/main.py").write_text("untasked edit\n", encoding="utf-8")
+        (work / "src/extra.py").write_text("untasked file\n", encoding="utf-8")
+        (work / "README.md").unlink()
+        xdg = self.root / "xdg"
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg)}):
+            result = workspace._set_aside(os.fspath(self.state), "dev")
+        self.assertEqual(result["set_aside"], 3)
+        rescue = Path(result["rescue_dir"])
+        self.assertTrue(_inside_path(rescue, xdg / "orgbot" / "leftovers"))
+        self.assertEqual((rescue / "src/main.py").read_text(encoding="utf-8"), "untasked edit\n")
+        self.assertEqual((rescue / "src/extra.py").read_text(encoding="utf-8"), "untasked file\n")
+        self.assertEqual((work / "src/main.py").read_text(encoding="utf-8"), "original\n")
+        self.assertFalse((work / "src/extra.py").exists())
+        self.assertEqual((work / "README.md").read_text(encoding="utf-8"), "keep me\n")
+        status = workspace._status(os.fspath(self.state), "dev")
+        self.assertEqual((status["changed"], status["added"], status["deleted"]), ([], [], []))
+        with patch.dict(os.environ, {"XDG_DATA_HOME": os.fspath(xdg)}):
+            self.assertEqual(workspace._set_aside(os.fspath(self.state), "dev")["set_aside"], 0)
+
     def test_prepare_rebases_clean_files_and_preserves_agent_edits(self):
         work = self.prepare()
         (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")
@@ -178,9 +335,9 @@ class WorkspaceTests(unittest.TestCase):
         scans = []
         real = workspace._scan
 
-        def counting(root):
+        def counting(root, **kwargs):
             scans.append(root)
-            return real(root)
+            return real(root, **kwargs)
 
         with patch.object(workspace, "_scan", counting):
             result = workspace._apply(os.fspath(self.state), "dev", review_token=None)
@@ -281,9 +438,9 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual((work / "src/main.py").read_text(encoding="utf-8"), "owner edit\n", "the copy takes the project's version")
         [item] = result["set_aside"]
         self.assertEqual(item["path"], "src/main.py")
-        kept = list((work.parent / "profiles/home/orgbot-conflicts").rglob("main.py"))
-        self.assertEqual([path.read_text(encoding="utf-8") for path in kept], ["agent edit\n"], "and the bot's version is kept for it")
-        self.assertIn("~/orgbot-conflicts/", result["note"])
+        kept = list((work / ".cache/orgbots/conflicts").rglob("main.py"))
+        self.assertEqual([path.read_text(encoding="utf-8") for path in kept], ["agent edit\n"], "and the bot's version is kept for it, in its copy")
+        self.assertIn(".cache/orgbots/conflicts/", result["note"])
         again = workspace._apply(os.fspath(self.state), "dev", review_token=None)
         self.assertTrue(again["ok"], "no conflict is left behind")
 
@@ -298,6 +455,9 @@ class WorkspaceTests(unittest.TestCase):
         self.assertIn("preview-rain.png", result["note"])
         self.assertIn(".cache/orgbots/", result["note"])
         self.assertNotIn("src/icon.png", result["note"], "an image inside the project's folders is its own")
+        (work / "logo.png").write_bytes(b"png")
+        logo = workspace._apply(os.fspath(self.state), "dev", review_token=None)
+        self.assertNotIn("logo.png", logo.get("note", ""), "an image that is not a capture is the project's own")
         again = workspace._apply(os.fspath(self.state), "dev", review_token=None)
         self.assertNotIn("note", again, "named once, when it lands")
 
@@ -314,6 +474,15 @@ class WorkspaceTests(unittest.TestCase):
         self.assertIn("_t", result["note"])
         self.assertIn("project/src/components/Hero.jsx", result["note"])
         self.assertNotIn(".nojekyll", result["note"], "a dotfile is the project's own")
+        # Empty by design, and sbt's own project/ folder: not strays.
+        (work / "conftest.py").write_bytes(b"")
+        (work / "build.sbt").write_text("name := \"x\"\n", encoding="utf-8")
+        (work / "project").mkdir(exist_ok=True)
+        (work / "project/build.properties").write_text("sbt.version=1.10\n", encoding="utf-8")
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch):
+            sbt = workspace._apply(os.fspath(self.state), "dev", review_token=None)
+        self.assertNotIn("conftest.py", sbt.get("note", ""))
+        self.assertNotIn("build.properties", sbt.get("note", ""))
 
     def test_setting_conflicts_aside_cannot_be_redirected_by_a_link_in_the_bots_home(self):
         work = self.prepare()
@@ -321,7 +490,8 @@ class WorkspaceTests(unittest.TestCase):
         (self.project / "src/main.py").write_text("owner edit\n", encoding="utf-8")
         elsewhere = self.root / "elsewhere"
         elsewhere.mkdir()
-        (work.parent / "profiles/home/orgbot-conflicts").symlink_to(elsewhere)
+        (work / ".cache/orgbots").mkdir(parents=True)
+        (work / ".cache/orgbots/conflicts").symlink_to(elsewhere)
         with self.assertRaises(workspace.WorkspaceError):
             workspace._apply(os.fspath(self.state), "dev", review_token=None, set_aside=True)
         self.assertEqual(list(elsewhere.iterdir()), [])
@@ -343,7 +513,39 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(backups[0].read_text(encoding="utf-8"), "original\n")
         journal = json.loads((work.parent / "apply-journal.json").read_text(encoding="utf-8"))
         self.assertEqual(journal["phase"], "applying")
-        self.assertEqual(journal["operations"][0]["state"], "preserving")
+        # From the 13 November audit: the original left before its new
+        # version was written. Now the staged new version takes its place.
+        self.assertEqual(journal["operations"][0]["state"], "applied")
+        self.assertEqual((self.project / "src/main.py").read_text(encoding="utf-8"), "agent edit\n")
+        self.assertEqual([p.name for p in (self.project / "src").iterdir()], ["main.py"], "no staged copy left behind")
+
+    def test_a_merge_stopped_after_the_trash_is_finished_by_the_next_one(self):
+        # From the 13 November audit: a kill between trashing originals and
+        # writing replacements left files missing, and the next merge read
+        # them as removed by the owner.
+        work = self.prepare()
+        (work / "src/main.py").write_text("agent edit\n", encoding="utf-8")
+        (work / "README.md").write_text("agent readme\n", encoding="utf-8")
+        real_commit = workspace._commit_staged
+
+        def killed(*args, **kwargs):
+            raise KeyboardInterrupt("killed between trash and write")
+
+        with patch.object(workspace, "_trash_replacements", self._fake_trash_batch), \
+                patch.object(workspace, "_commit_staged", killed), \
+                patch.object(workspace, "_discard_staged", lambda staged: os.close(staged[0])):
+            with self.assertRaises(KeyboardInterrupt):
+                workspace._apply(os.fspath(self.state), "dev", review_token=None)
+        self.assertFalse((self.project / "src/main.py").exists())
+        self.assertEqual(real_commit, workspace._commit_staged)
+        # The next prepare (any bot's) finishes the merge before it scans.
+        result = workspace._prepare(os.fspath(self.project), os.fspath(self.state), "other", False)
+        self.assertEqual(len(result["recovered"]), 2, result["recovered"])
+        self.assertEqual((self.project / "src/main.py").read_text(encoding="utf-8"), "agent edit\n")
+        self.assertEqual((self.project / "README.md").read_text(encoding="utf-8"), "agent readme\n")
+        self.assertFalse([p for p in self.project.rglob(".orgbot-*")], "staged copies are cleaned up")
+        journal = json.loads((work.parent / "apply-journal.json").read_text(encoding="utf-8"))
+        self.assertEqual(journal["phase"], "recovered")
 
     def test_a_long_review_is_preserved_in_batches_and_reports_progress(self):
         # From the live room: 1,549 approved removals took thirteen minutes,
@@ -1056,6 +1258,78 @@ Path('/tmp/private.txt').write_text('temporary')
 
     @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
                          "requires Linux bubblewrap user namespaces")
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
+                         "requires Linux bubblewrap user namespaces")
+    def test_other_bots_copies_the_trash_and_every_sign_in_name_are_hidden(self):
+        # From the 13 November audit: other bots' copies and private homes in
+        # the state folder, the trash, three sign-in names, the 2.2.2 backups
+        # and a lent sign-in linked out of the home were readable.
+        self.prepare("dev")
+        other = self.prepare("other")
+        (other / "src/secret-work.py").write_text("other bot's work", encoding="utf-8")
+        home = self._owner_home_with_secrets()
+        outside = self.root / "outside-tool"
+        outside.mkdir()
+        (outside / "token").write_text("linked token", encoding="utf-8")
+        (home / ".config").mkdir(exist_ok=True)
+        (home / ".config/linked-tool").symlink_to(outside)
+        names = [".claude/credentials.json", ".grok/.credentials.json", ".grok/credentials.json",
+                 ".codex/auth.json.orgbot-previous", ".claude/.credentials.json.orgbot-previous",
+                 ".local/share/orgbots/trash/project/old.txt"]
+        for relative in names:
+            (home / relative).parent.mkdir(parents=True, exist_ok=True)
+            (home / relative).write_text("secret", encoding="utf-8")
+        code = (
+            "import os, sys; from pathlib import Path; owner = Path(sys.argv[1]); state = Path(sys.argv[2]); outside = Path(sys.argv[3])\n"
+            "def unreadable(path):\n"
+            "    try:\n"
+            "        return path.read_text() == ''\n"
+            "    except OSError:\n"
+            "        return True\n"
+            "names = sys.argv[4:]\n"
+            "checks = [os.listdir(state) == [], os.listdir(outside) == [], os.path.exists('/tmp/orgbot-workspace/src/main.py')]\n"
+            "checks += [unreadable(owner / name) for name in names]\n"
+            "raise SystemExit(0 if all(checks) else 10 + checks.index(False))"
+        )
+        owner = SimpleNamespace(pw_dir=os.fspath(home))
+        with patch.object(workspace.pwd, "getpwuid", return_value=owner):
+            code = workspace._run(os.fspath(self.state), "dev", [sys.executable, "-c", code, os.fspath(home), os.fspath(self.state), os.fspath(outside), *names],
+                                  read_only=False, profiles=[], private_home_arg=None, mcp_socket=None, hide=[".config/linked-tool"], lend=None)
+        self.assertEqual(code, 0)
+        self.assertIn(".local/share/orgbots", workspace._NEVER_LENT)
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and workspace.shutil.which("bwrap"),
+                         "requires Linux bubblewrap user namespaces")
+    def test_a_sandbox_cannot_reach_abstract_sockets_outside_it(self):
+        # From the 13 November audit: the owner's X11 display was reachable
+        # through its abstract socket.
+        import ctypes as ctypeslib
+        import socket as socketlib
+        libc = ctypeslib.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypeslib.c_long
+        if libc.syscall(444, None, ctypeslib.c_size_t(0), ctypeslib.c_uint32(1)) < 6:
+            self.skipTest("Landlock scoping needs Linux 6.12")
+        name = f"orgbot-test-{os.getpid()}"
+        server = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
+        server.bind("\0" + name)
+        server.listen(1)
+        try:
+            self.prepare("dev")
+            code = (
+                "import socket, sys\n"
+                "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+                "try:\n"
+                f"    s.connect('\\0{name}')\n"
+                "except OSError:\n"
+                "    sys.exit(0)\n"
+                "sys.exit(3)\n"
+            )
+            result = workspace._run(os.fspath(self.state), "dev", [sys.executable, "-c", code], read_only=False,
+                                    profiles=[], private_home_arg=None, mcp_socket=None, hide=[], lend=None)
+            self.assertEqual(result, 0, "the connection is refused")
+        finally:
+            server.close()
+
     def test_lent_sign_ins_are_hidden_unless_lent_and_then_in_the_bots_home(self):
         # From the live room: the owner's Cloudflare sign-in was readable by
         # every bot, while the bot that needed it for a release had none.
@@ -1126,7 +1400,7 @@ Path('/tmp/private.txt').write_text('temporary')
         launched = []
         real_run = workspace.subprocess.run
         def spy(args, *rest, **kwargs):
-            if args and args[0] == "bwrap":
+            if args and os.path.basename(args[0]) == "bwrap":
                 launched.append(list(args))
             return real_run(args, *rest, **kwargs)
         def run(expected, read_only=False, lend=(".config/gh",)):
@@ -1225,6 +1499,15 @@ Path('/tmp/private.txt').write_text('temporary')
         self.assertFalse(integrated.exists())
         self.assertGreater(result["freed_bytes"], 0)
         self.assertEqual((self.project / "README.md").read_text(encoding="utf-8"), "applied\n", "the project is never touched")
+
+    def test_a_copy_used_in_the_last_hour_is_not_pruned(self):
+        # From the 13 November audit: a bot that joined after the keep list
+        # was taken could have its copy removed mid-turn.
+        self.prepare()
+        with patch.object(workspace, "PRUNE_RECENT_SECONDS", 3600):
+            result = workspace._prune(os.fspath(self.state), keep=[])
+        self.assertEqual(result["removed"], [])
+        self.assertTrue(any(item["reason"] == "used in the last hour" for item in result["kept"]), result)
 
     def test_a_leftover_copy_reports_the_name_its_bot_last_had(self):
         # From the live room: kept copies were listed by bot id, and nobody

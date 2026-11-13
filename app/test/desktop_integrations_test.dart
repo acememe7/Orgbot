@@ -141,6 +141,32 @@ mcp_servers = { tools = [] }
     },
   );
 
+  // From the 13 November audit: an array written over several lines was
+  // read as the text "[", so the imported server ran with the wrong argv.
+  test('an argument list written over several lines is read whole', () async {
+    final home = await Directory.systemTemp.createTemp('orgbot-integrations-');
+    addTearDown(() => home.delete(recursive: true));
+    await Directory('${home.path}/.codex').create(recursive: true);
+    await File('${home.path}/.codex/config.toml').writeAsString(r'''
+[mcp_servers.files]
+command = "npx"
+args = [
+  "-y", # the package runner's yes flag
+  "@modelcontextprotocol/server-filesystem",
+  'C:\work # literal',
+]
+''');
+    final snapshot = await _discover(home);
+    final environment = <String, String>{};
+    final output = StringBuffer();
+    snapshot.appendRoomConfig(output, environment: environment);
+    final values = [output.toString(), ...environment.values].join('\n');
+    expect(values, contains('-y'));
+    expect(values, contains('@modelcontextprotocol/server-filesystem'));
+    expect(values, contains(r'C:\work # literal'));
+    expect(values, isNot(contains('yes flag')));
+  });
+
   test(
     'native discovery remains available without platform path provider',
     () async {

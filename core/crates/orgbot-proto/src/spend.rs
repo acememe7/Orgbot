@@ -162,6 +162,14 @@ pub struct Spend {
     /// Number of turns with a known API-equivalent estimate.
     #[serde(default)]
     pub equivalent_cost_turns: u32,
+    /// Tokens of the turns with no recorded actual cost, so only they are
+    /// estimated. From the 13 November audit: one unpriced turn made the
+    /// whole bot's cost an estimate, priced at the time of day it was read.
+    #[serde(default)]
+    pub unpriced_actual: TokenUsage,
+    /// Tokens of the turns with no recorded API-equivalent cost.
+    #[serde(default)]
+    pub unpriced_equivalent: TokenUsage,
 }
 
 impl Spend {
@@ -174,16 +182,14 @@ impl Spend {
             if !usage.complete {
                 self.unreported_turns = self.unreported_turns.saturating_add(1);
             }
-            if usage.complete {
-                if usage.actual_api_cost_microusd.is_some() {
+            if usage.complete
+                && usage.actual_api_cost_microusd.is_some() {
                     self.actual_cost_turns = self.actual_cost_turns.saturating_add(1);
                 }
-            }
-            if usage.complete {
-                if usage.api_equivalent_cost_microusd.is_some() {
+            if usage.complete
+                && usage.api_equivalent_cost_microusd.is_some() {
                     self.equivalent_cost_turns = self.equivalent_cost_turns.saturating_add(1);
                 }
-            }
         } else {
             self.unreported_turns = self.unreported_turns.saturating_add(1);
         }
@@ -191,6 +197,17 @@ impl Spend {
         if !usage.complete {
             contribution.actual_api_cost_microusd = None;
             contribution.api_equivalent_cost_microusd = None;
+        }
+        let tokens_only = TokenUsage {
+            actual_api_cost_microusd: None,
+            api_equivalent_cost_microusd: None,
+            ..usage
+        };
+        if contribution.actual_api_cost_microusd.is_none() {
+            self.unpriced_actual.add(tokens_only);
+        }
+        if contribution.api_equivalent_cost_microusd.is_none() {
+            self.unpriced_equivalent.add(tokens_only);
         }
         self.usage.add(contribution);
         self.usage.complete = if was_empty {
@@ -212,6 +229,8 @@ impl Spend {
         self.equivalent_cost_turns = self
             .equivalent_cost_turns
             .saturating_add(other.equivalent_cost_turns);
+        self.unpriced_actual.add(other.unpriced_actual);
+        self.unpriced_equivalent.add(other.unpriced_equivalent);
         self.usage.input_tokens = self
             .usage
             .input_tokens

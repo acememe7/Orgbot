@@ -70,6 +70,9 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
   final ScrollController _scroll = ScrollController();
   late final TextEditingController _memory;
   bool _savingMemory = false;
+
+  /// Messages being sent again, so a second tap waits for the first.
+  final Set<String> _retrying = {};
   bool _sending = false;
   bool _preparingAttachments = false;
   late final RoomAttachments _attachments;
@@ -685,7 +688,14 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
             if (value == 'reconnect') await _controller.reconnectWorkspace();
             if (value == 'stop-now') _controller.stopTurnsNow();
             if (value == 'stop') {
-              await _controller.stop();
+              try {
+                await _controller.stop();
+              } catch (error) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+                }
+                return;
+              }
               if (mounted && !widget.embedded) Navigator.pop(context);
             }
           },
@@ -836,20 +846,29 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
               _composeFocus.requestFocus();
             },
             onRetry: (message) async {
-              // Kept on screen until the room takes the new copy, so a
-              // failed retry loses nothing.
-              final sent = await _controller.say(
-                message.author.name ?? widget.library.userName,
-                message.body,
-                files: message.files,
-                replyTo: message.replyTo,
-              );
-              if (sent) {
-                store.removePending(message);
-              } else {
-                _attachmentError(
-                  _controller.error ?? 'The room is not taking messages yet.',
+              // One send at a time per message. From the 13 November audit:
+              // a second tap while the first was sending posted it twice.
+              if (!_retrying.add(message.id)) return;
+              try {
+                // Kept on screen until the room takes the new copy, so a
+                // failed retry loses nothing.
+                final sent = await _controller.say(
+                  message.author.name ?? widget.library.userName,
+                  message.body,
+                  files: message.files,
+                  replyTo: message.replyTo,
                 );
+                if (!mounted) return;
+                if (sent) {
+                  store.removePending(message);
+                } else {
+                  _attachmentError(
+                    _controller.error ??
+                        'The room is not taking messages yet.',
+                  );
+                }
+              } finally {
+                _retrying.remove(message.id);
               }
             },
           ),
@@ -1310,9 +1329,13 @@ class _EngineRoomScreenState extends State<EngineRoomScreen> {
               : () async {
                   setState(() => _savingMemory = true);
                   widget.room.memory = _memory.text.trim();
-                  await widget.library.save();
+                  try {
+                    await widget.library.save();
+                  } finally {
+                    // A save that throws must not leave the button stuck.
+                    if (mounted) setState(() => _savingMemory = false);
+                  }
                   if (mounted) {
-                    setState(() => _savingMemory = false);
                     if (widget.library.error == null) {
                       if (_controller.isRunning) {
                         _controller.say(

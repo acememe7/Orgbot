@@ -128,8 +128,8 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
         tool(
             "claim_task",
             "Take an open task. You must hold the task's required role, and every task \
-             it depends on must already be submitted. Claiming does not start the \
-             clock — call start_task when you actually begin.",
+             it depends on must already be submitted. Your claim lasts while you work \
+             on the task; call start_task when you actually begin.",
             schema::object(vec![("task", schema::string("The task id."))], &["task"]),
         ),
         tool(
@@ -271,7 +271,7 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             "offer_handoff",
             "Ask another bot to take on work. Choose the kind carefully:\n\
              - \"assist\": you need something back and will wait for it. Your task is \
-             blocked automatically until they answer, so do not also call wait_for.\n\
+             blocked automatically until they answer, so do not also call block_on.\n\
              - \"delegate\": they take ownership of the task outright when they accept. \
              You are not blocked, but keep holding the task until then: releasing it \
              withdraws the offer.\n\
@@ -382,12 +382,19 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
             schema::object(
                 vec![
                     ("task", schema::string("Your task that needs a server.")),
+                    (
+                        "action",
+                        schema::enumerated(
+                            "What you will do: inspect (read or check), change (build, test or easily undone changes), release (production or a live service), destroy (delete data or change credentials), spend (money). Say it honestly; it decides who approves.",
+                            &["inspect", "change", "release", "destroy", "spend"],
+                        ),
+                    ),
                     ("reason", schema::string("What you will do on which server, in one or two sentences.")),
                     ("why", schema::string("Why the work needs it, in one or two sentences.")),
                     ("commands", schema::string_array("The commands you plan to run with it, if you know them (at most 10).")),
                     ("if_denied", schema::string("What happens to the work if the owner says no.")),
                 ],
-                &["task", "reason", "why", "if_denied"],
+                &["task", "action", "reason", "why", "if_denied"],
             ),
         ),
         tool(
@@ -482,6 +489,19 @@ pub fn definitions_for(spec: &AgentSpec) -> Vec<ToolDef> {
                 vec![
                     ("task", schema::string("The task to park.")),
                     ("reason", schema::string("What the owner said, quoted or in one sentence.")),
+                ],
+                &["task", "reason"],
+            ),
+        ),
+        tool(
+            "reopen_task",
+            "Coordinators: put a task that failed or was cancelled back on the board, \
+             for example one failed on a single reviewer's critical finding that has \
+             since been addressed. Work that depends on it waits for it again.",
+            schema::object(
+                vec![
+                    ("task", schema::string("The failed or cancelled task.")),
+                    ("reason", schema::string("Why it should be worked again, in one sentence.")),
                 ],
                 &["task", "reason"],
             ),
@@ -737,7 +757,7 @@ fn review_only_tool_allowed(spec: &AgentSpec, name: &str) -> bool {
         && match name {
             "create_task" => spec.autonomy.may_create_tasks,
             "submit_task" => spec.autonomy.may_submit,
-            "propose_retire_task" | "amend_task" | "park_task" => true,
+            "propose_retire_task" | "amend_task" | "park_task" | "reopen_task" => true,
             _ => false,
         })
         || matches!(
@@ -789,6 +809,18 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
             "Review-only bots cannot use `{name}`. Use the tools allowed by your review and coordination permissions."
         ));
     }
+    // Every argument given must have the type and value its schema says.
+    // From the 13 November audit: a reviewer's findings sent as a string were
+    // read as none and the work was approved; `kind: "handover"` made an
+    // assist.
+    if let Some(definition) = engine
+        .agent(actor)
+        .and_then(|spec| definitions_for(spec).into_iter().find(|definition| definition.name == name))
+    {
+        if let Err(message) = check_arguments(&definition.input_schema, input) {
+            return ToolOutcome::error(message);
+        }
+    }
     match name {
         "post_message" => post_message(engine, actor, input),
         "room_status" => room_status(engine, actor),
@@ -827,6 +859,7 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
         "propose_retire_task" => propose_retire_task(engine, actor, input),
         "amend_task" => amend_task(engine, actor, input),
         "park_task" => park_task(engine, actor, input),
+        "reopen_task" => reopen_task(engine, actor, input),
         "block_on" => block_on(engine, actor, input),
         "release_task" => release_task(engine, actor, input),
         "create_task" => create_task(engine, actor, input),
@@ -842,6 +875,74 @@ pub fn dispatch(engine: &mut Engine, actor: AgentId, name: &str, input: &Value) 
 }
 
 // ------------------------------------------------------------ argument access
+
+/// Whether `input` gives each field it has the type, and for a choice one of
+/// the values, that `schema` declares. Fields the schema does not name are
+/// left to the handler.
+pub fn check_arguments(schema: &Value, input: &Value) -> Result<(), String> {
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let Some(given) = input.as_object() else {
+        return Err("Arguments must be a JSON object.".into());
+    };
+    for (field, value) in given {
+        let Some(declared) = properties.get(field) else {
+            continue;
+        };
+        check_value(field, declared, value)?;
+        if let (Some(items), Some(values)) = (declared.get("items"), value.as_array()) {
+            for item in values {
+                check_value(&format!("every `{field}` item"), items, item).map_err(|error| error.replace("``", "`"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_value(field: &str, declared: &Value, value: &Value) -> Result<(), String> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let kinds: Vec<&str> = match declared.get("type") {
+        Some(Value::String(kind)) => vec![kind.as_str()],
+        Some(Value::Array(kinds)) => kinds.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    let fits = |kind: &str| match kind {
+        "string" => value.is_string(),
+        // Whole numbers are the handlers' to read: they take one sent as text
+        // and refuse the rest with their own reason codes.
+        "integer" => true,
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        _ => true,
+    };
+    let name = if field.starts_with("every ") { field.to_string() } else { format!("`{field}`") };
+    if !kinds.is_empty() && !kinds.iter().any(|kind| fits(kind)) {
+        return Err(format!("{name} must be {} (it was {}).", kinds.join(" or "), json_kind(value)));
+    }
+    if let Some(options) = declared.get("enum").and_then(Value::as_array) {
+        if !options.contains(value) {
+            let listed: Vec<String> = options.iter().map(Value::to_string).collect();
+            return Err(format!("{name} must be one of {}.", listed.join(", ")));
+        }
+    }
+    Ok(())
+}
+
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
 
 fn required_str<'a>(input: &'a Value, field: &str) -> Result<&'a str, String> {
     input
@@ -1051,7 +1152,10 @@ fn post_message(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
     if !handles.is_empty() {
         let mut targets = Vec::new();
         for handle in &handles {
-            // Accept a handle or a raw id, since a model will produce either.
+            // Accept a handle (with or without @) or a raw id, since a model
+            // will produce any of them. From the 13 November audit: "@qa"
+            // worked in one tool and not in another.
+            let handle = handle.trim().trim_start_matches('@');
             match engine
                 .agent_by_handle(handle)
                 .map(|spec| spec.id)
@@ -1069,33 +1173,35 @@ fn post_message(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutco
     } else if !roles.is_empty() {
         message.audience = Audience::Roles { roles };
     } else {
-        let mentions = message_handles(&message.body);
-        if let Some(mentions) = mentions {
-            if mentions.is_empty() {
-                message.audience = Audience::Everyone;
-            } else {
-                let mut targets = Vec::new();
-                for handle in mentions {
-                    let agent = match engine.agent_by_handle(&handle) {
-                        Some(agent) => agent,
-                        None => match resolve_display_name(engine, &handle) {
-                            Ok(Some(agent)) => agent,
-                            Ok(None) => {
-                                return ToolOutcome::error(format!(
-                                    "There is no bot named `{handle}`. Call room_status to see who is here."
-                                ));
-                            }
-                            Err(()) => {
-                                return ToolOutcome::error(format!(
-                                    "The display name `{handle}` is ambiguous. Use the bot's @handle from room_status."
-                                ));
-                            }
-                        },
-                    };
+        // Mentions that name a bot address it; any other `@word` (a package
+        // such as @types/node, a CSS rule such as @media) is just text. From
+        // the 13 November audit: one such word refused the whole message.
+        let mut targets = Vec::new();
+        let mut broadcast = false;
+        if let Some(mentions) = message_handles(&message.body) {
+            broadcast = mentions.is_empty();
+            for handle in mentions {
+                let agent = match engine.agent_by_handle(&handle) {
+                    Some(agent) => agent,
+                    None => match resolve_display_name(engine, &handle) {
+                        Ok(Some(agent)) => agent,
+                        Ok(None) => continue,
+                        Err(()) => {
+                            return ToolOutcome::error(format!(
+                                "The display name `{handle}` is ambiguous. Use the bot's @handle from room_status."
+                            ));
+                        }
+                    },
+                };
+                if !targets.contains(&agent.id) {
                     targets.push(agent.id);
                 }
-                message.audience = Audience::Agents { agents: targets };
             }
+        }
+        if broadcast {
+            message.audience = Audience::Everyone;
+        } else if !targets.is_empty() {
+            message.audience = Audience::Agents { agents: targets };
         } else if let Some(author) = parent_author {
             message.audience = match author {
                 orgbot_proto::Author::Agent { agent } => Audience::Agents {
@@ -1385,8 +1491,8 @@ fn create_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcom
             .collect();
         return ToolOutcome::error(format!(
             "This looks like work that already exists:\n{}\n\nUse the existing \
-             task — claim it, add a subtask under it, or supersede it if yours \
-             replaces it. If it really is separate work, call this again with \
+             task — claim it, or add a subtask under it; if yours replaces it, ask a \
+             coordinator to retire the old one. If it really is separate work, call this again with \
              `anyway: \"true\"` and say in the brief how it differs.",
             named.join("\n")
         ));
@@ -1773,6 +1879,7 @@ fn offer_handoff(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutc
     };
 
     let to = if let Some(handle) = optional_str(input, "to_agent") {
+        let handle = handle.trim().trim_start_matches('@');
         match engine
             .agent_by_handle(handle)
             .map(|spec| spec.id)
@@ -2046,10 +2153,8 @@ fn amend_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome
         .get("acceptance_criteria")
         .filter(|value| value.is_array())
         .map(|_| string_list(input, "acceptance_criteria"));
-    let brief = input
-        .get("brief")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    // An empty brief leaves the brief alone rather than wiping it.
+    let brief = optional_str(input, "brief").map(str::to_string);
     let depends_on = match input.get("depends_on").filter(|value| value.is_array()) {
         Some(_) => {
             let mut ids = Vec::new();
@@ -2125,6 +2230,21 @@ fn park_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome 
     }
 }
 
+fn reopen_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
+    let task = match task_arg(input, "task") {
+        Ok(task) => task,
+        Err(message) => return ToolOutcome::error(message),
+    };
+    let reason = match required_str(input, "reason") {
+        Ok(reason) => reason.to_string(),
+        Err(message) => return ToolOutcome::error(message),
+    };
+    match engine.apply(Command::ReopenTask { by: Some(actor), task, reason }) {
+        Ok(_) => ToolOutcome::ok("Reopened. It is on the board again for anyone who can take it."),
+        Err(error) => explain(error),
+    }
+}
+
 fn propose_retire_task(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
     let task = match task_arg(input, "task") {
         Ok(task) => task,
@@ -2169,26 +2289,16 @@ fn propose_retire_task(engine: &mut Engine, actor: AgentId, input: &Value) -> To
     }
 }
 
+/// The server key, asked for as `request_access` asks: with what will be done
+/// with it, which decides who approves. From the 13 November audit: this tool
+/// always rated the request "change", so deleting a production database over
+/// SSH was approved at once in Auto mode.
 fn request_server_access(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {
-    let task = match task_arg(input, "task") {
-        Ok(task) => task,
-        Err(message) => return ToolOutcome::error(message),
-    };
-    let reason = match required_str(input, "reason") {
-        Ok(reason) => reason.to_string(),
-        Err(message) => return ToolOutcome::error(message),
-    };
-    let plan = match access_plan(input) {
-        Ok(plan) => plan,
-        Err(message) => return ToolOutcome::error(message),
-    };
-    let outcome = engine.apply(Command::RequestServerAccess {
-        by: actor,
-        task,
-        reason,
-        plan,
-    });
-    access_outcome(engine, actor, outcome)
+    let mut input = input.clone();
+    if let Some(fields) = input.as_object_mut() {
+        fields.insert("items".into(), serde_json::json!(["server"]));
+    }
+    request_access(engine, actor, &input)
 }
 
 fn request_access(engine: &mut Engine, actor: AgentId, input: &Value) -> ToolOutcome {

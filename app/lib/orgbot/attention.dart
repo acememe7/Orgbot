@@ -40,7 +40,7 @@ enum Attention {
   needsAttention('Some work has nowhere to go'),
 
   /// The room used the turns it was given and stopped.
-  budget('The room is out of turns'),
+  budget('The room paused at its limit'),
 
   /// The room stopped and cannot continue on its own.
   stuck('The room cannot continue'),

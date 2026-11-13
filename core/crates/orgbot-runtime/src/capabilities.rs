@@ -269,13 +269,12 @@ impl Capabilities {
                     })
                     .map(|t| json!({"name":t.name,"description":short(&t.description)}))
                     .collect::<Vec<_>>();
-                if !self.has_server(server) {
-                    if self.release(actor, servers, server).await.is_err() {
+                if !self.has_server(server)
+                    && self.release(actor, servers, server).await.is_err() {
                         return ToolOutcome::error(
                             "Could not release the temporary MCP connection.",
                         );
                     }
-                }
                 ToolOutcome::ok(page(entries, offset))
             }
             _ => ToolOutcome::error("`kind` must be `skill` or `mcp`."),
@@ -360,11 +359,10 @@ impl Capabilities {
             Err(_) => return ToolOutcome::error("Could not load that MCP server."),
         };
         let Some(definition) = tools.into_iter().find(|tool| tool.name == name) else {
-            if !self.has_server(server) {
-                if self.release(actor, client, server).await.is_err() {
+            if !self.has_server(server)
+                && self.release(actor, client, server).await.is_err() {
                     return ToolOutcome::error("Could not release the temporary MCP connection.");
                 }
-            }
             return ToolOutcome::error(
                 "That exact tool is not offered by the selected server. Search it first.",
             );
@@ -431,7 +429,7 @@ impl Capabilities {
         let mut outcome = if client.load_for(actor, &server).await.is_err() {
             ToolOutcome::error("Could not reconnect the loaded MCP tool.")
         } else {
-            client.call_loaded_for(engine, actor, name, arguments).await
+            client.call_loaded_for(engine, actor, &server, name, arguments).await
         };
         if once {
             self.leases[index].expired = true;
@@ -475,6 +473,13 @@ impl Capabilities {
             return ToolOutcome::error("That capability is not loaded.");
         };
         let server = self.leases[index].server.clone();
+        // Named by its server, every tool loaded from it goes (13 November
+        // audit: only the first did).
+        if kind == Kind::Mcp && server.as_deref() == Some(name) {
+            for lease in self.leases.iter_mut().filter(|l| l.kind == Kind::Mcp && l.server.as_deref() == Some(name)) {
+                lease.expired = true;
+            }
+        }
         self.leases[index].expired = true;
         self.prune_expired();
         if let (Some(client), Some(server)) = (servers, server) {
@@ -696,7 +701,10 @@ impl Capabilities {
                         Some("find_capabilities") => {
                             *content = "[capability search result consumed]".into()
                         }
-                        _ if content.starts_with("SKILL ") => {
+                        // Only a result whose call is no longer known: another
+                        // tool's output that happens to start with "SKILL " is
+                        // left alone (13 November audit).
+                        None if content.starts_with("SKILL ") => {
                             *content = "[untracked skill instructions released]".into()
                         }
                         _ => {}

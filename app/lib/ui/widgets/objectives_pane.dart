@@ -17,6 +17,7 @@
 // ignore_for_file: prefer_interpolation_to_compose_strings
 library;
 
+import '../bot_status.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -1812,15 +1813,9 @@ class _UtilizationStrip extends StatelessWidget {
 
   final Utilization utilization;
 
-  Color _tone(ColorScheme scheme, String doing) => switch (doing) {
-    'working' => scheme.primary,
-    'reviewing' => Colors.purple,
-    'waiting' => Colors.amber,
-    'between turns' => Colors.blueGrey,
-    'faulted' => scheme.error,
-    'offline' => scheme.outline,
-    _ => scheme.onSurfaceVariant,
-  };
+  // The same colours as every other panel, paused and benched included.
+  // From the 13 November audit: this copy had no case for either.
+  Color _tone(ColorScheme scheme, String doing) => botStatus(doing).$1;
 
   @override
   Widget build(BuildContext context) {

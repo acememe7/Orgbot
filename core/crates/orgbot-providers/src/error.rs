@@ -22,12 +22,17 @@ pub enum ProviderError {
     },
 
     /// The credential was rejected.
-    #[error("{provider} rejected the credential (HTTP {status})")]
+    #[error("{provider} rejected the credential (HTTP {status}){detail}", detail = if message.is_empty() { String::new() } else { format!(": {message}") })]
     Unauthorized {
         /// Which backend.
         provider: String,
         /// The status returned.
         status: u16,
+        /// What the service said, which often names the actual problem (a
+        /// missing scope, a disabled organisation). From the 13 November
+        /// audit: all three adapters dropped it.
+        #[doc(hidden)]
+        message: String,
     },
 
     /// Rate limited. Retry after the given delay if one was supplied.
@@ -228,7 +233,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0; 1024];
-            stream.read(&mut request).await.unwrap();
+            let _ = stream.read(&mut request).await.unwrap();
             stream
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\npartial",
@@ -285,6 +290,7 @@ mod tests {
             ProviderError::Unauthorized {
                 provider: "deepseek".into(),
                 status: 401,
+                message: String::new(),
             },
             ProviderError::Upstream {
                 provider: "deepseek".into(),

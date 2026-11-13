@@ -196,7 +196,7 @@ impl MemoryRepository {
         let id = existing.map(|entry| entry.id.clone()).unwrap_or_else(|| {
             entry_id(&self.scope_hash, source_room, source_task, title, now_ms())
         });
-        let shared = existing.map_or(true, |entry| entry.shared);
+        let shared = existing.is_none_or(|entry| entry.shared);
         let entry = MemoryEntry {
             id: id.clone(),
             title: title.to_string(),
@@ -435,7 +435,24 @@ fn source_key(room: Option<&str>, task: Option<&str>) -> Option<String> {
 
 fn contains_credential_value(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    if lower.contains("-----begin private key-----") || lower.contains("bearer ") {
+    // Any PEM private key (RSA, EC, OPENSSH, ENCRYPTED), and well-known token
+    // shapes on their own. From the 13 November audit: only the bare
+    // "PRIVATE KEY" header was caught, and `sk-`, `ghp_` and `AKIA` tokens
+    // with no "key =" before them went into memory.
+    if (lower.contains("-----begin ") && lower.contains("private key-----")) || lower.contains("bearer ") {
+        return true;
+    }
+    let shaped = text
+        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | '(' | ')' | '<' | '>' | '`'))
+        .any(|word| {
+            let tail = |prefix: &str| word.strip_prefix(prefix).filter(|rest| rest.len() >= 16);
+            tail("sk-").is_some()
+                || ["ghp_", "gho_", "ghs_", "ghu_", "github_pat_", "glpat-", "xoxb-", "xoxp-"].iter().any(|prefix| tail(prefix).is_some())
+                || (word.len() == 20
+                    && word.starts_with("AKIA")
+                    && word.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()))
+        });
+    if shaped {
         return true;
     }
     for marker in ["api_key", "api key", "password", "secret", "token"] {
@@ -452,7 +469,14 @@ fn contains_credential_value(text: &str) -> bool {
                 .next()
                 .unwrap_or_default()
                 .trim_matches(|c| c == ',' || c == ';' || c == '"' || c == '\'');
+            // A value that reads like a secret, not a word: "token: rotates
+            // hourly" is prose. From the 13 November audit: ordinary prose
+            // after "token:" was refused.
+            let secret_like = value.chars().all(|c| c.is_ascii_alphanumeric() || "-_./+=~".contains(c))
+                && ((value.chars().any(|c| c.is_ascii_digit()) && value.chars().any(|c| c.is_ascii_alphabetic()))
+                    || value.chars().count() >= 24);
             if value.chars().count() >= 8
+                && secret_like
                 && !["<redacted>", "placeholder", "your_key_here"].contains(&value)
             {
                 return true;
@@ -847,6 +871,18 @@ mod tests {
             repo.add("Config", "Bearer abcdefghijklmnop", None, None),
             Err(MemoryError::SensitiveMaterial)
         ));
+        for secret in [
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk=",
+            "use sk-proj-abcdefghijklmnop1234 for it",
+            "the token ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "AKIAIOSFODNN7EXAMPLE is the key id",
+        ] {
+            assert!(matches!(repo.add("Config", secret, None, None), Err(MemoryError::SensitiveMaterial)), "{secret}");
+        }
+        assert!(
+            repo.add("Auth", "Token: authentication tokens rotate hourly.", None, None).is_ok(),
+            "prose after the word is not a secret"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

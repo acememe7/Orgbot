@@ -1382,7 +1382,7 @@ fn the_claimable_list_is_ordered_by_priority_then_age() {
     let mut f = fixture();
     let (worker, lead) = (f.worker, f.coordinator);
 
-    let mut make = |title: &str, priority: Priority, f: &mut Fixture| {
+    let make = |title: &str, priority: Priority, f: &mut Fixture| {
         let events = f.apply(Command::CreateTask {
             title: title.into(),
             brief: String::new(),
@@ -4327,8 +4327,7 @@ mod second_opinions {
         f.engine
             .reviews()
             .iter()
-            .filter(|r| r.task == task && r.decides())
-            .last()
+            .rfind(|r| r.task == task && r.decides())
             .cloned()
             .expect("a deciding review")
     }
@@ -4393,6 +4392,51 @@ mod second_opinions {
         assert!(settled.with.is_empty(), "nobody else stands behind them");
         assert!(settled.summary.contains("gave no second opinion within 10 minutes"), "{}", settled.summary);
         assert!(f.engine.transcript().iter().any(|m| m.body.contains("gave no second opinion within 10 minutes")));
+    }
+
+    /// From the 13 November audit: one reviewer's critical finding failed the
+    /// task for good when nobody else weighed in, and a panel whose reviewer
+    /// was benched never settled.
+    #[test]
+    fn a_lone_rejection_sends_work_back_and_a_benched_reviewer_settles_its_panel() {
+        let (mut f, strict, easy) = two_reviewers();
+        let critical = || Finding {
+            severity: Severity::Critical,
+            summary: "it deletes the owner's saves".into(),
+            locus: None,
+            suggestion: None,
+        };
+        let task = submitted(&mut f, "unsafe change", strict);
+        f.apply(review(task, strict, vec![critical()], vec![]));
+        f.apply(Command::Tick { now: Timestamp::now().plus_millis(11 * 60 * 1000) });
+        assert_eq!(f.state(task), TaskState::InProgress, "sent back, not failed");
+        assert_eq!(outcome(&f, task).verdict, Verdict::RequestChanges);
+
+        let task = submitted(&mut f, "another change", strict);
+        f.apply(review(task, strict, vec![critical()], vec![]));
+        assert!(f.engine.review_panel(task).is_some());
+        f.apply(Command::PauseAgent { agent: easy });
+        assert!(f.engine.review_panel(task).is_none(), "the panel settles when its reviewer is benched");
+        assert_eq!(f.state(task), TaskState::InProgress);
+    }
+
+    #[test]
+    fn a_coordinator_can_reopen_failed_work() {
+        let (mut f, strict, easy) = two_reviewers();
+        let task = submitted(&mut f, "unsafe change", strict);
+        let critical = Finding {
+            severity: Severity::Critical,
+            summary: "it deletes the owner's saves".into(),
+            locus: None,
+            suggestion: None,
+        };
+        f.apply(review(task, strict, vec![critical], vec![]));
+        f.apply(review(task, easy, vec![], vec![respond(1, true, "it does delete them")]));
+        assert_eq!(f.state(task), TaskState::Failed, "both reviewers found it critical");
+        let lead = f.coordinator;
+        f.reject(Command::ReopenTask { by: Some(f.worker), task, reason: "fixed".into() });
+        f.apply(Command::ReopenTask { by: Some(lead), task, reason: "the save path is guarded now".into() });
+        assert_eq!(f.state(task), TaskState::Ready);
     }
 
     #[test]
@@ -4858,6 +4902,214 @@ fn a_wait_that_would_close_a_circle_is_never_made() {
     assert_eq!(f.state(gas), TaskState::InProgress);
 }
 
+/// From the 13 November audit: turns that ended after a budget pause had
+/// their usage refused, and stayed open.
+#[test]
+fn a_turn_that_ends_after_the_room_paused_still_closes_with_its_usage() {
+    let mut f = fixture();
+    let worker = f.worker;
+    f.apply(Command::BeginTurn { agent: worker });
+    f.apply(Command::PauseRoom { reason: "budget".into() });
+    let events = f.apply(Command::RecordTurn { agent: worker, usage: orgbot_proto::spend::TokenUsage::default() });
+    assert!(events.iter().any(|e| matches!(e.event, Event::UsageRecorded { .. })));
+    assert!(!f.engine.in_turn(worker));
+    assert_eq!(f.engine.room().phase, orgbot_proto::room::RoomPhase::Paused);
+}
+
+/// From the 13 November audit: work depending on a retired task waited for
+/// good with nothing said, and a held task blocked on other work read as "in
+/// progress".
+#[test]
+fn health_names_a_dead_dependency_and_a_blocked_task_reads_as_blocked() {
+    use orgbot_proto::decision::RETIRE_TASK_ALLOW;
+    let mut f = fixture();
+    let (lead, worker) = (f.coordinator, f.worker);
+    let old = f.open_task("old research", None);
+    let after = f.open_task_after("write up", vec![old]);
+    let events = f.apply(Command::ProposeRetire { by: lead, task: old, reason: "not needed".into(), replaced_by: None });
+    answer(&mut f, asked_decision(&events), RETIRE_TASK_ALLOW);
+    let health = f.engine.health();
+    assert!(health.dead_waits.iter().any(|wait| wait.task == after && wait.blocker == old), "{:?}", health.dead_waits);
+
+    let held = f.start_task("integration", worker);
+    let part = f.open_task("part", None);
+    f.apply(Command::BlockTask { task: held, by: worker, reason: BlockReason::AwaitingTask { task: part } });
+    assert!(matches!(
+        f.engine.task(held).unwrap().readiness(),
+        Readiness::BlockedInternal { .. }
+    ));
+}
+
+/// From the 13 November audit: "Publish now?" answered for one release was
+/// answered from the record for the next.
+#[test]
+fn an_answered_question_is_not_reused_for_other_work() {
+    let mut f = fixture();
+    let (worker, worker2) = (f.worker, f.worker2);
+    let first = f.start_task("release 1", worker);
+    let events = f.apply(Command::AskOwner {
+        by: worker,
+        task: Some(first),
+        question: "Ready to publish. Publish now?".into(),
+        options: vec!["Publish".into(), "Wait".into()],
+    });
+    answer(&mut f, asked_decision(&events), "Publish");
+    let second = f.start_task("release 2", worker2);
+    f.apply(Command::AskOwner {
+        by: worker2,
+        task: Some(second),
+        question: "Ready to publish. Publish now?".into(),
+        options: vec!["Publish".into(), "Wait".into()],
+    });
+    assert_eq!(f.engine.decisions().pending().count(), 1, "the owner is asked again for release 2");
+}
+
+/// From the 13 November audit: a builder whose task was handed on found it in
+/// its own review queue.
+#[test]
+fn a_bot_that_held_a_task_never_reviews_it() {
+    let mut f = fixture();
+    let (lead, builder, inspector) = (f.coordinator, f.worker, f.inspector);
+    let task = f.start_task("renderer", inspector);
+    f.apply(Command::AmendTask {
+        by: lead,
+        task,
+        brief: None,
+        acceptance_criteria: None,
+        depends_on: None,
+        required_role: None,
+        hand_to: Some(builder),
+        reason: "the inspector should not build".into(),
+    });
+    f.apply(Command::ClaimTask { task, by: builder });
+    f.apply(Command::StartTask { task, by: builder });
+    let artifact = f.add_artifact(task, builder);
+    f.apply(Command::SubmitForReview { task, by: builder, artifacts: vec![artifact] });
+    assert!(!f.engine.review_queue_for(inspector).contains(&task), "it held the task");
+    // Work from another task is not submitted for this one.
+    let other = f.start_task("notes", builder);
+    let foreign = f.add_artifact(other, builder);
+    let third = f.start_task("third", f.worker2);
+    let refused = f.reject(Command::SubmitForReview { task: third, by: f.worker2, artifacts: vec![foreign] });
+    assert!(refused.to_string().contains("another task"), "{refused}");
+}
+
+/// From the 13 November audit: overnight in a paused room, claims lapsed and
+/// the long-hold notice went out every 45 minutes.
+#[test]
+fn a_paused_room_keeps_its_claims_and_sends_no_timed_notices() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let task = f.start_task("integration", worker);
+    let _waiting = f.open_task_after("release", vec![task]);
+    f.apply(Command::PauseRoom { reason: "night".into() });
+    let before = f.engine.transcript().len();
+    for hour in 1..=8 {
+        f.apply(Command::Tick { now: Timestamp::now().plus_millis(hour * 60 * 60_000) });
+    }
+    assert_eq!(f.engine.task(task).unwrap().assignee, Some(worker), "the claim is kept");
+    assert!(
+        !f.engine.transcript()[before..].iter().any(|m| m.body.contains("has been with")),
+        "no long-hold notice while paused"
+    );
+}
+
+/// From the 13 November audit: a bot the owner asked for something, with no
+/// task, was benched at 30 minutes.
+#[test]
+fn a_bot_working_on_an_owners_request_is_not_benched() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let ask = ChatMessage::human(f.engine.room_id(), "Aece", "@w1 rebuild the icons")
+        .to_agents(vec![worker])
+        .with_intent(MessageIntent::Ask);
+    f.apply(Command::PostMessage { message: Box::new(ask) });
+    f.apply(Command::BeginTurn { agent: worker });
+    f.apply(Command::Tick { now: Timestamp::now().plus_millis(31 * 60_000) });
+    assert!(!f.engine.is_paused(worker));
+    assert!(f.engine.has_reason_to_work(worker));
+}
+
+/// From the 13 November audit: a task handed to a bot without its role was
+/// claimable by nobody, and stayed so once that bot was benched.
+#[test]
+fn a_task_handed_to_a_bot_stays_claimable() {
+    let mut f = fixture();
+    let (lead, worker, worker2) = (f.coordinator, f.worker, f.worker2);
+    let task = f.open_task("renderer", Some("researcher"));
+    f.apply(Command::AmendTask {
+        by: lead,
+        task,
+        brief: None,
+        acceptance_criteria: None,
+        depends_on: None,
+        required_role: None,
+        hand_to: Some(worker2),
+        reason: "w2 knows the renderer".into(),
+    });
+    assert!(f.engine.claimable_by(worker2).contains(&task), "the coordinator's choice stands in for the role");
+    f.apply(Command::PauseAgent { agent: worker2 });
+    let open = f.engine.evaluate_claim(task, worker, Timestamp::now());
+    assert_ne!(open.reason, orgbot_engine::Reason::HandedToAnother, "a benched choice no longer holds the task");
+}
+
+/// From the 13 November audit: a benched bot whose model was changed came
+/// back Idle while still benched.
+#[test]
+fn changing_a_benched_bots_model_does_not_unbench_it() {
+    let mut f = fixture();
+    let worker = f.worker;
+    f.apply(Command::PauseAgent { agent: worker });
+    let status = f.engine.status(worker);
+    let mut spec = f.engine.agent(worker).unwrap().clone();
+    spec.provider = ProviderRef::Scripted { script: "another".into() };
+    f.engine.update_agent(spec);
+    assert!(f.engine.is_paused(worker));
+    assert_eq!(f.engine.status(worker), status);
+}
+
+/// From the 13 November audit: a failed turn's usage was dropped, and its
+/// time was missing from the bot's totals.
+#[test]
+fn a_failed_turn_counts_its_usage_and_its_time_but_not_as_a_turn() {
+    let mut f = fixture();
+    let worker = f.worker;
+    let turns = f.engine.room().turns_used;
+    f.apply(Command::BeginTurn { agent: worker });
+    let usage = orgbot_proto::spend::TokenUsage { reported: true, complete: true, calls: 1, input_tokens: 120, output_tokens: 30, ..Default::default() };
+    f.apply(Command::RecordUsage { agent: worker, usage });
+    f.apply(Command::ReportError { agent: worker, task: None, error: "the CLI failed".into(), permanent: false });
+    assert_eq!(f.engine.room().turns_used, turns, "not counted as a turn");
+    assert_eq!(f.engine.spend_of(worker).usage.input_tokens, 120);
+    assert_eq!(f.engine.time_spent(worker).turns, 1, "its time counts");
+    assert!(!f.engine.in_turn(worker));
+}
+
+/// From the 13 November audit: "Integration" depends on the part, and the
+/// part's holder set it to wait on Integration. Neither could ever finish and
+/// nothing said so.
+#[test]
+fn a_wait_on_work_that_depends_on_yours_is_refused() {
+    let mut f = fixture();
+    let (lead, worker) = (f.coordinator, f.worker);
+    let part = f.start_task("the part", worker);
+    let events = f.apply(Command::CreateTask {
+        title: "Integration".into(),
+        brief: "put the parts together".into(),
+        by: Some(lead),
+        required_role: None,
+        priority: Priority::Normal,
+        acceptance_criteria: vec!["it runs".into()],
+        depends_on: vec![part],
+        origin: TaskOrigin::plain(),
+    });
+    let integration = created_task(&events);
+    f.apply(Command::OpenTask { task: integration });
+    let refused = f.reject(Command::BlockTask { task: part, by: worker, reason: BlockReason::AwaitingTask { task: integration } });
+    assert!(matches!(&refused, EngineError::NotReady { reason, .. } if reason.contains("already waits on this task")), "{refused}");
+    assert_eq!(f.state(part), TaskState::InProgress);
+}
+
 /// From benchmark 2: @iris ran turns of 54 and 92 minutes holding no task,
 /// until the owner asked for it to be stopped.
 #[test]
@@ -5093,6 +5345,60 @@ fn retiring_a_task_others_wait_on_says_who_is_left_waiting() {
     f.reject(Command::ProposeRetire { by: lead, task: after, reason: "x".into(), replaced_by: Some(after) });
 }
 
+/// From the 13 November audit: a replacement that depended on the retired
+/// task waited on itself; one that waited on it through other work closed a
+/// circle; a failed task was accepted; and a "Keep" left the replacement to
+/// be reused by a later retirement.
+#[test]
+fn a_replacement_never_waits_on_itself_and_a_kept_one_is_forgotten() {
+    use orgbot_proto::decision::{RETIRE_TASK_ALLOW, RETIRE_TASK_KEEP};
+    let mut f = fixture();
+    let lead = f.coordinator;
+    let old = f.open_task("old sim", None);
+    let follow_up = f.open_task_after("sim v2", vec![old]);
+    let events = f.apply(Command::ProposeRetire { by: lead, task: old, reason: "superseded".into(), replaced_by: Some(follow_up) });
+    answer(&mut f, asked_decision(&events), RETIRE_TASK_ALLOW);
+    assert!(f.engine.task(follow_up).unwrap().depends_on.is_empty(), "it does not wait on itself");
+
+    let base = f.open_task("base", None);
+    let middle = f.open_task_after("middle", vec![base]);
+    let top = f.open_task_after("top", vec![middle]);
+    let refused = f.reject(Command::ProposeRetire { by: lead, task: base, reason: "x".into(), replaced_by: Some(top) });
+    assert!(matches!(&refused, EngineError::NotReady { reason, .. } if reason.contains("waits on this task")), "{refused}");
+
+    let kept = f.open_task("kept", None);
+    let after_kept = f.open_task_after("after kept", vec![kept]);
+    let other = f.open_task("other", None);
+    let events = f.apply(Command::ProposeRetire { by: lead, task: kept, reason: "maybe".into(), replaced_by: Some(other) });
+    answer(&mut f, asked_decision(&events), RETIRE_TASK_KEEP);
+    let events = f.apply(Command::ProposeRetire { by: lead, task: kept, reason: "now".into(), replaced_by: None });
+    answer(&mut f, asked_decision(&events), RETIRE_TASK_ALLOW);
+    assert_eq!(f.engine.task(after_kept).unwrap().depends_on, vec![kept], "the kept replacement is not reused");
+}
+
+/// From the 13 November audit: an amendment and a re-route in one call
+/// applied the amendment, then refused the re-route.
+#[test]
+fn an_amendment_that_cannot_move_its_task_changes_nothing() {
+    let mut f = fixture();
+    let (lead, worker, worker2) = (f.coordinator, f.worker, f.worker2);
+    let task = f.start_task("notes", worker);
+    let artifact = f.add_artifact(task, worker);
+    f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![artifact] });
+    let before = f.engine.task(task).unwrap().acceptance_criteria.clone();
+    f.reject(Command::AmendTask {
+        by: lead,
+        task,
+        brief: None,
+        acceptance_criteria: Some(vec!["a new bar".into()]),
+        depends_on: None,
+        required_role: None,
+        hand_to: Some(worker2),
+        reason: "move it".into(),
+    });
+    assert_eq!(f.engine.task(task).unwrap().acceptance_criteria, before);
+}
+
 /// From speed test 2: @quinn released its task to claim it again, and the
 /// next tick benched it for its whole 84-minute turn.
 #[test]
@@ -5182,7 +5488,7 @@ fn who_may_change_the_project() {
             room: f.engine.room_id(),
             author: orgbot_proto::chat::Author::Human { name: "Aece".into() },
             audience: orgbot_proto::chat::Audience::Agents { agents: vec![worker2] },
-            intent: MessageIntent::Say,
+            intent: MessageIntent::Ask,
             body: "please fix the typo in the README".into(),
             task: None,
             handoff: None,
@@ -5193,4 +5499,23 @@ fn who_may_change_the_project() {
         }),
     });
     assert!(f.engine.may_change_project(worker2), "the owner asked it directly");
+}
+
+/// From the 13 November audit: messages the engine writes in the owner's
+/// name (decision answers, "previously answered") opened the gate, and so did
+/// any review waiting for a bot that can inspect.
+#[test]
+fn only_a_persons_own_request_opens_the_gate_without_a_task() {
+    let mut f = fixture();
+    let (worker, inspector) = (f.worker, f.inspector);
+    let answer = ChatMessage::human(f.engine.room_id(), "Aece", "Aece answered: No")
+        .to_agents(vec![worker])
+        .with_intent(MessageIntent::Answer);
+    f.apply(Command::PostMessage { message: Box::new(answer) });
+    assert!(!f.engine.may_change_project(worker), "an answer is not a request");
+    let task = f.start_task("notes", worker);
+    let artifact = f.add_artifact(task, worker);
+    f.apply(Command::SubmitForReview { task, by: worker, artifacts: vec![artifact] });
+    assert!(!f.engine.review_queue_for(inspector).is_empty());
+    assert!(!f.engine.may_change_project(inspector), "reviewing runs checks, it does not change the project");
 }

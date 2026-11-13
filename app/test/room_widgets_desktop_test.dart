@@ -8,6 +8,8 @@ import 'package:orgbot_app/state/room_store.dart';
 import 'package:orgbot_app/ui/room_widgets.dart';
 
 class _Client implements RoomClient {
+  @override
+  bool withdrawQueued(String body) => false;
   final _messages = StreamController<Map<String, Object?>>.broadcast(
     sync: true,
   );

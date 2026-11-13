@@ -109,6 +109,11 @@ pub struct Orchestrator {
     /// Bots no longer woken for the work they went round in circles on, with
     /// that work as it was: the rest ends when it changes or the bot acts.
     resting: BTreeMap<AgentId, Vec<TaskId>>,
+    /// When each bot's last turn ended and whether it changed anything.
+    /// From the 13 November audit: kept per run, so a run that ended with an
+    /// unproductive turn was followed by one that started the same bot again
+    /// at once, one model call per loop.
+    last_turn: BTreeMap<AgentId, (tokio::time::Instant, bool)>,
 }
 
 /// Saves the room's checkpoint. A run lasts as long as its slowest turn, and
@@ -123,9 +128,9 @@ impl std::fmt::Debug for Autosave {
 }
 
 /// How long a bot whose last turn achieved nothing waits before another, when
-/// it still has something to do. A run now lasts as long as there is work, so
-/// "not again in this run" meant never: such bots sat idle until their claims
-/// lapsed.
+/// it still has something to do. Kept on the orchestrator across runs: a
+/// "not again in this run" rule meant nothing once the next run started at
+/// once, and the same bot was woken straight away.
 const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(2 * 60);
 
 /// How often a run saves the room while turns are under way.
@@ -293,6 +298,7 @@ impl Orchestrator {
             idle_rounds: 0,
             fruitless: BTreeMap::new(),
             resting: BTreeMap::new(),
+            last_turn: BTreeMap::new(),
             last_said: BTreeMap::new(),
             workspace: None,
             allowances: None,
@@ -344,6 +350,7 @@ impl Orchestrator {
             idle_rounds: 0,
             fruitless: BTreeMap::new(),
             resting: BTreeMap::new(),
+            last_turn: BTreeMap::new(),
             last_said: BTreeMap::new(),
             workspace: None,
             allowances: None,
@@ -504,15 +511,13 @@ impl Orchestrator {
         if self.has_unanswered_message(engine, agent) {
             return Some(Wake::Question);
         }
-        // Work in hand that is not parked.
+        // Work in hand that is not parked. Approved work is in the
+        // coordinators' hands, and a bot waiting on the owner cannot move it.
+        // From the 13 November audit: approved work woke its author, who
+        // could not deliver it, turn after turn.
         let held = engine.active_tasks_of(agent);
-        let has_live_work = held.iter().any(|id| {
-            engine
-                .task(*id)
-                .is_some_and(|task| !task.state.is_waiting())
-                && !engine.waits_on_dependency(*id)
-        });
-        if has_live_work && !resting {
+        let has_live_work = !Self::live_work_of(engine, agent).is_empty();
+        if has_live_work && !resting && !engine.awaiting_owner(agent) {
             return Some(Wake::HeldWork);
         }
         // Something to inspect.
@@ -623,8 +628,8 @@ impl Orchestrator {
         if self.rotation.is_empty() {
             return None;
         }
-        let engine = self.engine.borrow();
         let routing = crate::allowance::routing(self.allowances.as_ref());
+        let engine = self.engine.borrow();
         let eligible = |agent: &AgentId| {
             self.bots.get(agent).is_some_and(|bot| bot.available())
                 && engine.status(*agent).is_available()
@@ -677,7 +682,26 @@ impl Orchestrator {
     /// coordinators drawing up plans at the same moment produces two sets of
     /// tasks for the same goal, which is worse than a wasted turn.
     pub fn next_actors(&self, limit: usize) -> Vec<AgentId> {
-        self.pick_actors(limit, &mut BTreeMap::new(), |_| true)
+        let ready = self.ready_to_go_again();
+        self.pick_actors(limit, &mut BTreeMap::new(), |agent| ready.contains(&agent))
+    }
+
+    /// Bots that may take a turn now: their last turn changed something, or
+    /// ended [`RETRY_AFTER`] ago, or someone is waiting on them since: the
+    /// owner asked them something, a bot asked them or offered them work.
+    fn ready_to_go_again(&self) -> BTreeSet<AgentId> {
+        let engine = self.engine.borrow();
+        self.rotation
+            .iter()
+            .copied()
+            .filter(|agent| {
+                self.last_turn
+                    .get(agent)
+                    .is_none_or(|(at, productive)| *productive || at.elapsed() >= RETRY_AFTER)
+                    || self.has_unanswered_owner_ask(&engine, *agent)
+                    || matches!(self.wake_reason(&engine, *agent), Some(Wake::Handoff | Wake::Question))
+            })
+            .collect()
     }
 
     /// [`Self::next_actors`] for a run already under way.
@@ -696,6 +720,10 @@ impl Orchestrator {
         if self.rotation.is_empty() || limit == 0 {
             return Vec::new();
         }
+        // The allowance files are read before the room's lock is taken, not
+        // under it. From the 13 November audit: they were read and parsed
+        // every second while every bot's room tools waited.
+        let routing = crate::allowance::routing(self.allowances.as_ref());
         let engine = self.engine.borrow();
         let mut chosen = Vec::new();
         // Work a bot already picked is expected to take.
@@ -719,7 +747,6 @@ impl Orchestrator {
         // Turns already running count against their backend's cap.
         let mut in_flight: BTreeMap<String, usize> = self.busy_backends.clone();
 
-        let routing = crate::allowance::routing(self.allowances.as_ref());
         let mut candidates = (0..self.rotation.len())
             .map(|offset| self.rotation[(self.cursor + offset) % self.rotation.len()])
             .collect::<Vec<_>>();
@@ -925,7 +952,8 @@ impl Orchestrator {
         }
         // What each bot mid-turn was woken for, so refills leave it to them.
         let mut reserved: BTreeMap<AgentId, Reserved> = BTreeMap::new();
-        let chosen = self.pick_actors(limit, &mut reserved, |_| true);
+        let ready = self.ready_to_go_again();
+        let chosen = self.pick_actors(limit, &mut reserved, |agent| ready.contains(&agent));
         if chosen.is_empty() {
             return Vec::new();
         }
@@ -943,15 +971,10 @@ impl Orchestrator {
             std::pin::Pin<Box<dyn std::future::Future<Output = TurnOutcome> + Send + '_>>,
         > = FuturesUnordered::new();
         let mut running_backend: BTreeMap<AgentId, String> = BTreeMap::new();
-        // Who has had a turn in this run, and which of them got something done
-        // in their last one. A bot goes again in the same run only after a
-        // productive turn (or when the owner asks it something), so one that
-        // achieved nothing cannot be restarted the moment it stops and burn
-        // the budget. A run lasts as long as its slowest turn, so the others
-        // must be able to keep working meanwhile.
-        let mut ran: BTreeSet<AgentId> = BTreeSet::new();
-        let mut productive: BTreeSet<AgentId> = BTreeSet::new();
-        let mut finished_at: BTreeMap<AgentId, tokio::time::Instant> = BTreeMap::new();
+        // A bot goes again only after a productive turn, RETRY_AFTER after
+        // one that changed nothing, or when the owner asks it something
+        // (`ready_to_go_again`), so one that achieved nothing cannot be
+        // restarted the moment it stops and burn the budget.
         let mut last_save = tokio::time::Instant::now();
         let mut finished = Vec::new();
 
@@ -987,8 +1010,34 @@ impl Orchestrator {
             let turn: std::pin::Pin<Box<dyn std::future::Future<Output = TurnOutcome> + Send>> =
                 Box::pin(async move {
                     let mut lease = lease;
+                    // One bot's panic ends its own turn, not the room's. From
+                    // the 13 November audit: a panic in any turn took down
+                    // every running turn and the room with them.
+                    let guarded = {
+                        use futures::FutureExt;
+                        std::panic::AssertUnwindSafe(lease.bot.as_mut().expect("a leased bot").take_turn(&engine, sink))
+                            .catch_unwind()
+                    };
                     let finished = tokio::select! {
-                        result = lease.bot.as_mut().expect("a leased bot").take_turn(&engine, sink) => Some(result),
+                        result = guarded => Some(result.unwrap_or_else(|panic| {
+                            let why = panic
+                                .downcast_ref::<&str>()
+                                .map(|text| text.to_string())
+                                .or_else(|| panic.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "an internal error".into());
+                            tracing::error!(%agent, %why, "a bot's turn panicked");
+                            engine.with(|engine| {
+                                let _ = engine.apply(Command::ReportError {
+                                    agent,
+                                    task: None,
+                                    error: format!("the turn stopped on an internal error: {why}"),
+                                    permanent: false,
+                                });
+                            });
+                            Err(orgbot_providers::ProviderError::Unsupported(format!(
+                                "the turn stopped on an internal error: {why}"
+                            )))
+                        })),
                         _ = stop.cancelled() => None,
                     };
                     let result = match finished {
@@ -1011,7 +1060,6 @@ impl Orchestrator {
         };
 
         for agent in chosen {
-            ran.insert(agent);
             start(self, &mut running, &mut running_backend, agent);
         }
 
@@ -1024,6 +1072,14 @@ impl Orchestrator {
                 outcome = running.next() => {
                     let Some((agent, bot, result)) = outcome else { break };
                     self.bots.insert(agent, bot);
+                    // Every turn is closed. From the 13 November audit: a turn
+                    // that returned before recording anything (new input from
+                    // a person, or its model service asking to wait) stayed
+                    // open, so the bot showed as working and was benched 30
+                    // minutes later.
+                    self.engine.with(|engine| {
+                        let _ = engine.apply(Command::EndTurn { agent });
+                    });
                     self.leased_memory.remove(&agent);
                     reserved.remove(&agent);
                     if let Ok(report) = &result {
@@ -1033,10 +1089,8 @@ impl Orchestrator {
                     // speed test 1: counted by room calls alone, @grok-quick's
                     // turns on the 3D model "achieved nothing" and waited two
                     // minutes between turns, fourteen times.
-                    if matches!(&result, Ok(report) if report.acted()) {
-                        productive.insert(agent);
-                    }
-                    finished_at.insert(agent, tokio::time::Instant::now());
+                    let productive = matches!(&result, Ok(report) if report.acted());
+                    self.last_turn.insert(agent, (tokio::time::Instant::now(), productive));
                     if let Some(backend) = running_backend.remove(&agent) {
                         if let Some(count) = self.busy_backends.get_mut(&backend) {
                             *count = count.saturating_sub(1);
@@ -1118,30 +1172,17 @@ impl Orchestrator {
             // Fill free slots, unless the room should stop taking turns.
             let holding = self.holding.load(std::sync::atomic::Ordering::SeqCst);
             if refill && !holding && self.stop_condition().is_none() {
+                // Free slots, capped by the turns left once those running
+                // finish. (13 November audit: running turns were subtracted
+                // twice, so a free slot could go unused.)
                 let slots = self
                     .parallelism()
-                    .min(self.turns_left().saturating_sub(running.len()))
-                    .saturating_sub(running.len());
+                    .saturating_sub(running.len())
+                    .min(self.turns_left().saturating_sub(running.len()));
                 if slots > 0 {
-                    let engine = self.engine.borrow();
-                    let asked: BTreeSet<AgentId> = self
-                        .rotation
-                        .iter()
-                        .copied()
-                        .filter(|agent| self.has_unanswered_owner_ask(&engine, *agent))
-                        .collect();
-                    drop(engine);
-                    let next = self.pick_actors(slots, &mut reserved, |agent| {
-                        asked.contains(&agent)
-                            || !ran.contains(&agent)
-                            || productive.contains(&agent)
-                            || finished_at
-                                .get(&agent)
-                                .is_some_and(|at| at.elapsed() >= RETRY_AFTER)
-                    });
+                    let ready = self.ready_to_go_again();
+                    let next = self.pick_actors(slots, &mut reserved, |agent| ready.contains(&agent));
                     for agent in next {
-                        ran.insert(agent);
-                        productive.remove(&agent);
                         start(self, &mut running, &mut running_backend, agent);
                     }
                 }
@@ -1241,19 +1282,21 @@ impl Orchestrator {
                         usage: Default::default(),
                         stop_reason: orgbot_providers::StopReason::Other("provider_error".into()),
                         own_activity: 0,
+                        changes: 0,
                     }
                 }
             });
         }
 
         // A successful action is always progress. Saying something is progress
-        // only if it is not a verbatim repeat of what this bot last said — a
-        // bot stuck repeating itself must not keep the room awake.
+        // only if it is not a repeat of what this bot last said: a bot stuck
+        // repeating itself must not keep the room awake. From the 13 November
+        // audit: only a word-for-word repeat counted, so rewording reset it.
         let mut anyone_progressed = false;
         for report in &reports {
             let did_work = report.acted();
             let said_something_new = report.said.as_deref().is_some_and(|said| {
-                self.last_said.get(&report.agent).map(String::as_str) != Some(said)
+                self.last_said.get(&report.agent).is_none_or(|last| !says_much_the_same(last, said))
             });
             if let Some(said) = &report.said {
                 self.last_said.insert(report.agent, said.clone());
@@ -1415,7 +1458,11 @@ impl Orchestrator {
         let mut live: Vec<TaskId> = engine
             .active_tasks_of(agent)
             .into_iter()
-            .filter(|id| engine.task(*id).is_some_and(|task| !task.state.is_waiting()))
+            .filter(|id| {
+                engine.task(*id).is_some_and(|task| {
+                    !task.state.is_waiting() && task.state != orgbot_proto::TaskState::Approved
+                })
+            })
             .filter(|id| !engine.waits_on_dependency(*id))
             .collect();
         live.sort();
@@ -1442,9 +1489,14 @@ impl Orchestrator {
     /// the coordinators are told, so the work can move to someone who acts.
     fn note_turn_activity(&mut self, report: &TurnReport) {
         let agent = report.agent;
-        // A failed or deferred turn says nothing about the bot.
-        if matches!(report.stop_reason, orgbot_providers::StopReason::Other(_)) {
-            return;
+        // A failed or deferred turn says nothing about the bot. From the 13
+        // November audit: every `Other` stop was skipped, so a CLI bot
+        // stopped for reasoning, or a provider's own unlisted stop reason,
+        // never counted as a turn that did nothing.
+        if let orgbot_providers::StopReason::Other(marker) = &report.stop_reason {
+            if crate::bot::DEFERRED_TURN_MARKERS.contains(&marker.as_str()) {
+                return;
+            }
         }
         let (live, titles, handle, room) = {
             let engine = self.engine.borrow();
@@ -1545,6 +1597,27 @@ impl Orchestrator {
 /// are forwarded into the bot's turn loop, where inbound tools/call requests
 /// are dispatched against the engine mid-episode. Returns the channel the bot
 /// listens on plus the socket path handed to the CLI.
+/// A private folder, made once per process, for the bots' room tool sockets:
+/// owner-only, with a name nobody can guess, under the session's runtime
+/// folder, which every sandbox hides. From the 13 November audit: the sockets
+/// sat in the temp folder under predictable names, and a sandbox that could see
+/// that folder could act as any other bot.
+fn room_socket_folder() -> Option<std::path::PathBuf> {
+    static FOLDER: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    FOLDER
+        .get_or_init(|| {
+            use std::os::unix::fs::DirBuilderExt;
+            let base = std::env::var_os("XDG_RUNTIME_DIR")
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute() && path.is_dir())
+                .unwrap_or_else(std::env::temp_dir);
+            let folder = base.join(format!("orgbot-rooms-{}", orgbot_proto::EventId::new()));
+            std::fs::DirBuilder::new().mode(0o700).create(&folder).ok()?;
+            Some(folder)
+        })
+        .clone()
+}
+
 fn spawn_mcp_host(
     spec: &orgbot_proto::agent::AgentSpec,
 ) -> Option<(
@@ -1556,7 +1629,11 @@ fn spawn_mcp_host(
     if !matches!(&spec.provider, ProviderRef::CliAgent { mcp: true, .. }) {
         return None;
     }
-    let socket = std::env::temp_dir().join(format!("orgbot-mcp-{}.sock", spec.id));
+    let Some(folder) = room_socket_folder() else {
+        tracing::warn!("no private folder for room tool sockets");
+        return None;
+    };
+    let socket = folder.join(format!("{}.sock", spec.id));
     let _ = std::fs::remove_file(&socket);
     let std_listener = match std::os::unix::net::UnixListener::bind(&socket) {
         Ok(listener) => listener,
@@ -1594,9 +1671,16 @@ fn spawn_mcp_host(
                         crate::mcp::serve_stream(stream, tx).await;
                     });
                 }
+                // A passing failure (no file descriptors left, a connection
+                // reset before it was taken) must not end the listener. From
+                // the 13 November audit: one ended it for the life of the
+                // process, silently, and the bot's CLI lost its room tools.
                 Err(error) => {
-                    tracing::debug!(%error, "room MCP accept loop ended");
-                    break;
+                    tracing::warn!(%error, "room tool connection could not be accepted; trying again");
+                    tokio::select! {
+                        _ = tx.closed() => break,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+                    }
                 }
             }
         }
@@ -1663,6 +1747,22 @@ pub fn tick_frees_work(events: &[orgbot_proto::EventEnvelope]) -> bool {
             Event::AgentStatusChanged { from: orgbot_proto::AgentStatus::Faulted, .. }
         )
     })
+}
+
+/// Whether two messages say much the same: most of their words are shared.
+fn says_much_the_same(a: &str, b: &str) -> bool {
+    let words = |text: &str| -> BTreeSet<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|word| word.len() > 2)
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let (a, b) = (words(a), words(b));
+    if a.is_empty() || b.is_empty() {
+        return a == b;
+    }
+    let shared = a.intersection(&b).count();
+    shared * 10 >= a.union(&b).count() * 6
 }
 
 /// Consecutive fruitless rounds before the run is called stalled.

@@ -349,6 +349,15 @@ pub enum Command {
     /// Put a task aside until the owner resumes it, on the owner's own word or
     /// a coordinator's acting on it. Nobody holds, works on, claims or asks
     /// about a parked task, and questions waiting on it are withdrawn.
+    /// Put failed or cancelled work back on the board. From the 13 November
+    /// audit: a task that failed review could never be taken up again, and
+    /// what depended on it waited forever.
+    ReopenTask {
+        /// The coordinator reopening it, or `None` for the owner.
+        by: Option<AgentId>,
+        task: TaskId,
+        reason: String,
+    },
     ParkTask {
         /// The coordinating bot parking it on the owner's instruction, or
         /// `None` for the owner.
@@ -413,6 +422,10 @@ pub enum Command {
         usage: orgbot_proto::spend::TokenUsage,
     },
     /// Report a failed bot turn.
+    /// What a turn that failed or was cut off used, counted in what the bot
+    /// spent but not as a turn. From the 13 November audit: such usage was
+    /// dropped.
+    RecordUsage { agent: AgentId, usage: orgbot_proto::spend::TokenUsage },
     ReportError {
         agent: AgentId,
         task: Option<TaskId>,
@@ -486,6 +499,8 @@ impl Command {
             Self::EndTurn { .. } => "end_turn",
             Self::RecordTurn { .. } => "record_turn",
             Self::ReportError { .. } => "report_error",
+            Self::ReopenTask { .. } => "reopen_task",
+            Self::RecordUsage { .. } => "record_usage",
             Self::Tick { .. } => "tick",
         }
     }
@@ -510,6 +525,7 @@ impl Command {
             Self::RequestLanding { task, .. } => Some(*task),
             Self::RequestPush { task, .. } => Some(*task),
             Self::AmendTask { task, .. } => Some(*task),
+            Self::ReopenTask { task, .. } => Some(*task),
             _ => None,
         }
     }
@@ -539,6 +555,14 @@ impl Command {
                 | Self::BeginTurn { .. }
                 // A turn cut short by a pause ends after the pause.
                 | Self::EndTurn { .. }
+                // A turn under way when the room paused still closes with
+                // its usage or its error, and the owner's answer to a
+                // question is kept. From the 13 November audit: these were
+                // refused at every budget pause and their usage was lost.
+                | Self::RecordTurn { .. }
+                | Self::RecordUsage { .. }
+                | Self::ReportError { .. }
+                | Self::AnswerDecision { .. }
                 // Speaking is always allowed. A paused or finished room still
                 // has a transcript, and a message that is silently refused
                 // leaves the person staring at a chat that swallowed it.

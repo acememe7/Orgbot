@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::error::Result;
-use crate::types::{CompletionRequest, CompletionResponse, StreamEvent};
+use crate::types::{CompletionRequest, CompletionResponse, StreamEvent, Usage};
 
 /// Resolve bounded local image references only for the outgoing API request.
 pub(crate) async fn prepare_images(
@@ -114,6 +114,26 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
     /// them into the project, while it holds no task. Only CLI providers,
     /// which merge at the end of a turn, act on it.
     fn hold_merge(&self, _hold: bool) {}
+
+    /// Ask a turn under way to end now and still finish as a turn does:
+    /// merge, hand a renewed sign-in back, report its usage, clean up. From
+    /// the 13 November audit: an agent CLI's turn ended early was dropped, so
+    /// none of that happened. Providers that cannot do so ignore it, and the
+    /// caller stops waiting after a grace period.
+    fn end_turn_early(&self) {}
+
+    /// Whether the agent is inside one of its own tool calls right now, such
+    /// as a long test run, as opposed to reasoning.
+    fn tool_in_flight(&self) -> bool {
+        false
+    }
+
+    /// What the last turn used when it ended in an error, if the provider
+    /// knows. From the 13 November audit: a CLI's failed turn reported its
+    /// usage and it was dropped with the error.
+    fn last_failed_usage(&self) -> Option<Usage> {
+        None
+    }
 }
 
 /// A provider whose every turn runs at the bot's own effort level.
@@ -162,6 +182,18 @@ impl Provider for WithEffort {
 
     fn hold_merge(&self, hold: bool) {
         self.inner.hold_merge(hold)
+    }
+
+    fn end_turn_early(&self) {
+        self.inner.end_turn_early()
+    }
+
+    fn tool_in_flight(&self) -> bool {
+        self.inner.tool_in_flight()
+    }
+
+    fn last_failed_usage(&self) -> Option<Usage> {
+        self.inner.last_failed_usage()
     }
 }
 

@@ -67,6 +67,9 @@ abstract class RoomLink {
   /// Ask for a fresh snapshot.
   void resync();
 
+  /// Take back a message still waiting to be sent; whether one was.
+  bool withdrawQueued(String body);
+
   /// Connect. An in-process link is already connected.
   ///
   /// [token] is the room's key, sent in the opening frame. A room reachable
@@ -97,6 +100,15 @@ class RoomClient implements RoomLink {
     'answer_bot',
     'park_task',
     'resume_task',
+    // The owner's controls wait too. From the 13 November audit: a Pause or
+    // "Stop now" pressed during a reconnect was dropped, the room ran on,
+    // and the toolbar said it was pausing.
+    'pause',
+    'stop_now',
+    'resume',
+    'pause_bot',
+    'resume_bot',
+    'remove_bot',
   };
 
   final _messages = StreamController<Map<String, Object?>>.broadcast();
@@ -234,6 +246,19 @@ class RoomClient implements RoomLink {
       // The socket closed under us; keep the input for the reconnect.
       if (_personInput.contains(message['type'])) _outbox.add(message);
     }
+  }
+
+  /// Take back a message still waiting for the link, so a discarded one is
+  /// not delivered on reconnect. From the 13 November audit: "Discard" left
+  /// the queued copy, and the room got the message anyway.
+  @override
+  bool withdrawQueued(String body) {
+    final index = _outbox.indexWhere(
+      (message) => message['type'] == 'send_message' && message['body'] == body,
+    );
+    if (index < 0) return false;
+    _outbox.removeAt(index);
+    return true;
   }
 
   void _flushOutbox() {
@@ -392,6 +417,9 @@ class LocalRoomClient implements RoomLink {
 
   @override
   void resync() => send({'type': 'resync'});
+
+  @override
+  bool withdrawQueued(String body) => false;
 
   /// Nothing to connect to; the engine is already running here, so there is
   /// no network for a token to protect.

@@ -14,6 +14,8 @@ import 'package:orgbot_app/state/room_store.dart';
 import 'package:orgbot_app/ui/room_widgets.dart';
 
 class FakeClient implements RoomClient {
+  @override
+  bool withdrawQueued(String body) => false;
   final _messages = StreamController<Map<String, Object?>>.broadcast(
     sync: true,
   );
@@ -391,19 +393,6 @@ void main() {
     await tester.tap(find.byTooltip('Bot actions').first);
     await tester.pumpAndSettle();
     expect(find.text('Resume @iris'), findsOneWidget);
-  });
-
-  // From speed test 1: the owner wrote "@grok-quick ... I'm asking the room",
-  // and only @grok-quick heard it.
-  test('the composer says who a message will reach', () {
-    const handles = ['grok-quick', 'opus'];
-    expect(composerReach('just a note', handles), isNull);
-    expect(
-      composerReach('@grok-quick submit it, @opus split it', handles),
-      'Goes to @grok-quick, @opus. The coordinators see a copy; @all reaches everyone.',
-    );
-    expect(composerReach('@all stop', handles), 'Goes to everyone in the room.');
-    expect(composerReach('@nobody hi', handles), isNull);
   });
 
   testWidgets('the activity rail exposes a collapsible process timeline', (

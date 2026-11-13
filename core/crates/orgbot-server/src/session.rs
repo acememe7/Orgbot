@@ -393,7 +393,7 @@ impl RoomSession {
                 .iter()
                 .map(std::path::PathBuf::from)
                 .collect();
-            let this_room = orchestrator.engine().room().spec.name.clone();
+            let this_room = orchestrator.engine().room().id.to_string();
             orgbot_engine::Archive::load(&boards, Some(&this_room))
         } else {
             orgbot_engine::Archive::default()
@@ -446,26 +446,37 @@ impl RoomSession {
             snapshot: snapshot_of(&orchestrator),
             backlog: orchestrator.engine().log().to_vec(),
         }));
-        let committed_attachment_ids = Arc::new(RwLock::new(
-            orchestrator
-                .engine()
-                .transcript()
-                .iter()
-                .flat_map(|message| message.files.iter().map(|file| file.id.clone()))
-                .collect(),
-        ));
+        let committed_attachment_ids = Arc::new(RwLock::new({
+            let mut ids = committed_attachments(&orchestrator.engine());
+            let root = state_path.as_deref().and_then(|path| path.parent()).map(|parent| parent.join("attachments"));
+            ids.extend(remembered_committed_attachments(root.as_deref()));
+            ids
+        }));
         let interrupt = Arc::new(Mutex::new(CancellationToken::new()));
         let input_token = CancellationToken::new();
         orchestrator.attach_input_interrupt(input_token.clone());
+        if let Some(path) = state_path.as_deref() {
+            clear_stale_board_temps(path);
+        }
         // A run lasts as long as its slowest turn; the room is saved meanwhile.
         if let Some(path) = state_path.clone() {
+            // Announced like any other save. From the 13 November audit: the
+            // app never heard of these, and showed the last save as older.
+            let saved = events_tx.clone();
             orchestrator.attach_autosave(orgbot_runtime::Autosave(Arc::new(move |board| {
-                if let Err(error) = write_board(&path, board) {
-                    tracing::warn!(%error, "room could not be saved during a run");
+                match write_board(&path, board) {
+                    Ok(()) => {
+                        let _ = saved.send(ServerMessage::Saved { at: orgbot_proto::time::Timestamp::now() });
+                    }
+                    Err(error) => tracing::warn!(%error, "room could not be saved during a run"),
                 }
             })));
         }
         let input_interrupt = Arc::new(Mutex::new(input_token));
+        // What the room already held was announced when it happened. From the
+        // 13 November audit: on start the whole retained log was announced
+        // again as live, raising a stale alert and swamping listeners.
+        let restored_head = orchestrator.engine().head();
         let mut session = Self {
             desktop_notifications: Alerts::default(),
             state_path,
@@ -474,7 +485,7 @@ impl RoomSession {
             control: control_rx,
             deferred: std::collections::VecDeque::new(),
             events: events_tx.clone(),
-            broadcast_head: Seq::ZERO,
+            broadcast_head: restored_head,
             phase_sent: None,
             settled: false,
             published: published.clone(),
@@ -871,6 +882,14 @@ impl RoomSession {
                                 files,
                                 reply_to,
                             };
+                            // The run-start choice, unless that bot has since
+                            // gone or been benched. From the 13 November audit:
+                            // an untagged question went to a removed coordinator.
+                            let default_target = engine.with(|engine| {
+                                default_target
+                                    .filter(|target| engine.agent(*target).is_some() && !engine.is_paused(*target))
+                                    .or_else(|| default_human_target(engine))
+                            });
                             if let Some(path) = &journal {
                                 let entry = JournaledInput::Message {
                                     input: input.clone(),
@@ -916,10 +935,27 @@ impl RoomSession {
                         // tools also take, so no bot claims it while the
                         // turns under way finish.
                         Control::ParkTask { task, reason } => {
-                            let parked = engine.with(|engine| engine.apply(Command::ParkTask { by: None, task, reason }));
+                            let command = Command::ParkTask { by: None, task, reason };
+                            journal_control(journal.as_deref(), &command);
+                            let parked = engine.with(|engine| engine.apply(command));
                             if let Err(error) = parked {
                                 let _ = events.send(ServerMessage::Error { message: format!("Not parked: {error}") });
                             }
+                            send_unsent(&engine, &events, alerts, &committed, &published, &mut sent_head);
+                        }
+                        // Now, not when the slowest turn ends. From the 13
+                        // November audit: un-parking a task waited for the
+                        // whole run, an hour with five bots working.
+                        Control::ResumeTask { task } => {
+                            journal_control(journal.as_deref(), &Command::ResumeTask { task });
+                            if let Err(error) = engine.with(|engine| engine.apply(Command::ResumeTask { task })) {
+                                let _ = events.send(ServerMessage::Error { message: format!("Not resumed: {error}") });
+                            }
+                            spoke = true;
+                            send_unsent(&engine, &events, alerts, &committed, &published, &mut sent_head);
+                        }
+                        Control::ReportPendingRemovals { agent, copy, count } => {
+                            let _ = engine.with(|engine| engine.apply(Command::RecordPendingRemovals { agent, copy, count }));
                             send_unsent(&engine, &events, alerts, &committed, &published, &mut sent_head);
                         }
                         // Now, not when the slowest turn ends: the bot's own
@@ -935,6 +971,7 @@ impl RoomSession {
                                 ),
                                 _ => unreachable!(),
                             };
+                            journal_control(journal.as_deref(), &command);
                             let applied = engine.with(|engine| engine.apply(command));
                             if let Err(error) = applied {
                                 let _ = events.send(ServerMessage::Error { message: format!("Not done: {error}") });
@@ -944,6 +981,7 @@ impl RoomSession {
                             send_unsent(&engine, &events, alerts, &committed, &published, &mut sent_head);
                         }
                         Control::ResumeBot { agent } => {
+                            journal_control(journal.as_deref(), &Command::ResumeAgent { agent });
                             if let Err(error) = engine.with(|engine| engine.apply(Command::ResumeAgent { agent })) {
                                 let _ = events.send(ServerMessage::Error { message: format!("Not resumed: {error}") });
                             }
@@ -989,15 +1027,23 @@ impl RoomSession {
 
     /// Broadcast every log event not yet sent.
     fn broadcast_new_events(&mut self) {
-        if self.save_state().is_err() {
+        if let Err(error) = self.save_state() {
+            // The real cause, in the log and to the owner. From the 13
+            // November audit: every failure read "free storage", which cannot
+            // help a board over its size limit, and the log had no line.
+            tracing::error!(%error, "room memory could not be saved");
             if self.orchestrator.engine().room().phase.is_live() {
                 let _ = self.orchestrator.engine_mut().apply(Command::PauseRoom {
                     reason: "Room memory could not be saved".into(),
                 });
             }
+            let advice = if error.to_string().contains("64 MiB") {
+                "The room's record is too large to save; archive this room and start a new one."
+            } else {
+                "Work is paused; free storage and resume."
+            };
             let _ = self.events.send(ServerMessage::Error {
-                message: "Room memory could not be saved. Work is paused; free storage and resume."
-                    .into(),
+                message: format!("Room memory could not be saved ({error}). {advice}"),
             });
         }
         let new: Vec<_> = self
@@ -1009,9 +1055,22 @@ impl RoomSession {
         // From the audit after speed test 1: these were rebuilt on every
         // step and every idle tick, under the engine lock, whether or not
         // anything had happened.
-        if !new.is_empty() {
-            *self.committed_attachment_ids.write().unwrap() =
-                committed_attachments(&self.orchestrator.engine());
+        //
+        // From the 13 November audit: the set was rebuilt from the last
+        // thousand messages, so files on older ones stopped being importable.
+        // It only grows now, and what it learns is kept beside the
+        // attachments so a restart does not forget it either.
+        let posted: Vec<String> = new
+            .iter()
+            .filter_map(|envelope| match &envelope.event {
+                orgbot_proto::Event::MessagePosted { message } => Some(message),
+                _ => None,
+            })
+            .flat_map(|message| message.files.iter().map(|file| file.id.clone()))
+            .collect();
+        if !posted.is_empty() {
+            self.committed_attachment_ids.write().unwrap().extend(posted.iter().cloned());
+            remember_committed_attachments(self.attachments_root().as_deref(), &posted);
         }
         let now_at = {
             let engine = self.orchestrator.engine();
@@ -1028,6 +1087,7 @@ impl RoomSession {
             published
                 .backlog
                 .extend(new.iter().filter(|e| e.seq > head).cloned());
+            keep_recent(&mut published.backlog);
         }
         // Whether anything a person's view depends on has moved. Checked
         // before the events are consumed below.
@@ -1074,8 +1134,8 @@ impl RoomSession {
                     }
                 }
                 Err(mpsc::error::TryRecvError::Empty) => return ControlFlow::Continue,
-                // All handles dropped: keep running for the bots' sake, but
-                // there will be no more human input.
+                // All handles dropped: no person can reach the room any
+                // more, so it stops as idle and resumes when opened again.
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     return ControlFlow::Stop(RunOutcome::Idle)
                 }
@@ -1147,6 +1207,10 @@ impl RoomSession {
             }
             Control::Answer { task, answer } => {
                 self.answer_waiting_task(task, answer);
+                // From the 13 November audit: an answer to a stalled room
+                // unblocked the task and then nothing ran it.
+                self.settled = false;
+                self.orchestrator.wake();
                 self.broadcast_new_events();
             }
             Control::AnswerDecision {
@@ -1369,6 +1433,19 @@ fn snapshot_from(engine: &orgbot_engine::Engine) -> ServerMessage {
 /// Chat and streaming deltas do not: a room that is only talking has not
 /// changed its board, and resending the digest for every token would drown
 /// the useful updates.
+/// The most events kept to replay to a client that connects, as many as the
+/// engine keeps in its own log. From the 13 November audit: the backlog was
+/// never trimmed, and a room up for days sent tens of thousands of frames on
+/// every reconnect, overflowing the broadcast and starting again.
+const BACKLOG_LIMIT: usize = 3_000;
+
+fn keep_recent(backlog: &mut Vec<EventEnvelope>) {
+    if backlog.len() > BACKLOG_LIMIT {
+        let excess = backlog.len() - BACKLOG_LIMIT;
+        backlog.drain(..excess);
+    }
+}
+
 fn touches_the_board(event: &orgbot_proto::event::Event) -> bool {
     use orgbot_proto::event::Event;
     matches!(
@@ -1390,6 +1467,12 @@ fn touches_the_board(event: &orgbot_proto::event::Event) -> bool {
             | Event::TurnStarted { .. }
             | Event::TurnEnded { .. }
             | Event::AgentErrored { .. }
+            // A bot paused, resumed, benched or leaving changes the Team
+            // panel. From the 13 November audit: after Resume the pill could
+            // stay on "paused by you".
+            | Event::AgentStatusChanged { .. }
+            | Event::AgentJoined { .. }
+            | Event::AgentLeft { .. }
     )
 }
 
@@ -1488,6 +1571,7 @@ fn send_unsent(
         published
             .backlog
             .extend(unsent.iter().filter(|e| e.seq > head).cloned());
+        keep_recent(&mut published.backlog);
         if let Some(snapshot) = snapshot {
             published.snapshot = snapshot;
         }
@@ -1545,6 +1629,53 @@ fn committed_attachments(engine: &orgbot_engine::Engine) -> HashSet<String> {
         .collect()
 }
 
+/// Where the ids of files on posted messages are kept across restarts.
+fn committed_attachments_index(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("committed-ids")
+}
+
+/// Append newly committed attachment ids to the index. Best effort: a missed
+/// line costs the import of an old file after a restart, nothing more.
+fn remember_committed_attachments(root: Option<&std::path::Path>, ids: &[String]) {
+    use std::io::Write;
+    let Some(root) = root else { return };
+    if std::fs::create_dir_all(root).is_err() {
+        return;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let Ok(mut file) = options.open(committed_attachments_index(root)) else {
+        return;
+    };
+    let mut lines = String::new();
+    for id in ids {
+        lines.push_str(id);
+        lines.push('\n');
+    }
+    if let Err(error) = file.write_all(lines.as_bytes()) {
+        tracing::warn!(%error, "attachment index could not be extended");
+    }
+}
+
+/// The ids kept by [`remember_committed_attachments`].
+fn remembered_committed_attachments(root: Option<&std::path::Path>) -> HashSet<String> {
+    let Some(root) = root else { return HashSet::new() };
+    std::fs::read_to_string(committed_attachments_index(root))
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && line.len() <= 64)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Answer a bot that is blocked waiting on a person: post the answer to it
 /// and unblock its task.
 fn answer_waiting_task(engine: &mut orgbot_engine::Engine, task: TaskId, answer: String) {
@@ -1553,8 +1684,20 @@ fn answer_waiting_task(engine: &mut orgbot_engine::Engine, task: TaskId, answer:
     };
     let waiting_on_human = record.state == TaskState::Blocked
         && record.blocked_on.iter().any(BlockReason::needs_human);
+    // From the 13 November audit: an answer that arrived after the bot had
+    // stopped waiting was dropped without a word. It is still the owner's
+    // answer, so it is posted to whoever holds the task; only the unblock
+    // depends on the wait. The same answer sent twice is posted once.
     if !waiting_on_human {
-        return;
+        let repeated = engine
+            .transcript()
+            .iter()
+            .rev()
+            .find(|message| message.task == Some(task) && message.intent == MessageIntent::Answer)
+            .is_some_and(|message| message.body == answer);
+        if repeated {
+            return;
+        }
     }
     let assignee = record.assignee;
     let message = ChatMessage {
@@ -1581,7 +1724,62 @@ fn answer_waiting_task(engine: &mut orgbot_engine::Engine, task: TaskId, answer:
     let _ = engine.apply(Command::PostMessage {
         message: Box::new(message),
     });
-    let _ = engine.apply(Command::UnblockTask { task });
+    if waiting_on_human {
+        let _ = engine.apply(Command::UnblockTask { task });
+    }
+}
+
+/// The temporary name a board is written under before it is renamed into
+/// place. Named after the board so a later start can tell its own leftovers
+/// from another room's.
+fn board_temp_name(path: &std::path::Path) -> String {
+    let board = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    format!(".{board}.{}.tmp", orgbot_proto::EventId::new())
+}
+
+/// Remove board temp files a killed run left behind.
+///
+/// From the 13 November audit: a kill between write and rename left a copy
+/// of the whole board beside it, every time, and nothing removed them. Only
+/// this room's own temps go at start (no other writer of this board exists),
+/// and the older unnamed form only once it is a day old.
+fn clear_stale_board_temps(path: &std::path::Path) {
+    let (Some(parent), Some(board)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let own = format!(".{}.", board.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(middle) = name.strip_prefix('.').and_then(|rest| rest.strip_suffix(".tmp")) else {
+            continue;
+        };
+        let ours = name.starts_with(&own);
+        // The older form: `.ev_<32 hex>.tmp`.
+        let legacy = middle
+            .strip_prefix("ev_")
+            .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        if !ours && !legacy {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        if legacy && !ours {
+            let old_enough = meta
+                .modified()
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > Duration::from_secs(24 * 60 * 60));
+            if !old_enough {
+                continue;
+            }
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
 }
 
 /// Write a room checkpoint to `path`, atomically.
@@ -1604,7 +1802,7 @@ fn write_board(path: &std::path::Path, mut board: serde_json::Value) -> anyhow::
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Invalid memory path"))?;
     std::fs::create_dir_all(parent)?;
-    let temp = parent.join(format!(".{}.tmp", orgbot_proto::EventId::new()));
+    let temp = parent.join(board_temp_name(path));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1760,10 +1958,24 @@ enum JournaledInput {
         chosen: String,
         note: String,
     },
+    /// An owner control applied mid-run: park or resume a task, pause,
+    /// resume or remove a bot. From the 13 November audit: these were not
+    /// journaled, so a crash before the next save undid them.
+    Control { command: Command },
 }
 
 fn journal_path(state_path: &std::path::Path) -> std::path::PathBuf {
     state_path.with_file_name("owner-input.jsonl")
+}
+
+/// Journal an owner control applied mid-run. Best effort: the control is
+/// applied either way, as it was before it was journaled.
+fn journal_control(path: Option<&std::path::Path>, command: &Command) {
+    if let Some(path) = path {
+        if let Err(error) = journal_append(path, &JournaledInput::Control { command: command.clone() }) {
+            tracing::warn!(%error, "owner control not journaled");
+        }
+    }
 }
 
 /// Append one entry and flush it to disk before returning.
@@ -1792,6 +2004,8 @@ fn journal_replay(
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
+    let mut kept: Vec<&str> = Vec::new();
+    let mut reasons: Vec<String> = Vec::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         // A torn last line from a crash mid-write is skipped, not fatal.
         let Ok(entry) = serde_json::from_str::<JournaledInput>(line) else {
@@ -1801,17 +2015,76 @@ fn journal_replay(
             JournaledInput::Message {
                 input,
                 default_target,
-            } => record_human_message(engine, attachments_root, default_target, input).map(|_| ()),
+            } => {
+                // From the 13 November audit: the transcript keeps the last
+                // thousand messages, so a message that had scrolled out of it
+                // was posted a second time. The retained log reaches further.
+                let already = engine.log().iter().any(|envelope| {
+                    matches!(&envelope.event, orgbot_proto::Event::MessagePosted { message } if message.id == input.id)
+                });
+                if already {
+                    continue;
+                }
+                record_human_message(engine, attachments_root, default_target, input).map(|_| ())
+            }
             JournaledInput::Decision {
                 decision,
                 chosen,
                 note,
             } => record_decision(engine, decision, chosen, note).map(|_| ()),
+            // Refused again most often because the save already holds it (a
+            // task already parked, a bot already gone): nothing to keep.
+            JournaledInput::Control { command } => {
+                if let Err(error) = engine.apply(command) {
+                    tracing::info!(%error, "journaled owner control not applied again");
+                }
+                continue;
+            }
         };
         if let Err(error) = result {
             tracing::warn!(%error, "journaled owner input could not be replayed");
+            kept.push(line);
+            reasons.push(error);
         }
     }
+    // From the 13 November audit: input that could not be replayed was
+    // deleted with the journal at the next save, and nobody was told. It is
+    // kept beside the journal and the owner is told what happened.
+    if kept.is_empty() {
+        return;
+    }
+    let aside = path.with_file_name("owner-input-not-replayed.jsonl");
+    let saved = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&aside)?;
+        for line in &kept {
+            file.write_all(line.as_bytes())?;
+            file.write_all(b"\n")?;
+        }
+        file.sync_all()
+    })();
+    let where_kept = match saved {
+        Ok(()) => format!("It is kept in {}.", aside.display()),
+        Err(_) => "It could not be kept either.".to_string(),
+    };
+    let notice = ChatMessage::system(
+        engine.room_id(),
+        format!(
+            "{} of your messages or answers from before the room restarted could not be applied again ({}). {where_kept}",
+            kept.len(),
+            reasons.join("; ")
+        ),
+    );
+    let mut notice = notice;
+    notice.audience = Audience::Human;
+    let _ = engine.apply(Command::PostMessage { message: Box::new(notice) });
 }
 
 /// One message from the person, as it arrived.
@@ -1998,21 +2271,8 @@ fn human_audience_with_default(
     if tags.iter().any(|tag| orgbot_proto::is_broadcast_tag(tag)) {
         return Audience::Everyone;
     }
-    if tags.is_empty() {
-        return match parent_author {
-            Some(Author::Agent { agent }) => Audience::Agents {
-                agents: vec![*agent],
-            },
-            Some(Author::Human { .. } | Author::System) => Audience::Human,
-            None => default_target
-                .map(|agent| Audience::Agents {
-                    agents: vec![agent],
-                })
-                .unwrap_or(Audience::Agents { agents: vec![] }),
-        };
-    }
     let mut targets = Vec::new();
-    for tag in tags {
+    for tag in &tags {
         let matches: Vec<_> = engine
             .agents()
             .filter(|agent| {
@@ -2025,6 +2285,21 @@ fn human_audience_with_default(
             targets.push(matches[0]);
         }
     }
+    // A tag that names nobody is read as no tag. From the 13 November audit:
+    // a mistyped name sent the message to no one, without a word.
+    if targets.is_empty() {
+        return match parent_author {
+            Some(Author::Agent { agent }) => Audience::Agents {
+                agents: vec![*agent],
+            },
+            Some(Author::Human { .. } | Author::System) => Audience::Human,
+            None => default_target
+                .map(|agent| Audience::Agents {
+                    agents: vec![agent],
+                })
+                .unwrap_or(Audience::Agents { agents: vec![] }),
+        };
+    }
     Audience::Agents { agents: targets }
 }
 
@@ -2033,7 +2308,6 @@ fn human_audience_with_default(
 /// available planner, then any available agent. If the whole roster is
 /// unavailable, keep the request queued for one stable recipient instead of
 /// implicitly broadcasting it.
-#[cfg(test)]
 fn default_human_target(engine: &orgbot_engine::Engine) -> Option<orgbot_proto::AgentId> {
     let agents: Vec<_> = engine.agents().collect();
     let available = |agent: &&orgbot_proto::AgentSpec| engine.status(agent.id).is_available();
@@ -2067,7 +2341,10 @@ enum ControlFlow {
 fn describe(outcome: &RunOutcome) -> String {
     match outcome {
         RunOutcome::Completed => "the room's goal was met".into(),
-        RunOutcome::Idle => "everyone idle and no clients remain".into(),
+        // Also how a stopped service closes. From the 13 November audit:
+        // "everyone idle and no clients remain" read as a finished room in
+        // the app during a service restart.
+        RunOutcome::Idle => "the room stopped; it carries on when opened again".into(),
         RunOutcome::OutOfTurns => "the room spent its turn budget".into(),
         RunOutcome::OutOfTime => "the room ran out of time".into(),
         RunOutcome::Stalled { rounds } => {
@@ -2272,6 +2549,80 @@ mod tests {
         // The next save holds it all, so the journal is no longer needed.
         restored.save_state().unwrap();
         assert!(!journal.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An owner control applied mid-run survives a crash before the save.
+    #[test]
+    fn a_park_applied_mid_run_survives_a_crash() {
+        let dir = std::env::temp_dir().join(format!("orgbot-owner-control-{}", orgbot_proto::RoomId::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let config = || {
+            let mut config = RoomConfig::parse(SCRIPTED_ROOM, "journal-control.toml").unwrap();
+            config.room.state_path = Some(path.clone());
+            config.resolve().unwrap()
+        };
+        let (mut session, _handle) = RoomSession::build(config()).unwrap();
+        let task = session.orchestrator.engine().tasks().next().unwrap().id;
+        session.save_state().unwrap();
+        journal_control(
+            Some(&journal_path(&path)),
+            &Command::ParkTask { by: None, task, reason: "later".into() },
+        );
+        drop(session);
+
+        let (restored, _handle) = RoomSession::build_with_resume(config(), true).unwrap();
+        assert_eq!(restored.orchestrator.engine().task(task).unwrap().state, TaskState::Parked);
+        assert!(!path.with_file_name("owner-input-not-replayed.jsonl").exists());
+        drop(restored);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Journaled input that cannot be applied again is kept and reported,
+    /// not deleted with the journal at the next save.
+    #[test]
+    fn owner_input_that_cannot_be_replayed_is_kept_and_reported() {
+        let dir = std::env::temp_dir().join(format!("orgbot-owner-journal-kept-{}", orgbot_proto::RoomId::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let config = || {
+            let mut config = RoomConfig::parse(SCRIPTED_ROOM, "journal-kept.toml").unwrap();
+            config.room.state_path = Some(path.clone());
+            config.resolve().unwrap()
+        };
+        let (mut session, _handle) = RoomSession::build(config()).unwrap();
+        session.save_state().unwrap();
+        journal_append(
+            &journal_path(&path),
+            &JournaledInput::Message {
+                input: HumanInput {
+                    id: MessageId::new(),
+                    author: "Aece".into(),
+                    body: "about that reply".into(),
+                    task: None,
+                    files: vec![],
+                    // Not in this room, so it cannot be posted again.
+                    reply_to: Some(MessageId::new()),
+                },
+                default_target: None,
+            },
+        )
+        .unwrap();
+        drop(session);
+
+        let (restored, _handle) = RoomSession::build_with_resume(config(), true).unwrap();
+        let aside = path.with_file_name("owner-input-not-replayed.jsonl");
+        let kept = std::fs::read_to_string(&aside).unwrap();
+        assert!(kept.contains("about that reply"), "{kept}");
+        let told = restored
+            .orchestrator
+            .engine()
+            .transcript()
+            .iter()
+            .any(|m| m.audience == Audience::Human && m.body.contains("could not be applied again"));
+        assert!(told, "the owner is told");
+        drop(restored);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2803,6 +3154,54 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), running).await;
     }
 
+    /// A killed save leaves a temp copy of the board; the next start removes
+    /// it, and leaves other rooms' temps and fresh unnamed ones alone.
+    #[test]
+    fn a_killed_save_leaves_nothing_behind_at_the_next_start() {
+        let dir = std::env::temp_dir().join(format!("orgbot-board-temps-{}", orgbot_proto::RoomId::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let board = dir.join("room.board.json");
+        let own = dir.join(board_temp_name(&board));
+        let other = dir.join(board_temp_name(&dir.join("other.board.json")));
+        let fresh_legacy = dir.join(format!(".{}.tmp", orgbot_proto::EventId::new()));
+        for file in [&own, &other, &fresh_legacy] {
+            std::fs::write(file, b"{}").unwrap();
+        }
+        clear_stale_board_temps(&board);
+        assert!(!own.exists());
+        assert!(other.exists());
+        assert!(fresh_legacy.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An answer that arrives after the bot stopped waiting still reaches it,
+    /// once, and does not unblock anything.
+    #[test]
+    fn a_late_answer_is_posted_once_and_unblocks_nothing() {
+        let resolved = RoomConfig::parse(SCRIPTED_ROOM, "late-answer.toml")
+            .unwrap()
+            .resolve()
+            .unwrap();
+        let (mut session, _handle) = RoomSession::build(resolved).unwrap();
+        let mut engine = session.orchestrator.engine_mut();
+        let bot = engine.agents().next().unwrap().id;
+        let task = engine.tasks().next().unwrap().id;
+        engine.apply(Command::ClaimTask { task, by: bot }).unwrap();
+        engine.apply(Command::StartTask { task, by: bot }).unwrap();
+        let answers = |engine: &orgbot_engine::Engine| {
+            engine
+                .transcript()
+                .iter()
+                .filter(|message| message.task == Some(task) && message.intent == MessageIntent::Answer)
+                .count()
+        };
+        answer_waiting_task(&mut engine, task, "teal".into());
+        assert_eq!(answers(&engine), 1, "the answer must not be dropped");
+        assert_eq!(engine.task(task).unwrap().state, TaskState::InProgress);
+        answer_waiting_task(&mut engine, task, "teal".into());
+        assert_eq!(answers(&engine), 1, "the same answer twice is posted once");
+    }
+
     /// A turn that ends only when the test says so.
     #[derive(Debug)]
     struct HeldTurnProvider {
@@ -2979,8 +3378,19 @@ mod tests {
             .unwrap();
         assert!(prepared.status.success(), "{}", String::from_utf8_lossy(&prepared.stderr));
         let copies = workspaces.join("agents");
-        let leftover = std::fs::read_dir(&copies).unwrap().next().unwrap().unwrap().path().join("bot_long_gone");
+        let project_copies = std::fs::read_dir(&copies).unwrap().next().unwrap().unwrap().path();
+        let leftover = project_copies.join("bot_long_gone");
         assert!(leftover.is_dir());
+        // Last used two hours ago: a copy used in the last hour is kept, as
+        // it may belong to a bot that joined after the keep list was taken.
+        let earlier = std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+        let manifest = workspaces
+            .join("manifests")
+            .join(project_copies.file_name().unwrap())
+            .join("bot_long_gone.json");
+        for path in [&leftover, &manifest] {
+            std::fs::File::open(path).unwrap().set_modified(earlier).unwrap();
+        }
 
         let mut config = RoomConfig::parse(SCRIPTED_ROOM, "prune.toml").unwrap();
         config.room.state_path = Some(dir.join("state").join("state.json"));
@@ -3541,14 +3951,12 @@ mod tests {
             })
             .unwrap();
         let engine = session.orchestrator.engine();
-        assert_eq!(
-            human_audience(&engine, "@Julian check", None),
-            Audience::Agents { agents: vec![] }
-        );
-        assert_eq!(
-            human_audience(&engine, "@missing check", None),
-            Audience::Agents { agents: vec![] }
-        );
+        // A tag that names nobody, or two bots, is read as no tag: the
+        // message goes where an untagged one would, not to no one.
+        let untagged = human_audience(&engine, "check", None);
+        assert_ne!(untagged, Audience::Agents { agents: vec![] });
+        assert_eq!(human_audience(&engine, "@Julian check", None), untagged);
+        assert_eq!(human_audience(&engine, "@missing check", None), untagged);
         assert_eq!(
             human_audience(&engine, "@all hello", None),
             Audience::Everyone

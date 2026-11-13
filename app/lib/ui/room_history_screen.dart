@@ -91,6 +91,7 @@ class _RoomHistoryScreenState extends State<RoomHistoryScreen> {
       }
       final files = <String, List<int>>{...history};
       final projectFileModes = <String, int>{};
+      var omitted = const <String>[];
       var payloadBytes = files.values.fold<int>(
         0,
         (sum, bytes) => sum + bytes.length,
@@ -109,6 +110,7 @@ class _RoomHistoryScreenState extends State<RoomHistoryScreen> {
             maxBytes: PortableRoomBackup.maxExpandedBytes - payloadBytes,
             maxFileCount: PortableRoomBackup.maxFiles - files.length,
             onFileMode: (path, mode) => projectFileModes[path] = mode,
+            onOmitted: (left) => omitted = left,
             onProgress: (count) {
               if (mounted) {
                 setState(
@@ -157,7 +159,14 @@ class _RoomHistoryScreenState extends State<RoomHistoryScreen> {
       _checkBackupCancelled();
       setState(() => _backupStatus = 'Saving backup…');
       await PortableRoomBackup.writePrivateFile(path, bundle);
-      if (mounted) _message('Private room backup saved.');
+      if (mounted) {
+        _message(
+          omitted.isEmpty
+              ? 'Private room backup saved.'
+              : 'Private room backup saved. Left out: ${omitted.take(5).join(', ')}'
+                    '${omitted.length > 5 ? ' and ${omitted.length - 5} more' : ''}.',
+        );
+      }
     } catch (error) {
       if (mounted) {
         _message(

@@ -60,6 +60,36 @@ void main() {
   // Concurrency is a rate multiplier, not only a speed-up: a room running four
   // at a time draws about four times as fast as one at a time. A default that
   // quadruples someone's consumption is a decision taken on their behalf.
+  test('earlier rooms\' boards are a top-level key, before any table', () {
+    // From the 13 November audit: written after `[room]`, the key landed in
+    // that table and the engine never saw earlier rooms' work.
+    final file = buildRoomFile(
+      room(),
+      [BotDef(name: 'Builder')],
+      canRunClis: true,
+      priorBoards: ['/tmp/a/state.json'],
+    );
+    final key = file.toml.indexOf('prior_boards = ["/tmp/a/state.json"]');
+    expect(key, greaterThanOrEqualTo(0));
+    expect(key, lessThan(file.toml.indexOf('[room]')));
+  });
+
+  // From the 13 November audit: a pasted form feed was written raw, and the
+  // room failed to start with a TOML error.
+  test('control characters in a goal are escaped, not written raw', () {
+    final file = buildRoomFile(
+      RoomDef(name: 'Pasted', goal: 'Page one\fPage two\u0007', path: '/tmp/p'),
+      [BotDef(name: 'Builder')],
+      canRunClis: true,
+    );
+    expect(file.toml, contains(r'Page one\u000cPage two\u0007'));
+    expect(
+      file.toml.runes.where((r) => r < 0x20 && r != 0x0A),
+      isEmpty,
+      reason: 'only line breaks between entries are raw',
+    );
+  });
+
   test('a new room does not default to quadrupling what it draws', () {
     expect(defaultParallelTurns, lessThanOrEqualTo(2));
     expect(

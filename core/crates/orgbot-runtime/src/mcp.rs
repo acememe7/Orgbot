@@ -149,13 +149,22 @@ impl McpSession {
 /// Serve one relay connection: forward every newline-delimited request to the
 /// room's in-turn dispatcher and write its reply back. The dispatcher lives in
 /// the bot's turn loop, so a request that arrives between turns simply waits.
+/// The longest room tool request a bot may send.
+const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+
 pub async fn serve_stream(stream: tokio::net::UnixStream, tx: mpsc::Sender<McpCall>) {
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
     let mut reader = BufReader::new(stream);
     loop {
+        // One request is at most MAX_REQUEST_BYTES. From the 13 November
+        // audit: a sandboxed peer could send a line of any length.
         let mut line = String::new();
-        match reader.read_line(&mut line).await {
+        let read = (&mut reader).take(MAX_REQUEST_BYTES as u64 + 1).read_line(&mut line).await;
+        if line.len() > MAX_REQUEST_BYTES {
+            break;
+        }
+        match read {
             Ok(0) | Err(_) => break,
             Ok(_) => {
                 let trimmed = line.trim().to_string();

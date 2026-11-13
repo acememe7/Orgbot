@@ -126,8 +126,12 @@ def _ensure_private_dir(path: Path) -> None:
     except FileNotFoundError:
         path.mkdir(mode=0o700)
         info = path.lstat()
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
         _fail(f"Unsafe or non-private directory: {path}")
+    # Our own folder opened up (a bot's `chmod 755 ~/.claude`, say) is made
+    # private again rather than refusing every later turn.
+    if info.st_mode & 0o077:
+        os.chmod(path, stat.S_IMODE(info.st_mode) & 0o700 | 0o700)
 
 
 def _safe_state_child(state: Path, relative: str, *, create: bool = False) -> Path:
@@ -192,7 +196,22 @@ def _manifest_candidates(state: Path, agent: str) -> list[Path]:
             if stat.S_ISLNK(candidate_info.st_mode) or not stat.S_ISREG(candidate_info.st_mode):
                 _fail("Unsafe workspace baseline manifest")
             result.append(candidate)
+    # A bot with copies of two project folders (the room was pointed at a
+    # renamed one) uses the copy of the project it is working on now. From the
+    # 13 November audit: the second manifest made every command fail.
+    if len(result) > 1 and _PROJECT_HINT:
+        try:
+            wanted = _project_id(Path(_PROJECT_HINT[0]).resolve(strict=True))
+        except (OSError, WorkspaceError):
+            return result
+        chosen = [candidate for candidate in result if candidate.parent.name == wanted]
+        if len(chosen) == 1:
+            return chosen
     return result
+
+
+# The project a command is for, when the caller says (`--project`).
+_PROJECT_HINT: list[str] = []
 
 
 def _ensure_root_paths(state: Path, project: Path) -> None:
@@ -217,10 +236,43 @@ def _relative(path: str) -> PurePosixPath:
     return rel
 
 
+# Folders with an excluded name that the project's git tracks files in: real
+# source (a site's `build/`, `scripts/dist/`), copied and merged like any
+# other. From the 13 November audit: changes there were dropped while the
+# merge reported success. Filled per command from the owner's project.
+_TRACKED_GENERATED: set[str] = set()
+
+
+def _load_tracked_generated(project: Path) -> None:
+    """Note which excluded-name folders the project tracks files in."""
+    _TRACKED_GENERATED.clear()
+    if not (project / ".git").is_dir() or not shutil.which("git"):
+        return
+    try:
+        listed = _owner_git(project, "ls-files", "-z")
+    except (OSError, subprocess.SubprocessError):
+        return
+    if listed.returncode != 0:
+        return
+    for path in listed.stdout.split("\0"):
+        parts = PurePosixPath(path).parts
+        for index, part in enumerate(parts[:-1]):
+            if part in EXCLUDED_DIRS and part != ".git":
+                _TRACKED_GENERATED.add("/".join(parts[: index + 1]))
+
+
 def _excluded(relative: str, *, include_git: bool = False) -> bool:
     parts = PurePosixPath(relative).parts
+    # Inside .git, names are refs and objects, not build output. From the 13
+    # November audit: a branch named `build` or `release/dist` was not copied
+    # into a bot's .git, which then saw an unborn branch.
+    if include_git and parts and parts[0] == ".git":
+        return False
     excluded = EXCLUDED_DIRS - ({".git"} if include_git else set())
-    return any(part in excluded for part in parts) or bool(parts and parts[-1] in EXCLUDED_FILES)
+    for index, part in enumerate(parts):
+        if part in excluded and "/".join(parts[: index + 1]) not in _TRACKED_GENERATED:
+            return True
+    return bool(parts and parts[-1] in EXCLUDED_FILES)
 
 
 _IGNORED_LINKS: set[str] = set()
@@ -330,11 +382,11 @@ def _entry(path: Path, root: Path, *, limit: bool = True) -> dict[str, Any]:
     return {"kind": "file", "sha256": sha, "mode": stat.S_IMODE(info.st_mode) & 0o777, "size": info.st_size}
 
 
-def _scan(root: Path) -> dict[str, dict[str, Any]]:
+def _scan(root: Path, *, lenient: bool = False) -> dict[str, dict[str, Any]]:
     cache = _HASH_CACHES.get(os.fspath(root))
     if cache is not None:
         cache[2].clear()
-    entries = _scan_tree(root)
+    entries = _scan_tree(root, lenient=lenient)
     if cache is not None and cache[2] != cache[1]:
         try:
             _atomic_json(cache[0], {"files": cache[2]})
@@ -346,10 +398,14 @@ def _scan(root: Path) -> dict[str, dict[str, Any]]:
 
 # Links the latest scan left out because they lead outside the project.
 _SKIPPED_LINKS: list[str] = []
+# Entries the latest lenient scan of a bot's copy left out because they cannot
+# be merged: sockets, FIFOs, hard links, files over the size limit.
+_SKIPPED_ENTRIES: list[str] = []
 
 
-def _scan_tree(root: Path) -> dict[str, dict[str, Any]]:
+def _scan_tree(root: Path, *, lenient: bool = False) -> dict[str, dict[str, Any]]:
     _SKIPPED_LINKS.clear()
+    _SKIPPED_ENTRIES.clear()
     entries: dict[str, dict[str, Any]] = {}
     total_bytes = 0
     count = 0
@@ -383,6 +439,18 @@ def _scan_tree(root: Path) -> dict[str, dict[str, Any]]:
                     _SKIPPED_LINKS.append(rel)
                 continue
             _relative(rel)
+            if lenient:
+                # A bot's copy may hold what the room cannot merge: a dev
+                # server's socket, a hard link, a huge build output. It is
+                # left out and named instead of failing every later call,
+                # the one that would remove it included (13 November audit).
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_FILE_BYTES:
+                    _SKIPPED_ENTRIES.append(rel)
+                    continue
             row = _entry(path, root)
             total_bytes += row["size"]
             count += 1
@@ -393,7 +461,15 @@ def _scan_tree(root: Path) -> dict[str, dict[str, Any]]:
 
 
 def _scan_workspace(root: Path, baseline: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    entries = _scan(root)
+    entries = _scan(root, lenient=True)
+    # What cannot be merged counts as unchanged where a project file stands,
+    # and is simply left out elsewhere; either way it is named.
+    for skipped in _SKIPPED_ENTRIES:
+        if skipped in baseline:
+            entries[skipped] = baseline[skipped]
+    if _SKIPPED_ENTRIES:
+        shown = ", ".join(_SKIPPED_ENTRIES[:5]) + ("" if len(_SKIPPED_ENTRIES) <= 5 else f" and {len(_SKIPPED_ENTRIES) - 5} more")
+        print(f"orgbot-workspace: not merged, as they are not plain files under the size limit: {shown}", file=sys.stderr)
     # A stray link at a new path is left out, but one standing where project
     # files were would make them look removed, and could redirect writes.
     for link in _SKIPPED_LINKS:
@@ -640,22 +716,26 @@ def _rename_noreplace(parent_fd: int, old_name: str, new_name: str) -> None:
         raise OSError(error, os.strerror(error), new_name)
 
 
-def _atomic_copy_file(source_root: Path, source_relative: str, destination_root: Path, destination_relative: str, mode: int, *, create_parents: bool, replace_existing: bool) -> None:
+def _stage_copy(source_root: Path, source_relative: str, destination_root: Path, destination_relative: str, mode: int, *, create_parents: bool, replace_existing: bool, directory_mode: int | None = None) -> tuple[int, str, str]:
+    """Copy a file to a temporary name beside its destination.
+
+    Returns the destination folder's descriptor, the temporary name and the
+    final name, for `_commit_staged` or `_discard_staged`. Nothing at the
+    destination changes until the commit.
+    """
     source_parent_fd, source_name = _open_parent_fd(source_root, source_relative, create=False, directory_mode=0o700)
-    destination_parent_fd, destination_name = _open_parent_fd(destination_root, destination_relative, create=create_parents, directory_mode=0o755 if destination_root == source_root else 0o700)
+    # Folders a bot adds to the project get the project's usual 0755 (less
+    # the umask); folders made in private state stay 0700. From the 13
+    # November audit: new project folders landed as 0700.
+    folder_mode = directory_mode if directory_mode is not None else (0o755 if destination_root == source_root else 0o700)
+    destination_parent_fd, destination_name = _open_parent_fd(destination_root, destination_relative, create=create_parents, directory_mode=folder_mode)
     temp_name = f".orgbot-{os.getpid()}-{os.urandom(8).hex()}"
+    staged = False
     try:
         source_stat = os.stat(source_name, dir_fd=source_parent_fd, follow_symlinks=False)
         if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_nlink != 1:
             _fail(f"Unsafe source file: {source_relative}")
-        try:
-            dest_stat = os.stat(destination_name, dir_fd=destination_parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            dest_stat = None
-        if dest_stat is not None and (stat.S_ISLNK(dest_stat.st_mode) or not stat.S_ISREG(dest_stat.st_mode)):
-            _fail(f"Unsafe destination file: {destination_relative}")
-        if dest_stat is not None and not replace_existing:
-            _fail(f"Destination appeared while integrating {destination_relative}; preserved it")
+        _check_destination(destination_parent_fd, destination_name, destination_relative, replace_existing)
         src_fd = os.open(source_name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=source_parent_fd)
         dst_fd = -1
         try:
@@ -668,22 +748,59 @@ def _atomic_copy_file(source_root: Path, source_relative: str, destination_root:
             final_source = os.fstat(src_fd)
             if source_snapshot != (final_source.st_dev, final_source.st_ino, final_source.st_size, final_source.st_mtime_ns, final_source.st_ctime_ns):
                 _fail(f"Source changed during copy: {source_relative}")
-            if replace_existing:
-                os.replace(temp_name, destination_name, src_dir_fd=destination_parent_fd, dst_dir_fd=destination_parent_fd)
-            else:
-                _rename_noreplace(destination_parent_fd, temp_name, destination_name)
-            os.fsync(destination_parent_fd)
         finally:
             os.close(src_fd)
             if dst_fd >= 0:
                 os.close(dst_fd)
+        staged = True
+        return destination_parent_fd, temp_name, destination_name
     finally:
-        try:
-            os.unlink(temp_name, dir_fd=destination_parent_fd)
-        except FileNotFoundError:
-            pass
         os.close(source_parent_fd)
-        os.close(destination_parent_fd)
+        if not staged:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temp_name, dir_fd=destination_parent_fd)
+            os.close(destination_parent_fd)
+
+
+def _check_destination(parent_fd: int, name: str, relative: str, replace_existing: bool) -> None:
+    try:
+        dest_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(dest_stat.st_mode) or not stat.S_ISREG(dest_stat.st_mode):
+        _fail(f"Unsafe destination file: {relative}")
+    if not replace_existing:
+        _fail(f"Destination appeared while integrating {relative}; preserved it")
+
+
+def _commit_staged(staged: tuple[int, str, str], relative: str, *, replace_existing: bool) -> None:
+    """Move a staged copy into place and let go of it."""
+    parent_fd, temp_name, name = staged
+    try:
+        _check_destination(parent_fd, name, relative, replace_existing)
+        if replace_existing:
+            os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        else:
+            _rename_noreplace(parent_fd, temp_name, name)
+        os.fsync(parent_fd)
+    finally:
+        _discard_staged(staged)
+
+
+def _discard_staged(staged: tuple[int, str, str]) -> None:
+    """Remove a staged copy that was not committed, and let go of it."""
+    parent_fd, temp_name, _ = staged
+    try:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp_name, dir_fd=parent_fd)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(parent_fd)
+
+
+def _atomic_copy_file(source_root: Path, source_relative: str, destination_root: Path, destination_relative: str, mode: int, *, create_parents: bool, replace_existing: bool, directory_mode: int | None = None) -> None:
+    staged = _stage_copy(source_root, source_relative, destination_root, destination_relative, mode, create_parents=create_parents, replace_existing=replace_existing, directory_mode=directory_mode)
+    _commit_staged(staged, destination_relative, replace_existing=replace_existing)
 
 
 def _remove_file(path: Path) -> None:
@@ -731,7 +848,7 @@ def _copy_from_project(project: Path, workspace: Path, relative: str) -> None:
 
 
 def _copy_from_workspace(workspace: Path, project: Path, relative: str, mode: int) -> None:
-    _atomic_copy_file(workspace, relative, project, relative, mode, create_parents=True, replace_existing=False)
+    _atomic_copy_file(workspace, relative, project, relative, mode, create_parents=True, replace_existing=False, directory_mode=0o755)
 
 
 def _changes(base: dict[str, dict[str, Any]], current: dict[str, dict[str, Any]], work: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1040,7 +1157,11 @@ def _share_with_siblings(state: Path, project: Path, agent: str, workspace: Path
 
 
 def _cache_hashes(state: Path, project: Path, workspace: Path) -> None:
-    """Remember file hashes for the project and this copy, in private state."""
+    """Remember file hashes for the project and this copy, in private state.
+
+    Also notes which excluded-name folders the project tracks, so every scan
+    in this command treats them alike."""
+    _load_tracked_generated(project)
     _use_hash_cache(project, state / "agents" / _project_id(project) / ".project-hashes.json")
     _use_hash_cache(workspace, workspace.parent / ".hashes.json")
 
@@ -1099,6 +1220,7 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool, 
     _ensure_root_paths(state, project)
     lock_fd = _lock(project)
     try:
+        recovered = _recover_journals(state, project)
         agent_root, workspace, manifest_path = _layout(state, project, agent)
         # Before the scan, so it reuses remembered hashes. From the audit
         # after speed test 1: every prepare rehashed the whole project first.
@@ -1127,11 +1249,37 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool, 
                 workspace_exists = True
             except FileNotFoundError:
                 workspace_exists = False
+            # From the 13 November audit: a first copy that failed or was
+            # stopped part way stayed here without a manifest, and every later
+            # prepare refused the bot. Such a copy is moved to the owner's
+            # leftovers, and a new copy is made under a temporary name and
+            # moved into place only once it is complete.
             if workspace_exists:
-                _fail("Workspace exists without a trusted baseline manifest")
-            _copy_tree(project, workspace)
-            if _scan_workspace(workspace, source_entries) != source_entries or _scan(project) != source_entries:
-                _fail("Project changed during workspace preparation; no baseline was written")
+                if workspace.is_symlink() or not workspace.is_dir():
+                    _fail("Workspace exists without a trusted baseline manifest")
+                aside = _leftovers_dir(f"{agent}-incomplete-copy")
+                _mkdir_chain_no_symlinks(aside.parent)
+                try:
+                    os.rename(workspace, aside)
+                except OSError:
+                    _fail("Workspace exists without a trusted baseline manifest")
+            for stale in agent_root.glob("project.partial-*"):
+                if stale.is_dir() and not stale.is_symlink():
+                    with contextlib.suppress(OSError):
+                        _remove_tree(stale)
+            partial = agent_root / f"project.partial-{os.getpid()}-{os.urandom(4).hex()}"
+            try:
+                _copy_tree(project, partial)
+                # The copy's hashes are remembered by path inside it, so they
+                # still match once it is moved into place.
+                _use_hash_cache(partial, workspace.parent / ".hashes.json")
+                if _scan_workspace(partial, source_entries) != source_entries or _scan(project) != source_entries:
+                    _fail("Project changed during workspace preparation; no baseline was written")
+                os.rename(partial, workspace)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    _remove_tree(partial)
+                raise
             data = {"format_version": FORMAT_VERSION, "project": os.fspath(project), "agent": agent, "read_only": read_only, "created_at": int(time.time()), "entries": source_entries}
             if label:
                 data["label"] = label
@@ -1142,6 +1290,10 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool, 
             _atomic_json(manifest_path, data)
         else:
             data = _manifest_read(manifest_path, project, agent)
+            # Written back only when something changed. From the 13 November
+            # audit: every read, list and git call rewrote it under the
+            # room-wide project lock.
+            as_read = json.dumps(data, sort_keys=True, default=str)
             if not workspace.is_dir() or workspace.is_symlink():
                 _fail("Workspace path is missing or unsafe")
             _check_private_dir(workspace)
@@ -1171,10 +1323,15 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool, 
                     else:
                         _copy_from_project(project, workspace, name)
                         merged[name] = now
-                elif ours is not None:
-                    merged[name] = before or ours
+                # Otherwise the bot changed it: its baseline stays as it was.
+                # From the 13 November audit: a file the bot added was
+                # recorded as baseline here, so it never merged, and the next
+                # prepare deleted it from the copy as removed upstream.
             data["entries"] = merged
-            data["read_only"] = data["read_only"] or read_only
+            # The copy follows what this bot may do now. From the 13 November
+            # audit: one that was ever read-only stayed so after the owner
+            # made the bot a builder.
+            data["read_only"] = read_only
             _prune_empty_parents(workspace, removed_here)
             history = None
             if not conflicts:
@@ -1188,9 +1345,10 @@ def _prepare(project_arg: str, state_arg: str, agent_arg: str, read_only: bool, 
                 data.pop("refresh_conflicts", None)
             if label:
                 data["label"] = label
-            _atomic_json(manifest_path, data)
+            if json.dumps(data, sort_keys=True, default=str) != as_read:
+                _atomic_json(manifest_path, data)
         shared = _share_with_siblings(state, project, agent, workspace, data["entries"]) if _is_shared_copy(agent, data) else 0
-        return {"ok": True, "shared_bytes": shared, "workspace": os.fspath(workspace), "profile_root": os.fspath(agent_root / "profiles"), "private_home": os.fspath(private_home), "private_home_mount": f"/run/user/{os.getuid()}/orgbot-home", "mcp_socket_mount": f"/run/user/{os.getuid()}/orgbot-room-mcp.sock", "read_only": data["read_only"], "conflicts": data.get("refresh_conflicts", []), "project_id": _project_id(project), "history": history}
+        return {"ok": True, "shared_bytes": shared, "workspace": os.fspath(workspace), "profile_root": os.fspath(agent_root / "profiles"), "private_home": os.fspath(private_home), "private_home_mount": f"/run/user/{os.getuid()}/orgbot-home", "mcp_socket_mount": f"/run/user/{os.getuid()}/orgbot-room-mcp.sock", "read_only": data["read_only"], "conflicts": data.get("refresh_conflicts", []), "project_id": _project_id(project), "history": history, "recovered": recovered}
     finally:
         os.close(lock_fd)
 
@@ -1199,6 +1357,10 @@ LEDGER_LIMIT = 100_000
 
 # Image files a bot most likely made as a screenshot or capture.
 CAPTURE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+# Words that mark an image as a capture rather than one of the project's own.
+CAPTURE_WORDS = ("screenshot", "screen-shot", "screen_shot", "screen", "capture", "preview", "snapshot", "shot")
+# Top-level files that are meant to be empty.
+EMPTY_BY_DESIGN = frozenset({"__init__.py", "conftest.py", "py.typed", "CNAME", "LICENSE"})
 
 
 def _ledger_path(state: Path, project: Path) -> Path:
@@ -1410,6 +1572,9 @@ def _last_modified(agent_root: Path) -> int | None:
     return None
 
 
+PRUNE_RECENT_SECONDS = 3600
+
+
 def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, Any]:
     """Remove working copies that belong to no current bot and hold no unmerged work.
 
@@ -1443,6 +1608,16 @@ def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, 
                 kept.append({"agent": agent, "last_modified": _last_modified(agent_root), "reason": "not a private directory"})
                 continue
             manifest = state / "manifests" / project_dir.name / f"{agent}.json"
+            # A copy used in the last hour may belong to a bot that joined
+            # after the keep list was taken. From the 13 November audit: such
+            # a copy could be removed mid-turn.
+            try:
+                recent = max(agent_root.stat().st_mtime, manifest.stat().st_mtime if manifest.exists() else 0)
+            except OSError:
+                recent = 0
+            if not dry_run and time.time() - recent < PRUNE_RECENT_SECONDS:
+                kept.append({"agent": agent, "last_modified": _last_modified(agent_root), "reason": "used in the last hour"})
+                continue
             named: dict[str, Any] = {}
             try:
                 raw = _read_private_json(manifest, "workspace baseline manifest")
@@ -1480,10 +1655,36 @@ def _prune(state_arg: str, keep: list[str], dry_run: bool = False) -> dict[str, 
             size = _tree_bytes(agent_root)
             modified = _last_modified(agent_root)
             if not dry_run:
-                shutil.rmtree(agent_root)
+                # One copy that cannot be removed is kept and named; the rest
+                # go on. From the 13 November audit: a read-only Go module
+                # cache stopped every later prune at that copy.
+                try:
+                    _remove_tree(agent_root)
+                except OSError as exc:
+                    kept.append({"agent": agent, **named, "last_modified": modified, "reason": f"it could not be removed: {exc.strerror or exc}", "bytes": _tree_bytes(agent_root) if agent_root.exists() else 0})
+                    continue
                 manifest.unlink(missing_ok=True)
             removed.append({"agent": agent, **named, "bytes": size, "last_modified": modified})
     return {"ok": True, "dry_run": dry_run, "removed": removed, "kept": kept, "freed_bytes": sum(item["bytes"] for item in removed)}
+
+
+def _remove_tree(root: Path) -> None:
+    """Remove a folder of OrgBots' own, read-only parts included (a Go module
+    cache, a bot's `chmod -w`): their write permission is restored first."""
+    def again(function, path, _excinfo):
+        parent = os.path.dirname(path)
+        for folder in (parent, path):
+            try:
+                info = os.lstat(folder)
+            except OSError:
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                os.chmod(folder, stat.S_IMODE(info.st_mode) | stat.S_IRWXU)
+        function(path)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(root, onexc=again)
+    else:
+        shutil.rmtree(root, onerror=again)
 
 
 def _same_bytes(first: Path, second: Path) -> bool:
@@ -1576,9 +1777,7 @@ def _discard(state_arg: str, agent_arg: str, keep: list[str]) -> dict[str, Any]:
     history = False
     copy = agent_root / "project"
     if copy.is_dir() and not copy.is_symlink():
-        raw_xdg = os.environ.get("XDG_DATA_HOME")
-        data = Path(raw_xdg) if raw_xdg and Path(raw_xdg).is_absolute() else Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local/share"
-        rescue = data / "orgbot" / "leftovers" / f"{agent}-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}"
+        rescue = _leftovers_dir(agent)
         if _unlanded_commits(copy, project):
             # Commits that never landed live only here; keep the whole history.
             _mkdir_chain_no_symlinks(rescue)
@@ -1592,6 +1791,12 @@ def _discard(state_arg: str, agent_arg: str, keep: list[str]) -> dict[str, Any]:
                 relative = source.relative_to(copy).as_posix()
                 if source.is_symlink() or _excluded(relative):
                     continue
+                # Only plain files: opening a FIFO a bot made would wait forever.
+                try:
+                    if not stat.S_ISREG(source.lstat().st_mode):
+                        continue
+                except OSError:
+                    continue
                 theirs = project / relative if project is not None else None
                 if theirs is not None and theirs.is_file() and not theirs.is_symlink() and _same_bytes(source, theirs):
                     continue
@@ -1602,11 +1807,83 @@ def _discard(state_arg: str, agent_arg: str, keep: list[str]) -> dict[str, Any]:
                     shutil.copyfileobj(src, out)
                 rescued += 1
     size = _tree_bytes(agent_root)
-    shutil.rmtree(agent_root)
+    _remove_tree(agent_root)
     (manifests / f"{agent}.json").unlink(missing_ok=True)
     kept_any = rescued or history
     return {"ok": True, "agent": agent, "rescued": rescued, "history": history,
             "rescue_dir": os.fspath(rescue) if kept_any else None, "freed_bytes": size}
+
+
+def _leftovers_dir(name: str) -> Path:
+    """A new folder for files kept from a bot's copy, hidden from every bot."""
+    raw_xdg = os.environ.get("XDG_DATA_HOME")
+    data = Path(raw_xdg) if raw_xdg and Path(raw_xdg).is_absolute() else Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local/share"
+    return data / "orgbot" / "leftovers" / f"{name}-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}"
+
+
+def _set_aside(state_arg: str, agent_arg: str) -> dict[str, Any]:
+    """Take the changes a bot made while it held no task out of its copy.
+
+    From the 13 November audit: they stayed in the copy and merged at the end
+    of the first later turn in which the bot held any task, under that task.
+    The bot's version of each changed or added file goes to a leftovers
+    folder the owner can open; the copy takes the project's files back, and
+    its baseline follows, so nothing of it merges later.
+    """
+    agent = _safe_agent(agent_arg)
+    state = _canonical_directory(state_arg, "state")
+    _check_private_dir(state)
+    manifest_paths = _manifest_candidates(state, agent)
+    if len(manifest_paths) != 1:
+        _fail("Expected exactly one workspace manifest for this agent")
+    manifest_path = manifest_paths[0]
+    raw = _read_private_json(manifest_path, "workspace baseline manifest")
+    if not isinstance(raw, dict) or raw.get("format_version") != FORMAT_VERSION or not isinstance(raw.get("project"), str):
+        _fail("Workspace baseline manifest has invalid identity or version")
+    project = _canonical_directory(raw["project"], "project")
+    lock_fd = _lock(project)
+    try:
+        data = _manifest_read(manifest_path, project, agent)
+        _, workspace, _ = _layout(state, project, agent)
+        if _is_shared_copy(agent, data):
+            return {"ok": True, "set_aside": 0, "rescue_dir": None, "paths": []}
+        if workspace.is_symlink() or not workspace.is_dir():
+            _fail("Workspace path is missing or unsafe")
+        _check_private_dir(workspace)
+        _cache_hashes(state, project, workspace)
+        current = _scan(project)
+        ours = _scan_workspace(workspace, data["entries"])
+        diffs = _changes(data["entries"], current, ours)
+        names = sorted({item["path"] for item in diffs["changed"]} | set(diffs["added"]) | set(diffs["deleted"]))
+        if not names:
+            return {"ok": True, "set_aside": 0, "rescue_dir": None, "paths": []}
+        rescue = _leftovers_dir(f"{agent}-untasked")
+        rescued = 0
+        entries = dict(data["entries"])
+        removed: list[str] = []
+        for name in names:
+            source = _file_at(workspace, name)
+            if ours.get(name) is not None and source.is_file() and not source.is_symlink():
+                target = rescue / name
+                _mkdir_chain_no_symlinks(target.parent)
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                with os.fdopen(fd, "wb") as out, open(source, "rb") as src:
+                    shutil.copyfileobj(src, out)
+                rescued += 1
+            if current.get(name) is None:
+                if ours.get(name) is not None:
+                    _remove_file(source)
+                    removed.append(name)
+                entries.pop(name, None)
+            else:
+                _copy_from_project(project, workspace, name)
+                entries[name] = current[name]
+        data["entries"] = entries
+        _prune_empty_parents(workspace, removed)
+        _atomic_json(manifest_path, data)
+        return {"ok": True, "set_aside": len(names), "rescue_dir": os.fspath(rescue) if rescued else None, "paths": names[:50]}
+    finally:
+        os.close(lock_fd)
 
 
 def _gpu_device_args() -> list[str]:
@@ -1638,6 +1915,8 @@ _OWNER_SECRET_DIRS = (
     ".config/gh", ".config/hub",
     ".mozilla", ".config/google-chrome", ".config/chromium", ".config/BraveSoftware",
     ".config/Claude", ".local/share/orgbot", ".config/orgbot",
+    # The trash: every project's removed files.
+    ".local/share/orgbots",
     # The app's own support folder: tool approvals, the allowance ledger and
     # the registry of outside tools.
     ".local/share/com.orgbot.app",
@@ -1654,12 +1933,18 @@ _OWNER_SECRET_DIRS = (
 # Never lent, whatever the owner lists: OrgBots' own data, private keys, and
 # the model CLIs' sign-ins (bots get their own copies of those).
 _NEVER_LENT = (
-    ".local/share/orgbot", ".config/orgbot", ".local/share/com.orgbot.app",
+    ".local/share/orgbot", ".config/orgbot", ".local/share/com.orgbot.app", ".local/share/orgbots",
     ".ssh", ".gnupg", ".codex", ".claude", ".claude.json", ".grok",
     ".gemini", ".config/opencode", ".local/share/opencode",
 )
+# Every file the engine treats as a CLI sign-in (workspace_guard.rs
+# `credential_files`), and the backups 2.2.2 kept beside them.
+_CLI_SIGN_INS = (
+    ".codex/auth.json", ".claude/.credentials.json", ".claude/credentials.json",
+    ".grok/auth.json", ".grok/credentials.json", ".grok/.credentials.json",
+)
 _OWNER_SECRET_FILES = (
-    ".codex/auth.json", ".grok/auth.json", ".claude/.credentials.json",
+    *_CLI_SIGN_INS, *(name + ".orgbot-previous" for name in _CLI_SIGN_INS),
     ".claude/.firecrawl.env", ".claude/.claude.json", ".claude.json",
     ".netrc", ".git-credentials", ".config/git/credentials", ".npmrc", ".pypirc",
     ".cargo/credentials", ".cargo/credentials.toml", ".vault-token",
@@ -1719,9 +2004,10 @@ def _owner_secret_mask_args(owner_home: Path, bot_ssh: Path | None, hide: Path |
     # Before the key folder's own mask, which then shows empty inside it.
     raw_xdg = os.environ.get("XDG_DATA_HOME")
     if raw_xdg and os.path.isabs(raw_xdg):
-        data = Path(os.path.realpath(Path(raw_xdg) / "orgbot"))
-        if data.is_dir() and data != Path(os.path.realpath(owner_home / ".local/share/orgbot")):
-            args.extend(["--size", "65536", "--tmpfs", os.fspath(data)])
+        for name in ("orgbot", "orgbots"):
+            data = Path(os.path.realpath(Path(raw_xdg) / name))
+            if data.is_dir() and data != Path(os.path.realpath(owner_home / ".local/share" / name)):
+                args.extend(["--size", "65536", "--tmpfs", os.fspath(data)])
     if hide is not None and not _inside(Path(os.path.realpath(hide)), Path(os.path.realpath(owner_home / ".local/share/orgbot"))):
         args.extend(["--size", "65536", "--tmpfs", os.fspath(hide)])
     return args
@@ -1744,8 +2030,14 @@ def _owner_hidden_args(owner_home: Path, hidden: list[str]) -> list[str]:
     for raw in hidden:
         path = owner_home / _owner_relative(raw)
         real = Path(os.path.realpath(path))
+        # A sign-in kept elsewhere through a link is hidden where it lives too,
+        # when it is the owner's: never a system folder such as /usr.
         if not _inside(real, home):
-            continue
+            try:
+                if real == Path("/") or real.stat().st_uid != os.getuid():
+                    continue
+            except OSError:
+                continue
         if real.is_dir():
             args.extend(["--size", "65536", "--tmpfs", os.fspath(real)])
         elif real.is_file():
@@ -1856,7 +2148,7 @@ def _packaged_trash_args(path_dirs: list[str], packaged: Path = Path("/usr/lib/o
 def _verify_sandbox_args(workspace: Path, program: list[str]) -> list[str]:
     """Build a minimal, networkless root for reviewer test commands."""
     args = [
-        "bwrap", "--die-with-parent", "--new-session", "--unshare-pid",
+        _bwrap(), "--die-with-parent", "--new-session", "--unshare-pid",
         "--unshare-ipc", "--unshare-uts", "--unshare-net",
         "--size", "1073741824", "--tmpfs", "/",
         "--dev", "/dev", "--proc", "/proc",
@@ -2449,7 +2741,7 @@ def _agy_sandbox_args(
     uid = os.getuid()
     runtime_mount = f"/run/user/{uid}/orgbots-agy-runtime"
     args = [
-        "bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+        _bwrap(), "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
         "--size", "1073741824", "--tmpfs", "/", "--dev", "/dev", "--proc", "/proc",
         "--size", "268435456", "--tmpfs", "/tmp", "--dir", "/tmp/orgbot-workspace",
         "--dir", "/opt", "--dir", "/opt/orgbots",
@@ -2812,6 +3104,15 @@ def _agy_binary() -> Path:
     return path
 
 
+def _bwrap() -> str:
+    """bubblewrap by absolute path from the system folders only.
+
+    From the 13 November audit: it was run by bare name with the bot's copy
+    as the working directory, so a PATH starting with `.` would have run a
+    bwrap the bot wrote."""
+    return shutil.which("bwrap", path="/usr/local/bin:/usr/bin:/bin") or ""
+
+
 def _agy_auth_preflight() -> None:
     for executable in ("bwrap", "dbus-daemon", "dbus-send", "gnome-keyring-daemon", "secret-tool"):
         if shutil.which(executable, path="/usr/local/bin:/usr/bin:/bin") is None:
@@ -3001,6 +3302,7 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
     if not isinstance(raw, dict) or raw.get("format_version") != FORMAT_VERSION or raw.get("agent") != agent or not isinstance(raw.get("project"), str):
         _fail("Workspace baseline manifest has invalid identity or version")
     project = _canonical_directory(str(raw.get("project", "")), "project")
+    _load_tracked_generated(project)
     lock_fd = _lock(project)
     try:
         data = _manifest_read(manifest_path, project, agent)
@@ -3009,7 +3311,7 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
         if not workspace.is_dir() or workspace.is_symlink():
             _fail("Workspace path is missing or unsafe")
         _check_private_dir(workspace)
-        if not shutil.which("bwrap"):
+        if not _bwrap():
             _fail("bubblewrap is required; refusing to run without filesystem isolation")
         if verify:
             if not read_only or not data["read_only"]:
@@ -3019,6 +3321,7 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
             args = _verify_sandbox_args(workspace, program)
             os.close(lock_fd)
             lock_fd = None
+            _say_started()
             try:
                 result = subprocess.run(args, check=False, preexec_fn=_set_process_limits)
             except OSError as exc:
@@ -3075,7 +3378,7 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
             )
         private_cli_overlays: list[tuple[Path, str]] = []
         private_home_bind = "--ro-bind" if agent_cli == "opencode" else "--bind"
-        args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--size", "1073741824", "--tmpfs", "/tmp", "--dir", "/tmp/orgbot-workspace", "--tmpfs", "/run", "--dir", "/run/user", "--dir", f"/run/user/{os.getuid()}", "--dir", private_home_mount, private_home_bind, os.fspath(supplied_home), private_home_mount, *_gpu_device_args()]
+        args = [_bwrap(), "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--size", "1073741824", "--tmpfs", "/tmp", "--dir", "/tmp/orgbot-workspace", "--tmpfs", "/run", "--dir", "/run/user", "--dir", f"/run/user/{os.getuid()}", "--dir", private_home_mount, private_home_bind, os.fspath(supplied_home), private_home_mount, *_gpu_device_args()]
         # The bot server key only for a turn the owner allowed it, and never
         # for a read-only one: a reviewer has no business on a server.
         bot_ssh = _bot_ssh_dir()
@@ -3083,6 +3386,10 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
         granted = bot_ssh if server_access and not ro else None
         owner_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
         args.extend(_owner_secret_mask_args(owner_home, granted, hide=bot_ssh))
+        # Every bot's copy and private home live in the state folder; this
+        # bot's own are mounted below from outside the sandbox, so hiding the
+        # folder hides only the others'.
+        args.extend(["--size", "65536", "--tmpfs", os.fspath(state)])
         # Everything the owner lends is hidden where it lives; what is lent to
         # this turn appears in the bot's own home instead, never for a
         # read-only turn, and not for CLIs whose private home is read-only.
@@ -3271,6 +3578,7 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
         # hold the project lock across the child process.
         os.close(lock_fd)
         lock_fd = None
+        _say_started()
         try:
             result = subprocess.run(args, check=False, preexec_fn=_set_process_limits, pass_fds=(secret_fd,) if secret_fd is not None else ())
         except OSError as exc:
@@ -3284,7 +3592,51 @@ def _run(state_arg: str, agent_arg: str, program: list[str], *, read_only: bool,
             os.close(lock_fd)
 
 
+# Written to stderr when the command itself starts, after any wait for the
+# project lock, so the caller times the command and not the queue (13 November
+# audit). The caller removes it from what it shows.
+STARTED_MARKER = "orgbot-workspace: command started"
+
+
+def _say_started() -> None:
+    print(STARTED_MARKER, file=sys.stderr, flush=True)
+
+
+def _scope_abstract_sockets() -> None:
+    """Keep a sandbox from connecting to abstract Unix sockets outside it.
+
+    The sandbox shares the host network namespace, so a socket in the
+    abstract namespace, such as the owner's X11 display, was reachable: from
+    the 13 November audit, a bot could type into the owner's terminal through
+    it. Landlock scoping (Linux 6.12 and later) closes that; on an older
+    kernel nothing changes and the documented limit stands.
+    """
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        syscall = libc.syscall
+        syscall.restype = ctypes.c_long
+        create, restrict = 444, 446  # landlock_create_ruleset, landlock_restrict_self
+        if syscall(create, None, ctypes.c_size_t(0), ctypes.c_uint32(1)) < 6:
+            return
+
+        class _Attr(ctypes.Structure):
+            _fields_ = [("handled_access_fs", ctypes.c_uint64), ("handled_access_net", ctypes.c_uint64), ("scoped", ctypes.c_uint64)]
+
+        attr = _Attr(0, 0, 1)  # LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET
+        fd = syscall(create, ctypes.byref(attr), ctypes.c_size_t(ctypes.sizeof(attr)), ctypes.c_uint32(0))
+        if fd < 0:
+            return
+        try:
+            if libc.prctl(38, 1, 0, 0, 0) == 0:  # PR_SET_NO_NEW_PRIVS
+                syscall(restrict, ctypes.c_int(fd), ctypes.c_uint32(0))
+        finally:
+            os.close(fd)
+    except Exception:  # noqa: BLE001 - a kernel without it keeps the old behaviour
+        return
+
+
 def _set_process_limits() -> None:
+    _scope_abstract_sockets()
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     for limit, maximum in ((resource.RLIMIT_FSIZE, MAX_FILE_BYTES * 2), (resource.RLIMIT_NOFILE, 1024)):
         soft, hard = resource.getrlimit(limit)
@@ -3336,11 +3688,101 @@ def _trash_replacements(project: Path, items: list[tuple[Path, str]]) -> list[st
     so the caller can record them before failing.
     """
     payload = json.dumps([[os.fspath(target), digest] for target, digest in items])
-    result = subprocess.run([*_trash_command(), "move", "--project", project.name, "--expected-json", "-"], input=payload, check=False, capture_output=True, text=True)
+    result = subprocess.run([*_trash_command(), "move", "--project", project.name, "--expected-json", "-"], input=payload, check=False, capture_output=True, text=True, preexec_fn=_die_with_parent)
     receipts = [line.strip()[-200:] for line in result.stdout.splitlines() if line.strip()]
     if result.returncode != 0 or len(receipts) != len(items):
         raise PartialTrash(receipts, f"orgbot-trash refused to preserve {items[len(receipts)][0] if len(receipts) < len(items) else 'a file'}: {result.stderr.strip()[:400]}")
     return receipts
+
+
+def _die_with_parent() -> None:
+    """In a child: stop when this helper stops, so a killed merge does not
+    keep moving the owner's files to the trash with nobody left to write
+    their replacements."""
+    with contextlib.suppress(Exception):
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
+
+
+@contextlib.contextmanager
+def _terminate_deferred():
+    """Hold off a stop request while files are being moved and replaced."""
+    try:
+        previous = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    except ValueError:
+        previous = None
+    try:
+        yield
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _recover_journals(state: Path, project: Path) -> list[str]:
+    """Finish the merges into `project` that were stopped part way.
+
+    Under the project lock, before anything scans the project: for each
+    write whose original went to the trash, the new version is moved into
+    place from its staged copy, or copied again from the bot's copy when that
+    still holds exactly what was being merged. Anything that cannot be
+    finished is named; the original stays in the trash.
+    """
+    notes: list[str] = []
+    try:
+        agents_root = _safe_state_child(state, f"agents/{_project_id(project)}")
+    except (WorkspaceError, OSError):
+        return notes
+    if not agents_root.is_dir() or agents_root.is_symlink():
+        return notes
+    for agent_root in sorted(agents_root.iterdir()):
+        journal_path = agent_root / "apply-journal.json"
+        if agent_root.is_symlink() or not journal_path.is_file() or journal_path.is_symlink():
+            continue
+        try:
+            journal = _read_private_json(journal_path, "merge journal")
+        except (WorkspaceError, OSError, ValueError):
+            continue
+        if not isinstance(journal, dict) or journal.get("phase") != "applying" or journal.get("project") != os.fspath(project):
+            continue
+        workspace = agent_root / "project"
+        for operation in journal.get("operations") or []:
+            if not isinstance(operation, dict) or operation.get("state") == "applied":
+                continue
+            name = operation.get("path")
+            if not isinstance(name, str):
+                continue
+            staged_as = operation.get("staged_as")
+            try:
+                target = _file_at(project, name)
+                staged_path = _file_at(project, staged_as) if isinstance(staged_as, str) else None
+                # Only a file whose original existed can be missing because of
+                # the merge; a new file that never landed is simply not merged.
+                if operation.get("action") == "write" and operation.get("expected_current") is not None and not target.exists():
+                    wanted = operation.get("agent_entry") or {}
+                    if staged_path is not None and staged_path.is_file() and _entry(staged_path, project).get("sha256") == wanted.get("sha256"):
+                        parent_fd = os.open(staged_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                        try:
+                            _rename_noreplace(parent_fd, staged_path.name, target.name)
+                            os.fsync(parent_fd)
+                        finally:
+                            os.close(parent_fd)
+                        staged_path = None
+                    elif (workspace / name).is_file() and _entry(_file_at(workspace, name), workspace).get("sha256") == wanted.get("sha256"):
+                        _atomic_copy_file(workspace, name, project, name, int(wanted.get("mode", 0o644)), create_parents=True, replace_existing=False)
+                    else:
+                        notes.append(f"{name} could not be restored; its earlier version is in the OrgBots trash")
+                        continue
+                    notes.append(f"{name} was restored from a merge that stopped part way")
+                if staged_path is not None and staged_path.is_file():
+                    staged_path.unlink()
+            except (WorkspaceError, OSError, ValueError, KeyError, TypeError) as exc:
+                notes.append(f"{name} could not be restored ({str(exc)[:120]}); its earlier version is in the OrgBots trash")
+                continue
+            operation["state"] = "applied"
+        journal["phase"] = "recovered"
+        journal["recovered_at"] = int(time.time())
+        with contextlib.suppress(WorkspaceError, OSError):
+            _atomic_json(journal_path, journal)
+    return notes
 
 
 class PartialTrash(WorkspaceError):
@@ -3360,13 +3802,14 @@ def _set_aside_conflicts(project: Path, workspace: Path, conflicts: list[str], c
     From the live room: a bot whose copy conflicted with files others had
     changed could run no command at all, because every command ends by
     merging, and the merge refused. The project's newer version is never
-    overwritten: the bot's version is copied into its private home under
-    `~/orgbot-conflicts/<time>/`, where it can compare and redo its change, and
-    its copy takes the project's version so everything else merges.
+    overwritten: the bot's version is copied to `.cache/orgbots/conflicts/<time>/`
+    in its own copy, which never merges and which both its CLI and its
+    workspace commands can read (13 November audit: kept in its private home,
+    the files were out of reach of workspace_run), and its copy takes the
+    project's version so everything else merges.
     """
     stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime()) + f"-{os.getpid()}"
-    home = workspace.parent / "profiles" / "home"
-    kept_root = home / "orgbot-conflicts" / stamp
+    kept_root = workspace / ".cache" / "orgbots" / "conflicts" / stamp
     set_aside: list[dict[str, Any]] = []
     for name in conflicts:
         ours = agent_entries.get(name)
@@ -3382,7 +3825,7 @@ def _set_aside_conflicts(project: Path, workspace: Path, conflicts: list[str], c
                         os.write(fd, chunk)
             finally:
                 os.close(fd)
-            kept = f"~/orgbot-conflicts/{stamp}/{name}"
+            kept = f".cache/orgbots/conflicts/{stamp}/{name}"
         if name in current:
             _copy_from_project(project, workspace, name)
         else:
@@ -3423,6 +3866,7 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
     _ensure_root_paths(state, project)
     lock_fd = _lock(project)
     try:
+        recovered = _recover_journals(state, project)
         data = _manifest_read(manifest_path, project, agent)
         if data["read_only"]:
             _fail("Read-only reviewer workspaces cannot apply changes")
@@ -3504,39 +3948,69 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
                     pass
                 else:
                     _fail(f"Project target appeared after conflict checking; preserved {name}")
-        # Whatever is removed or replaced goes to the trash first, in batches:
-        # the helper re-checks each file's content as it moves it. The journal
-        # is written per batch, not three times per file, which made a long
-        # review quadratic.
-        preserve = [index for index, (name, _) in enumerate(operations) if current.get(name) is not None]
-        for start in range(0, len(preserve), TRASH_BATCH):
-            batch = preserve[start:start + TRASH_BATCH]
-            for index in batch:
-                journal["operations"][index]["state"] = "preserving"
-            _atomic_json(journal_path, journal)
-            items = [(_file_at(project, operations[index][0]), current[operations[index][0]]["sha256"]) for index in batch]
-            try:
-                receipts = _trash_replacements(project, items)
-            except PartialTrash as partial:
-                for index, receipt in zip(batch, partial.receipts):
-                    journal["operations"][index]["state"] = "preserved"
-                    journal["operations"][index]["trash_receipt"] = receipt
-                _atomic_json(journal_path, journal)
-                _fail(str(partial))
-            for index, receipt in zip(batch, receipts):
-                journal["operations"][index]["state"] = "preserved"
-                journal["operations"][index]["trash_receipt"] = receipt
-            _atomic_json(journal_path, journal)
-            _progress("trash", start + len(batch), len(preserve))
-        for index, (name, action) in enumerate(operations):
-            if action != "delete":
-                mode = agent_entries[name]["mode"]
-                _copy_from_workspace(workspace, project, name, mode)
-            journal["operations"][index]["state"] = "applied"
-            if (index + 1) % TRASH_BATCH == 0 or index + 1 == len(operations):
-                journal["updated_at"] = int(time.time())
-                _atomic_json(journal_path, journal)
-                _progress("apply", index + 1, len(operations))
+        # Per batch: every new version is written beside its file first, then
+        # the originals go to the trash (the helper re-checks each file's
+        # content as it moves it), then each new version takes its place. From
+        # the 13 November audit: every original left before any replacement
+        # was written, so a full disk, a kill or a restart in between left
+        # the project short of files, and the next merge hid it. What a kill
+        # still interrupts is finished from the journal by the next prepare
+        # or merge (`_recover_journals`).
+        total = len(operations)
+        preserve_total = sum(1 for name, _ in operations if current.get(name) is not None)
+        preserved_so_far = 0
+        with _terminate_deferred():
+            for start in range(0, total, TRASH_BATCH):
+                batch = list(range(start, min(start + TRASH_BATCH, total)))
+                staged: dict[int, tuple[int, str, str]] = {}
+                try:
+                    for index in batch:
+                        name, action = operations[index]
+                        if action == "write":
+                            staged[index] = _stage_copy(workspace, name, project, name, agent_entries[name]["mode"], create_parents=True, replace_existing=True, directory_mode=0o755)
+                            journal["operations"][index]["staged_as"] = (PurePosixPath(name).parent / staged[index][1]).as_posix()
+                        journal["operations"][index]["state"] = "staged"
+                    _atomic_json(journal_path, journal)
+                    preserve = [index for index in batch if current.get(operations[index][0]) is not None]
+                    moved: list[int] = []
+                    failure: WorkspaceError | None = None
+                    if preserve:
+                        items = [(_file_at(project, operations[index][0]), current[operations[index][0]]["sha256"]) for index in preserve]
+                        try:
+                            receipts = _trash_replacements(project, items)
+                        except PartialTrash as partial:
+                            receipts, failure = partial.receipts, partial
+                        except WorkspaceError as error:
+                            receipts, failure = [], error
+                        for index, receipt in zip(preserve, receipts):
+                            journal["operations"][index]["state"] = "preserved"
+                            journal["operations"][index]["trash_receipt"] = receipt
+                            moved.append(index)
+                        if failure is not None:
+                            # Whatever left the project, receipt or not.
+                            moved.extend(index for index in preserve[len(receipts):] if not os.path.lexists(project / operations[index][0]))
+                        _atomic_json(journal_path, journal)
+                        preserved_so_far += len(receipts)
+                        _progress("trash", preserved_so_far, preserve_total)
+                    moved_set = set(moved)
+                    # A file whose original went to the trash always gets its
+                    # new version, even when the trash stopped part way.
+                    for index in batch:
+                        name, action = operations[index]
+                        if failure is not None and current.get(name) is not None and index not in moved_set:
+                            continue
+                        if failure is not None and current.get(name) is None:
+                            continue
+                        if index in staged:
+                            _commit_staged(staged.pop(index), name, replace_existing=False)
+                        journal["operations"][index]["state"] = "applied"
+                    _atomic_json(journal_path, journal)
+                    if failure is not None:
+                        _fail(str(failure))
+                finally:
+                    for leftover in staged.values():
+                        _discard_staged(leftover)
+                _progress("apply", batch[-1] + 1, total)
         _prune_empty_parents(project, [name for name, action in operations if action == "delete"])
         who = _copy_label(data.get("label") if isinstance(data.get("label"), str) else None) or agent
         try:
@@ -3580,18 +4054,24 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
         if operations:
             _atomic_json(journal_path, journal)
         result = {"ok": True, "workspace": os.fspath(workspace), "changed": diffs["changed"], "added": diffs["added"], "deleted": diffs["deleted"], "applied": [name for name, _ in operations], "pending_delete": pending_delete, "conflicts": [], "review_token": final_review_token}
-        notes = []
+        notes = list(recovered)
         if set_aside_files:
             result["set_aside"] = set_aside_files
             notes.append(
                 "These files changed in the project after your copy was made, so your versions were not merged: "
                 + ", ".join(item["path"] for item in set_aside_files)
-                + ". Your copy now has the project's version; yours are kept under ~/orgbot-conflicts/ "
-                "(read them with workspace_run). Redo your change on top of the project's version if it is still needed."
+                + ". Your copy now has the project's version; yours are kept under .cache/orgbots/conflicts/ "
+                "in your copy. Redo your change on top of the project's version if it is still needed."
             )
         # From benchmark 2: six preview screenshots were merged into the
         # project root, though bots are told to keep captures in .cache/orgbots/.
-        captures = [name for name, action in operations if action != "delete" and name in diffs["added"] and "/" not in name and name.lower().endswith(CAPTURE_SUFFIXES)]
+        # Only names that read as captures. From the 13 November audit: a
+        # project's own logo.png was called a stray screenshot.
+        captures = [
+            name for name, action in operations
+            if action != "delete" and name in diffs["added"] and "/" not in name
+            and name.lower().endswith(CAPTURE_SUFFIXES) and any(word in name.lower() for word in CAPTURE_WORDS)
+        ]
         if captures:
             notes.append(
                 "New image files reached the project root: " + ", ".join(captures[:10])
@@ -3601,11 +4081,15 @@ def _apply(state_arg: str, agent_arg: str, review_token: str | None, set_aside: 
             )
         # From speed test 1: a bot left an empty `_t` and a `project/src/...`
         # folder in the project root, as if the project were a folder in it.
+        # Not sbt's own project/ folder, and not files that are empty by
+        # design. From the 13 November audit: both were called strays.
+        sbt = (project / "build.sbt").exists()
         strays = [
             name for name, action in operations
             if action != "delete" and name in diffs["added"] and (
-                name.startswith("project/")
-                or ("/" not in name and not name.startswith(".") and (agent_entries.get(name) or {}).get("size") == 0)
+                (name.startswith("project/") and not sbt)
+                or ("/" not in name and not name.startswith(".") and name not in EMPTY_BY_DESIGN
+                    and (agent_entries.get(name) or {}).get("size") == 0)
             )
         ]
         if strays:
@@ -3634,9 +4118,11 @@ def _parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status")
     status.add_argument("--state", required=True)
     status.add_argument("--agent", required=True)
+    status.add_argument("--project", help="The project this copy is for, to choose among several")
     run = sub.add_parser("run")
     run.add_argument("--state", required=True)
     run.add_argument("--agent", required=True)
+    run.add_argument("--project", help="The project this copy is for, to choose among several")
     run.add_argument("--read-only", action="store_true")
     run.add_argument("--verify", action="store_true", help="Run with a minimal read-only, networkless runtime sandbox")
     run.add_argument("--profile", action="append", default=[])
@@ -3648,6 +4134,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--mcp-relay")
     run.add_argument("--agent-cli", choices=("opencode", "agy"))
     run.add_argument("program", nargs=argparse.REMAINDER)
+    set_aside = sub.add_parser("set-aside", help="Move a bot's changes made without a task out of its copy")
+    set_aside.add_argument("--state", required=True)
+    set_aside.add_argument("--agent", required=True)
+    set_aside.add_argument("--project", help="The project this copy is for, to choose among several")
     label = sub.add_parser("label", help="Keep a bot's handle with its existing copies")
     label.add_argument("--state", required=True)
     label.add_argument("--agent", required=True)
@@ -3663,6 +4153,7 @@ def _parser() -> argparse.ArgumentParser:
     apply = sub.add_parser("apply")
     apply.add_argument("--state", required=True)
     apply.add_argument("--agent", required=True)
+    apply.add_argument("--project", help="The project this copy is for, to choose among several")
     apply.add_argument("--review-token")
     apply.add_argument("--set-aside-conflicts", action="store_true", help="Keep the bot's version of each conflicting file in its private home and take the project's")
     apply.add_argument("--only-folder", action="append", default=[], help="With --review-token, approve only the removals in this top folder (as the review groups them)")
@@ -3680,6 +4171,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare":
             _json(_prepare(args.project, args.state, args.agent, args.read_only, args.label))
             return 0
+        _PROJECT_HINT[:] = [args.project] if getattr(args, "project", None) and args.command != "prepare" else []
         if args.command == "status":
             _json(_status(args.state, args.agent))
             return 0
@@ -3691,6 +4183,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "discard":
             _json(_discard(args.state, args.agent, args.keep))
+            return 0
+        if args.command == "set-aside":
+            _json(_set_aside(args.state, args.agent))
             return 0
         if args.command == "agy-auth":
             result = _agy_auth_login() if args.action == "login" else _agy_auth_status()

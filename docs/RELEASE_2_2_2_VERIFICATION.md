@@ -40,6 +40,9 @@ was watched turn by turn, and its fixes went into the next build.
   that only reasons for 5 minutes, or an agent CLI 10 minutes without a tool,
   is stopped and told to act. With nobody waiting, a coordinator can think a
   plan through for up to 30 minutes.
+  Correction (13 November 2026 audit): in 2.2.2 the 5-minute API limit applied
+  to OpenAI-compatible models only; Anthropic and Codex API bots were not cut
+  short. 2.2.3 applies it to all three.
 - A task held 45 minutes while other work waits on it is raised with its
   holder and the coordinators.
 - A bot whose model service refuses every turn for 5 minutes hands its work

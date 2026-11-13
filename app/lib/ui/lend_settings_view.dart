@@ -37,7 +37,9 @@ class _LendSettingsViewState extends State<LendSettingsView> {
     setState(update);
     try {
       settings.save();
-      _error = null;
+      // From the 13 November audit: cleared without a rebuild, so the error
+      // stayed on screen after a save that worked.
+      if (_error != null) setState(() => _error = null);
     } on Object catch (error) {
       setState(() => _error = 'Could not save your sign-in list: $error');
     }

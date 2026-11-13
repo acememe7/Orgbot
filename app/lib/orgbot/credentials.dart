@@ -254,13 +254,54 @@ class Credentials extends ChangeNotifier {
     }
   }
 
+  /// Whether the keystore could not be read at startup, so what is held here
+  /// may be missing sign-ins that are stored there.
+  bool _unreadable = false;
+
   /// Read the keystore, tolerating a device where it is unavailable.
   Future<String?> _readSecure() async {
     try {
       return await _secure.read(key: _key);
     } catch (_) {
       // A locked or broken keystore must not stop the app starting.
+      _unreadable = true;
       return null;
+    }
+  }
+
+  /// Before writing over a keystore that could not be read, read it again
+  /// and keep what it holds.
+  ///
+  /// From the 13 November audit: a keyring that was locked at startup made
+  /// the next save write only the sign-in being saved, erasing the others.
+  Future<void> _recoverUnread() async {
+    if (!_unreadable) return;
+    final String? raw;
+    try {
+      raw = await _secure.read(key: _key);
+    } catch (_) {
+      throw StateError(
+        'Your keyring could not be read, so saving now would erase your other '
+        'sign-ins. Unlock the keyring and try again.',
+      );
+    }
+    _unreadable = false;
+    if (raw == null || raw.isEmpty) return;
+    try {
+      final decoded = jsonDecode(raw);
+      final providers = decoded is Map ? decoded['providers'] : null;
+      if (providers is! List) return;
+      for (final entry in providers.whereType<Map>()) {
+        final credential = ProviderCredential.fromJson(
+          entry.cast<String, Object?>(),
+        );
+        if (credential != null) {
+          _byProvider.putIfAbsent(credential.provider, () => credential);
+        }
+      }
+      if (decoded is Map) source ??= decoded['source'] as String?;
+    } catch (_) {
+      // Unreadable contents: there is nothing to keep.
     }
   }
 
@@ -401,16 +442,33 @@ class Credentials extends ChangeNotifier {
     bool force = false,
   }) async {
     await load();
-    final pending = _renewing[provider];
-    if (pending != null) return pending;
+    // A forced renewal joins only another forced one. Behind an unforced
+    // check it waits, then renews itself. From the 13 November audit: it
+    // joined the unforced check and was handed the token just refused.
+    while (true) {
+      final pending = _renewing[provider];
+      if (pending == null) break;
+      if (!force || _forcedRenewals.contains(pending)) return pending;
+      try {
+        await pending;
+      } catch (_) {
+        // Its caller hears about that failure; this one renews below.
+      }
+      if (identical(_renewing[provider], pending)) break;
+    }
     final future = _freshToken(provider, auth: auth, force: force);
     _renewing[provider] = future;
+    if (force) _forcedRenewals.add(future);
     try {
       return await future;
     } finally {
+      _forcedRenewals.remove(future);
       if (identical(_renewing[provider], future)) _renewing.remove(provider);
     }
   }
+
+  /// Renewals that were forced, so a forced caller may join them.
+  final Set<Future<String?>> _forcedRenewals = {};
 
   Future<String?> _freshToken(
     ProviderKind provider, {
@@ -465,6 +523,7 @@ class Credentials extends ChangeNotifier {
   }
 
   Future<void> _persist() async {
+    await _recoverUnread();
     ModelCatalog.invalidate();
     final encoded = jsonEncode({
       'version': kBundleVersion,

@@ -72,8 +72,6 @@ enum CliCommand {
         #[arg(default_value = "room.toml")]
         path: PathBuf,
     },
-    /// Bridge an agent CLI's stdio to a room's MCP socket. Spawned by the
-    /// agent CLI itself from its MCP config; you normally never run this.
     /// Carry this machine's sign-ins to another device, such as a phone.
     ///
     /// A phone has no agent CLIs, but the tokens those CLIs hold are ordinary
@@ -90,6 +88,8 @@ enum CliCommand {
         #[command(subcommand)]
         action: AgyAction,
     },
+    /// Bridge an agent CLI's stdio to a room's MCP socket. Spawned by the
+    /// agent CLI itself from its MCP config; you normally never run this.
     RoomMcp {
         /// The room MCP unix socket to connect to.
         #[arg(long)]
@@ -318,7 +318,8 @@ fn access_for(
     }
 
     let token = match token {
-        Some(token) if token.trim().len() >= MIN_TOKEN_LEN => token,
+        // Kept trimmed: a token read from a file usually ends in a newline.
+        Some(token) if token.trim().len() >= MIN_TOKEN_LEN => token.trim().to_string(),
         Some(_) => anyhow::bail!(
             concat!(
                 "that token is too short to be worth having; use at least ",
@@ -601,13 +602,24 @@ fn pair(out: Option<std::path::PathBuf>) -> anyhow::Result<()> {
 
     match out {
         Some(path) => {
-            std::fs::write(&path, &json)?;
-            // The bundle carries live access tokens; keep it off other users'
-            // eyes even on a shared machine.
-            #[cfg(unix)]
+            // The bundle carries live access tokens: created private, never
+            // over an existing file or through a link. From the 13 November
+            // audit: it was written with default permissions and only then
+            // restricted, and the result of that was ignored.
             {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                use std::io::Write;
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600).custom_flags(0x20000); // O_NOFOLLOW
+                }
+                let mut file = options.open(&path).map_err(|error| {
+                    anyhow::anyhow!("could not create {} ({error}); choose a path that does not exist yet", path.display())
+                })?;
+                file.write_all(json.as_bytes())?;
+                file.sync_all()?;
             }
             eprintln!(
                 "wrote {} ({} provider(s))",

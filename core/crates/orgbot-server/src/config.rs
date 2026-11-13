@@ -94,7 +94,9 @@ pub struct SkillSource {
 
 /// Room-scoped instructions are appended to bot personas, not written into
 /// the user's global CLI or agent configuration.
-const ORGBOT_RUNTIME_INSTRUCTIONS: &str = "OrgBots room instructions: follow the host's installed skills, plugins, and project instructions, including the user's Luna-first delegation rules and nested Luna worker limits. For review work in this OrgBots room, use the reviewer assigned by OrgBots; this room-scoped assignment replaces any global mandatory Astra review workflow. Do not start a separate Astra review or change global instructions.";
+// From the 13 November audit: this named one installation's own workflows
+// ("Luna-first delegation", "Astra review"), undefined anywhere else.
+const ORGBOT_RUNTIME_INSTRUCTIONS: &str = "OrgBots room instructions: follow the host's installed skills, plugins, and project instructions, including any delegation rules and worker limits they set. For review work in this OrgBots room, use the reviewer assigned by OrgBots; this room-scoped assignment replaces any global mandatory review workflow. Do not start a separate review of your own or change global instructions.";
 
 fn resolve_mcp_environment(
     servers: &[orgbot_runtime::mcp_client::McpServerSpec],
@@ -204,6 +206,11 @@ pub struct RoomSection {
     /// bot and never lent.
     #[serde(default)]
     pub hide: Vec<String>,
+    /// Earlier rooms' boards, where app versions up to 2.2.2 wrote them. From
+    /// the 13 November audit: the key landed in this table, which did not
+    /// read it, so bots never saw earlier rooms' work.
+    #[serde(default)]
+    pub prior_boards: Vec<String>,
 }
 
 /// The completion rule, as a friendly string in TOML.
@@ -769,7 +776,7 @@ impl RoomConfig {
             roles: RoleTable::new(self.roles.clone()),
             skills: self.load_skills(),
             mcp: resolve_mcp_environment(&self.mcp, environment)?,
-            prior_boards: self.prior_boards.clone(),
+            prior_boards: self.prior_boards.iter().chain(&self.room.prior_boards).cloned().collect(),
             spec,
             bots,
             tasks,
@@ -779,8 +786,18 @@ impl RoomConfig {
     }
 }
 
+/// A bot's key for its session file and working copy, from its handle.
+///
+/// Two hex digits a byte, as before, while that fits the helper's 64-character
+/// limit; a longer handle gets a digest instead. From the 13 November audit:
+/// a bot named "Senior Frontend Reviewer (Claude Opus)" failed every turn.
 pub(crate) fn session_file_key(handle: &str) -> String {
-    handle.bytes().map(|byte| format!("{byte:02x}")).collect()
+    let hex: String = handle.bytes().map(|byte| format!("{byte:02x}")).collect();
+    if hex.len() <= 64 {
+        return hex;
+    }
+    use sha2::{Digest, Sha256};
+    format!("h{:x}", Sha256::digest(handle.as_bytes()))[..41].to_string()
 }
 
 impl RoomConfig {
@@ -900,6 +917,29 @@ mod tests {
         required_role = "writer"
         priority = "high"
     "#;
+
+    #[test]
+    fn every_handle_gets_a_copy_key_the_helper_accepts() {
+        assert_eq!(session_file_key("ab"), "6162");
+        let long = session_file_key("Senior Frontend Reviewer (Claude Opus)");
+        assert!(long.len() <= 64 && long.chars().all(|c| c.is_ascii_alphanumeric()), "{long}");
+        assert_ne!(long, session_file_key("Senior Frontend Reviewer (Claude Sonnet)"));
+    }
+
+    /// From the 13 November audit: the app wrote `prior_boards` after the
+    /// `[room]` header, where it was dropped. Both places are read.
+    #[test]
+    fn earlier_rooms_boards_are_read_at_the_top_or_in_the_room_table() {
+        let top = format!("prior_boards = [\"/a/state.json\"]\n{SAMPLE}");
+        let resolved = RoomConfig::parse(&top, "top.toml").unwrap().resolve().unwrap();
+        assert_eq!(resolved.prior_boards, vec!["/a/state.json".to_string()]);
+        let legacy = SAMPLE.replace(
+            "completion = \"all_tasks_terminal\"",
+            "completion = \"all_tasks_terminal\"\nprior_boards = [\"/b/state.json\"]",
+        );
+        let resolved = RoomConfig::parse(&legacy, "legacy.toml").unwrap().resolve().unwrap();
+        assert_eq!(resolved.prior_boards, vec!["/b/state.json".to_string()]);
+    }
 
     #[test]
     fn a_room_carries_its_access_mode_and_the_owners_lend_list() {
@@ -1257,7 +1297,7 @@ mod tests {
         assert!(resolved.bots[0]
             .spec
             .persona
-            .contains("nested Luna worker limits"));
+            .contains("delegation rules and worker limits"));
     }
 
     #[test]

@@ -168,6 +168,35 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
   String? _workspaceError;
   String? _editingPath;
   final Map<String, _ProjectEditDraft> _editDrafts = {};
+
+  /// Unsaved edits of panes that closed or moved to another project, by
+  /// project and file, so they come back when that file is edited again.
+  ///
+  /// From the 13 November audit: switching session dropped unsaved edits
+  /// without a word, and a draft kept by its relative path could be saved
+  /// into the same-named file of the next project.
+  static final Map<String, ({String text, String? versionToken})> _keptDrafts =
+      {};
+
+  /// Set this pane's unsaved edits aside and close them.
+  void _setDraftsAside() {
+    final root = _root;
+    for (final entry in _editDrafts.entries) {
+      final draft = entry.value;
+      if (root != null && draft.dirty && !draft.loading) {
+        if (_keptDrafts.length >= 32) {
+          _keptDrafts.remove(_keptDrafts.keys.first);
+        }
+        _keptDrafts['$root\u0000${entry.key}'] = (
+          text: draft.controller.text,
+          versionToken: draft.versionToken,
+        );
+      }
+      draft.controller.dispose();
+    }
+    _editDrafts.clear();
+    _editingPath = null;
+  }
   int _listGeneration = 0;
   int _previewGeneration = 0;
   int _gitGeneration = 0;
@@ -235,6 +264,7 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
         _listGeneration++;
         _previewGeneration++;
         _invalidateGit();
+        _setDraftsAside();
         setState(() {
           _root = null;
           _current = null;
@@ -258,9 +288,7 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
     widget.requests?.removeListener(_onRequest);
     unawaited(_removeThumbnail());
     _webAddress.dispose();
-    for (final draft in _editDrafts.values) {
-      draft.controller.dispose();
-    }
+    _setDraftsAside();
     super.dispose();
   }
 
@@ -288,6 +316,7 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
         throw const FileSystemException('Choose an existing project folder.');
       }
       if (!mounted || generation != _listGeneration) return false;
+      if (canonical != _root) _setDraftsAside();
       setState(() {
         _root = canonical;
         _current = canonical;
@@ -519,10 +548,13 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
         throw const FormatException('Binary files cannot be edited as text.');
       }
       if (!mounted || !identical(_editDrafts[path], draft)) return;
+      final kept = _keptDrafts.remove('$root\u0000$path');
       draft
-        ..controller.text = text
+        ..controller.text = kept?.text ?? text
         ..original = text
-        ..versionToken = document.versionToken
+        // A kept edit carries the version it was made against, so saving it
+        // over a file that changed since is refused rather than lost.
+        ..versionToken = kept?.versionToken ?? document.versionToken
         ..loading = false;
       setState(() {});
     } catch (error) {
@@ -806,7 +838,9 @@ class _DesktopProjectPaneState extends State<DesktopProjectPane> {
     } catch (error) {
       if (mounted && _root == root) setState(() => _gitError = '$error');
     } finally {
-      if (mounted && _root == root) setState(() => _gitActionRunning = false);
+      // Cleared whatever project is showing now. From the 13 November
+      // audit: a project switched mid-action left every git button disabled.
+      if (mounted) setState(() => _gitActionRunning = false);
     }
   }
 

@@ -85,6 +85,16 @@ class EngineRoomController extends ChangeNotifier {
   WorkspaceConnection? workspace;
   bool _disposed = false;
   int _generation = 0;
+
+  /// The owner asked this room to stop. A service a start or reconnect still
+  /// in flight brings up is then stopped, not left running. From the 13
+  /// November audit: "Stop and save" or Delete during "Starting the
+  /// engine…" found no service yet, and the one that came up a second later
+  /// ran on with no window attached.
+  bool _stopRequested = false;
+
+  /// The start under way, which [stop] waits for.
+  Future<void>? _starting;
   int _memoryRequestSequence = 0;
   final Map<String, Completer<Map<String, Object?>>> _memoryRequests = {};
   Set<String> _memoryProjects = const {};
@@ -170,7 +180,19 @@ class EngineRoomController extends ChangeNotifier {
       return;
     }
     final generation = ++_generation;
+    _stopRequested = false;
     error = null;
+    final starting = Completer<void>();
+    _starting = starting.future;
+    try {
+      await _start(generation);
+    } finally {
+      starting.complete();
+      if (identical(_starting, starting.future)) _starting = null;
+    }
+  }
+
+  Future<void> _start(int generation) async {
     _to(RoomLaunch.generating);
 
     try {
@@ -262,7 +284,16 @@ class EngineRoomController extends ChangeNotifier {
         statePath: savedState.path,
         projectId: projectId,
         skillsPath: await unpackBundledSkills(),
-        priorBoards: await RoomArchive.otherBoards(room.id),
+        priorBoards: await RoomArchive.otherBoards(
+          room.id,
+          only: {
+            if (projectId != null)
+              for (final other in library.rooms)
+                if (other.id != room.id &&
+                    await _projectScope(other.path) == projectId)
+                  other.id,
+          },
+        ),
         desktopIntegrations: !runsInProcess
             ? await DesktopIntegrations.discover()
             : null,
@@ -299,7 +330,7 @@ class EngineRoomController extends ChangeNotifier {
         await _startSubprocess(file);
       }
       if (_disposed || generation != _generation) {
-        await _teardown();
+        await _teardown(stopServer: _stopRequested);
         return;
       }
       _to(RoomLaunch.running);
@@ -333,10 +364,7 @@ class EngineRoomController extends ChangeNotifier {
   /// Run the room as a child process and talk to it over a socket.
   Future<void> _startSubprocess(RoomFile file) async {
     final server = await startRoom(file, roomId: room.id);
-    if (_disposed) {
-      await server.detach();
-      return;
-    }
+    if (!await adoptStartedService(server)) return;
     _server = server;
 
     _to(RoomLaunch.connecting);
@@ -391,7 +419,8 @@ class EngineRoomController extends ChangeNotifier {
     try {
       // Reuses the room's service when it is up, or starts it again.
       final server = await startRoom(file, roomId: room.id);
-      if (_disposed || !identical(_client, client)) return;
+      if (!await adoptStartedService(server)) return;
+      if (!identical(_client, client)) return;
       _server = server;
       await client.connect(server.url, token: server.token);
     } catch (_) {
@@ -812,6 +841,22 @@ class EngineRoomController extends ChangeNotifier {
     await _background(false);
   }
 
+  /// Whether a service a start or reconnect just brought up is kept: it is
+  /// stopped when the owner asked this room to stop meanwhile, and left
+  /// running, unattached, when only this screen closed.
+  @visibleForTesting
+  Future<bool> adoptStartedService(CoreServer server) async {
+    if (_stopRequested) {
+      await server.stop();
+      return false;
+    }
+    if (_disposed) {
+      await server.detach();
+      return false;
+    }
+    return true;
+  }
+
   /// Stop explicitly; navigation only detaches the screen.
   Future<void> stop() async {
     if (isRunning && _store?.isActive == true) {
@@ -821,8 +866,23 @@ class EngineRoomController extends ChangeNotifier {
         await Future<void>.delayed(const Duration(milliseconds: 50));
       }
     }
+    _stopRequested = true;
     ++_generation;
-    await _teardown(stopServer: true);
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    try {
+      await _teardown(stopServer: true);
+    } on EngineStartError catch (failure) {
+      error = failure.message;
+      _to(RoomLaunch.failed);
+      rethrow;
+    }
+    // A start still under way stops the service it brings up; wait for it,
+    // so the room is really stopped when this returns.
+    final starting = _starting;
+    if (starting != null) {
+      await starting.timeout(const Duration(seconds: 60), onTimeout: () {});
+    }
     _to(RoomLaunch.closed);
   }
 

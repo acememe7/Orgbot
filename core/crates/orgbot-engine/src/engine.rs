@@ -106,7 +106,7 @@ pub const REVIEW_BACKLOG_MS: i64 = 10 * 60 * 1000;
 /// needed from them — exactly the wrong thing to tell an agent it cannot claim.
 /// A dependency that has not landed yet.
 #[derive(Debug, Clone)]
-struct UnmetDependency {
+pub(crate) struct UnmetDependency {
     /// The upstream task, after following any supersession.
     task: TaskId,
     /// Its title, or a note that it is not here.
@@ -211,6 +211,19 @@ pub struct Engine {
     /// When the owner was last told reviews were piling up.
     #[serde(default)]
     review_backlog_told: Option<Timestamp>,
+    /// Everyone who ever held each task: none of them reviews it. From the
+    /// 13 November audit: a builder whose task was handed on reviewed, and
+    /// approved, its own code.
+    #[serde(default)]
+    past_holders: BTreeMap<TaskId, BTreeSet<AgentId>>,
+    /// Artifacts a reviewer saved on a task in review: notes on the work, not
+    /// part of it.
+    #[serde(default)]
+    review_notes: BTreeSet<ArtifactId>,
+    /// When the room last started running again, after a pause or after the
+    /// app was closed. Waits are timed from no earlier than this.
+    #[serde(skip)]
+    resumed_at: Option<Timestamp>,
     /// Where each bot's time has gone.
     #[serde(default)]
     time_spent: BTreeMap<AgentId, crate::digest::TimeSpent>,
@@ -319,7 +332,12 @@ impl Engine {
                     engine.statuses.insert(spec.id, AgentStatus::Idle);
                     engine.specs.insert(spec.id, *spec.clone());
                 }
+                // As a live leave does: the bot is gone, not offline. From
+                // the 13 November audit: replayed, it stayed on the roster.
                 Event::AgentLeft { agent, .. } => {
+                    if let Some(spec) = engine.specs.remove(agent) {
+                        engine.handles.remove(&spec.handle);
+                    }
                     engine.statuses.insert(*agent, AgentStatus::Offline);
                 }
                 Event::AgentStatusChanged { agent, from, to } => {
@@ -493,6 +511,8 @@ impl Engine {
 
     /// Rebind current configuration to the saved identity and board.
     pub fn configure_saved_room(&mut self, spec: RoomSpec) {
+        // The time the app was closed is not time anyone could act in.
+        self.resumed_at = Some(Timestamp::now());
         self.room.spec = spec;
         self.room.spec.roster = self.specs.keys().copied().collect();
         // Opening saved work never replays an interrupted external operation.
@@ -508,7 +528,12 @@ impl Engine {
             .get(&spec.id)
             .is_some_and(|old| old.provider != spec.provider)
         {
-            self.statuses.insert(spec.id, AgentStatus::Idle);
+            // A new provider clears a fault, not a bench. From the 13 November
+            // audit: a benched bot whose model was changed came back Idle
+            // while still benched, and every turn it was given was stopped.
+            if !self.paused.contains_key(&spec.id) {
+                self.statuses.insert(spec.id, AgentStatus::Idle);
+            }
             self.error_streak.remove(&spec.id);
         }
         self.handles.insert(spec.handle.clone(), spec.id);
@@ -562,6 +587,9 @@ impl Engine {
             last_held: BTreeMap::new(),
             handed_to: BTreeMap::new(),
             review_backlog_told: None,
+            past_holders: BTreeMap::new(),
+            review_notes: BTreeSet::new(),
+            resumed_at: None,
             time_spent: BTreeMap::new(),
             records_warned: BTreeSet::new(),
             turn_began: BTreeMap::new(),
@@ -994,10 +1022,17 @@ impl Engine {
     /// Who must check `task`'s fixes now: the reviewers who asked for them,
     /// until it has waited [`RECHECK_FALLBACK_MS`] in review; then anyone.
     pub fn recheck_reviewers(&self, task: &Task, now: Timestamp) -> Vec<AgentId> {
-        if task.state == TaskState::InReview && task.updated_at.elapsed_to(now) >= RECHECK_FALLBACK_MS {
+        let reviewers = self.last_round_reviewers(task.id);
+        // Not while one of them is in a turn: it may be doing the recheck.
+        // From the 13 November audit: the fallback opened a second recheck
+        // beside the one under way.
+        if task.state == TaskState::InReview
+            && task.updated_at.elapsed_to(now) >= RECHECK_FALLBACK_MS
+            && !reviewers.iter().any(|reviewer| self.in_turn(*reviewer))
+        {
             return Vec::new();
         }
-        self.last_round_reviewers(task.id)
+        reviewers
     }
 
     pub fn last_round_reviewers(&self, task: TaskId) -> Vec<AgentId> {
@@ -1385,6 +1420,16 @@ impl Engine {
             );
             return result;
         }
+        // A coordinator's choice of bot stands in for the role gates, while
+        // that bot can still take work. From the 13 November audit: a task
+        // handed to a bot without its role, or to one paused, removed or
+        // faulted afterwards, could be claimed by nobody.
+        let chosen = self.handed_to.get(&task).copied().filter(|chosen| {
+            self.specs.contains_key(chosen) && !self.paused.contains_key(chosen) && self.status(*chosen).is_available()
+        });
+        if chosen == Some(agent) {
+            return result;
+        }
         let fit = self
             .roles
             .eligibility(&spec.roles, record.required_role.as_deref());
@@ -1414,13 +1459,13 @@ impl Engine {
                 return result;
             }
         }
-        if let Some(chosen) = self.handed_to.get(&task).filter(|chosen| **chosen != agent) {
+        if let Some(chosen) = chosen {
             result.eligible = false;
             result.reason = Reason::HandedToAnother;
             result.detail = format!(
                 "a coordinator handed \"{}\" to {}; leave it to them",
                 record.title,
-                self.handle_of(*chosen)
+                self.handle_of(chosen)
             );
             return result;
         }
@@ -1430,7 +1475,7 @@ impl Engine {
         // holder of the role is busy.
         if fit == RoleFit::Fallback {
             let role = record.required_role.clone().unwrap_or_default();
-            if let Some(holder) = self.free_role_holder(&role, record.kind, agent) {
+            if let Some(holder) = self.free_role_holder(&role, record.kind, agent, task) {
                 result.eligible = false;
                 result.reason = Reason::LeaveToRoleHolder;
                 result.detail = format!(
@@ -1450,7 +1495,7 @@ impl Engine {
             && !self.builds(spec)
             && !spec.roles.iter().any(|role| role == "coordinator")
         {
-            if let Some(builder) = self.free_builder(agent) {
+            if let Some(builder) = self.free_builder(agent, task) {
                 result.eligible = false;
                 result.reason = Reason::LeaveToBuilders;
                 result.detail = format!(
@@ -1470,25 +1515,34 @@ impl Engine {
         !spec.autonomy.review_only && self.roles.eligibility(&spec.roles, Some("build")).is_eligible()
     }
 
-    /// A bot other than `asker` that builds, is taking work and holds
-    /// nothing, if there is one.
-    fn free_builder(&self, asker: AgentId) -> Option<String> {
+    /// A bot other than `asker` that builds, is taking work, holds nothing
+    /// and could claim `task`, if there is one.
+    fn free_builder(&self, asker: AgentId, task: TaskId) -> Option<String> {
         self.specs
             .values()
             .filter(|spec| spec.id != asker && self.builds(spec))
+            .filter(|spec| self.could_take(task, spec.id))
             .find(|spec| self.status(spec.id).accepts_work())
             .map(|spec| spec.handle.clone())
     }
 
-    /// A bot other than `asker` that holds `role` itself, is taking work and
-    /// holds nothing, if there is one.
-    fn free_role_holder(&self, role: &str, kind: TaskKind, asker: AgentId) -> Option<String> {
+    /// A bot other than `asker` that holds `role` itself, is taking work,
+    /// holds nothing and could claim `task`, if there is one.
+    fn free_role_holder(&self, role: &str, kind: TaskKind, asker: AgentId, task: TaskId) -> Option<String> {
         self.specs
             .values()
             .filter(|spec| spec.id != asker && spec.roles.iter().any(|held| held == role))
             .filter(|spec| !spec.autonomy.review_only || review_only_task(kind, Some(role)))
+            .filter(|spec| self.could_take(task, spec.id))
             .find(|spec| self.status(spec.id).accepts_work())
             .map(|spec| spec.handle.clone())
+    }
+
+    /// Whether `agent` is not barred from `task` outright: not its reviewer
+    /// and not benched. From the 13 November audit: work was left to a free
+    /// builder who had reviewed it, and both bots sat idle beside it.
+    fn could_take(&self, task: TaskId, agent: AgentId) -> bool {
+        !self.reviewed_by(task, agent) && !self.paused.contains_key(&agent)
     }
 
     /// Turn a refusal into the error the caller already knows.
@@ -1808,12 +1862,16 @@ impl Engine {
         convergence::assess(&self.review_cycles(task))
     }
 
+    /// Whether `agent` worked on `task`: held it at any time, or wrote work
+    /// submitted for it. A reviewer's own notes saved on the task (never
+    /// submitted while it was in review) do not count, so recording its
+    /// checks does not disqualify it.
     fn authored_review_artifact(&self, task: &Task, agent: AgentId) -> bool {
-        task.artifacts.iter().any(|id| {
-            self.artifacts
-                .get(id)
-                .is_some_and(|artifact| artifact.author == agent)
-        })
+        self.past_holders.get(&task.id).is_some_and(|holders| holders.contains(&agent))
+            || task.artifacts.iter().any(|id| {
+                !self.review_notes.contains(id)
+                    && self.artifacts.get(id).is_some_and(|artifact| artifact.author == agent)
+            })
     }
 
     /// A bot that could review `task`, chosen so nobody has to be asked.
@@ -1893,10 +1951,11 @@ impl Engine {
             let Some(role) = task.required_role.as_deref().filter(|r| !r.is_empty()) else {
                 continue;
             };
+            // A review-only bot staffs only work it may claim. From the 13
+            // November audit: it counted for any task in its role.
             if usable.iter().any(|spec| {
-                self.roles
-                    .eligibility(&spec.roles, Some(role))
-                    .is_eligible()
+                (!spec.autonomy.review_only || review_only_task(task.kind, Some(role)))
+                    && self.roles.eligibility(&spec.roles, Some(role)).is_eligible()
             }) {
                 continue;
             }
@@ -2152,7 +2211,7 @@ impl Engine {
         false
     }
 
-    fn first_unmet_dependency(&self, task: &Task) -> Option<UnmetDependency> {
+    pub(crate) fn first_unmet_dependency(&self, task: &Task) -> Option<UnmetDependency> {
         for dep in &task.depends_on {
             let resolved = self.follow_supersession(*dep);
             match self.tasks.get(&resolved) {
@@ -2240,6 +2299,9 @@ impl Engine {
 
     /// The first of `blockers` that already waits, directly or through
     /// others, on `task`, so that `task` waiting on it would close a circle.
+    /// The first of `blockers` that already waits on `task`, by a block or
+    /// by a dependency not yet delivered. From the 13 November audit: a wait
+    /// on a task that depended on the waiter was accepted and never ended.
     fn closes_a_wait_cycle(&self, task: TaskId, blockers: &[TaskId]) -> Option<TaskId> {
         let graph = self.wait_graph();
         blockers.iter().copied().find(|&blocker| {
@@ -2251,10 +2313,39 @@ impl Engine {
                 }
                 if seen.insert(next) {
                     stack.extend(graph.blockers_of(next));
+                    stack.extend(self.unmet_dependencies(next));
                 }
             }
             false
         })
+    }
+
+    /// The tasks `task` depends on that have not been delivered yet.
+    fn unmet_dependencies(&self, task: TaskId) -> Vec<TaskId> {
+        self.tasks.get(&task).map_or_else(Vec::new, |record| {
+            record
+                .depends_on
+                .iter()
+                .map(|dep| self.follow_supersession(*dep))
+                .filter(|dep| self.tasks.get(dep).is_some_and(|upstream| upstream.state != TaskState::Submitted))
+                .collect()
+        })
+    }
+
+    /// Whether `from` cannot start until `target` is delivered, through its
+    /// dependencies.
+    pub(crate) fn waits_through_dependencies(&self, from: TaskId, target: TaskId) -> bool {
+        let mut seen = BTreeSet::new();
+        let mut stack = self.unmet_dependencies(from);
+        while let Some(next) = stack.pop() {
+            if next == target {
+                return true;
+            }
+            if seen.insert(next) {
+                stack.extend(self.unmet_dependencies(next));
+            }
+        }
+        false
     }
 
     pub fn wait_graph(&self) -> WaitGraph {
@@ -2306,8 +2397,19 @@ impl Engine {
                 phase: self.room.phase,
             });
         }
-        // Which task, if any, this command is a sign of life on.
-        let touched = command.task();
+        // Which task, if any, this command is a sign of life on: only the
+        // holder's own commands are. From the 13 November audit: a
+        // coordinator amending a dead holder's task every ten minutes kept
+        // renewing that holder's claim, and the room never took it back.
+        let by_someone_else = match &command {
+            Command::AmendTask { by, task, .. } => self.tasks.get(task).and_then(|t| t.assignee).is_some_and(|holder| holder != *by),
+            Command::RecordReview { inspector, task, .. } => {
+                self.tasks.get(task).and_then(|t| t.assignee).is_some_and(|holder| holder != *inspector)
+            }
+            Command::ReopenTask { .. } => true,
+            _ => false,
+        };
+        let touched = command.task().filter(|_| !by_someone_else);
         let mut outcome = match command {
             Command::JoinAgent { spec } => self.join_agent(*spec),
             Command::LeaveAgent { agent, reason } => self.leave_agent(agent, reason),
@@ -2325,6 +2427,7 @@ impl Engine {
                     self.room.turns_used = 0;
                 }
                 let mut events = self.set_phase(RoomPhase::Running, "resumed")?;
+                self.resumed_at = Some(Timestamp::now());
                 // Nobody could act while the room was paused, so every claim
                 // gets a fresh window rather than lapsing on the first tick.
                 let held: Vec<TaskId> = self
@@ -2544,6 +2647,13 @@ impl Engine {
                 reason,
             } => {
                 let mut events = Vec::new();
+                // Both halves are checked before either changes anything.
+                // From the 13 November audit: the amendment was applied, then
+                // the re-route refused, and the coordinator was told nothing
+                // happened.
+                if required_role.is_some() || hand_to.is_some() {
+                    self.check_reroute(by, task, hand_to, &reason)?;
+                }
                 if brief.is_some() || acceptance_criteria.is_some() || depends_on.is_some() {
                     events.extend(self.amend_task(by, task, brief, acceptance_criteria, depends_on, reason.clone())?);
                 } else if required_role.is_none() && hand_to.is_none() {
@@ -2583,13 +2693,21 @@ impl Engine {
                 self.close_turn(agent, Timestamp::now());
                 self.record_turn(agent, usage)
             }
+            Command::ReopenTask { by, task, reason } => self.reopen_task(by, task, reason),
+            Command::RecordUsage { agent, usage } => {
+                self.require_agent(agent)?;
+                self.spend.entry(agent).or_default().record(usage);
+                Ok(vec![self.emit(Event::UsageRecorded { agent, usage })])
+            }
             Command::ReportError {
                 agent,
                 task,
                 error,
                 permanent,
             } => {
-                self.turn_ended.insert(agent, Timestamp::now());
+                // Closed as any turn is, so its time counts. From the 13
+                // November audit: failed turns were missing from time totals.
+                self.close_turn(agent, Timestamp::now());
                 self.report_error(agent, task, error, permanent)
             }
             Command::Tick { now } => self.tick(now),
@@ -2633,7 +2751,7 @@ impl Engine {
 
     fn leave_agent(&mut self, agent: AgentId, reason: String) -> Result<Vec<EventEnvelope>> {
         self.require_agent(agent)?;
-        let mut events = Vec::new();
+        let mut events = self.settle_panels_of(agent)?;
 
         // Releasing first means the bot's work returns to the pool instead of
         // being stranded on a bot that is no longer there.
@@ -2652,15 +2770,23 @@ impl Engine {
         let pending: Vec<HandoffId> = self
             .handoffs
             .values()
-            .filter(|h| h.from == agent && h.state.is_pending())
+            // Help offered to it, or that it accepted, goes back too, as when
+            // a bot is benched. From the 13 November audit: only its own
+            // offers were withdrawn, and a sender waiting on it stayed blocked.
+            .filter(|h| {
+                h.state.is_pending()
+                    && (h.from == agent || h.to == Recipient::Agent { agent } || h.accepted_by == Some(agent))
+            })
             .map(|h| h.id)
             .collect();
         for handoff in pending {
+            let from = self.handoffs.get(&handoff).map_or(agent, |h| h.from);
+            let reason = if from == agent { "sender left the room" } else { "the bot it went to left the room" };
             if let Ok(withdrawn) = self.drive_handoff(
                 handoff,
                 HandoffTransition::Withdraw {
-                    by: agent,
-                    reason: "sender left the room".into(),
+                    by: from,
+                    reason: reason.into(),
                 },
             ) {
                 events.extend(withdrawn);
@@ -2682,8 +2808,21 @@ impl Engine {
     /// every bot or none.
     fn pause_agent(&mut self, agent: AgentId) -> Result<Vec<EventEnvelope>> {
         let handle = self.require_agent(agent)?.handle.clone();
+        // Work in review stays: its review goes on, and it comes back to the
+        // board if it is sent back. From the 13 November audit: the note said
+        // all its work had gone back.
+        let in_review = self
+            .tasks
+            .values()
+            .filter(|task| task.is_held_by(agent) && matches!(task.state, TaskState::InReview | TaskState::Approved))
+            .count();
+        let kept = if in_review > 0 {
+            format!(" Its {in_review} task(s) in review stay in review, and go back to the board if sent back.")
+        } else {
+            String::new()
+        };
         let note = format!(
-            "The owner paused @{handle}. It takes no turns until they resume it, and its work went back to the board."
+            "The owner paused @{handle}. It takes no turns until they resume it, and the work it was doing went back to the board.{kept}"
         );
         self.bench(agent, PausedBy::Owner, &format!("the owner paused @{handle}"), ChatMessage::system(self.room.id, note))
     }
@@ -2716,7 +2855,7 @@ impl Engine {
             return Ok(Vec::new());
         }
         self.paused.insert(agent, by);
-        let mut events = Vec::new();
+        let mut events = self.settle_panels_of(agent)?;
         for task in self.active_tasks_of(agent) {
             if let Ok(released) =
                 self.transition(task, TaskTransition::Release { reason: why.to_string() }, Some(agent))
@@ -2727,7 +2866,11 @@ impl Engine {
         let pending: Vec<HandoffId> = self
             .handoffs
             .values()
-            .filter(|h| h.state.is_pending() && (h.from == agent || h.to == Recipient::Agent { agent }))
+            // Help it accepted from the room at large goes back too.
+            .filter(|h| {
+                h.state.is_pending()
+                    && (h.from == agent || h.to == Recipient::Agent { agent } || h.accepted_by == Some(agent))
+            })
             .map(|h| h.id)
             .collect();
         for handoff in pending {
@@ -2784,6 +2927,7 @@ impl Engine {
     /// Where `agent`'s time has gone, with the turn under way.
     pub fn time_spent(&self, agent: AgentId) -> crate::digest::TimeSpent {
         let mut spent = self.time_spent.get(&agent).copied().unwrap_or_default();
+        spent.in_turn = self.in_turn(agent);
         if self.in_turn(agent) {
             spent.current_turn_ms = self
                 .turn_began
@@ -2808,6 +2952,7 @@ impl Engine {
                     Some(held) if held.0 > began.0 => *held,
                     _ => *began,
                 };
+                let since = self.running_since(since);
                 (*agent, since.elapsed_to(now))
             })
             .filter(|(_, ran)| *ran >= IDLE_TURN_LIMIT_MS)
@@ -2816,11 +2961,26 @@ impl Engine {
                     .get(agent)
                     .is_some_and(|spec| !spec.roles.iter().any(|role| role == "coordinator"))
             })
-            .filter(|(agent, _)| {
-                !self.tasks.values().any(|task| task.is_held_by(*agent) && !task.state.is_terminal())
-                    && self.review_queue_for(*agent).is_empty()
-            })
+            .filter(|(agent, _)| !self.has_reason_to_work(*agent))
             .collect()
+    }
+
+    /// Whether `agent` has a reason to be working: a task it holds, a review
+    /// waiting for it, help it accepted, or a request a person made of it in
+    /// the last hour. The one rule for the idle bench and the turn reminders.
+    /// From the 13 November audit: a bot the owner asked to rebuild the icons,
+    /// with no task, was told to finish at 10 and 20 minutes and benched at 30.
+    pub fn has_reason_to_work(&self, agent: AgentId) -> bool {
+        self.tasks.values().any(|task| task.is_held_by(agent) && !task.state.is_terminal())
+            || !self.review_queue_for(agent).is_empty()
+            || self
+                .handoffs
+                .values()
+                .any(|handoff| handoff.state.is_pending() && handoff.accepted_by == Some(agent))
+            || self
+                .specs
+                .get(&agent)
+                .is_some_and(|spec| self.owner_asked_within(agent, spec, OWNER_ASK_COVERS_MS))
     }
 
     /// Tell the owner, at most hourly, when reviews have waited long while
@@ -2835,7 +2995,9 @@ impl Engine {
         let waiting: Vec<&Task> = self
             .tasks
             .values()
-            .filter(|task| task.state == TaskState::InReview && task.updated_at.elapsed_to(now) >= REVIEW_BACKLOG_MS)
+            .filter(|task| {
+                task.state == TaskState::InReview && self.running_since(task.updated_at).elapsed_to(now) >= REVIEW_BACKLOG_MS
+            })
             .collect();
         let idle: Vec<String> = self
             .specs
@@ -2860,11 +3022,22 @@ impl Engine {
             ),
         );
         message.audience = orgbot_proto::chat::Audience::Human;
-        Ok(self.post_message(message)?)
+        self.post_message(message)
     }
 
     /// Tell the coordinators and the holder about each task that has been
     /// with one holder for [`HELD_TOO_LONG_MS`] while other work waits on it.
+    /// `at`, or when the room last started running again if that is later:
+    /// waits are timed in running time. From the 13 November audit: an
+    /// overnight pause sent a long-hold notice every 45 minutes, the review
+    /// backlog notice hourly, and settled every second opinion on resume.
+    fn running_since(&self, at: Timestamp) -> Timestamp {
+        match self.resumed_at {
+            Some(resumed) if resumed > at => resumed,
+            _ => at,
+        }
+    }
+
     fn nudge_long_held(&mut self, now: Timestamp) -> Result<Vec<EventEnvelope>> {
         let held: Vec<(TaskId, AgentId)> = self
             .tasks
@@ -2872,16 +3045,24 @@ impl Engine {
             .filter(|task| matches!(task.state, TaskState::Claimed | TaskState::InProgress))
             .filter_map(|task| task.assignee.map(|holder| (task.id, holder)))
             .collect();
-        self.held_since
-            .retain(|task, (holder, _)| held.contains(&(*task, *holder)));
-        self.held_nudged.retain(|task, _| held.iter().any(|(id, _)| id == task));
+        // Kept while the same bot still has the task, whatever its state
+        // for the moment. From the 13 November audit: a tick in Blocked or
+        // in review restarted the clock.
+        let tasks = &self.tasks;
+        self.held_since.retain(|task, (holder, _)| {
+            tasks
+                .get(task)
+                .is_some_and(|record| record.assignee == Some(*holder) && !record.state.is_terminal())
+        });
+        self.held_nudged.retain(|task, _| self.held_since.contains_key(task));
         for (task, holder) in &held {
             self.held_since.entry(*task).or_insert((*holder, now));
         }
         let due: Vec<(TaskId, AgentId, i64, usize)> = self
             .held_since
             .iter()
-            .filter(|(_, (_, since))| since.elapsed_to(now) >= HELD_TOO_LONG_MS)
+            .filter(|(task, (holder, _))| held.contains(&(**task, *holder)))
+            .filter(|(_, (_, since))| self.running_since(*since).elapsed_to(now) >= HELD_TOO_LONG_MS)
             .filter(|(task, _)| {
                 self.held_nudged
                     .get(task)
@@ -2941,12 +3122,23 @@ impl Engine {
     /// up; a bot reasoning for twenty minutes on the render pipeline held up
     /// three teammates.
     pub fn others_wait_on(&self, agent: AgentId) -> bool {
+        // Only held work the bot can move. From the 13 November audit: work
+        // of its that sat in review or blocked counted, and a second opinion
+        // or recheck awaited from it did not.
         let held: BTreeSet<TaskId> = self
             .tasks
             .values()
-            .filter(|task| task.is_held_by(agent) && !task.state.is_terminal())
+            .filter(|task| task.is_held_by(agent) && !task.state.is_terminal() && !task.state.is_waiting())
             .map(|task| task.id)
             .collect();
+        let awaited_verdict = self.tasks.values().any(|task| {
+            task.state == TaskState::InReview
+                && (self.review_panels.get(&task.id).is_some_and(|panel| panel.awaiting() == Some(agent))
+                    || self.recheck_reviewers(task, Timestamp::now()).contains(&agent))
+        });
+        if awaited_verdict {
+            return true;
+        }
         let waits_on_held = self.tasks.values().any(|task| {
             !task.state.is_terminal()
                 && !task.is_held_by(agent)
@@ -2964,7 +3156,7 @@ impl Engine {
     }
 
     /// Whether changes this bot makes may reach the project now: it holds a
-    /// task, is helping with one, reviews, or coordinates.
+    /// task, is helping with one, coordinates, or a person asked it.
     ///
     /// From speed test 2: @iris, holding no task, edited a delivered file,
     /// another bot's test and others' evidence over two turns, and every
@@ -2978,12 +3170,29 @@ impl Engine {
             || self.handoffs.values().any(|handoff| {
                 handoff.state.is_pending() && handoff.accepted_by == Some(agent)
             })
-            || (spec.autonomy.may_inspect && !self.review_queue_for(agent).is_empty())
             || self.owner_asked_within(agent, spec, OWNER_ASK_COVERS_MS)
+    }
+
+    /// Whether `agent` may land or push commits: what lets it change the
+    /// project, or a task of its own that passed review. From the 13 November
+    /// audit: a bot whose task was approved and delivered was refused landing
+    /// its granted commits as holding no task.
+    pub fn may_land(&self, agent: AgentId) -> bool {
+        self.may_change_project(agent)
+            || self.tasks.values().any(|task| {
+                task.is_held_by(agent) && matches!(task.state, TaskState::Approved | TaskState::Submitted)
+            })
     }
 
     /// Whether a person asked this bot for something in the last `window`:
     /// work the owner asks for directly needs no task.
+    ///
+    /// Only what a person typed to the bots counts, which the service posts
+    /// as `Ask`. From the 13 November audit: decision answers (a "No"
+    /// included) and the engine's "previously answered" replay are written in
+    /// the owner's name too, and a bot could open the gate by repeating an
+    /// answered question. A review waiting for a bot no longer opens it
+    /// either: checks run in `workspace_verify`, which changes nothing.
     fn owner_asked_within(&self, agent: AgentId, spec: &AgentSpec, window: i64) -> bool {
         let now = Timestamp::now();
         self.transcript
@@ -2992,6 +3201,7 @@ impl Engine {
             .take_while(|message| message.sent_at.elapsed_to(now) <= window)
             .any(|message| {
                 matches!(message.author, orgbot_proto::chat::Author::Human { .. })
+                    && message.intent == orgbot_proto::chat::MessageIntent::Ask
                     && message.wakes(agent, &spec.roles)
             })
     }
@@ -3071,6 +3281,39 @@ impl Engine {
             if !self.tasks.contains_key(dep) {
                 return Err(EngineError::UnknownTask { task: *dep });
             }
+            // From the 13 November audit: a new task could wait on work that
+            // failed or was dropped, and so wait for good.
+            let upstream = self.follow_supersession(*dep);
+            if let Some(record) = self.tasks.get(&upstream) {
+                if record.state.is_terminal() && record.state != TaskState::Submitted {
+                    return Err(EngineError::NotReady {
+                        task: upstream,
+                        reason: format!(
+                            "it is {} and will not deliver; depend on its replacement, or leave it out",
+                            record.state.as_str()
+                        ),
+                    });
+                }
+            }
+        }
+        // The task it is part of, or a fix for, must be in the room. From the
+        // 13 November audit: neither was checked.
+        for related in [origin.lineage.parent, origin.lineage.remediation_of].into_iter().flatten() {
+            if !self.tasks.contains_key(&related) {
+                return Err(EngineError::UnknownTask { task: related });
+            }
+        }
+        // The same limits a bot's amendment has. From the 13 November audit:
+        // creating a task had none.
+        if by.is_some()
+            && (title.chars().count() > 200
+                || brief.chars().count() > 8_000
+                || acceptance_criteria.len() > 30
+                || acceptance_criteria.iter().any(|c| c.chars().count() > 1_000))
+        {
+            return Err(EngineError::InvalidOwnerQuestion {
+                reason: "keep the title under 200 characters, the brief under 8000, and at most 30 criteria of up to 1000 characters".into(),
+            });
         }
         // One review finding must not spawn an open-ended chain. Past a
         // handful of open remediations on one task, adding another is not
@@ -3259,6 +3502,15 @@ impl Engine {
                 }
                 for task in &waiting {
                     if let Some(record) = self.tasks.get_mut(task) {
+                        // The replacement itself stops waiting on what it
+                        // replaces, rather than waiting on itself.
+                        if *task == replacement {
+                            record.blocked_on.retain(
+                                |reason| !matches!(reason, BlockReason::AwaitingTask { task: awaited } if *awaited == retired),
+                            );
+                            record.depends_on.retain(|dep| *dep != retired);
+                            continue;
+                        }
                         for reason in record.blocked_on.iter_mut() {
                             if matches!(reason, BlockReason::AwaitingTask { task: awaited } if *awaited == retired) {
                                 *reason = BlockReason::AwaitingTask { task: replacement };
@@ -3269,6 +3521,8 @@ impl Engine {
                                 *dep = replacement;
                             }
                         }
+                        let mut seen = BTreeSet::new();
+                        record.depends_on.retain(|dep| seen.insert(*dep));
                     }
                 }
                 self.recompute_dependencies();
@@ -3334,6 +3588,12 @@ impl Engine {
                 }
                 // Already answered: apply it rather than asking again.
                 Settled::Already(prior) => {
+                    if !prior.grants() {
+                        return Err(EngineError::NotReady {
+                            task,
+                            reason: format!("the owner already answered this: {}", prior.answer.map(|a| a.chosen).unwrap_or_default()),
+                        });
+                    }
                     let record = self
                         .tasks
                         .get_mut(&task)
@@ -4060,7 +4320,7 @@ impl Engine {
     /// From the benchmark room: a landing Full write mode had allowed was
     /// announced as "as the owner approved", and the owner had not answered.
     pub fn landing_granted_by_mode(&self, task: TaskId, agent: AgentId, branch: &str, base: &str, head: &str) -> bool {
-        let request = Request::new(&land_action(branch, base, head), server_access_scope(task));
+        let request = Request::new(land_action(branch, base, head), server_access_scope(task));
         let now = Timestamp::now();
         self.decisions.decisions.iter().any(|decision| {
             decision.task == Some(task)
@@ -4244,14 +4504,9 @@ impl Engine {
     /// From speed test 2: moving work to another bot took a copy of the task
     /// and a retire card for the owner (four times), and twice the owner had
     /// to bench a bot so its task could change hands.
-    fn reroute_task(
-        &mut self,
-        by: AgentId,
-        task: TaskId,
-        required_role: Option<String>,
-        hand_to: Option<AgentId>,
-        reason: String,
-    ) -> Result<Vec<EventEnvelope>> {
+    /// Whether `by` may move `task` to another role or bot, without changing
+    /// anything.
+    fn check_reroute(&self, by: AgentId, task: TaskId, hand_to: Option<AgentId>, reason: &str) -> Result<()> {
         let spec = self.require_agent(by)?;
         if !spec.roles.iter().any(|role| role == "coordinator") {
             return Err(EngineError::NotPermitted {
@@ -4259,8 +4514,7 @@ impl Engine {
                 action: "re-route a task without the coordinator role".into(),
             });
         }
-        let coordinator = spec.handle.clone();
-        let reason = reason.trim().to_string();
+        let reason = reason.trim();
         if reason.is_empty() || reason.chars().count() > 500 {
             return Err(EngineError::InvalidOwnerQuestion {
                 reason: "say in 1–500 characters why the task moves".into(),
@@ -4277,14 +4531,48 @@ impl Engine {
             });
         }
         if let Some(target) = hand_to {
-            self.require_agent(target)?;
+            let target_spec = self.require_agent(target)?;
             if self.paused.contains_key(&target) {
                 return Err(EngineError::NotReady {
                     task,
                     reason: format!("{} is benched; resume it or choose another bot", self.handle_of(target)),
                 });
             }
+            // A bot that could never claim it is refused here, not later.
+            if self.reviewed_by(task, target) {
+                return Err(EngineError::NotReady {
+                    task,
+                    reason: format!("{} reviewed it, so it cannot also write it", self.handle_of(target)),
+                });
+            }
+            if target_spec.autonomy.review_only && !review_only_task(record.kind, record.required_role.as_deref()) {
+                return Err(EngineError::NotReady {
+                    task,
+                    reason: format!("{} only reviews; choose a bot that builds", self.handle_of(target)),
+                });
+            }
+            if !self.status(target).is_available() {
+                return Err(EngineError::NotReady {
+                    task,
+                    reason: format!("{} is not taking work right now; choose another bot", self.handle_of(target)),
+                });
+            }
         }
+        Ok(())
+    }
+
+    fn reroute_task(
+        &mut self,
+        by: AgentId,
+        task: TaskId,
+        required_role: Option<String>,
+        hand_to: Option<AgentId>,
+        reason: String,
+    ) -> Result<Vec<EventEnvelope>> {
+        self.check_reroute(by, task, hand_to, &reason)?;
+        let coordinator = self.require_agent(by)?.handle.clone();
+        let reason = reason.trim().to_string();
+        let record = self.require_task(task)?;
         let title = record.title.clone();
         let holder = record.assignee;
         let mut events = Vec::new();
@@ -4367,18 +4655,33 @@ impl Engine {
         // From speed test 2: a retired race sim stranded the integration and
         // two other tasks waiting on it, though its replacement was already
         // on the board.
+        // From the 13 November audit: a failed or cancelled task was taken
+        // as a replacement, and one that itself waited on the retired task
+        // (through other tasks) closed a circle nothing could clear.
         if let Some(replacement) = replaced_by {
-            let live = self
-                .tasks
-                .get(&replacement)
-                .is_some_and(|other| !other.state.is_permanent());
+            let live = self.tasks.get(&replacement).is_some_and(|other| {
+                !other.state.is_permanent() && (!other.state.is_terminal() || other.state == TaskState::Submitted)
+            });
             if replacement == task || !live || self.follow_supersession(replacement) == task {
                 return Err(EngineError::NotReady {
                     task,
                     reason: format!("{replacement} cannot replace it: name a live task other than this one"),
                 });
             }
-            self.retire_replacements.insert(task, replacement);
+            let waits_on_retired = self
+                .unmet_dependencies(replacement)
+                .into_iter()
+                .filter(|dep| *dep != task)
+                .any(|dep| self.waits_through_dependencies(dep, task));
+            if waits_on_retired {
+                return Err(EngineError::NotReady {
+                    task,
+                    reason: format!(
+                        "\"{}\" waits on this task through other work, so it cannot replace it",
+                        self.title_of(replacement)
+                    ),
+                });
+            }
         }
         let mut proposed = Decision::ask(
             self.room.id,
@@ -4390,7 +4693,11 @@ impl Engine {
         proposed.envelope.environment = task_scope(task);
         proposed.task = Some(task);
         // Not parked on the answer: the task may be open and held by nobody.
-        self.put_to_owner(by, None, proposed)
+        let events = self.put_to_owner(by, None, proposed)?;
+        if let Some(replacement) = replaced_by {
+            self.retire_replacements.insert(task, replacement);
+        }
+        Ok(events)
     }
 
     /// Record how many removals wait in one of `agent`'s copies, announcing
@@ -4758,6 +5065,15 @@ impl Engine {
             events.push(self.emit(Event::TaskAuthorized { task, decision }));
         }
 
+        // A retirement the owner kept: its replacement is forgotten, so a
+        // later retirement does not reuse it. From the 13 November audit.
+        if settled.envelope.allowed.iter().any(|action| action == RETIRE_TASK)
+            && answer.chosen != RETIRE_TASK_ALLOW
+        {
+            if let Some(task) = settled.task {
+                self.retire_replacements.remove(&task);
+            }
+        }
         // A retirement the owner agreed to.
         if settled.envelope.allowed.iter().any(|action| action == RETIRE_TASK)
             && answer.chosen == RETIRE_TASK_ALLOW
@@ -4800,8 +5116,19 @@ impl Engine {
             })
             .map(|task| task.id)
             .collect();
+        // Only this question's wait ends: a task also waiting on other work
+        // stays blocked on it. From the 13 November audit: an answer cleared
+        // every blocker, an unfinished upstream task included.
         for task in held_questions {
-            events.extend(self.transition(task, TaskTransition::Unblock, None)?);
+            let others_remain = self.tasks.get_mut(&task).is_some_and(|record| {
+                record.blocked_on.retain(
+                    |reason| !matches!(reason, BlockReason::AwaitingDecision { decision: held } if *held == decision),
+                );
+                !record.blocked_on.is_empty()
+            });
+            if !others_remain {
+                events.extend(self.transition(task, TaskTransition::Unblock, None)?);
+            }
         }
         Ok(events)
     }
@@ -4925,9 +5252,16 @@ impl Engine {
         self.require_assignee(task, by)?;
         self.require_review_only_assignment(task, by)?;
         for artifact in &artifacts {
-            if !self.artifacts.contains_key(artifact) {
+            let Some(record) = self.artifacts.get(artifact) else {
                 return Err(EngineError::UnknownArtifact {
                     artifact: *artifact,
+                });
+            };
+            // Only work recorded on this task is submitted for it.
+            if record.task != task {
+                return Err(EngineError::NotReady {
+                    task,
+                    reason: format!("{artifact} belongs to another task; add it to this one first"),
                 });
             }
         }
@@ -5141,6 +5475,8 @@ impl Engine {
                 record.assignee = Some(by);
                 record.updated_at = Timestamp::now();
             }
+            // It holds the task now, as a claim would record (F11).
+            self.past_holders.entry(task).or_default().insert(by);
             // From the benchmark room: a delegation accepted at 10:12 was
             // marked expired at 10:28, though the task had been the
             // recipient's since it was taken. Moving the task is all a
@@ -5149,6 +5485,11 @@ impl Engine {
             events.extend(self.complete_handoff(handoff, by, Vec::new(), "took over the task".into())?);
         }
         events.extend(self.recompute_status(by));
+        // The sender's status changes too: it no longer holds the task, or is
+        // no longer waiting. From the 13 November audit: it was left as was.
+        if let Some(sender) = self.handoffs.get(&handoff).map(|h| h.from).filter(|sender| *sender != by) {
+            events.extend(self.recompute_status(sender));
+        }
         Ok(events)
     }
 
@@ -5376,10 +5717,19 @@ impl Engine {
         artifact.revision = revision;
         artifact.room = Some(self.room.id);
         artifact.authority_bearing = authority_bearing;
-        artifact.supersedes = self.replaced_record(&artifact);
+        // What is under review stays what was submitted. From the 13 November
+        // audit: `sealed` was set and never read, so a record written during
+        // review replaced the one the reviewer was reading.
+        let in_review = self.tasks.get(&task).is_some_and(|t| t.state == TaskState::InReview);
+        artifact.supersedes = self
+            .replaced_record(&artifact)
+            .filter(|older| !(in_review && self.artifacts.get(older).is_some_and(|older| older.sealed)));
         let id = artifact.id;
         if let Some(older) = artifact.supersedes.and_then(|older| self.artifacts.get_mut(&older)) {
             older.superseded_by = Some(id);
+        }
+        if self.tasks.get(&task).is_some_and(|t| t.state == TaskState::InReview && t.assignee != Some(author)) {
+            self.review_notes.insert(id);
         }
         self.artifacts.insert(id, artifact.clone());
         if let Some(record) = self.tasks.get_mut(&task) {
@@ -5423,6 +5773,13 @@ impl Engine {
             .find(|older| older.name.trim() == artifact.name.trim())
             .or_else(|| earlier.iter().find(|older| restates(&artifact.body, &older.body)))
             .map(|older| older.id)
+    }
+
+    /// Whether a faulted bot is inside its first automatic retries, which
+    /// usually clear a passing failure without anyone. A signed-out bot needs
+    /// its owner, and one that keeps failing is worth raising.
+    pub fn retries_by_itself(&self, agent: AgentId) -> bool {
+        !self.is_signed_out(agent) && self.fault_retry.get(&agent).is_some_and(|retry| retry.faults < 3)
     }
 
     /// Whether a turn of `agent`'s is running: one began and has not yet
@@ -5498,6 +5855,7 @@ impl Engine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_review(
         &mut self,
         task: TaskId,
@@ -5881,6 +6239,49 @@ impl Engine {
     ///
     /// `keep_disputed` keeps the findings the first reviewer still stood by
     /// after the second disputed them; `by_owner` says the owner decided.
+    fn reopen_task(&mut self, by: Option<AgentId>, task: TaskId, reason: String) -> Result<Vec<EventEnvelope>> {
+        let who = match by {
+            Some(agent) => {
+                let spec = self.require_agent(agent)?;
+                if !spec.roles.iter().any(|role| role == "coordinator") {
+                    return Err(EngineError::NotPermitted { agent, action: "reopen a task without the coordinator role".into() });
+                }
+                format!("@{}", spec.handle)
+            }
+            None => self.owner_name(),
+        };
+        let record = self.require_task(task)?;
+        if !matches!(record.state, TaskState::Failed | TaskState::Cancelled) {
+            return Err(EngineError::NotReady { task, reason: "only failed or cancelled work can be reopened".into() });
+        }
+        let title = record.title.clone();
+        let mut events = self.transition(task, TaskTransition::Reopen, by)?;
+        self.recompute_dependencies();
+        let room = self.room.id;
+        events.extend(self.post_message(ChatMessage::system(
+            room,
+            format!("\"{title}\" is open again, reopened by {who}: {}", reason.trim()),
+        ))?);
+        Ok(events)
+    }
+
+    /// Settle the panels a reviewer leaving or benched was part of, with what
+    /// has been said. From the 13 November audit: a panel waiting on a
+    /// reviewer who was paused or removed kept its task in review for good.
+    fn settle_panels_of(&mut self, agent: AgentId) -> Result<Vec<EventEnvelope>> {
+        let panels: Vec<ReviewPanel> = self
+            .review_panels
+            .values()
+            .filter(|panel| panel.stage != PanelStage::AwaitingOwner && (panel.first == agent || panel.second == agent))
+            .cloned()
+            .collect();
+        let mut events = Vec::new();
+        for panel in panels {
+            events.extend(self.settle_panel(panel, true, false)?);
+        }
+        Ok(events)
+    }
+
     fn settle_panel(&mut self, panel: ReviewPanel, keep_disputed: bool, by_owner: bool) -> Result<Vec<EventEnvelope>> {
         let task = panel.task;
         let opening = self.review(panel.opening).cloned().ok_or_else(|| EngineError::InvalidReview {
@@ -5954,6 +6355,12 @@ impl Engine {
             )
         };
         let mut outcome = Review::from_findings(task, panel.first, panel.revision, standing, summary);
+        // One reviewer alone does not fail work for good. From the 13
+        // November audit: a critical finding nobody else weighed in on
+        // failed the task after ten minutes, and its dependants waited forever.
+        if unanswered && outcome.verdict == Verdict::Reject {
+            outcome.verdict = Verdict::RequestChanges;
+        }
         outcome.stage = ReviewStage::Outcome;
         outcome.with = if unanswered { Vec::new() } else { vec![panel.second] };
         outcome.criteria_met = opening.criteria_met.clone();
@@ -6084,14 +6491,39 @@ impl Engine {
             )?;
             return Ok(events);
         }
-        self.transition(
+        let mut events = self.transition(
             task,
             TaskTransition::RequestChanges {
                 by: inspector,
                 reason,
             },
             Some(inspector),
-        )
+        )?;
+        let holder = self.tasks.get(&task).and_then(|record| record.assignee);
+        match holder {
+            // Back to a holder who cannot take it up: to the board. From the
+            // 13 November audit: work in review stayed with a bot that was
+            // paused, benched, removed or faulted, and came back to it.
+            Some(holder)
+                if self.paused.contains_key(&holder)
+                    || !self.specs.contains_key(&holder)
+                    || !self.status(holder).is_available() =>
+            {
+                if let Ok(released) = self.transition(
+                    task,
+                    TaskTransition::Release { reason: "sent back to a bot that is not working now".into() },
+                    Some(holder),
+                ) {
+                    events.extend(released);
+                }
+            }
+            // A fresh lease for the fixes. From the 13 November audit: after
+            // a long review it came back on a lease that had lapsed, and was
+            // released within seconds.
+            Some(_) => self.renew_lease(task),
+            None => {}
+        }
+        Ok(events)
     }
 
     // ---------------------------------------------------------- housekeeping
@@ -6111,7 +6543,9 @@ impl Engine {
         for task in self.active_tasks_of(agent) {
             self.renew_lease(task);
         }
-        if self.room.is_out_of_turns() {
+        // Only a running room pauses for its budget: a turn that closes after
+        // the pause (or after the room finished) changes neither.
+        if self.room.is_out_of_turns() && self.room.phase == RoomPhase::Running {
             let mut events = vec![recorded];
             events.extend(self.set_phase(RoomPhase::Paused, "turn budget exhausted")?);
             return Ok(events);
@@ -6274,19 +6708,43 @@ impl Engine {
         for agent in holding {
             self.last_held.insert(agent, now);
         }
-        for (agent, ran) in self.idle_too_long(now) {
-            events.extend(self.bench_idle(agent, ran / 60_000)?);
-        }
-        events.extend(self.nudge_long_held(now)?);
-        events.extend(self.tell_review_backlog(now)?);
+        // Nothing is timed against a room that is not running: claims stay
+        // alive, and no bench, long-hold or backlog notice is sent.
         if self.room.phase == RoomPhase::Running {
+            for (agent, ran) in self.idle_too_long(now) {
+                events.extend(self.bench_idle(agent, ran / 60_000)?);
+            }
+            events.extend(self.nudge_long_held(now)?);
+            events.extend(self.tell_review_backlog(now)?);
+        } else if self.room.phase == RoomPhase::Paused {
+            let held: Vec<TaskId> = self
+                .tasks
+                .values()
+                .filter(|task| task.assignee.is_some() && !task.state.is_terminal())
+                .map(|task| task.id)
+                .collect();
+            for task in held {
+                self.renew_lease(task);
+            }
+        }
+        if self.room.phase == RoomPhase::Running {
+            // A first reviewer who does not answer a dispute in time is not
+            // waited for either: the second opinion stands.
             let overdue: Vec<ReviewPanel> = self
                 .review_panels
                 .values()
-                .filter(|panel| panel.stage == PanelStage::AwaitingSecond && panel.second_opinion.is_none())
-                .filter(|panel| {
-                    self.review(panel.opening)
-                        .is_some_and(|opening| now >= opening.at.plus_millis(SECOND_OPINION_WAIT_MS))
+                .filter(|panel| match panel.stage {
+                    PanelStage::AwaitingSecond => {
+                        panel.second_opinion.is_none()
+                            && self.review(panel.opening).is_some_and(|opening| {
+                                now >= self.running_since(opening.at).plus_millis(SECOND_OPINION_WAIT_MS)
+                            })
+                    }
+                    PanelStage::AwaitingReply => panel
+                        .second_opinion
+                        .and_then(|id| self.review(id))
+                        .is_some_and(|opinion| now >= self.running_since(opinion.at).plus_millis(SECOND_OPINION_WAIT_MS)),
+                    PanelStage::AwaitingOwner => false,
                 })
                 .cloned()
                 .collect();
@@ -6724,7 +7182,10 @@ impl Engine {
             .get_mut(&task)
             .expect("task presence checked immediately above");
         match &transition {
-            TaskTransition::Claim { by } => record.assignee = Some(*by),
+            TaskTransition::Claim { by } => {
+                record.assignee = Some(*by);
+                self.past_holders.entry(task).or_default().insert(*by);
+            }
             TaskTransition::Release { .. } | TaskTransition::Reopen | TaskTransition::Park { .. } => {
                 record.assignee = None;
                 record.blocked_on.clear();
@@ -7026,12 +7487,29 @@ fn spend_costs(spec: &AgentSpec, spend: Spend) -> SpendCosts {
     let local = orgbot_proto::pricing::is_local(&spec.provider);
     let metered = metered(&spec.provider);
     let all = |priced: u32| spend.turns > 0 && priced == spend.turns;
+    let now = Timestamp::now();
+    // The costs recorded per turn, with only the turns that have none
+    // estimated. From the 13 November audit: one unpriced turn made the whole
+    // bot's cost an estimate that moved with the time of day.
+    let partly = |priced: u32, recorded: Option<u64>, unpriced: &TokenUsage| -> Option<u64> {
+        if priced == 0 || recorded.is_none() {
+            return None;
+        }
+        if unpriced.total() == 0 {
+            return recorded;
+        }
+        let rest = orgbot_proto::pricing::list_cost(&spec.provider, spec.provider.model(), unpriced, now)?;
+        recorded.map(|cost| cost.saturating_add(rest))
+    };
     let recorded_actual = all(spend.actual_cost_turns).then_some(spend.usage.actual_api_cost_microusd).flatten();
     let recorded_equivalent =
         all(spend.equivalent_cost_turns).then_some(spend.usage.api_equivalent_cost_microusd).flatten();
+    let partial_actual = partly(spend.actual_cost_turns, spend.usage.actual_api_cost_microusd, &spend.unpriced_actual);
+    let partial_equivalent =
+        partly(spend.equivalent_cost_turns, spend.usage.api_equivalent_cost_microusd, &spend.unpriced_equivalent);
     let estimate = || {
         if spend_usage_known(spend) {
-            orgbot_proto::pricing::list_cost(&spec.provider, spec.provider.model(), &spend.usage, Timestamp::now())
+            orgbot_proto::pricing::list_cost(&spec.provider, spec.provider.model(), &spend.usage, now)
         } else {
             None
         }
@@ -7043,7 +7521,7 @@ fn spend_costs(spec: &AgentSpec, spend: Spend) -> SpendCosts {
         None => match (metered, recorded_actual) {
             (true, Some(cost)) => Some(cost),
             _ => {
-                let cost = estimate();
+                let cost = partial_equivalent.or_else(estimate);
                 estimated |= cost.is_some();
                 cost
             }
@@ -7053,7 +7531,7 @@ fn spend_costs(spec: &AgentSpec, spend: Spend) -> SpendCosts {
         match recorded_actual {
             Some(cost) => Some(cost),
             None => {
-                let cost = estimate();
+                let cost = partial_actual.or_else(estimate);
                 estimated |= cost.is_some();
                 cost
             }
@@ -7159,4 +7637,42 @@ fn check_responses(responses: &[FindingResponse], expected: &[u32], whose: &str)
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod spend_cost_tests {
+    use super::*;
+
+    /// From the 13 November audit: one turn without a recorded cost made the
+    /// whole bot's cost an estimate. Recorded costs stand; only the unpriced
+    /// turn is estimated.
+    #[test]
+    fn only_unpriced_turns_are_estimated() {
+        let spec = AgentSpec::new("opus", "Opus", orgbot_proto::ProviderRef::Anthropic { model: "claude-opus-5-5".into() });
+        let priced = TokenUsage {
+            reported: true,
+            complete: true,
+            calls: 1,
+            input_tokens: 1_000,
+            output_tokens: 100,
+            actual_api_cost_microusd: Some(1_000),
+            api_equivalent_cost_microusd: Some(1_000),
+            ..TokenUsage::default()
+        };
+        let unpriced = TokenUsage {
+            actual_api_cost_microusd: None,
+            api_equivalent_cost_microusd: None,
+            ..priced
+        };
+        let mut spend = Spend::default();
+        spend.record(priced);
+        spend.record(priced);
+        spend.record(unpriced);
+        let rest = orgbot_proto::pricing::list_cost(&spec.provider, "claude-opus-5-5", &unpriced, Timestamp::now())
+            .expect("a listed model");
+        let costs = spend_costs(&spec, spend);
+        assert_eq!(costs.actual, Some(2_000 + rest));
+        assert_eq!(costs.equivalent, Some(2_000 + rest));
+        assert!(costs.estimated);
+    }
 }

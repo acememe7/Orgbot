@@ -128,7 +128,12 @@ impl AnthropicProvider {
         }
         if capabilities.effort {
             if let Some(effort) = request.effort {
-                body.insert("output_config".into(), json!({"effort": effort.as_str()}));
+                // The 4.6 models take no `xhigh`; asked for it they refuse
+                // every call, so they get their highest, `high`. (13 November
+                // audit.)
+                let older = request.model.contains("-4-6");
+                let level = if older && effort.as_str() == "xhigh" { "high" } else { effort.as_str() };
+                body.insert("output_config".into(), json!({"effort": level}));
             }
         }
         if capabilities.refusal_fallbacks {
@@ -202,7 +207,7 @@ impl Provider for AnthropicProvider {
         let response = check_status(response).await?;
 
         if request.stream {
-            stream_response(response, sink).await
+            stream_response_within(response, sink, request.thinking_limit.unwrap_or(THINKING_LIMIT)).await
         } else {
             let value: Value = response.json().await.map_err(|e| ProviderError::Decode {
                 provider: "anthropic".into(),
@@ -231,6 +236,7 @@ async fn check_status(response: reqwest::Response) -> Result<reqwest::Response> 
         401 | 403 => ProviderError::Unauthorized {
             provider: "anthropic".into(),
             status: status.as_u16(),
+            message: message.clone(),
         },
         429 => ProviderError::RateLimited {
             provider: "anthropic".into(),
@@ -326,7 +332,7 @@ pub(crate) fn parse_message(value: &Value) -> Result<CompletionResponse> {
     let content = value
         .get("content")
         .and_then(|v| v.as_array())
-        .map(|blocks| blocks.iter().filter_map(block_from_wire).collect())
+        .map(|blocks| after_the_last_fallback(blocks).filter_map(block_from_wire).collect())
         .unwrap_or_default();
 
     let stop_reason = value
@@ -340,6 +346,24 @@ pub(crate) fn parse_message(value: &Value) -> Result<CompletionResponse> {
         content,
         stop_reason,
         usage: parse_usage(value.get("usage")),
+    })
+}
+
+/// The blocks of a reply, without what a declined model left before the last
+/// server-side fallback.
+///
+/// From the 13 November audit: the `fallback` block was dropped while the
+/// declined model's tool calls before it were kept, so a call the refusing
+/// model started was run, and its thinking was echoed back across the
+/// boundary. Before the last switch only text is kept; the API documents
+/// thinking and tool calls there as not to be echoed.
+fn after_the_last_fallback(blocks: &[Value]) -> impl Iterator<Item = &Value> {
+    let boundary = blocks
+        .iter()
+        .rposition(|block| block.get("type").and_then(Value::as_str) == Some("fallback"));
+    blocks.iter().enumerate().filter_map(move |(index, block)| match boundary {
+        Some(at) if index < at => (block.get("type").and_then(Value::as_str) == Some("text")).then_some(block),
+        _ => Some(block),
     })
 }
 
@@ -380,6 +404,27 @@ fn parse_usage(usage: Option<&Value>) -> Usage {
     let Some(usage) = usage else {
         return Usage::missing();
     };
+    // With server-side fallbacks the top level covers only the attempt that
+    // produced the reply; `iterations` lists every attempt. From the 13
+    // November audit: a declined attempt's tokens were never counted.
+    if let Some(iterations) = usage.get("iterations").and_then(Value::as_array).filter(|list| !list.is_empty()) {
+        let mut total = Usage {
+            reported: true,
+            complete: true,
+            calls: 0,
+            ..Usage::default()
+        };
+        for attempt in iterations {
+            let one = parse_usage(Some(attempt));
+            total.complete &= one.complete;
+            total.calls += 1;
+            total.input_tokens = total.input_tokens.saturating_add(one.input_tokens);
+            total.output_tokens = total.output_tokens.saturating_add(one.output_tokens);
+            total.cache_read_tokens = total.cache_read_tokens.saturating_add(one.cache_read_tokens);
+            total.cache_write_tokens = total.cache_write_tokens.saturating_add(one.cache_write_tokens);
+        }
+        return total;
+    }
     let field = |name: &str| usage.get(name).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     Usage {
         reported: [
@@ -401,22 +446,45 @@ fn parse_usage(usage: Option<&Value>) -> Usage {
     }
 }
 
+/// How long a reply may reason before it says a word or calls a tool, when
+/// the room sets no limit, and how long the stream may stay silent. Shorter
+/// than the client's 30-minute request timeout. From the 13 November audit:
+/// these existed for OpenAI-compatible models only, though every API bot is
+/// given a reasoning limit while teammates wait on it.
+const THINKING_LIMIT: std::time::Duration = std::time::Duration::from_secs(25 * 60);
+const QUIET_STREAM_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Read an SSE stream to completion, emitting deltas and assembling the turn.
-async fn stream_response(
+/// A reply that only reasons for `thinking_limit` is cut off as if it had
+/// reached its output limit.
+async fn stream_response_within(
     response: reqwest::Response,
     sink: Option<mpsc::Sender<StreamEvent>>,
+    thinking_limit: std::time::Duration,
 ) -> Result<CompletionResponse> {
     let mut decoder = SseDecoder::new();
     let mut accumulator = Accumulator::default();
     let mut bytes = response.bytes_stream();
+    let mut last_answer = tokio::time::Instant::now();
+    let mut thinking_since: Option<tokio::time::Instant> = None;
 
-    'stream: while let Some(chunk) = bytes.next().await {
+    'stream: loop {
+        let next = tokio::time::timeout_at(last_answer + QUIET_STREAM_LIMIT, bytes.next()).await;
+        let Ok(next) = next else {
+            return Err(ProviderError::RateLimited {
+                provider: "anthropic".into(),
+                message: "the service held the reply 5 minutes without a word, so it is too busy".into(),
+                retry_after_secs: Some(60),
+            });
+        };
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|source| ProviderError::Transport {
             provider: "anthropic".into(),
             source,
         })?;
         for event in decoder.push(&chunk) {
-            if event.data == "[DONE]" {
+            last_answer = tokio::time::Instant::now();
+            if event.data.trim() == "[DONE]" {
                 break 'stream;
             }
             let Ok(value) = serde_json::from_str::<Value>(&event.data) else {
@@ -426,6 +494,15 @@ async fn stream_response(
             if value.get("type").and_then(Value::as_str) == Some("message_stop") {
                 break 'stream;
             }
+            if accumulator.only_thinking() {
+                let since = *thinking_since.get_or_insert_with(tokio::time::Instant::now);
+                if since.elapsed() >= thinking_limit {
+                    accumulator.stop_reason = Some(StopReason::MaxTokens);
+                    break 'stream;
+                }
+            } else {
+                thinking_since = None;
+            }
         }
     }
     if let Some(event) = decoder.finish() {
@@ -434,6 +511,9 @@ async fn stream_response(
         }
     }
 
+    if let Some((kind, message)) = accumulator.error.take() {
+        return Err(stream_error(&kind, &message));
+    }
     if accumulator.stop_reason.is_none() {
         return Err(ProviderError::StreamInterrupted {
             provider: "anthropic".into(),
@@ -465,6 +545,22 @@ enum PartialBlock {
     },
 }
 
+/// The error an `error` event in the stream stands for: an overloaded or
+/// rate-limited service is waited out, anything else is named.
+fn stream_error(kind: &str, message: &str) -> ProviderError {
+    match kind {
+        "overloaded_error" | "rate_limit_error" => ProviderError::RateLimited {
+            provider: "anthropic".into(),
+            message: format!("{kind}: {message}"),
+            retry_after_secs: Some(30),
+        },
+        _ => ProviderError::StreamInterrupted {
+            provider: "anthropic".into(),
+            message: format!("{kind}: {message}"),
+        },
+    }
+}
+
 /// Assembles a complete response from a stream of SSE events.
 #[derive(Debug, Default)]
 struct Accumulator {
@@ -472,9 +568,16 @@ struct Accumulator {
     blocks: BTreeMap<usize, PartialBlock>,
     stop_reason: Option<StopReason>,
     usage: Usage,
+    /// An `error` event sent in the stream: its type and message.
+    error: Option<(String, String)>,
 }
 
 impl Accumulator {
+    /// Whether everything so far is reasoning: no text and no tool call.
+    fn only_thinking(&self) -> bool {
+        !self.blocks.is_empty() && self.blocks.values().all(|block| matches!(block, PartialBlock::Thinking(_)))
+    }
+
     async fn absorb(&mut self, value: &Value, sink: &Option<mpsc::Sender<StreamEvent>>) {
         match value.get("type").and_then(|v| v.as_str()) {
             Some("message_start") => {
@@ -493,6 +596,12 @@ impl Accumulator {
                     return;
                 };
                 match block.get("type").and_then(|v| v.as_str()) {
+                    // A server-side fallback: what the declining model
+                    // thought or started to call stays out of the reply; its
+                    // text is kept, as the API passes it on.
+                    Some("fallback") => {
+                        self.blocks.retain(|_, block| matches!(block, PartialBlock::Text(_)));
+                    }
                     Some("text") => {
                         self.blocks
                             .insert(index as usize, PartialBlock::Text(String::new()));
@@ -571,6 +680,15 @@ impl Accumulator {
                     _ => {}
                 }
             }
+            // From the 13 November audit: an `overloaded_error` mid-stream
+            // was ignored, and the reply read as "stream interrupted" with no
+            // cause and no wait.
+            Some("error") => {
+                let error = value.get("error");
+                let kind = error.and_then(|e| e.get("type")).and_then(Value::as_str).unwrap_or("error");
+                let message = error.and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or("");
+                self.error = Some((kind.to_string(), message.to_string()));
+            }
             Some("message_delta") => {
                 if let Some(reason) = value
                     .get("delta")
@@ -579,10 +697,13 @@ impl Accumulator {
                 {
                     self.stop_reason = Some(parse_stop_reason(reason));
                 }
-                // The final usage arrives here, and only output counts update.
+                // The final usage arrives here, and only output counts update,
+                // unless it lists every attempt of a fallback.
                 if let Some(usage) = value.get("usage") {
                     let update = parse_usage(Some(usage));
-                    if update.output_tokens > 0 {
+                    if usage.get("iterations").and_then(Value::as_array).is_some_and(|list| !list.is_empty()) {
+                        self.usage = update;
+                    } else if update.output_tokens > 0 {
                         self.usage.output_tokens = update.output_tokens;
                     }
                 }
@@ -640,10 +761,13 @@ impl ModelCapabilities {
     /// Capabilities for a model id.
     pub fn for_model(model: &str) -> Self {
         // The current families all take adaptive thinking and effort.
-        const MODERN: [&str; 8] = [
+        // From the 13 November audit: Haiku 5.5 was missing, so its effort
+        // setting was never sent, and Sonnet 5.5 takes the default fallbacks.
+        const MODERN: [&str; 9] = [
             "claude-fable-5",
             "claude-mythos-5",
             "claude-opus-5",
+            "claude-haiku-5",
             "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-opus-4-6",
@@ -651,7 +775,7 @@ impl ModelCapabilities {
             "claude-sonnet-4-6",
         ];
         // Only the frontier models route refusals to a fallback model.
-        const FALLBACK_CAPABLE: [&str; 3] = ["claude-fable-5", "claude-mythos-5", "claude-opus-5"];
+        const FALLBACK_CAPABLE: [&str; 4] = ["claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-sonnet-5-5"];
 
         let modern = MODERN.iter().any(|m| model.starts_with(m));
         Self {
@@ -692,7 +816,7 @@ mod tests {
                 crate::sse::test_response(&format!("{tool}{terminal}"), keep_open).await;
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
-                stream_response(http, None),
+                stream_response_within(http, None, THINKING_LIMIT),
             )
             .await
             .expect("a completed turn must not wait for the server to close HTTP");
@@ -816,6 +940,10 @@ mod tests {
         assert!(!provider()
             .betas(&request("claude-sonnet-5"))
             .contains(&FALLBACK_BETA));
+        let sonnet_5_5 = provider().build_body(&request("claude-sonnet-5-5"));
+        assert_eq!(sonnet_5_5["fallbacks"], "default");
+        assert!(ModelCapabilities::for_model("claude-haiku-5-5").effort, "Haiku 5.5 takes effort");
+        assert!(!ModelCapabilities::for_model("claude-haiku-4-5").effort);
     }
 
     #[test]
@@ -964,6 +1092,63 @@ mod tests {
             accumulator.absorb(event, &None).await;
         }
         accumulator.finish()
+    }
+
+    /// From the 13 November audit: an overloaded service's error event was
+    /// ignored mid-stream.
+    #[tokio::test]
+    async fn an_error_event_in_the_stream_is_kept_and_named() {
+        let mut accumulator = Accumulator::default();
+        accumulator
+            .absorb(&json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}), &None)
+            .await;
+        let (kind, message) = accumulator.error.clone().unwrap();
+        assert!(matches!(stream_error(&kind, &message), ProviderError::RateLimited { .. }));
+        assert!(matches!(stream_error("api_error", "boom"), ProviderError::StreamInterrupted { .. }));
+    }
+
+    /// A mid-stream fallback: the declined model's tool call is not run, its
+    /// text is kept, and both attempts' tokens are counted.
+    #[tokio::test]
+    async fn a_fallback_drops_the_declined_models_calls_and_counts_both_attempts() {
+        let response = assemble(&[
+            json!({"type": "message_start", "message": {"model": "claude-opus-5", "usage": {"input_tokens": 10}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Starting."}}),
+            json!({"type": "content_block_start", "index": 1,
+                   "content_block": {"type": "tool_use", "id": "toolu_declined", "name": "workspace_run"}}),
+            json!({"type": "content_block_start", "index": 2,
+                   "content_block": {"type": "fallback", "from": {"model": "claude-fable-5-2"}, "to": {"model": "claude-opus-5"}}}),
+            json!({"type": "content_block_start", "index": 3,
+                   "content_block": {"type": "tool_use", "id": "toolu_kept", "name": "claim_task"}}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"},
+                   "usage": {"output_tokens": 30, "iterations": [
+                       {"type": "message", "input_tokens": 100, "output_tokens": 5},
+                       {"type": "fallback_message", "input_tokens": 120, "output_tokens": 30}
+                   ]}}),
+        ])
+        .await;
+        let calls: Vec<&str> = response
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec!["toolu_kept"]);
+        assert!(matches!(&response.content[0], ContentBlock::Text { text } if text == "Starting."));
+        assert_eq!(response.usage.input_tokens, 220);
+        assert_eq!(response.usage.output_tokens, 35);
+        assert_eq!(response.usage.calls, 2);
+
+        let whole = json!({"model": "claude-opus-5", "stop_reason": "end_turn", "content": [
+            {"type": "thinking", "thinking": "declined"},
+            {"type": "fallback", "from": {"model": "a"}, "to": {"model": "b"}},
+            {"type": "text", "text": "done"}
+        ], "usage": {"input_tokens": 1, "output_tokens": 1}});
+        let parsed = parse_message(&whole).unwrap();
+        assert_eq!(parsed.content.len(), 1);
     }
 
     #[tokio::test]
