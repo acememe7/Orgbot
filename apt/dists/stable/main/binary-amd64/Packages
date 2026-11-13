@@ -1,31 +1,31 @@
 Package: orgbot
-Version: 2.2.2
+Version: 2.2.3
 Architecture: all
-Maintainer: OrgBot <theaeceme@gmail.com>
-Depends: orgbots (= 2.2.2)
-Filename: pool/main/o/orgbot/orgbot_2.2.2_all.deb
+Maintainer: OrgBots <theaece@theaecestudio.com>
+Depends: orgbots (= 2.2.3)
+Filename: pool/main/o/orgbot/orgbot_2.2.3_all.deb
 Size: 2994
-MD5sum: f737a70b507074d3b168aa7b6d4020f5
-SHA1: afd8d71fadc8c69003fc409b0b3425c6cc4ece61
-SHA256: 8151fc6333c8a734bfe613dbdc18c74fed7e0bc2739efac9850655e52fad7098
+MD5sum: 6851cccab8664aabcc85469b39b87f4b
+SHA1: 95cd9d2e7b91a4214c484822d47fd454f72cf12f
+SHA256: 959c14a0ad8fff016874073f1e83d5d218f0f388988804d0974c8e18c6a42bca
 Section: oldlibs
 Priority: optional
 Description: transitional package for OrgBots
  This package upgrades installations of the former orgbot package to orgbots.
 
 Package: orgbots
-Version: 2.2.2
+Version: 2.2.3
 Architecture: amd64
-Maintainer: OrgBot <theaeceme@gmail.com>
-Installed-Size: 46912
+Maintainer: OrgBots <theaece@theaecestudio.com>
+Installed-Size: 48028
 Depends: libatk1.0-0t64 (>= 2.7.91), libc6 (>= 2.39), libcairo-gobject2 (>= 1.10.0), libcairo2 (>= 1.14.0), libepoxy0 (>= 1.0), libfontconfig1 (>= 2.12.6), libgcc-s1 (>= 4.2), libgdk-pixbuf-2.0-0 (>= 2.22.0), libglib2.0-0t64 (>= 2.79.0), libgtk-3-0t64 (>= 3.21.4), libharfbuzz0b (>= 0.6.0), libjavascriptcoregtk-4.1-0, libpango-1.0-0 (>= 1.29.4), libpangocairo-1.0-0 (>= 1.14.0), libsecret-1-0 (>= 0.7), libsoup-3.0-0 (>= 2.4.0), libstdc++6 (>= 11), libvte-2.91-0 (>= 0.47.90), libwebkit2gtk-4.1-0 (>= 2.15.4), zlib1g (>= 1:1.1.4), python3, bubblewrap, dbus-daemon, gnome-keyring, libnotify-bin, libsecret-tools, ffmpeg, gstreamer1.0-libav, gstreamer1.0-plugins-good
-Breaks: orgbot (<< 2.2.2)
-Replaces: orgbot (<< 2.2.2)
-Filename: pool/main/o/orgbots/orgbots_2.2.2_amd64.deb
-Size: 16280024
-MD5sum: 8ffeb44088a19df55674842fb5e7de5a
-SHA1: e4e94550aca880546aa58d49c92cf43a27ab6387
-SHA256: f91cbc23d9f18a2880b4545109795c7f89d56bc80cc4fa3a72bdea9a022de0e9
+Breaks: orgbot (<< 2.2.3)
+Replaces: orgbot (<< 2.2.3)
+Filename: pool/main/o/orgbots/orgbots_2.2.3_amd64.deb
+Size: 16579320
+MD5sum: 5b4876368244841a083ed6fab6a22c57
+SHA1: e78106e04e37b48a2bc1c58cafd18322a02f5e6c
+SHA256: d0ee0280e1f46e5a2456ae4b182f9af5df5df9108cc2c42d59f5b5139d109fae
 Section: devel
 Priority: optional
 Description: CLI and API agents working together in shared rooms
