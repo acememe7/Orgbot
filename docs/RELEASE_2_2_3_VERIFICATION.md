@@ -37,6 +37,11 @@ finding was fixed, or left with a stated reason (see Known limits).
 - **One panic no longer stops the room**, and a crashing room backs off before
   restarting instead of resuming paid turns every few seconds.
 - **Stopping or deleting a room while it starts stops its service.**
+- **A room whose folder was removed by hand no longer restarts forever.** Its
+  service retires itself (unit disabled and removed, stored keys cleared)
+  instead of failing every 3 seconds, deleting such a room in the app stops
+  its service by name, and a running room's service picks up the current
+  restart settings after an upgrade.
 - Owner controls given during a run (park, resume, pause, remove a bot) are
   journalled, so a crash does not undo them. Input that cannot be replayed is
   kept and the owner is told.
@@ -77,9 +82,9 @@ finding was fixed, or left with a stated reason (see Known limits).
 
 ## Release checks
 
-- Full Rust workspace (`--locked`): 1,107 passed, zero failures, three
+- Full Rust workspace (`--locked`): 1,108 passed, zero failures, three
   ignored. `cargo clippy --workspace --all-targets` reports nothing.
-- Full Flutter tests: 428 passed, seven skipped. `flutter analyze` reports
+- Full Flutter tests: 429 passed, seven skipped. `flutter analyze` reports
   nothing.
 - Workspace sandbox helper: 108 passed. Trash helper: 32 passed.
 - Website check: 11 pages passed.
@@ -90,17 +95,18 @@ finding was fixed, or left with a stated reason (see Known limits).
   longer had the libsecret and VTE development files (the private copy earlier
   builds used was gone). A package made from the previous app build was set
   aside, not kept. After the owner installed `libsecret-1-dev` and
-  `libvte-2.91-dev`, the build was run again from source `49d903d`; the app
-  built, and the packaged app matches that build.
+  `libvte-2.91-dev`, the build was run again; the app built. After the owner
+  installed that build, six crash-looping services of removed rooms showed the
+  room-service fixes above, and 2.2.3 was built once more with them.
 - Package build test passed; the packaged engine matches the release build.
 
 Final engine SHA-256:
-`cdfbede036703dc1fffe08968e67e08428e7a8f20ee08bfdff01b1f7e4c0e87d`.
+`247fd508bcd9c50f5be1443fcb88bb19a623688f728ed10542f53fcdf4487389`.
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.3_amd64.deb | `7d6f800d923b078451098fe1c823b27c67f17bf66b73c102bc146b5103702aac` |
-| orgbot_2.2.3_all.deb | `3c1051706d5e7af79bbcb0ea421e77e1f1800385d6580b0d37272dfe9a2a58f3` |
+| orgbots_2.2.3_amd64.deb | `f3e922a21b81ad9dbd3e5351f4928871b76124b1117e53bdc15cc937dc24a07b` |
+| orgbot_2.2.3_all.deb | `2a4b261eefd08735b270a6e57704de3b0e5b275e7abe3be547dd25abb2bcb453` |
 
 ## Publication
 

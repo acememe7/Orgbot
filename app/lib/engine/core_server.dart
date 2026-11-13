@@ -247,9 +247,21 @@ Future<void> stopLinuxRoomService(String roomId) async {
     return;
   }
   final directory = Directory(linuxServiceDirectory(roomId));
-  if (!await directory.exists()) return;
   final engine = findEngine();
   if (!engine.available) return;
+  // A room whose folder was removed by hand still has its service: the
+  // engine finds it by name and takes it down. From 13 November 2026: the
+  // owner freed 165 GB that way, and this returned early, so the services
+  // were never stopped.
+  if (!await directory.exists()) {
+    if (!await hasRoomServiceEntry(directory.path)) return;
+    try {
+      await _serviceCommand(engine.path!, ['stop', '--directory', directory.path]);
+    } catch (_) {
+      // Nothing of the room is left; its service also retires itself.
+    }
+    return;
+  }
   if (!await _serviceStillRunning(engine.path!, directory.path)) return;
   try {
     await _serviceCommand(engine.path!, ['stop', '--directory', directory.path]);
@@ -261,6 +273,33 @@ Future<void> stopLinuxRoomService(String roomId) async {
       'The room\'s background service did not stop. Try again, or stop it from a terminal.',
     );
   }
+}
+
+/// Whether a systemd unit or autostart entry still names this room's folder.
+Future<bool> hasRoomServiceEntry(
+  String directory, {
+  Map<String, String>? environment,
+}) async {
+  final env = environment ?? Platform.environment;
+  final home = env['HOME'] ?? '';
+  final configured = env['XDG_CONFIG_HOME']?.trim();
+  final config = configured != null && configured.startsWith('/')
+      ? configured
+      : '$home/.config';
+  for (final folder in ['$config/systemd/user', '$config/autostart']) {
+    try {
+      await for (final entry in Directory(folder).list(followLinks: false)) {
+        final name = entry.uri.pathSegments.last;
+        if (entry is! File || !name.startsWith('orgbots-room-')) continue;
+        // The whole folder name: `room_1` must not match `room_10`.
+        final names = RegExp('${RegExp.escape(directory)}(?![A-Za-z0-9_-])');
+        if (names.hasMatch(await entry.readAsString())) return true;
+      }
+    } on FileSystemException {
+      continue;
+    }
+  }
+  return false;
 }
 
 /// Whether a room's background service still runs. Unknown counts as yes:

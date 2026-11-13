@@ -282,9 +282,14 @@ fn systemd_quote(argument: &str) -> String {
 }
 
 fn install_unit(directory: &Path, unit: &str) -> anyhow::Result<PathBuf> {
+    let path = user_unit_directory()?.join(unit);
+    write_private(&path, unit_body(directory, unit)?.as_bytes())?;
+    Ok(path)
+}
+
+/// The text of a room's unit file, as this engine writes it.
+fn unit_body(directory: &Path, unit: &str) -> anyhow::Result<String> {
     let executable = std::env::current_exe()?.canonicalize()?;
-    let unit_dir = user_unit_directory()?;
-    let path = unit_dir.join(unit);
     let service_args = [
         executable.to_string_lossy().to_string(),
         "room-service-run".to_owned(),
@@ -296,11 +301,56 @@ fn install_unit(directory: &Path, unit: &str) -> anyhow::Result<PathBuf> {
         .map(|arg| systemd_quote(arg))
         .collect::<Vec<_>>()
         .join(" ");
-    let body = format!(
+    Ok(format!(
         "[Unit]\nDescription=OrgBots persistent room {unit}\nAfter=default.target\nStartLimitIntervalSec=900\nStartLimitBurst=8\n\n[Service]\nType=simple\nExecStart={exec}\nRestart=on-failure\nRestartSec=3\nRestartSteps=6\nRestartMaxDelaySec=300\nTimeoutStopSec=20\nEnvironment=RUST_LOG=warn\n\n[Install]\nWantedBy=default.target\n"
-    );
-    write_private(&path, body.as_bytes())?;
-    Ok(path)
+    ))
+}
+
+/// A room service folder that was removed, with its unit's name, worked out
+/// without the folder: its parent must still exist, so a data disk that is
+/// not mounted yet never reads as a deleted room.
+fn gone_room(directory: &Path) -> Option<(PathBuf, String)> {
+    let name = directory.file_name()?;
+    let parent = directory.parent()?.canonicalize().ok()?;
+    let full = parent.join(name);
+    if fs::symlink_metadata(&full).is_ok() {
+        return None;
+    }
+    room_id(&full).ok()?;
+    let hash = Sha256::digest(full.as_os_str().as_encoded_bytes());
+    Some((full, format!("orgbots-room-{}.service", hex_prefix(&hash, 16))))
+}
+
+/// Take down what is left of a room whose folder was removed: its unit (and
+/// the process, when `now`), the unit file, the autostart entry and its stored
+/// keys. Best effort: there is no room left to keep.
+///
+/// From 13 November 2026: the owner removed six finished rooms' folders to
+/// free 165 GB, and their services restarted every 3 seconds from then on,
+/// failing each time on the missing folder.
+fn retire_gone_room(directory: &Path, unit: &str, now: bool) {
+    if systemd_user_available() {
+        let _ = if now { systemctl(&["disable", "--now", unit]) } else { systemctl(&["disable", unit]) };
+        if let Ok(path) = user_unit_directory().map(|path| path.join(unit)) {
+            let _ = fs::remove_file(path);
+        }
+        let _ = systemctl(&["daemon-reload"]);
+        let _ = systemctl(&["reset-failed", unit]);
+    }
+    remove_autostart(directory);
+    let _ = secret_clear(&secret_id(directory));
+}
+
+/// Bring a room's unit file up to this engine's settings. Units are written
+/// when a room starts, so after an upgrade a running room kept the old ones
+/// (13 November 2026: no restart back-off). Takes effect at its next restart.
+fn refresh_unit(directory: &Path, unit: &str) {
+    let (Ok(path), Ok(body)) = (user_unit_directory().map(|dir| dir.join(unit)), unit_body(directory, unit)) else {
+        return;
+    };
+    if fs::read_to_string(&path).is_ok_and(|current| current != body) && write_private(&path, body.as_bytes()).is_ok() {
+        let _ = systemctl(&["daemon-reload"]);
+    }
 }
 
 fn secret_store(id: &str, environment: &HashMap<String, String>) -> anyhow::Result<()> {
@@ -661,6 +711,10 @@ pub fn status(directory: &Path) -> anyhow::Result<RoomServiceStatus> {
 /// Stop only the background service. The room checkpoint and transcript stay
 /// in place and are available to the next explicit start.
 pub fn stop(directory: &Path) -> anyhow::Result<()> {
+    if let Some((gone, unit)) = gone_room(directory) {
+        retire_gone_room(&gone, &unit, true);
+        return Ok(());
+    }
     let directory = directory.canonicalize()?;
     let _lifecycle = acquire_lock(&directory, "lifecycle.lock")?;
     let descriptor = read_descriptor(&directory)?;
@@ -698,11 +752,22 @@ pub fn stop(directory: &Path) -> anyhow::Result<()> {
 
 /// Run as the systemd unit's foreground service process.
 pub async fn run(directory: &Path) -> anyhow::Result<()> {
+    // Exits cleanly, so `Restart=on-failure` does not start it again.
+    if let Some((gone, unit)) = gone_room(directory) {
+        eprintln!("the room's folder {} is gone; its service is retired", gone.display());
+        retire_gone_room(&gone, &unit, false);
+        return Ok(());
+    }
     let directory = directory.canonicalize()?;
     let Some(_lifetime) = try_acquire_lock(&directory, "lifetime.lock")? else {
         return Ok(());
     };
     let descriptor = read_descriptor(&directory)?;
+    if descriptor.systemd {
+        if let Ok((_, unit)) = paths(&directory) {
+            refresh_unit(&directory, &unit);
+        }
+    }
     let addr = descriptor
         .url
         .strip_prefix("ws://")
@@ -725,6 +790,11 @@ pub async fn run(directory: &Path) -> anyhow::Result<()> {
 
 /// Detached fallback monitor used when no systemd user manager is available.
 pub fn supervise(directory: &Path) -> anyhow::Result<()> {
+    // Without systemd too: a removed room's autostart entry goes with it.
+    if let Some((gone, unit)) = gone_room(directory) {
+        retire_gone_room(&gone, &unit, false);
+        return Ok(());
+    }
     let directory = directory.canonicalize()?;
     let Some(_monitor) = try_acquire_lock(&directory, "monitor.lock")? else {
         return Ok(());
@@ -826,6 +896,23 @@ fn terminate_child(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A removed room folder is recognised, and named as its unit was when
+    /// the folder existed; a missing parent (a disk not mounted yet) is not.
+    #[test]
+    fn a_removed_room_folder_is_recognised_by_its_unit_name() {
+        let base = std::env::temp_dir().join(format!("orgbots-gone-{}", uuid::Uuid::new_v4()));
+        let room = base.join("room_0123abcd");
+        fs::create_dir_all(&room).unwrap();
+        let (_, unit_while_present) = paths(&room).unwrap();
+        assert!(gone_room(&room).is_none(), "a folder that is there is not gone");
+        fs::remove_dir(&room).unwrap();
+        let (gone, unit) = gone_room(&room).expect("a removed folder is gone");
+        assert_eq!(unit, unit_while_present);
+        assert_eq!(gone.file_name().unwrap(), "room_0123abcd");
+        assert!(gone_room(&base.join("not-mounted").join("room_x")).is_none());
+        fs::remove_dir_all(&base).unwrap();
+    }
 
     fn fixture() -> PathBuf {
         let path =
