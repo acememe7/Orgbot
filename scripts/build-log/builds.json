@@ -601,5 +601,21 @@
    "Sandbox helper 96 passed",
    "Package f91cbc23"
   ]
+ },
+ {
+  "kind": "release",
+  "tag": "2.2.3",
+  "when": "13 Nov 09:30",
+  "day": "2026-11-13",
+  "title": "Every audit finding fixed",
+  "what": "Bots' git calls stay inside their sandbox, and a bot's sign-in reaches yours only as a real refresh of your own account. An interrupted merge finishes or rolls back, one bot's crash no longer stops the room, and every API model is cut short when it only reasons while teammates wait. Deleting a room now frees its disk space and never touches the project.",
+  "why": "A full audit of the code on 13 November looked for bugs, flawed logic, security problems, dead code and duplicated code. Every finding was fixed or left with a stated reason in the release record.",
+  "commit": "7e26592",
+  "facts": [
+   "Rust 1,108 passed",
+   "App 432 passed",
+   "Sandbox helper 108 passed",
+   "Package d0ee0280"
+  ]
  }
 ]

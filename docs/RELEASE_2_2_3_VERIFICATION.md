@@ -116,8 +116,8 @@ Final engine SHA-256:
 
 ## Publication
 
-Not published. This is a local build; the APT archive and the website still
-name 2.2.2.
+The owner asked for this release on 13 November 2026. The signed archive
+revision and the Pages run are recorded here once they are published.
 
 ## Known limits
 

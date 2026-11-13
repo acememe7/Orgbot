@@ -28,7 +28,7 @@ OUT = ROOT / "website" / "build" / "index.html"
 LOCAL = ROOT / "build.html"
 REPO = "https://github.com/acememe7/Orgbot"
 SITE = "https://orgbots.theaecestudio.com"
-VERSION = "2.2.2"
+VERSION = "2.2.3"
 ASSET_VERSION = "20261101b"
 
 KINDS = OrderedDict(
