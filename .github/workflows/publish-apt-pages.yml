@@ -58,7 +58,9 @@ jobs:
           # signatures replaced together would otherwise verify each other.
           expected=$(sed -n "s/^readonly KEY_FINGERPRINT='\([0-9A-F]*\)'$/\1/p" "$GH_WORKSPACE/source/scripts/install-orgbots.sh")
           test -n "$expected"
-          actual=$(gpg --batch --no-options --show-keys --with-colons "$keyring" | awk -F: '$1 == "fpr" { print toupper($10); exit }')
+          gpg_home=$(mktemp -d)
+          actual=$(GNUPGHOME="$gpg_home" gpg --batch --no-options --show-keys --with-colons "$keyring" | awk -F: '$1 == "fpr" { print toupper($10); exit }')
+          rm -rf "$gpg_home"
           test "$actual" = "$expected"
           gpgv --keyring "$keyring" "$repo/dists/stable/InRelease"
           gpgv --keyring "$keyring" "$repo/dists/stable/Release.gpg" "$repo/dists/stable/Release"
