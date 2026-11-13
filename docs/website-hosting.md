@@ -85,7 +85,17 @@ The shared SSH exposure and TLS 1.2 support remain pre-existing open items;
 this scoped change is not a complete shared-server security certification.
 
 
-Current release: `3bd0a91`, activated on 10 November 2026: every page names
+Current release: `f815f5a`, activated on 13 November 2026: every page names
+OrgBots 2.2.3 as the current package, the install note and Evidence page link
+the 2.2.3 release record, and the build log adds the 2.2.3 entry. The vhost's
+CSP carries the home and build pages' new JSON-LD hashes; the previous vhost is
+kept in `/root` and `nginx -t` passed before the reload. The 28 uploaded files
+matched the source manifest, the live home, install, results, build and privacy
+pages matched source, every public page returned 200, a missing page returned
+404, HTTP redirected to HTTPS, and the home, install, build and results pages
+showed one heading, no overflow and no console errors at 375 pixels. A snapshot
+of the release and vhost passed a restore check. Earlier: `3bd0a91`, activated
+on 10 November 2026: every page names
 OrgBots 2.2.2 as the current package, the install note links the 2.2.2 release
 record, the Evidence page links it beside the 2.2.1 record, and the build log
 adds the 2.2.2 entry. The vhost's CSP carries the home and build pages' new
