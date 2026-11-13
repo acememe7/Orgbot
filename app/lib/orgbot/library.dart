@@ -1,6 +1,7 @@
 // The persisted bot library and rooms for the phone app.
 library;
 
+import '../state/room_data.dart';
 import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
@@ -323,15 +324,24 @@ class Library extends ChangeNotifier {
   }
 
   /// Delete a room from the list and stop it, including a background
-  /// service this app did not open in this session. Saved history stays on
-  /// disk.
+  /// service this app did not open in this session.
   ///
   /// Returns why it could not, with the room left in the list, when its
-  /// service would not stop.
+  /// service would not stop or its data could not be deleted.
+  ///
+  /// The room's saved data goes with it (its board, conversation,
+  /// deliverables, CLI sessions and the bots' working copies); the project
+  /// folder never does. From 13 November 2026: deleted rooms kept 165 GB of
+  /// history and copies, which the owner had to remove by hand.
   Future<String?> removeRoom(String id) async {
+    final room = rooms.where((r) => r.id == id).firstOrNull;
     try {
       await stopRoom(id);
       await stopLinuxRoomService(id);
+      await deleteRoomData(
+        id,
+        keep: [if (room != null) room.path, if (room != null) room.workspace.path],
+      );
     } catch (error) {
       return error.toString();
     }

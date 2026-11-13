@@ -3,6 +3,7 @@
 // OrgBot home: your bots, and rooms as group chats of those bots.
 library;
 
+import '../state/room_data.dart';
 import 'confirm.dart';
 import 'dart:convert';
 import 'dart:io';
@@ -1340,15 +1341,53 @@ class _OrgBotScreenState extends State<OrgBotScreen>
   void _newRoom() => _roomDialog();
 
   /// Ask before deleting a room; returns whether it was deleted.
+  static String _formatBytes(int bytes) {
+    const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+    var value = bytes.toDouble();
+    var unit = 0;
+    while (value >= 1000 && unit < units.length - 1) {
+      value /= 1000;
+      unit++;
+    }
+    return unit == 0 ? '$bytes bytes' : '${value.toStringAsFixed(value < 10 ? 1 : 0)} ${units[unit]}';
+  }
+
   Future<bool> _confirmDeleteRoom(RoomDef room) async {
     final scheme = Theme.of(context).colorScheme;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text('Delete “${room.name}”?'),
-        content: const Text(
-          'The room is removed from your sessions and stops running. Its '
-          'saved history stays on this computer.',
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'The room stops and is deleted with its saved data: its board, '
+              'conversation, deliverables and the bots\' working copies. '
+              'Changes in those copies that were never applied to the project '
+              'are deleted too.',
+            ),
+            const SizedBox(height: 10),
+            const Text('Your project folder and its files are not touched.'),
+            const SizedBox(height: 10),
+            FutureBuilder<int?>(
+              future: roomDataBytes(room.id),
+              builder: (context, snapshot) {
+                final bytes = snapshot.data;
+                final text = snapshot.connectionState != ConnectionState.done
+                    ? 'Working out how much space this frees…'
+                    : bytes == null
+                    ? ''
+                    : 'This frees ${_formatBytes(bytes)}.';
+                return Text(
+                  text,
+                  key: const ValueKey('delete-room-size'),
+                  style: TextStyle(color: scheme.onSurfaceVariant),
+                );
+              },
+            ),
+          ],
         ),
         actions: [
           TextButton(
@@ -1362,7 +1401,7 @@ class _OrgBotScreenState extends State<OrgBotScreen>
               foregroundColor: scheme.onError,
             ),
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete room'),
+            child: const Text('Delete room and data'),
           ),
         ],
       ),

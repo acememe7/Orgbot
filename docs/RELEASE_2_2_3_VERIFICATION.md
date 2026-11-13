@@ -73,6 +73,11 @@ finding was fixed, or left with a stated reason (see Known limits).
 
 ### The app
 
+- **Deleting a room deletes its saved data**: its board, conversation,
+  deliverables, CLI sessions and the bots' working copies. The project folder
+  and its files are never touched (nothing is deleted if the project lies
+  inside that data), and the confirmation says how much space it frees. Before,
+  deleted rooms kept their history and copies; six finished rooms held 165 GB.
 - The keyring is read again before a save if it was locked at start, so a save
   can no longer erase the other sign-ins.
 - Multi-line arrays in `~/.codex/config.toml` import correctly.
@@ -84,7 +89,7 @@ finding was fixed, or left with a stated reason (see Known limits).
 
 - Full Rust workspace (`--locked`): 1,108 passed, zero failures, three
   ignored. `cargo clippy --workspace --all-targets` reports nothing.
-- Full Flutter tests: 429 passed, seven skipped. `flutter analyze` reports
+- Full Flutter tests: 432 passed, seven skipped. `flutter analyze` reports
   nothing.
 - Workspace sandbox helper: 108 passed. Trash helper: 32 passed.
 - Website check: 11 pages passed.
@@ -97,7 +102,8 @@ finding was fixed, or left with a stated reason (see Known limits).
   aside, not kept. After the owner installed `libsecret-1-dev` and
   `libvte-2.91-dev`, the build was run again; the app built. After the owner
   installed that build, six crash-looping services of removed rooms showed the
-  room-service fixes above, and 2.2.3 was built once more with them.
+  room-service fixes above, and 2.2.3 was built once more with them and with
+  deleting a room's saved data.
 - Package build test passed; the packaged engine matches the release build.
 
 Final engine SHA-256:
@@ -105,8 +111,8 @@ Final engine SHA-256:
 
 | Package | SHA-256 |
 | --- | --- |
-| orgbots_2.2.3_amd64.deb | `f3e922a21b81ad9dbd3e5351f4928871b76124b1117e53bdc15cc937dc24a07b` |
-| orgbot_2.2.3_all.deb | `2a4b261eefd08735b270a6e57704de3b0e5b275e7abe3be547dd25abb2bcb453` |
+| orgbots_2.2.3_amd64.deb | `d0ee0280e1f46e5a2456ae4b182f9af5df5df9108cc2c42d59f5b5139d109fae` |
+| orgbot_2.2.3_all.deb | `959c14a0ad8fff016874073f1e83d5d218f0f388988804d0974c8e18c6a42bca` |
 
 ## Publication
 

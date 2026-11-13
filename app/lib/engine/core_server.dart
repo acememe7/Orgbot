@@ -237,7 +237,8 @@ String linuxServiceDirectory(String roomId) {
 
 /// Stop a room's background service if one is running, whether or not this
 /// app opened the room in this session. Used when a room is deleted, so a
-/// deleted room cannot keep running out of sight. Its saved state stays.
+/// deleted room cannot keep running out of sight. Its saved data is deleted
+/// separately, by `deleteRoomData`.
 ///
 /// Throws when the service is still running afterwards. From the 13 November
 /// audit: a failed stop was swallowed, the room was deleted from the list,
