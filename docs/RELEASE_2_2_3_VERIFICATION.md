@@ -86,10 +86,21 @@ finding was fixed, or left with a stated reason (see Known limits).
 - The owner's real sign-in files were fingerprinted before and after the
   build and were unchanged.
 - The Linux acceptance suite was not rerun for this release.
-- Packages: not built yet. The release engine built and passed, but the Linux
-  app could not be compiled: this machine no longer has the libsecret and VTE
-  development files (the private copy earlier builds used is gone). A package
-  made from the previous app build was set aside, not kept.
+- The first build attempt could not compile the Linux app: this machine no
+  longer had the libsecret and VTE development files (the private copy earlier
+  builds used was gone). A package made from the previous app build was set
+  aside, not kept. After the owner installed `libsecret-1-dev` and
+  `libvte-2.91-dev`, the build was run again from source `49d903d`; the app
+  built, and the packaged app matches that build.
+- Package build test passed; the packaged engine matches the release build.
+
+Final engine SHA-256:
+`cdfbede036703dc1fffe08968e67e08428e7a8f20ee08bfdff01b1f7e4c0e87d`.
+
+| Package | SHA-256 |
+| --- | --- |
+| orgbots_2.2.3_amd64.deb | `7d6f800d923b078451098fe1c823b27c67f17bf66b73c102bc146b5103702aac` |
+| orgbot_2.2.3_all.deb | `3c1051706d5e7af79bbcb0ea421e77e1f1800385d6580b0d37272dfe9a2a58f3` |
 
 ## Publication
 
